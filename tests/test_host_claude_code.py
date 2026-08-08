@@ -29,6 +29,7 @@ from invariant.hosts.claude_code import (
     CHECK_AGENTS_LOADABLE,
     ClaudeCodeHost,
     agent_frontmatter,
+    loadability_problem,
 )
 
 SHIPPED = sorted((claude_code.DATA_DIR / "agents").glob("*.md"))
@@ -295,6 +296,42 @@ class TestAgentFrontmatter:
         assert agent_frontmatter("---\r\nname: a\r\n---\r\nbody\r\n") == {"name": "a"}
 
 
+class TestLoadabilityReasons:
+    """The reason is the deliverable — "broken" alone tells nobody what to do."""
+
+    def test_a_file_with_no_frontmatter_says_so(self):
+        assert loadability_problem("prose only\n", "x") == "no frontmatter on line 1"
+
+    def test_a_block_with_no_keys_says_so(self):
+        problem = loadability_problem("---\n- a\n---\nbody\n", "x")
+        assert problem == "frontmatter declares no keys"
+
+    def test_a_missing_name_says_so(self):
+        problem = loadability_problem("---\ndescription: d\n---\nbody\n", "x")
+        assert problem == "no name"
+
+    def test_a_mismatched_name_names_both_sides(self):
+        problem = loadability_problem("---\nname: a\ndescription: d\n---\nb\n", "x")
+        assert "'a'" in problem and "x.md" in problem
+
+    def test_a_good_file_has_no_problem(self):
+        assert loadability_problem("---\nname: x\ndescription: d\n---\nb\n", "x") is None
+
+
+class TestMarkerDigest:
+    def test_absent_frontmatter_has_no_marker(self):
+        assert claude_code._marker_digest("no frontmatter\n") is None
+
+    def test_frontmatter_without_a_marker_returns_none(self):
+        assert claude_code._marker_digest("---\nname: a\n---\nb\n") is None
+
+    def test_the_marker_is_read_back(self, installed):
+        text = (agents_dir(installed) / SHIPPED[0].name).read_text(encoding="utf-8")
+        assert claude_code._marker_digest(text) == claude_code.digest_of(
+            SHIPPED[0].read_text(encoding="utf-8")
+        )
+
+
 # -- settings wiring ---------------------------------------------------
 
 
@@ -397,6 +434,36 @@ class TestAgentInvocationIsRecorded:
             host, {"tool_name": "Read", "tool_input": {"file_path": "/x/overview.md"}}
         )
         assert pipelines.docs == [("s1", "/x/overview.md")]
+
+
+    def test_a_recording_failure_never_breaks_the_tool_call(self, host):
+        """Evidence is a side effect; it must not be able to fail a tool.
+
+        A hook that raises turns every Task invocation in the project into an
+        error, which is a far worse outcome than a gate missing one data point.
+        """
+        class Exploding(FakePipelines):
+            def record_agent_run(self, session_id, agent_type):
+                raise InvariantError("state store is unwritable")
+
+        ctx = FakeCtx()
+        ctx.pipelines = Exploding()
+        assert host._post_tool_use(
+            {"tool_name": "Task", "tool_input": {"subagent_type": "feature-architect"}},
+            ctx,
+        ) == {}
+
+    def test_the_hook_entry_point_routes_post_tool_use(self, host):
+        ctx = FakeCtx()
+        payload = '{"tool_name": "Task", "tool_input": {"subagent_type": "bug-reproducer"}}'
+        assert host.handle("post-tool-use", payload, ctx) == {}
+        assert ctx.pipelines.agents == [("s1", "bug-reproducer")]
+
+    def test_malformed_hook_input_is_not_an_error(self, host):
+        assert host.handle("post-tool-use", "not json at all", FakeCtx()) == {}
+
+    def test_an_unknown_event_is_ignored(self, host):
+        assert host.handle("session-end", "{}", FakeCtx()) == {}
 
     def test_recording_is_skipped_without_a_session(self, host):
         class NoSession(FakeCtx):
