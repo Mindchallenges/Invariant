@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.uv/
+
+# Runtime state is machine-local and session-scoped; it is never committed.
+.claude/invariant/state/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "invariant"
+version = "0.1.0"
+description = "Deterministic, scripted state for agent workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["agents", "workflow", "state-machine", "claude-code"]
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+invariant = "invariant.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/invariant"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/invariant", "docs", "tests", "README.md"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["src/invariant"]
+branch = true
