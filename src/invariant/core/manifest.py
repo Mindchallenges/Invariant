@@ -96,6 +96,14 @@ DEFAULTS: dict[str, Any] = {
         "gates": {"coverage_min": 90, "coverage_scope": "touched"},
     },
     "enforcement": {"profile": "standard", "rules": {}},
+    "session": {
+        # Paths exempt from worktree isolation. Configuration and knowledge
+        # files are the motivating case: they are data rather than code, every
+        # session edits them, and routing them through a branch produces
+        # conflicts with no review value.
+        "exempt_paths": [".claude/*", ".claude/**", "MEMORY.md"],
+        "worktree_prefix": None,
+    },
     "items": {"backend": "markdown", "path": "docs/backlog.md", "id_prefix": ""},
     "memory": {"managed": True, "index_generated": True},
     "privacy": {
