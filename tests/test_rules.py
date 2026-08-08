@@ -501,3 +501,49 @@ class TestExemptionAcrossWorktrees:
             payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
         )
         assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+
+class TestPrivacyScopeAcrossWorktrees:
+    """Scope must not depend on which worktree the caller is standing in."""
+
+    def _memory_write(self, path):
+        return edit_payload(path, "the crash fired at 14:05")
+
+    def test_memory_in_the_manifest_root(self, ctx_factory):
+        target = ctx_factory.main / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_memory_in_the_main_checkout_seen_from_a_worktree(self, ctx_factory):
+        # The regression: scope computed from the worktree excluded a file in
+        # the main checkout, so the gate reported nothing to check.
+        target = ctx_factory.main / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.wt, payload=self._memory_write(target))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_memory_in_a_worktree_seen_from_main(self, ctx_factory):
+        target = ctx_factory.wt / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_source_file_stays_out_of_scope(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / "app.py", "EMAIL='a@b.com'"),
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+    def test_scope_all_covers_source_too(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["all"]}})
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / "app.py", "mail a@b.com"),
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_empty_scope_checks_nothing(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": []}})
+        target = ctx_factory.main / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped

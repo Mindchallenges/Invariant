@@ -849,13 +849,35 @@ def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:
 
 
 def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
-    root = ctx.manifest.root
-    absolute = target if target.is_absolute() else root / target
-    if "docs" in scope and _is_within(absolute, ctx.manifest.path_for("docs")):
+    """Whether this path is one the privacy gate is configured to scan.
+
+    Compared in PROJECT-RELATIVE space rather than absolute space. Comparing
+    absolute paths made scope depend on which worktree the caller happened to
+    be in: a memory file in the main checkout fell outside a scope computed
+    from a session worktree, and the gate reported nothing to check on exactly
+    the files it exists to protect.
+    """
+    if "all" in scope:
         return True
-    if "memory" in scope and _is_within(absolute, ctx.manifest.path_for("memory")):
-        return True
-    return "all" in scope
+
+    scoped_prefixes: list[str] = []
+    for key in ("docs", "memory"):
+        if key in scope:
+            configured = ctx.manifest.get(f"paths.{key}")
+            if configured:
+                scoped_prefixes.append(str(Path(configured)))
+
+    if not scoped_prefixes:
+        return False
+
+    for rel in _project_relative_forms(ctx, target):
+        rel_path = Path(rel)
+        if rel_path.is_absolute():
+            continue
+        for prefix in scoped_prefixes:
+            if rel == prefix or rel.startswith(prefix.rstrip("/") + "/"):
+                return True
+    return False
 
 
 def _is_within(path: Path, root: Path) -> bool:
