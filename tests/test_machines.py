@@ -1,0 +1,185 @@
+import pytest
+import yaml
+
+from invariant.core.errors import ManifestError
+from invariant.core.machines import (
+    DOCS_FIRST_GATES,
+    MACHINE_DIR,
+    load_item_machine,
+    load_machine,
+    load_pipeline_machine,
+    load_session_machine,
+    shipped_ids,
+)
+from invariant.core.rules import all_rules
+
+
+class TestShippedMachines:
+    def test_every_shipped_machine_is_structurally_sound(self):
+        # Machine.from_dict validates on load, so this asserts the whole set
+        # parses, has a reachable graph, and has no dead ends.
+        for machine_id in shipped_ids():
+            assert load_machine(machine_id).id == machine_id
+
+    def test_the_expected_set_is_present(self):
+        assert set(shipped_ids()) >= {
+            "session", "tdd", "bugfix", "spec-first", "chore", "none", "idea", "bug",
+        }
+
+    def test_every_gate_names_a_registered_rule(self):
+        """A gate naming a rule that does not exist would pass forever."""
+        registered = {spec.id for spec in all_rules()}
+        for machine_id in shipped_ids():
+            machine = load_machine(machine_id)
+            for state in machine.states.values():
+                for gate in (*state.entry_gates, *state.exit_gates):
+                    assert gate in registered, f"{machine_id}.{state.id} -> {gate}"
+
+    def test_kinds_are_what_the_loaders_expect(self):
+        assert load_machine("session").kind == "session"
+        assert load_machine("tdd").kind == "pipeline"
+        assert load_machine("bug").kind == "item"
+
+
+class TestDocsFirstInjection:
+    def test_every_pipeline_with_a_review_state_gets_the_update_gate(self, make_manifest):
+        for methodology in ("tdd", "bugfix", "spec-first", "chore"):
+            m = make_manifest({"methodology": {"pipeline": methodology}})
+            machine = load_pipeline_machine(m)
+            exit_ = {g for s in machine.states.values() for g in s.exit_gates}
+            assert "docs.updated" in exit_, methodology
+
+    def test_every_pipeline_with_a_design_state_gets_the_read_gate(self, make_manifest):
+        for methodology in ("tdd", "bugfix", "spec-first"):
+            m = make_manifest({"methodology": {"pipeline": methodology}})
+            machine = load_pipeline_machine(m)
+            exit_ = {g for s in machine.states.values() for g in s.exit_gates}
+            assert "docs.read_architecture" in exit_, methodology
+
+    def test_the_read_gate_can_actually_fail(self, make_manifest):
+        """It guards leaving the design state, not entering it.
+
+        A pipeline starts in its design state. An entry gate there would be
+        evaluated before any work happened and could never fail, which is a
+        gate that looks present and enforces nothing.
+        """
+        m = make_manifest({"methodology": {"pipeline": "tdd"}})
+        machine = load_pipeline_machine(m)
+        design = machine.states_with_role("design")[0]
+        assert design == machine.initial
+        assert "docs.read_architecture" in machine.state(design).exit_gates
+        assert "docs.read_architecture" not in machine.state(design).entry_gates
+
+    def test_chore_is_exempt_from_the_read_gate_but_not_the_update_gate(
+        self, make_manifest
+    ):
+        """A methodology that declares no design state is asserting there is none.
+
+        Forcing an architecture read onto a formatter pass would make `chore`
+        useless, which pushes people to `none` and drops every gate — a strictly
+        worse outcome than exempting the read. The review gate still catches a
+        chore that turns out to change structure after all.
+        """
+        m = make_manifest({"methodology": {"pipeline": "chore"}})
+        machine = load_pipeline_machine(m)
+        assert machine.states_with_role("design") == ()
+        entry = {g for s in machine.states.values() for g in s.entry_gates}
+        exit_ = {g for s in machine.states.values() for g in s.exit_gates}
+        assert "docs.read_architecture" not in entry
+        assert "docs.updated" in exit_
+
+    def test_the_shipped_files_do_not_declare_them_themselves(self):
+        # Docs-first is core policy, applied centrally. If a methodology file
+        # declared it, a project forking that file could silently drop it.
+        for machine_id in ("tdd", "bugfix", "chore"):
+            raw = yaml.safe_load((MACHINE_DIR / f"{machine_id}.yaml").read_text())
+            text = str(raw)
+            assert "docs.read_architecture" not in text
+
+    def test_injection_targets_roles_not_names(self):
+        assert set(DOCS_FIRST_GATES) == {"design", "review"}
+
+    def test_a_machine_without_the_roles_is_unaffected(self, make_manifest):
+        m = make_manifest({"methodology": {"pipeline": "none"}})
+        machine = load_pipeline_machine(m)
+        assert machine.states["working"].entry_gates == ()
+
+
+class TestSessionMachine:
+    def test_the_push_barrier_is_after_the_merge(self):
+        machine = load_session_machine()
+        assert not machine.can("working", "pushed")
+        assert not machine.can("reviewed", "pushed")
+        assert machine.can("merged", "pushed")
+
+    def test_teardown_only_follows_a_push(self):
+        machine = load_session_machine()
+        assert machine.can("pushed", "torn_down")
+        assert not machine.can("working", "torn_down")
+
+    def test_abandon_is_reachable_from_every_working_state(self):
+        machine = load_session_machine()
+        for state in ("registered", "isolated", "working", "reviewed", "merged"):
+            assert machine.can(state, "abandoned"), state
+
+
+class TestBugMachine:
+    def test_fixed_is_unreachable_without_a_reproduction(self):
+        machine = load_item_machine("bug")
+        assert not machine.can("filed", "fixed")
+        assert machine.can("reproduced", "fixed")
+
+    def test_declining_a_bug_is_distinct_from_failing_to_reproduce(self):
+        # A decision must never be recorded as a failed investigation.
+        machine = load_item_machine("bug")
+        assert machine.can("filed", "wont_fix")
+        assert machine.can("filed", "not_reproducible")
+        assert "wont_fix" in machine.terminal
+        assert "not_reproducible" in machine.terminal
+
+    def test_a_verified_bug_can_be_reopened(self):
+        assert load_item_machine("bug").can("verified", "reproduced")
+
+    def test_closing_carries_the_residue_gate(self):
+        machine = load_item_machine("bug")
+        assert "item.residue_matches_status" in machine.state("closed").entry_gates
+
+
+class TestLoaderErrors:
+    def test_unknown_machine_lists_the_shipped_ones(self):
+        with pytest.raises(ManifestError, match="shipped machines are: .*tdd"):
+            load_machine("nonexistent")
+
+    def test_wrong_kind_for_pipeline(self, make_manifest):
+        m = make_manifest({"methodology": {"pipeline": "bug"}})
+        with pytest.raises(ManifestError, match="not 'pipeline'"):
+            load_pipeline_machine(m)
+
+    def test_wrong_kind_for_item(self):
+        with pytest.raises(ManifestError, match="not 'item'"):
+            load_item_machine("tdd")
+
+
+class TestProjectMachines:
+    def test_a_project_machine_shadows_a_shipped_one(self, tmp_path, make_manifest):
+        custom = tmp_path / "machines"
+        custom.mkdir()
+        (custom / "tdd.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "id": "tdd",
+                    "kind": "pipeline",
+                    "initial": "only",
+                    "terminal": ["only"],
+                    "states": {"only": {"roles": ["design"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        m = make_manifest(
+            {"methodology": {"pipeline": "tdd", "extra_machines": ["machines"]}}
+        )
+        machine = load_pipeline_machine(m)
+        assert set(machine.states) == {"only"}
+        # Forking a methodology still cannot drop the core policy.
+        assert "docs.read_architecture" in machine.state("only").exit_gates

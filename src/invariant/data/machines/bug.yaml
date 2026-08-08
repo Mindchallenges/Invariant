@@ -1,0 +1,30 @@
+id: bug
+kind: item
+description: >
+  A reported defect. The filed -> reproduced edge is load-bearing: a fix for an
+  unreproduced defect proves nothing, so 'fixed' is unreachable without passing
+  through a reproduction.
+initial: filed
+terminal: [closed, not_reproducible, wont_fix]
+states:
+  filed:
+    next: [reproduced, not_reproducible, wont_fix]
+  reproduced:
+    next: [fixed, not_reproducible, wont_fix]
+  not_reproducible:
+    description: >
+      The symptom could not be reproduced. Recorded so the next session does
+      not repeat the attempt — and distinct from wont_fix, because an untried
+      bug is not a disproven one.
+  wont_fix:
+    description: >
+      Real, understood, and deliberately not being fixed. Separate from
+      not_reproducible so that a decision is never recorded as a failed
+      investigation.
+  fixed:
+    entry_gates: [item.bug_reproduced_before_fix]
+    next: [verified, reproduced]
+  verified:
+    next: [closed, reproduced, wont_fix]
+  closed:
+    entry_gates: [item.residue_matches_status]

@@ -65,7 +65,13 @@ DEFAULTS: dict[str, Any] = {
     "version": 1,
     "project": {"name": "unnamed", "ecosystems": ["generic"]},
     "paths": {
-        "state": ".claude/invariant/state",
+        # null means "derive it". State must be SHARED by every worktree of a
+        # repository: a session created from the main checkout has to stay
+        # visible from the worktree it just created, and a per-worktree state
+        # directory makes it invisible at exactly that moment. The git common
+        # directory is already shared by every worktree and already untracked,
+        # so it is where the state belongs. Set a path here to override.
+        "state": None,
         "docs": "docs/architecture",
         "memory": ".claude/memory",
         "memory_index": "MEMORY.md",
@@ -104,7 +110,9 @@ DEFAULTS: dict[str, Any] = {
         "exempt_paths": [".claude/*", ".claude/**", "MEMORY.md"],
         "worktree_prefix": None,
     },
-    "items": {"backend": "markdown", "path": "docs/backlog.md", "id_prefix": ""},
+    # The markdown backend stores one file per item, so its path is a
+    # directory. The json and sphinx_needs backends treat it as a single file.
+    "items": {"backend": "markdown", "path": "docs/backlog", "id_prefix": ""},
     "memory": {"managed": True, "index_generated": True},
     "privacy": {
         "enabled": True,
@@ -352,7 +360,23 @@ class Manifest:
 
     @property
     def state_root(self) -> Path:
-        return self.path_for("state")
+        """Where runtime state lives — shared across every worktree.
+
+        An explicit ``paths.state`` wins. Otherwise the git common directory,
+        which every linked worktree of a repository resolves to the same place
+        and which git already ignores. Only outside a repository does this fall
+        back to a path under the project root.
+        """
+        configured = self.get("paths.state")
+        if configured:
+            return (self.root / configured).resolve()
+
+        from . import git
+
+        common = git.common_dir(self.root)
+        if common is not None:
+            return (common / "invariant" / "state").resolve()
+        return (self.root / ".claude" / "invariant" / "state").resolve()
 
     def iter_provenance(self) -> Iterator[tuple[str, Any, str]]:
         for dotted, value in sorted(_flatten(self.data)):

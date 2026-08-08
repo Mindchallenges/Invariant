@@ -60,6 +60,16 @@ def in_linked_worktree(cwd: Path) -> bool:
     return Path(git_dir).resolve() != Path(common).resolve()
 
 
+def common_dir(cwd: Path) -> Path | None:
+    """The git directory shared by every worktree of this repository.
+
+    The same absolute path from the main checkout and from every linked
+    worktree, which is what makes it the right home for cross-worktree state.
+    """
+    code, out, _ = _run(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
+    return Path(out).resolve() if code == 0 and out else None
+
+
 def main_checkout(cwd: Path) -> Path | None:
     """The main working tree's path, from anywhere in the repository."""
     code, common, _ = _run(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)

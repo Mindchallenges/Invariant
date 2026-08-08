@@ -1,0 +1,15 @@
+id: idea
+kind: item
+description: A proposed piece of work, scored and tiered.
+initial: proposed
+terminal: [done, dropped]
+states:
+  proposed:
+    next: [accepted, dropped]
+  accepted:
+    next: [in_progress, dropped]
+  in_progress:
+    next: [done, accepted]
+  done:
+    exit_gates: [item.residue_matches_status]
+  dropped: {}

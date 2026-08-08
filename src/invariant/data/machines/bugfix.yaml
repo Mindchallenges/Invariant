@@ -1,0 +1,33 @@
+id: bugfix
+kind: pipeline
+description: >
+  Prove a reported defect is real before spending a session fixing it. The
+  reproducing state has stopping authority: its success condition is a
+  trustworthy verdict, not a landed fix.
+
+initial: triaging
+terminal: [committed, not_reproducible, abandoned]
+
+states:
+  triaging:
+    description: Read the report and the docs that own the affected area.
+    roles: [design]
+    next: [reproducing, abandoned]
+  reproducing:
+    description: One test that fails on the reported symptom.
+    exit_gates: [test.new_test_fails]
+    next: [fixing, not_reproducible, abandoned]
+  not_reproducible:
+    description: >
+      The symptom could not be reproduced. This is a real outcome, not a
+      failure of the attempt — recording it stops the next session repeating it.
+  fixing:
+    exit_gates: [test.all_pass]
+    next: [verifying, abandoned]
+  verifying:
+    description: Confirm the fix addresses the reported symptom, not a neighbour.
+    roles: [review]
+    exit_gates: [test.all_pass, privacy.clean]
+    next: [committed, fixing, abandoned]
+  committed: {}
+  abandoned: {}

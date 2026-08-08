@@ -1,0 +1,34 @@
+id: tdd
+kind: pipeline
+description: >
+  Test-driven development. The red state is not decoration: a test written
+  after the fix proves the fix compiles, not that it addresses anything.
+
+initial: designing
+terminal: [committed, abandoned]
+
+states:
+  designing:
+    description: Understand the change against the architecture docs.
+    roles: [design]
+    next: [red, abandoned]
+  red:
+    description: A test that fails on the reported symptom, before any fix.
+    exit_gates: [test.new_test_fails]
+    next: [green, abandoned]
+  green:
+    description: The smallest change that makes the failing test pass.
+    exit_gates: [test.all_pass]
+    next: [refactor, reviewing, abandoned]
+  refactor:
+    description: Clean up under a green suite. Touched it, own it.
+    exit_gates: [test.all_pass]
+    next: [reviewing, red, abandoned]
+  reviewing:
+    description: Review, coverage, docs, and privacy before committing.
+    roles: [review]
+    exit_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+    next: [committed, red, refactor, abandoned]
+  committed:
+    description: Committed locally. Pushing is a session-level event, not this.
+  abandoned: {}

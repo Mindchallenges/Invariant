@@ -19,7 +19,7 @@ terminal: [committed, abandoned]
 states:
   designing:
     description: Understand the change against the architecture docs.
-    entry_gates: [docs.read_architecture]
+    roles: [design]          # the docs-first read gate attaches here
     next: [red, abandoned]
   red:
     description: A failing test that fails on the reported symptom.
@@ -111,10 +111,26 @@ Shipped methodologies:
 | `none` | Escape hatch — a single state, no gates | working |
 
 `docs-first` is not in this list because it is not a methodology (D12). It is a
-pair of gates — `docs.read_architecture` on entry to the first design state,
-`docs.updated` on exit from review — that the engine injects into whichever
-methodology is configured. A methodology cannot opt out of it; a project can
-only retune the gates' level, and even that is discouraged.
+pair of gates the engine injects into whichever methodology is configured:
+`docs.read_architecture` leaving the design state, `docs.updated` leaving
+review. A methodology cannot opt out of it; a project can only retune the
+gates' level, and even that is discouraged.
+
+Two details that are load-bearing rather than incidental:
+
+- **The read gate is an exit gate, not an entry gate.** A pipeline starts *in*
+  its design state, so an entry gate there would be evaluated before any work
+  had happened and could never fail — a gate that looks present and enforces
+  nothing. The check that means something is "you may not leave design until
+  you have read the docs."
+- **Injection is by role, not by state name.** A methodology this library has
+  never seen still receives the gates, provided it labels its states. A
+  methodology that declares *no* design state — `chore` — is asserting there is
+  no design content, and is exempt from the read gate but not from the review
+  gate. That exemption is deliberate: forcing an architecture read onto a
+  formatter pass makes `chore` useless and pushes people to `none`, which drops
+  every gate. A narrower rule that gets used beats a broader one that gets
+  bypassed.
 
 ## Domain: work item
 
@@ -170,12 +186,29 @@ files drifts, and the drift is silent.
 ## Storage layout
 
 ```
-.claude/invariant/state/
+<git-common-dir>/invariant/state/
   registry.json           cross-session index; the only locked file
   sessions/<sid>.json     one file per session
   pipelines/<sid>.json    current + historical pipelines for a session
   locks/registry.lock     advisory lock file
 ```
+
+**Why the git common directory.** State has to be shared by every worktree of a
+repository. It cannot live under the project root, because each linked worktree
+*has* its own project root — a session created from the main checkout would
+then be invisible from the worktree it had just created, at exactly the moment
+it needs to be addressable. The git common directory is the one location every
+worktree resolves identically, and git already ignores it, so nothing has to be
+excluded by hand. `paths.state` overrides this for a project outside git or one
+that wants state somewhere specific.
+
+**Finding the current session.** An explicit `INVARIANT_SESSION_ID` wins.
+Otherwise the session whose worktree contains the working directory does, with
+the deepest match winning so a nested worktree beats its parent. Failing that,
+a session is matched by where it was registered — without which a session that
+has not isolated yet, having no worktree, would be unreachable by the command
+that isolates it. Ambiguity there is reported with the candidates listed rather
+than guessed at.
 
 **Concurrency.** Per-session files are written only by their owning session, so
 they need atomicity but not locking: write to a temporary file in the same

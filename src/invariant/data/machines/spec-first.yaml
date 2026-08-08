@@ -1,0 +1,27 @@
+id: spec-first
+kind: pipeline
+description: >
+  For design-heavy work where the specification is the deliverable and the
+  implementation follows it rather than discovering it.
+
+initial: designing
+terminal: [committed, abandoned]
+
+states:
+  designing:
+    description: Understand the problem against the architecture docs.
+    roles: [design]
+    next: [specified, abandoned]
+  specified:
+    description: A written spec exists and has been reviewed.
+    exit_gates: [docs.updated]
+    next: [implementing, designing, abandoned]
+  implementing:
+    exit_gates: [test.all_pass]
+    next: [reviewing, specified, abandoned]
+  reviewing:
+    roles: [review]
+    exit_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+    next: [committed, implementing, abandoned]
+  committed: {}
+  abandoned: {}

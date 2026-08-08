@@ -1,0 +1,37 @@
+id: session
+kind: session
+description: >
+  A unit of agent work with an identity, an isolated worktree, and exactly one
+  push. The edges are ordered the way they are so that nothing irreversible
+  happens before something reviewable has.
+
+initial: registered
+terminal: [torn_down, abandoned]
+
+states:
+  registered:
+    description: The session exists and is named, but owns no worktree yet.
+    next: [isolated, abandoned]
+  isolated:
+    description: A worktree and branch exist and belong to this session.
+    entry_gates: [session.named_after_isolating]
+    next: [working, abandoned]
+  working:
+    description: Edits and local commits. Commits are cheap; keep them granular.
+    next: [working, reviewed, abandoned]
+  reviewed:
+    description: The review gates have passed against the declared file set.
+    exit_gates: [privacy.clean]
+    next: [merged, working, abandoned]
+  merged:
+    description: Rebased and fast-forward merged into the base branch.
+    entry_gates: [session.ff_merge_target]
+    next: [pushed, abandoned]
+  pushed:
+    description: The single push has happened.
+    entry_gates: [session.push_barrier]
+    next: [torn_down]
+  torn_down:
+    description: Worktree removed, session deregistered.
+  abandoned:
+    description: Ended without merging. The record is kept as evidence.

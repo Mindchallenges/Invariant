@@ -1,0 +1,19 @@
+id: chore
+kind: pipeline
+description: >
+  Mechanical work with no design content — a rename, a formatter pass, a
+  dependency bump. Deliberately short, so that using it is easier than
+  disabling the pipeline entirely.
+
+initial: doing
+terminal: [committed, abandoned]
+
+states:
+  doing:
+    next: [reviewing, abandoned]
+  reviewing:
+    roles: [review]
+    exit_gates: [test.all_pass, privacy.clean]
+    next: [committed, doing, abandoned]
+  committed: {}
+  abandoned: {}
