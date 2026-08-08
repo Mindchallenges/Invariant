@@ -1,0 +1,37 @@
+id: loose
+description: >
+  Observation mode. Nothing blocks except the two failures that cannot be
+  undone after the fact — an edit in the shared checkout and personal data
+  heading into a commit. Everything else is recorded and reported, so a project
+  can adopt the library, watch what it would have said for a while, and tighten
+  from evidence rather than from guesswork.
+
+rules:
+  session.isolated_before_edit: warn
+  session.no_edit_in_main_checkout: block
+  session.push_barrier: warn
+  session.ff_merge_target: warn
+  session.own_file_set_only: warn
+  session.named_after_isolating: "off"
+  session.teardown_complete: "off"
+
+  pipeline.started_before_edit: warn
+
+  docs.read_architecture: warn
+  docs.updated: warn
+  docs.diagrams_current: "off"
+
+  test.suite_runs: warn
+  test.new_test_fails: warn
+  test.all_pass: warn
+  coverage.meets_floor: "off"
+
+  privacy.clean: block
+
+  memory.schema_valid: warn
+  memory.index_current: warn
+  memory.no_dead_links: "off"
+  memory.no_duplicates: "off"
+
+  item.bug_reproduced_before_fix: warn
+  item.residue_matches_status: "off"

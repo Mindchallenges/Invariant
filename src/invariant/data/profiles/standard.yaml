@@ -1,0 +1,45 @@
+id: standard
+description: >
+  The hybrid default. A small set of invariants block, because violating them
+  produces damage that is expensive or impossible to undo — lost work, a
+  polluted shared branch, personal data committed to history, a fix built on an
+  unproven defect. Everything else advises, because a gate that fights
+  legitimate exceptions gets the whole tool switched off.
+
+rules:
+  # Isolation and git safety. These block: the failures are silent and the
+  # recovery is manual.
+  session.isolated_before_edit: block
+  session.no_edit_in_main_checkout: block
+  session.push_barrier: block
+  session.ff_merge_target: block
+  session.own_file_set_only: warn
+  session.named_after_isolating: warn
+  session.teardown_complete: warn
+
+  # Pipeline ordering.
+  pipeline.started_before_edit: warn
+
+  # Docs-first is core policy, not an opt-in (ADR-001 D12).
+  docs.read_architecture: block
+  docs.updated: block
+  docs.diagrams_current: warn
+
+  # Tests.
+  test.suite_runs: warn
+  test.new_test_fails: warn
+  test.all_pass: block
+  coverage.meets_floor: warn
+
+  # Personal data in a commit is not retractable once pushed.
+  privacy.clean: block
+
+  # Memory hygiene is a maintenance concern, not a safety one.
+  memory.schema_valid: warn
+  memory.index_current: warn
+  memory.no_dead_links: warn
+  memory.no_duplicates: warn
+
+  # A fix for an unreproduced defect proves nothing.
+  item.bug_reproduced_before_fix: block
+  item.residue_matches_status: warn

@@ -1,0 +1,79 @@
+"""The adapter interface.
+
+An adapter carries ecosystem knowledge the manifest should not have to spell
+out: how to build, how to run one test, how to read a coverage number, and —
+most usefully — which of that ecosystem's success signals are unreliable.
+
+``hazards()`` is the part that earns the abstraction. A hazard is not a rule.
+Rules gate transitions; hazards annotate a result so a green is not mistaken
+for proof. When ``parse_test_output`` reports ``passed`` alongside a hazard,
+the library is saying: this looks green, and here is the specific reason it
+might not be.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Hazard:
+    """A way this ecosystem's success signal can lie."""
+
+    id: str
+    summary: str
+    detail: str
+    detect: str | None = None  # optional regex over combined output
+
+    def matches(self, text: str) -> bool:
+        return bool(self.detect) and re.search(self.detect, text) is not None
+
+
+@dataclass
+class TestResult:
+    # Its name matches pytest's collection pattern; it is a result type, not a
+    # test case.
+    __test__ = False
+
+    passed: bool
+    exit_code: int
+    total: int | None = None
+    failed: int | None = None
+    hazards: list[Hazard] = field(default_factory=list)
+    note: str = ""
+
+    @property
+    def trustworthy(self) -> bool:
+        """A pass with a live hazard is not a trustworthy pass."""
+        return self.passed and not self.hazards
+
+
+class Adapter:
+    """Base adapter. ``generic`` is this class, unmodified."""
+
+    id = "generic"
+    manifest_defaults: dict[str, Any] = {}
+
+    def detect(self, root: Path) -> bool:
+        return False
+
+    def default_commands(self) -> dict[str, str | None]:
+        return dict(self.manifest_defaults.get("commands", {}))
+
+    def parse_test_output(self, stdout: str, stderr: str, code: int) -> TestResult:
+        combined = f"{stdout}\n{stderr}"
+        live = [h for h in self.hazards() if h.matches(combined)]
+        return TestResult(passed=code == 0, exit_code=code, hazards=live)
+
+    def parse_coverage(self, raw: str) -> dict[str, float]:
+        return {}
+
+    def source_files(self, changed: list[Path]) -> list[Path]:
+        """Narrow a changed-file list to this ecosystem's source files."""
+        return list(changed)
+
+    def hazards(self) -> list[Hazard]:
+        return []

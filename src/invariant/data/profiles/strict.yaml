@@ -1,0 +1,40 @@
+id: strict
+description: >
+  Everything the library can prove, it enforces. Appropriate for a project that
+  has already been burned by each of these and would rather argue with a gate
+  than re-learn the lesson. Two rules stay at warn because they are heuristics
+  rather than proofs, and a blocking heuristic is a false positive with
+  authority.
+
+rules:
+  session.isolated_before_edit: block
+  session.no_edit_in_main_checkout: block
+  session.push_barrier: block
+  session.ff_merge_target: block
+  session.own_file_set_only: block
+  session.named_after_isolating: block
+  session.teardown_complete: block
+
+  pipeline.started_before_edit: block
+
+  docs.read_architecture: block
+  docs.updated: block
+  docs.diagrams_current: block
+
+  test.suite_runs: block
+  test.new_test_fails: block
+  test.all_pass: block
+  coverage.meets_floor: block
+
+  privacy.clean: block
+
+  memory.schema_valid: block
+  memory.index_current: block
+  memory.no_dead_links: block
+  # Duplicate detection is similarity-based; it proposes candidates rather than
+  # proving a duplicate, so it advises even here.
+  memory.no_duplicates: warn
+
+  item.bug_reproduced_before_fix: block
+  # Residue is free text; matching it against a status is a judgement call.
+  item.residue_matches_status: warn
