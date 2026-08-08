@@ -148,7 +148,7 @@ class SessionDomain:
             id=session_id,
             name=_slug(name),
             base=base,
-            origin=str(git.toplevel(Path.cwd()) or Path.cwd()),
+            origin=str(git.toplevel(self.manifest.root) or self.manifest.root),
             heartbeat=time.time(),
         )
         self._save(session)
@@ -162,7 +162,7 @@ class SessionDomain:
         and placed beside the repository rather than inside it so that the
         worktree is not itself a tracked path.
         """
-        root = git.toplevel(Path.cwd()) or self.manifest.root
+        root = git.toplevel(self.manifest.root) or self.manifest.root
         prefix = self.manifest.get("session.worktree_prefix") or f"{root.name}-wt"
         return {
             "worktree": str(root.parent / f"{prefix}-{session.id}"),
@@ -186,6 +186,7 @@ class SessionDomain:
             )
         proc = subprocess.run(
             ["git", "worktree", "add", plan["worktree"], "-b", plan["branch"], plan["base"]],
+            cwd=str(self.manifest.root),
             capture_output=True,
             text=True,
         )
@@ -227,6 +228,7 @@ class SessionDomain:
         if remove_worktree and session.worktree and Path(session.worktree).exists():
             proc = subprocess.run(
                 ["git", "worktree", "remove", session.worktree],
+                cwd=str(self.manifest.root),
                 capture_output=True,
                 text=True,
             )
@@ -248,7 +250,12 @@ class SessionDomain:
         crashed session diagnosable afterwards.
         """
         actions: list[str] = []
-        live_worktrees = {str(w.path.resolve()) for w in git.worktrees(Path.cwd())}
+        # Registered with git AND present on disk. Git prunes worktree metadata
+        # lazily, so a directory someone deleted by hand is still listed —
+        # which is exactly the crashed-session case this has to catch. The
+        # directory's existence is the signal that does not lag.
+        registered = {str(w.path.resolve()) for w in git.worktrees(self.manifest.root)}
+        live_worktrees = {p for p in registered if Path(p).is_dir()}
 
         for session in self.list():
             if session.state in {"torn_down", "abandoned"}:

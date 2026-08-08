@@ -684,15 +684,30 @@ def build_parser() -> argparse.ArgumentParser:
     # A parent carrying the global flags, attached to every leaf command as
     # well as the root, so that `--json` works in the position a person
     # naturally types it rather than only before the subcommand.
+    # SUPPRESS rather than a False default: the same flag is attached at every
+    # level, and a plain default would have the subparser overwrite a value the
+    # root parser already set — so `invariant --json init` would silently print
+    # text. With SUPPRESS the attribute is written only where the flag actually
+    # appeared, and the root's set_defaults survives.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--json", action="store_true", help="machine-readable output")
-    common.add_argument("--verbose", "-v", action="store_true")
+    common.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS,
+        help="machine-readable output",
+    )
+    common.add_argument(
+        "--verbose", "-v", action="store_true", default=argparse.SUPPRESS
+    )
 
     parser = argparse.ArgumentParser(
         prog="invariant",
         description="Deterministic, scripted state for agent workflows.",
         parents=[common],
     )
+    # Deliberately NO set_defaults(json=False) here. `parents=` copies action
+    # objects by reference, and set_defaults reaches into every action with a
+    # matching dest — so setting a default on the root would overwrite SUPPRESS
+    # on every subparser's copy of the same action, reinstating the bug above.
+    # Readers use getattr(args, "json", False) instead.
     class _Sub(argparse._SubParsersAction):
         """Attaches the common flags to every subparser, at every depth."""
 
