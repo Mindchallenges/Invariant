@@ -450,3 +450,54 @@ def test_render_includes_level_and_fixes(ctx_factory):
     ctx = ctx_factory(cwd=ctx_factory.main, payload=edit_payload(ctx_factory.main / "a.py"))
     rendered = only(evaluate(["session.no_edit_in_main_checkout"], ctx)).render()
     assert "BLOCK" in rendered and "try:" in rendered
+
+
+class TestExemptionAcrossWorktrees:
+    """The exemption must survive the multi-worktree case it exists for.
+
+    Patterns are written project-relative. If the target sits in a different
+    worktree than the manifest was found in, resolving against a single base
+    yields an absolute path, which matches no project-relative pattern — so the
+    exemption silently stops applying exactly when several worktrees exist.
+    """
+
+    def test_exempt_in_the_manifest_root(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
+        )
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_exempt_when_the_target_is_in_another_worktree(self, ctx_factory):
+        # cwd is the worktree; the target is the same config path in the main
+        # checkout. This is the case that regressed.
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
+        )
+        for rule_id in ("session.isolated_before_edit",
+                        "session.no_edit_in_main_checkout",
+                        "pipeline.started_before_edit"):
+            assert only(evaluate([rule_id], ctx)).verdict.skipped, rule_id
+
+    def test_exempt_when_cwd_is_main_and_target_is_in_a_worktree(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.wt / ".claude" / "memory" / "a.md"),
+        )
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_a_source_file_is_still_not_exempt(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / "src" / "app.py"),
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+    def test_no_patterns_means_nothing_is_exempt(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"session": {"exempt_paths": []}})
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok

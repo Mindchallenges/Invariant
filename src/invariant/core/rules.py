@@ -253,9 +253,22 @@ def _no_edit_in_main_checkout(ctx: RuleContext) -> Verdict:
     except OSError:
         return Verdict.na("path is not resolvable")
 
+    # The question is where the TARGET lives, not where the caller stands.
+    # Asking about the working directory let an edit to a main-checkout file
+    # pass whenever it was issued from inside a worktree — which is every edit
+    # a session makes, so the rule was close to inert in exactly the setup it
+    # was written for.
+    for worktree in git.worktrees(ctx.cwd):
+        if worktree.is_main:
+            continue
+        try:
+            worktree_path = worktree.path.resolve()
+        except OSError:
+            continue
+        if resolved == worktree_path or worktree_path in resolved.parents:
+            return Verdict.clean(f"inside linked worktree {worktree_path.name}")
+
     if resolved == main or main in resolved.parents:
-        if git.in_linked_worktree(ctx.cwd):
-            return Verdict.clean("editing from a linked worktree")
         return Verdict.fail(
             "this edit targets the shared main checkout",
             detail="The main checkout must only ever hold merged work. A "
@@ -788,12 +801,51 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     if target is None:
         return False
     patterns = ctx.manifest.get("session.exempt_paths") or []
-    root = ctx.manifest.root
+    if not patterns:
+        return False
+
+    for rel in _project_relative_forms(ctx, target):
+        if any(fnmatch.fnmatch(rel, pattern) for pattern in patterns):
+            return True
+    return False
+
+
+def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:
+    """Every plausible project-relative spelling of ``target``.
+
+    Exempt patterns are written project-relative (``.claude/**``), but the
+    target may sit in any worktree of the repository — the main checkout, this
+    session's worktree, or a peer's. Resolving against a single base produces an
+    absolute path whenever the two disagree, and an absolute path matches no
+    project-relative pattern, so the exemption silently stops applying exactly
+    when several worktrees exist. That is the situation this library is for, so
+    every known base is tried.
+    """
     try:
-        rel = str(Path(target).resolve().relative_to(root))
-    except (ValueError, OSError):
-        rel = str(target)
-    return any(fnmatch.fnmatch(rel, pattern) for pattern in patterns)
+        absolute = Path(target).resolve()
+    except OSError:
+        return [str(target)]
+
+    bases = [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
+    forms: list[str] = []
+    for base in bases:
+        if base is None:
+            continue
+        try:
+            forms.append(str(absolute.relative_to(Path(base).resolve())))
+        except (ValueError, OSError):
+            continue
+
+    # A path in a peer's worktree matches none of the bases above. Its
+    # project-relative form is still recoverable from the worktree list.
+    if not forms:
+        for worktree in git.worktrees(ctx.cwd):
+            try:
+                forms.append(str(absolute.relative_to(worktree.path.resolve())))
+            except (ValueError, OSError):
+                continue
+
+    return forms or [str(absolute)]
 
 
 def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
