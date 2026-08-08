@@ -77,16 +77,52 @@ class TestInit:
         shim = project / ".claude" / "hooks" / "invariant-pre-tool-use.sh"
         assert shim.stat().st_mode & 0o111
         body = shim.read_text(encoding="utf-8")
-        assert "invariant hook pre-tool-use" in body
-        assert len(body.splitlines()) < 20  # a shim, not a program
+        assert "hook pre-tool-use" in body  # dispatches this event to the CLI
+        assert len(body.splitlines()) < 30  # a shim, not a program
 
-    def test_shim_is_silent_when_the_library_is_absent(self, project):
+    def test_shim_carries_no_absolute_home_path(self, project):
+        """It is committed, so it must not bake in a username."""
         run("init", "--ecosystem", "python")
+        for shim in (project / ".claude" / "hooks").glob("invariant-*.sh"):
+            body = shim.read_text(encoding="utf-8")
+            assert "/Users/" not in body and "/home/" not in body
+            assert "$HOME" in body
+
+    def test_shim_finds_a_user_installed_cli(self, project, tmp_path):
+        """The case that motivated the resolution order.
+
+        uv and pipx install into a user bin directory that is not on PATH by
+        default, so a PATH-only lookup finds nothing on a working install.
+        """
+        run("init", "--ecosystem", "python")
+        fake_home = tmp_path / "home"
+        (fake_home / ".local" / "bin").mkdir(parents=True)
+        stub = fake_home / ".local" / "bin" / "invariant"
+        stub.write_text('#!/usr/bin/env bash\necho "STUB $*"\n', encoding="utf-8")
+        stub.chmod(0o755)
+
         shim = project / ".claude" / "hooks" / "invariant-pre-tool-use.sh"
         proc = subprocess.run(
             ["bash", str(shim)],
             capture_output=True, text=True,
-            env={"PATH": "/usr/bin:/bin", "CLAUDE_PROJECT_DIR": str(project)},
+            env={"PATH": "/usr/bin:/bin", "HOME": str(fake_home),
+                 "CLAUDE_PROJECT_DIR": str(project)},
+        )
+        assert proc.stdout.strip() == "STUB hook pre-tool-use"
+
+    def test_shim_is_silent_when_the_library_is_absent(self, project, tmp_path):
+        run("init", "--ecosystem", "python")
+        shim = project / ".claude" / "hooks" / "invariant-pre-tool-use.sh"
+        empty_home = tmp_path / "empty-home"
+        empty_home.mkdir()
+        proc = subprocess.run(
+            ["bash", str(shim)],
+            capture_output=True, text=True,
+            # HOME must be isolated too: on a machine where the tool IS
+            # installed, the real user bin directory would satisfy the lookup
+            # and this would test nothing.
+            env={"PATH": "/usr/bin:/bin", "HOME": str(empty_home),
+                 "CLAUDE_PROJECT_DIR": str(project)},
         )
         # A missing tool must not break every tool call in the project.
         assert proc.returncode == 0
