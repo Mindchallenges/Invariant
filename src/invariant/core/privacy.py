@@ -79,6 +79,19 @@ _TIME_FALSE_ALARM = re.compile(
     r"\b(?:took|elapsed|duration|ratio|version|v\d|timeout|ETA|of\s+\d)\b", re.I
 )
 
+#: Addresses that are non-identifying by construction. A no-reply address is not
+#: a way to reach a person, and the git co-author trailer carrying one is a
+#: convention every agent-assisted repository uses — so flagging it means the
+#: gate blocks the commit that records who wrote the change, on every commit,
+#: until someone disables the email pattern entirely.
+#:
+#: Deliberately narrow: only address shapes that cannot identify anyone. A real
+#: contributor's address in the same trailer is still a finding, because it
+#: still is one.
+_NON_IDENTIFYING_ADDRESS = re.compile(
+    r"^(?:no-?reply|do-?not-?reply)@|@(?:[\w.-]+\.)?no-?reply\.[\w.-]+$", re.I
+)
+
 
 class PrivacyScanner:
     def __init__(
@@ -113,6 +126,8 @@ class PrivacyScanner:
                 for match in pattern.finditer(line):
                     raw = match.group(0)
                     if any(allowed in raw for allowed in self.allow):
+                        continue
+                    if name == "emails" and _NON_IDENTIFYING_ADDRESS.search(raw):
                         continue
                     findings.append(
                         Finding(

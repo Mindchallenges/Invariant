@@ -140,3 +140,35 @@ class TestFileScanning:
         (tmp_path / "a" / "two.md").write_text("clean", encoding="utf-8")
         found = PrivacyScanner(patterns=["emails"]).scan_paths([tmp_path])
         assert len(found) == 1
+
+
+class TestNonIdentifyingAddresses:
+    """A no-reply address is not a way to reach anyone.
+
+    The git co-author trailer carrying one is a convention every
+    agent-assisted repository uses, so flagging it blocks the commit that
+    records authorship — on every commit — until someone disables the whole
+    email pattern.
+    """
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["emails"])
+
+    def test_the_agent_coauthor_trailer_passes(self):
+        assert self.scanner.scan_text("Co-Authored-By: An Agent <noreply@example.com>") == []
+
+    def test_hyphenated_and_donotreply_forms(self):
+        for address in ("no-reply@example.com", "donotreply@example.com",
+                        "do-not-reply@example.com"):
+            assert self.scanner.scan_text(address) == [], address
+
+    def test_a_noreply_subdomain_passes(self):
+        assert self.scanner.scan_text("a-user@users.noreply.example.com") == []
+
+    def test_a_real_address_in_the_same_trailer_is_still_a_finding(self):
+        # Narrow on purpose: only shapes that cannot identify anyone.
+        found = self.scanner.scan_text("Co-Authored-By: A Person <a.person@example.com>")
+        assert len(found) == 1
+
+    def test_a_lookalike_local_part_is_still_a_finding(self):
+        assert self.scanner.scan_text("noreplyactually@example.com") != []

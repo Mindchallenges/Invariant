@@ -547,3 +547,29 @@ class TestPrivacyScopeAcrossWorktrees:
         target = ctx_factory.main / ".claude" / "memory" / "note.md"
         ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
         assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestOutOfProjectPaths:
+    """One project's hooks must not govern edits to a different repository."""
+
+    def test_an_edit_in_another_repository_is_not_governed(self, ctx_factory, tmp_path):
+        other = tmp_path / "unrelated-repo"
+        (other / "src").mkdir(parents=True)
+        target = other / "src" / "thing.py"
+        target.write_text("x", encoding="utf-8")
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=edit_payload(target))
+        for rule_id in ("session.isolated_before_edit", "pipeline.started_before_edit"):
+            verdict = only(evaluate([rule_id], ctx)).verdict
+            assert verdict.skipped, f"{rule_id}: {verdict.message}"
+
+    def test_an_edit_in_this_project_is_still_governed(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=edit_payload(ctx_factory.main / "app.py")
+        )
+        assert not only(evaluate(["session.isolated_before_edit"], ctx)).verdict.ok
+
+    def test_an_edit_in_a_sibling_worktree_is_still_governed(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=edit_payload(ctx_factory.wt / "app.py")
+        )
+        assert not only(evaluate(["session.isolated_before_edit"], ctx)).verdict.ok

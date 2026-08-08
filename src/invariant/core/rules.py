@@ -206,6 +206,8 @@ def evaluate_event(event: str, ctx: RuleContext) -> list[Evaluated]:
 def _isolated_before_edit(ctx: RuleContext) -> Verdict:
     if not ctx.is_edit:
         return Verdict.na()
+    if _is_outside_project(ctx, ctx.target_path):
+        return Verdict.na("path is outside this project")
     if _is_exempt(ctx, ctx.target_path):
         return Verdict.na("path is exempt from isolation")
     if ctx.session is None:
@@ -408,6 +410,8 @@ def _teardown_complete(ctx: RuleContext) -> Verdict:
 def _pipeline_started_before_edit(ctx: RuleContext) -> Verdict:
     if not ctx.is_edit:
         return Verdict.na()
+    if _is_outside_project(ctx, ctx.target_path):
+        return Verdict.na("path is outside this project")
     if _is_exempt(ctx, ctx.target_path):
         return Verdict.na("path is exempt")
     if ctx.pipeline and ctx.pipeline.get("state"):
@@ -789,6 +793,46 @@ def _docs_root(ctx: RuleContext) -> Path:
     except ValueError:
         return configured  # an absolute path outside the project: use as given
     return (_repo_root(ctx) / relative).resolve()
+
+
+def _is_outside_project(ctx: RuleContext, target: Path | None) -> bool:
+    """True when the path belongs to a different repository entirely.
+
+    A host runs one project's hooks for every edit in the session, including
+    edits to a sibling checkout. Session and pipeline rules answer from state
+    alone, so without this they refuse work in an unrelated repository and the
+    only escape is to disable them — which disables them for the project they
+    were meant to govern too.
+
+    Errs toward governing: unless the path is provably in another repository,
+    it is treated as in scope.
+    """
+    if target is None:
+        return False
+    try:
+        absolute = Path(target).resolve()
+    except OSError:
+        return False
+
+    for base in (ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)):
+        if base is None:
+            continue
+        try:
+            base = Path(base).resolve()
+        except OSError:
+            continue
+        if absolute == base or base in absolute.parents:
+            return False
+
+    for worktree in git.worktrees(ctx.cwd):
+        try:
+            path = worktree.path.resolve()
+        except OSError:
+            continue
+        if absolute == path or path in absolute.parents:
+            return False
+
+    return True
 
 
 def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
