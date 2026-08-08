@@ -410,6 +410,75 @@ class TestHookBridge:
         run("init", "--ecosystem", "python")
         assert run("context") == 0
 
+    def test_several_live_sessions_do_not_deadlock_the_hook(
+        self, project, capsys, monkeypatch
+    ):
+        """The regression this whole guard exists for.
+
+        Two sessions registered in the main checkout and neither isolated: the
+        directory cannot say which one is calling. That ambiguity used to raise
+        out of the hook, and a pre-tool-use hook exiting non-zero is a deny —
+        so every tool call in the project was refused, including the
+        `session isolate` that would have resolved it. Nothing could reach the
+        state that unblocks it. The hook must exit zero and must not deny.
+        """
+        run("init", "--ecosystem", "python")
+        commit_all(project, "adopt")
+        run("session", "start", "first")
+        run("session", "start", "second")
+
+        monkeypatch.setattr("sys.stdin", _Stdin(json.dumps({"tool_name": "Bash"})))
+        assert run("hook", "pre-tool-use") == 0
+        decision = payload(capsys).get("hookSpecificOutput", {})
+        assert decision.get("permissionDecision") != "deny"
+
+    def test_ambiguity_names_the_sessions_and_the_way_out(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        run("session", "start", "first")
+        run("session", "start", "second")
+        assert run("context") == 0
+        text = out(capsys)
+        assert "first" in text and "second" in text
+        # The remedy must be the command that actually resolves it.
+        assert "isolate" in text and "--id" in text
+
+    def test_context_accepts_the_id_its_own_error_recommends(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        run("session", "start", "first")
+        run("session", "start", "second")
+
+        capsys.readouterr()
+        run("session", "list", "--json")
+        listed = payload(capsys)["sessions"]
+        target = next(s for s in listed if s["name"] == "second")["id"]
+
+        assert run("context", "--id", target) == 0
+        text = out(capsys)
+        assert target in text and "second" in text
+
+    def test_a_broken_hook_reports_instead_of_denying(
+        self, project, capsys, monkeypatch
+    ):
+        """Enforcement may fail. It may not fail closed.
+
+        A hook that cannot evaluate has lost the ability to judge, which is not
+        the same as having judged 'no'. Losing a gate is recoverable; refusing
+        every tool call is not.
+        """
+        run("init", "--ecosystem", "python")
+
+        def explode(*a, **k):
+            raise RuntimeError("rule engine is wedged")
+
+        monkeypatch.setattr(
+            "invariant.hosts.claude_code.ClaudeCodeHost.handle", explode
+        )
+        monkeypatch.setattr("sys.stdin", _Stdin(json.dumps({"tool_name": "Bash"})))
+        assert run("hook", "pre-tool-use") == 0
+        response = payload(capsys)
+        assert response.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
+        assert "enforcement is OFF" in json.dumps(response)
+
 
 class TestStateMaintenance:
     def test_state_show(self, project, capsys):

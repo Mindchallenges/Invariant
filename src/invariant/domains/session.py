@@ -85,12 +85,18 @@ class SessionDomain:
             if s is not None
         ]
 
-    def current(self, cwd: Path | None = None) -> Session | None:
+    def current(self, cwd: Path | None = None, *, strict: bool = True) -> Session | None:
         """The session this invocation belongs to.
 
         An explicit identifier wins. Otherwise the session whose worktree
         contains the working directory does — which is what makes a hook
         running inside a worktree find its own session without being told.
+
+        ``strict=False`` turns an unresolvable origin into ``None`` rather than
+        an error. Ambiguity is a normal state for an advisory caller — a hook
+        firing in the main checkout while several sessions are live — and one
+        that must not be reported by failing, because a hook that fails denies
+        the tool call that would have resolved it.
         """
         explicit = os.environ.get("INVARIANT_SESSION_ID")
         if explicit:
@@ -119,24 +125,27 @@ class SessionDomain:
         # session was registered: a session that has not isolated yet has no
         # worktree at all, and one that just isolated leaves the caller
         # standing in the origin. Both need to stay addressable.
-        candidates = [
+        candidates = self.origin_candidates(cwd)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1 and strict:
+            raise UsageError(ambiguity_message(candidates))
+        return None
+
+    def origin_candidates(self, cwd: Path | None = None) -> list[Session]:
+        """Live sessions registered at or above ``cwd``.
+
+        Split out from :meth:`current` so that a caller which must not fail on
+        ambiguity can still describe it.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        return [
             s
             for s in self.list()
             if s.state not in {"torn_down", "abandoned"}
             and s.origin
             and _contains(Path(s.origin), cwd)
         ]
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            raise UsageError(
-                f"{len(candidates)} live sessions were registered here and none "
-                f"of their worktrees contains this directory: "
-                + ", ".join(f"{s.id} ({s.name})" for s in candidates)
-                + ".\nSet INVARIANT_SESSION_ID, pass --id, or run from inside "
-                "the session's worktree."
-            )
-        return None
 
     # -- lifecycle -----------------------------------------------------
 
@@ -322,6 +331,28 @@ class SessionDomain:
     def _deregister(self, session_id: str) -> None:
         with self.store.locked(REGISTRY, default={"sessions": {}}) as registry:
             registry.setdefault("sessions", {}).pop(session_id, None)
+
+
+def ambiguity_message(candidates: list[Session]) -> str:
+    """How to name a session when the working directory cannot.
+
+    The remedies are ordered by what actually works from inside an agent. A
+    session that has not isolated yet stands in the origin by definition, so
+    "run from inside the worktree" is advice it cannot take — it is listed
+    last, and the command that creates that worktree is spelled out instead.
+    """
+    lines = [
+        f"{len(candidates)} live sessions were registered here and none of "
+        "their worktrees contains this directory:"
+    ]
+    for s in candidates:
+        where = s.worktree or "(not isolated yet)"
+        lines.append(f"  {s.id}  {s.name}  [{s.state}]  {where}")
+    lines.append("Name the one you mean:")
+    lines.append("  INVARIANT_SESSION_ID=<id> invariant <command>   (or pass --id <id>)")
+    lines.append("A session with no worktree gets one with:")
+    lines.append("  invariant session isolate --execute --id <id>")
+    return "\n".join(lines)
 
 
 def _contains(root: Path, candidate: Path) -> bool:

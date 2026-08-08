@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..core.errors import InvariantError
 from ..core.rules import evaluate_event
+from ..domains.session import ambiguity_message
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -212,7 +213,7 @@ class ClaudeCodeHost:
         target = (payload.get("tool_input") or {}).get("file_path")
         if not target:
             return {}
-        session = ctx.current_session()
+        session = ctx.current_session(strict=False)
         if session is None:
             return {}
         try:
@@ -241,9 +242,16 @@ def build_context(ctx, greeting: bool = False) -> str:
     happened.
     """
     lines: list[str] = []
-    session = ctx.current_session()
+    session = ctx.current_session(strict=False)
 
     if session is None:
+        # "None" has two causes and they need opposite advice: nothing is
+        # registered here (start one), or several are and the directory cannot
+        # say which (name one). Telling an agent with three live sessions to
+        # start a fourth is how this deadlocked in the first place.
+        candidates = ctx.sessions.origin_candidates(ctx.cwd)
+        if len(candidates) > 1:
+            return "invariant: " + ambiguity_message(candidates)
         if greeting:
             return (
                 "invariant: no session is active in this directory.\n"

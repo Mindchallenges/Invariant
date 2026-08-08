@@ -105,6 +105,12 @@ class RuleContext:
     pipeline: dict | None = None
     payload: dict = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
+    #: Live sessions registered here when the directory could not pick one.
+    #: A rule that sees ``session is None`` must consult this before advising
+    #: the caller to start a session: with candidates present, the answer is
+    #: to name one of them, and telling the caller to start another makes the
+    #: ambiguity permanently worse.
+    ambiguous: list[dict] = field(default_factory=list)
 
     # -- convenience --------------------------------------------------
 
@@ -211,6 +217,18 @@ def _isolated_before_edit(ctx: RuleContext) -> Verdict:
     if _is_exempt(ctx, ctx.target_path):
         return Verdict.na("path is exempt from isolation")
     if ctx.session is None:
+        if ctx.ambiguous:
+            return Verdict.fail(
+                f"{len(ctx.ambiguous)} live sessions are registered here and "
+                "this directory cannot say which one is editing",
+                detail="Naming one resolves it; starting another does not — "
+                "it adds a fourth candidate to the same question.",
+                fixes=tuple(
+                    f"INVARIANT_SESSION_ID={s.get('id')} invariant session "
+                    f"isolate --execute  ({s.get('name')})"
+                    for s in ctx.ambiguous
+                ),
+            )
         return Verdict.fail(
             "no session is registered, so this edit is not attributable",
             fixes=("invariant session start <task-name>",),

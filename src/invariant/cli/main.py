@@ -67,10 +67,19 @@ def verdicts_payload(verdicts) -> list[dict]:
 class Context:
     """Everything a command needs, assembled once."""
 
-    def __init__(self, cwd: Path | None = None, required: bool = True) -> None:
+    def __init__(
+        self,
+        cwd: Path | None = None,
+        required: bool = True,
+        session_id: str | None = None,
+    ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         self.manifest = Manifest.load(self.cwd, required=required)
         self.store = JsonStore(self.manifest.state_root)
+        #: An explicit --id, carried rather than exported. Writing it into
+        #: os.environ would work and would also outlive the command, silently
+        #: re-answering the same question for everything that ran afterwards.
+        self.session_id = session_id
 
     @property
     def sessions(self) -> SessionDomain:
@@ -92,8 +101,10 @@ class Context:
 
         return MemoryStore.from_manifest(self.manifest)
 
-    def current_session(self):
-        return self.sessions.current(self.cwd)
+    def current_session(self, strict: bool = True):
+        if self.session_id:
+            return self.sessions.require(self.session_id)
+        return self.sessions.current(self.cwd, strict=strict)
 
     def require_session(self):
         session = self.current_session()
@@ -105,8 +116,15 @@ class Context:
         return session
 
     def rule_context(self, payload=None, extra=None) -> RuleContext:
-        session = self.current_session()
+        # Non-strict on purpose. Rules are evaluated on behalf of hooks, and an
+        # unidentifiable session is something the rules already model: no
+        # session means the session-scoped gates abstain. Raising here would
+        # convert "I do not know who you are" into "you may not act".
+        session = self.current_session(strict=False)
         pipeline = self.pipelines.current(session.id) if session else None
+        ambiguous = (
+            [] if session else [s.to_dict() for s in self.sessions.origin_candidates(self.cwd)]
+        )
         return RuleContext(
             manifest=self.manifest,
             cwd=self.cwd,
@@ -114,6 +132,7 @@ class Context:
             pipeline=pipeline.to_dict() if pipeline else None,
             payload=payload or {},
             extra=extra or {},
+            ambiguous=ambiguous,
         )
 
 
@@ -665,12 +684,44 @@ def cmd_hook(args) -> int:
         print(json.dumps({}))
         return EXIT_OK
     host = ClaudeCodeHost(ctx.manifest.root)
-    print(json.dumps(host.handle(args.event, raw, ctx)))
+    try:
+        response = host.handle(args.event, raw, ctx)
+    except Exception as exc:  # noqa: BLE001 - see below
+        # The same reasoning as the guard above, extended to the part that does
+        # the work. A pre-tool-use hook that exits non-zero is a *deny*, so any
+        # unhandled failure in here does not merely lose enforcement — it
+        # refuses every tool call in the project, including the ones that would
+        # diagnose and repair the cause. That is a deadlock, and it is strictly
+        # worse than the unenforced gate it was trying to protect.
+        #
+        # A block is a verdict, and verdicts come back as a return value. An
+        # exception is this library breaking, and this library breaking must
+        # never be spelled "the agent may not act".
+        print(json.dumps(_hook_degraded(args.event, exc)))
+        return EXIT_OK
+    print(json.dumps(response))
     return EXIT_OK
 
 
+def _hook_degraded(event: str, exc: Exception) -> dict:
+    """Report a broken hook as context, never as a decision."""
+    from ..hosts.claude_code import EVENTS, _context_response
+
+    text = (
+        f"invariant: the {event} hook could not evaluate and was skipped — "
+        f"enforcement is OFF for this call.\n"
+        f"  {type(exc).__name__}: {exc}\n"
+        f"  Diagnose with 'invariant doctor'. Gates are not being checked "
+        f"until this is fixed."
+    )
+    return _context_response(EVENTS.get(event, "PreToolUse"), text)
+
+
 def cmd_context(args) -> int:
-    ctx = Context()
+    # --id is not a convenience here. Every ambiguity message tells the caller
+    # to pass it, and 'context' is the first command they reach for after
+    # reading one; without it the advice is a dead end.
+    ctx = Context(session_id=getattr(args, "id", None))
     from ..hosts.claude_code import build_context
 
     text = build_context(ctx)
@@ -887,7 +938,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("event")
     q.set_defaults(func=cmd_hook)
 
-    sub.add_parser("context").set_defaults(func=cmd_context)
+    q = sub.add_parser("context")
+    q.add_argument("--id", help="the session to report on, when the directory cannot say")
+    q.set_defaults(func=cmd_context)
 
     return parser
 
