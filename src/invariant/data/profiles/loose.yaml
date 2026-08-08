@@ -17,6 +17,9 @@ rules:
 
   pipeline.started_before_edit: warn
 
+  agents.design_agent_ran: warn
+  agents.review_agent_ran: warn
+
   docs.read_architecture: warn
   docs.updated: warn
   docs.diagrams_current: "off"

@@ -20,6 +20,11 @@ rules:
   # Pipeline ordering.
   pipeline.started_before_edit: warn
 
+  # Installing an agent is not using one. These advise rather than block: the
+  # engine can prove an agent ran, never that one was needed.
+  agents.design_agent_ran: warn
+  agents.review_agent_ran: warn
+
   # Docs-first is core policy, not an opt-in (ADR-001 D12).
   docs.read_architecture: block
   docs.updated: block

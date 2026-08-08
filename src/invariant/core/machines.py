@@ -31,6 +31,18 @@ DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
     "review": {"exit": ["docs.updated", "docs.diagrams_current"]},
 }
 
+#: Attached the same way, and exit gates for the same reason.
+#:
+#: These stay ADVISORY in every shipped profile, including ``strict``. The
+#: engine can prove an agent *ran*; it cannot prove one was *needed*, and a
+#: one-line change made inline is a legitimate exception rather than a
+#: violation. ``strict`` already holds that line for its other heuristics, on
+#: the grounds that a blocking heuristic is a false positive with authority.
+AGENT_ROLE_GATES: dict[str, dict[str, list[str]]] = {
+    "design": {"exit": ["agents.design_agent_ran"]},
+    "review": {"exit": ["agents.review_agent_ran"]},
+}
+
 
 def shipped_ids() -> list[str]:
     return sorted(p.stem for p in MACHINE_DIR.glob("*.yaml"))
@@ -68,7 +80,7 @@ def load_pipeline_machine(manifest) -> Machine:
         raise ManifestError(
             f"machine {machine_id!r} is of kind {machine.kind!r}, not 'pipeline'"
         )
-    return machine.inject_gates(DOCS_FIRST_GATES)
+    return machine.inject_gates(DOCS_FIRST_GATES).inject_gates(AGENT_ROLE_GATES)
 
 
 def load_session_machine(manifest=None) -> Machine:

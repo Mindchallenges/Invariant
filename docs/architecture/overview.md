@@ -184,7 +184,8 @@ actually happened.
     invariant/
       state/                gitignored; per-session JSON + locked registry
     hooks/                  thin shims that exec the CLI
-    agents/                 library agents installed as shims; local agents as files
+    agents/                 library agents installed as copies with an
+                            in-frontmatter content hash; local agents untouched
   docs/                     architecture docs the docs-first gate reads
 ```
 

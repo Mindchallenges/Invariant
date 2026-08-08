@@ -3,6 +3,7 @@ import yaml
 
 from invariant.core.errors import ManifestError
 from invariant.core.machines import (
+    AGENT_ROLE_GATES,
     DOCS_FIRST_GATES,
     MACHINE_DIR,
     load_item_machine,
@@ -103,6 +104,57 @@ class TestDocsFirstInjection:
         m = make_manifest({"methodology": {"pipeline": "none"}})
         machine = load_pipeline_machine(m)
         assert machine.states["working"].entry_gates == ()
+
+
+class TestAgentRoleGates:
+    """The agent gates ride the same role injection as docs-first."""
+
+    def test_both_are_attached_to_the_tdd_pipeline(self, make_manifest):
+        machine = load_pipeline_machine(make_manifest({}))
+        exit_ = {g for s in machine.states.values() for g in s.exit_gates}
+        assert {"agents.design_agent_ran", "agents.review_agent_ran"} <= exit_
+
+    def test_they_are_exit_gates_not_entry_gates(self, make_manifest):
+        # A pipeline starts in its design state; an entry gate there could
+        # never fail, which is how the docs-first gate was inert once already.
+        machine = load_pipeline_machine(make_manifest({}))
+        entry = {g for s in machine.states.values() for g in s.entry_gates}
+        assert not {g for g in entry if g.startswith("agents.")}
+
+    def test_injection_targets_roles_not_names(self):
+        assert set(AGENT_ROLE_GATES) == {"design", "review"}
+
+    def test_a_roleless_machine_is_unaffected(self, make_manifest):
+        machine = load_pipeline_machine(make_manifest({"methodology": {"pipeline": "none"}}))
+        gates = {
+            g
+            for s in machine.states.values()
+            for g in s.entry_gates + s.exit_gates
+        }
+        assert not {g for g in gates if g.startswith("agents.")}
+
+    def test_no_methodology_file_declares_them(self):
+        # Same reason as docs-first: applied centrally, so forking a
+        # methodology file cannot silently drop them.
+        for machine_id in ("tdd", "bugfix", "chore"):
+            raw = str(yaml.safe_load((MACHINE_DIR / f"{machine_id}.yaml").read_text()))
+            assert "agents." not in raw
+
+    def test_they_advise_in_every_shipped_profile(self):
+        """A blocking heuristic is a false positive with authority.
+
+        Pinned as a test because the tempting change — "strict should block
+        this" — makes every inline one-line fix require an override, and a
+        profile that gets overridden routinely teaches people to reach for
+        --force on the gates that do matter.
+        """
+        from invariant.core.manifest import DATA_DIR
+
+        for profile in ("standard", "strict", "loose"):
+            path = DATA_DIR / "profiles" / f"{profile}.yaml"
+            rules = yaml.safe_load(path.read_text())["rules"]
+            assert rules["agents.design_agent_ran"] == "warn", profile
+            assert rules["agents.review_agent_ran"] == "warn", profile
 
 
 class TestSessionMachine:

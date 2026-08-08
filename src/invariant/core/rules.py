@@ -440,6 +440,68 @@ def _pipeline_started_before_edit(ctx: RuleContext) -> Verdict:
     )
 
 
+# -- agent rules -------------------------------------------------------
+#
+# Installing an agent and using one are different events, and only the second
+# is worth anything. These gates read the invocations the host recorded, in the
+# same spirit as the docs-first gate: what happened, not what was intended.
+
+
+def _agent_role_gate(ctx: RuleContext, role: str, purpose: str) -> Verdict:
+    configured = ctx.manifest.get(f"agents.roles.{role}") or []
+    configured = [str(a) for a in configured]
+    if not configured:
+        return Verdict.na(f"no agent is configured for the {role!r} role")
+
+    ran = [str(a) for a in (ctx.evidence("agents_run", []) or [])]
+    matched = [a for a in ran if a in configured]
+    if matched:
+        return Verdict.clean(f"{', '.join(matched)} ran in this pipeline")
+
+    detail = (
+        f"{purpose} A subagent carries the project's own procedure; doing the "
+        f"work inline reaches the same files by a route nothing checked."
+    )
+    if ran:
+        detail += f" Agents that did run here: {', '.join(ran)}."
+    return Verdict.fail(
+        f"no {role} agent ran in this pipeline",
+        detail=detail,
+        fixes=(
+            f"dispatch one of: {', '.join(configured)}",
+            f"or retune agents.roles.{role} if this project does not use one",
+        ),
+    )
+
+
+@rule(
+    "agents.design_agent_ran",
+    summary="A design agent was dispatched before the design state was left.",
+    events=(),
+)
+def _agents_design_ran(ctx: RuleContext) -> Verdict:
+    return _agent_role_gate(
+        ctx,
+        "design",
+        "The design agent is what reads the architecture docs before planning "
+        "against them.",
+    )
+
+
+@rule(
+    "agents.review_agent_ran",
+    summary="A review agent was dispatched before the review state was left.",
+    events=(),
+)
+def _agents_review_ran(ctx: RuleContext) -> Verdict:
+    return _agent_role_gate(
+        ctx,
+        "review",
+        "The review agent is what checks the change against the project's "
+        "compliance checklist before it is committed.",
+    )
+
+
 # -- docs rules --------------------------------------------------------
 
 

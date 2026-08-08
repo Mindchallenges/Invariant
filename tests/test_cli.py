@@ -565,3 +565,90 @@ class TestHookAttribution:
         capsys.readouterr()
         run("--json", "session", "adopt", "ff-0000-00009999", "--id", "deadbeef")
         assert payload(capsys)["host_session_id"] == "ff-0000-00009999"
+
+
+class TestAgentsCommand:
+    """Repair must not cost the caller their enforcement configuration."""
+
+    def test_install_makes_every_agent_loadable(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        agents = project / ".claude" / "agents"
+        (agents / "feature-architect.md").write_text("broken\n", encoding="utf-8")
+
+        assert run("agents", "install", "--json") == 0
+        data = payload(capsys)
+        assert data["loadable"] is True
+        assert (agents / "feature-architect.md").read_text(encoding="utf-8").startswith("---\n")
+
+    def test_install_does_not_touch_the_manifest(self, project):
+        """The reason this is not `init --force`.
+
+        `init --force` rewrites the manifest. A project that has tuned its
+        profile and rule levels would silently lose all of it while repairing
+        an unrelated file.
+        """
+        assert run("init", "--name", "demo") == 0
+        manifest = project / ".claude" / "invariant.yaml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "\nenforcement:\n  profile: strict\n  rules:\n    test.all_pass: warn\n",
+            encoding="utf-8",
+        )
+        before = manifest.read_text(encoding="utf-8")
+
+        assert run("agents", "install") == 0
+        assert manifest.read_text(encoding="utf-8") == before
+
+    def test_install_does_not_touch_settings_or_hooks(self, project):
+        assert run("init", "--name", "demo") == 0
+        settings = project / ".claude" / "settings.json"
+        settings.write_text('{"model": "opus"}', encoding="utf-8")
+
+        assert run("agents", "install") == 0
+        assert settings.read_text(encoding="utf-8") == '{"model": "opus"}'
+
+    def test_dry_run_writes_nothing(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        target = project / ".claude" / "agents" / "feature-architect.md"
+        target.write_text("broken\n", encoding="utf-8")
+
+        assert run("agents", "install", "--dry-run", "--json") == 0
+        assert "feature-architect" in payload(capsys)["would_install"]
+        assert target.read_text(encoding="utf-8") == "broken\n"
+
+    def test_list_reports_a_broken_agent_as_unloadable(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        (project / ".claude" / "agents" / "feature-architect.md").write_text(
+            "<!-- marker -->\n---\nname: feature-architect\ndescription: d\n---\nb\n",
+            encoding="utf-8",
+        )
+        assert run("agents", "list", "--json") == 0
+        rows = {r["agent"]: r for r in payload(capsys)["agents"]}
+        assert "UNLOADABLE" in rows["feature-architect"]["status"]
+        assert rows["compliance-reviewer"]["status"] == "loadable"
+
+    def test_list_names_the_role_each_agent_answers_for(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        assert run("agents", "list", "--json") == 0
+        rows = {r["agent"]: r for r in payload(capsys)["agents"]}
+        assert rows["feature-architect"]["role"] == "design"
+        assert rows["compliance-reviewer"]["role"] == "review"
+
+    def test_doctor_reports_loadability_as_its_own_row(self, project, capsys):
+        """Doctor goes red on this, and not via the currency check.
+
+        The failure that shipped was "library agents current: ok" on a project
+        whose agents all failed to load, so the two rows are asserted apart.
+        """
+        assert run("init", "--name", "demo") == 0
+        run("doctor", "--json")  # exits 1 here: commands.build/test are unset
+        rows = {c["check"]: c["ok"] for c in payload(capsys)["checks"]}
+        assert rows["agents loadable by host"] is True
+
+        (project / ".claude" / "agents" / "feature-architect.md").write_text(
+            "<!-- marker -->\n---\nname: feature-architect\ndescription: d\n---\nb\n",
+            encoding="utf-8",
+        )
+        run("doctor", "--json")
+        rows = {c["check"]: c["ok"] for c in payload(capsys)["checks"]}
+        assert rows["agents loadable by host"] is False

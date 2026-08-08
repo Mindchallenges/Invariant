@@ -193,6 +193,21 @@ class PipelineDomain:
             read.append(path)
             self._save(session_id, pipeline)
 
+    def record_agent_run(self, session_id: str, agent_type: str) -> None:
+        """Note that a subagent was dispatched in this pipeline.
+
+        Unrecorded outside a pipeline, like a docs read: dispatching an agent
+        before starting one is allowed, it just cannot be evidence for a gate
+        that does not exist yet.
+        """
+        pipeline = self.current(session_id)
+        if pipeline is None:
+            return
+        ran = pipeline.evidence.setdefault("agents_run", [])
+        if agent_type not in ran:
+            ran.append(agent_type)
+            self._save(session_id, pipeline)
+
     def record_coverage(self, session_id: str, coverage: dict[str, float]) -> None:
         pipeline = self.require(session_id)
         pipeline.evidence["coverage"] = dict(coverage)

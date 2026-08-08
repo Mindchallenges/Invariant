@@ -7,15 +7,23 @@ rewrite.
 
 **Hooks are shims; agents are copies.** A hook can be three lines that exec the
 CLI, so it has nothing to drift. An agent definition has to be a real file the
-host reads, so it is copied with a provenance header and a content hash, and
-``doctor`` reports drift rather than silently overwriting local edits.
+host reads, so it is copied with a content hash recorded *inside* its
+frontmatter, and ``doctor`` reports drift rather than silently overwriting
+local edits.
+
+The marker's placement is not a detail. It was once written above the
+frontmatter, which moved that block off line 1 and made this host skip every
+agent it had just installed — silently, and with ``verify`` reporting success,
+because the thing ``verify`` looked for was the marker that caused the skip.
+Loadability and currency are separate checks here for that reason, and neither
+is allowed to stand in for the other.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import re
 from pathlib import Path
 
 from ..core.errors import InvariantError
@@ -56,7 +64,121 @@ done
 echo '{{}}'
 """
 
-MANAGED_HEADER = "<!-- invariant-managed: {digest} -->"
+#: Provenance goes *inside* the frontmatter, as a YAML comment.
+#:
+#: It used to be an HTML comment on line 1. That pushed the frontmatter to line
+#: 2, and this host only recognises a frontmatter block that opens the file —
+#: so every agent installed that way was copied into place and then ignored,
+#: with nothing reporting it. A comment within the block is invisible to the
+#: YAML parser and still greppable, which is what provenance actually needs.
+MARKER_PREFIX = "# invariant-managed:"
+MARKER_TEMPLATE = MARKER_PREFIX + " {digest}"
+
+FENCE = "---"
+
+#: Check labels. Named constants because ``doctor`` prints them and the tests
+#: assert on them, and a silently renamed check is a silently dropped test.
+CHECK_HOOKS = "hook shims installed"
+CHECK_WIRED = "hooks wired in settings"
+CHECK_AGENTS_LOADABLE = "agents loadable by host"
+CHECK_AGENTS_CURRENT = "library agents current"
+
+#: Tools whose invocation means "a subagent ran". Recorded as pipeline
+#: evidence so the agent-role gates can read a fact instead of a claim.
+AGENT_TOOLS = {"Task", "Agent"}
+
+
+def digest_of(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def _split_frontmatter(text: str) -> tuple[list[str], str] | None:
+    """``(frontmatter lines, body)`` — or ``None`` if the host would skip it.
+
+    Deliberately strict about the opening fence being the first line, because
+    that is the condition the host itself applies. A helper that is more
+    forgiving than the thing it models cannot be used to predict it.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != FENCE:
+        return None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == FENCE:
+            return lines[1:index], "\n".join(lines[index + 1 :])
+    return None
+
+
+#: A frontmatter key line. Deliberately narrow: a key is a bare identifier at
+#: the start of a line, everything after the first colon is the value.
+_KEY_LINE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
+
+
+def agent_frontmatter(text: str) -> dict | None:
+    """The agent's frontmatter as a mapping, or ``None`` if it will not load.
+
+    Parsed line by line rather than with a YAML parser, because the host reads
+    it that way and the host is what this predicts. Every agent file shipped
+    here — and the project-local one that has always loaded correctly — has a
+    ``description`` containing ``": "``, which strict YAML rejects outright.
+    Validating with ``yaml.safe_load`` would therefore condemn four agents that
+    work. A checker that is stricter than the system it models produces false
+    alarms exactly as reliably as a loose one produces misses.
+    """
+    split = _split_frontmatter(text)
+    if split is None:
+        return None
+    front: dict[str, str] = {}
+    for line in split[0]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = _KEY_LINE.match(stripped)
+        if match:  # anything else is a continuation line, not a new key
+            front.setdefault(match.group(1), match.group(2).strip())
+    return front or None
+
+
+def _marker_digest(text: str) -> str | None:
+    split = _split_frontmatter(text)
+    if split is None:
+        return None
+    for line in split[0]:
+        stripped = line.strip()
+        if stripped.startswith(MARKER_PREFIX):
+            return stripped[len(MARKER_PREFIX) :].strip()
+    return None
+
+
+def _reconstruct_source(text: str) -> str | None:
+    """The installed file with the marker removed — i.e. its source form.
+
+    Comparing this against the shipped file is what detects a *local edit*.
+    Comparing the marker against the shipped digest only detects an *old
+    install*; the two are different situations and the original check could
+    see neither.
+    """
+    split = _split_frontmatter(text)
+    if split is None:
+        return None
+    front, body = split
+    kept = [line for line in front if not line.strip().startswith(MARKER_PREFIX)]
+    return "\n".join([FENCE, *kept, FENCE, body])
+
+
+def loadability_problem(text: str, expected_name: str) -> str | None:
+    """Why the host would refuse this file, or ``None`` if it would load it."""
+    if _split_frontmatter(text) is None:
+        return "no frontmatter on line 1"
+    front = agent_frontmatter(text)
+    if front is None:
+        return "frontmatter declares no keys"
+    if not front.get("name"):
+        return "no name"
+    if not front.get("description"):
+        return "no description, so nothing can route work to it"
+    if str(front["name"]) != expected_name:
+        return f"declares name {front['name']!r} but the file is {expected_name}.md"
+    return None
 
 
 class ClaudeCodeHost:
@@ -84,14 +206,26 @@ class ClaudeCodeHost:
         agents_dir = self.claude_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         for source in sorted((DATA_DIR / "agents").glob("*.md")):
-            self._install_agent(source, agents_dir / source.name)
+            self.install_agent(source, agents_dir / source.name)
 
         self._wire_settings()
 
-    def _install_agent(self, source: Path, target: Path) -> None:
+    def install_agent(self, source: Path, target: Path) -> None:
         body = source.read_text(encoding="utf-8")
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
-        target.write_text(f"{MANAGED_HEADER.format(digest=digest)}\n{body}", encoding="utf-8")
+        split = _split_frontmatter(body)
+        if split is None:
+            raise InvariantError(
+                f"{source.name} has no YAML frontmatter starting on line 1. "
+                f"This host identifies an agent by that block; a file without "
+                f"one is copied into place and then silently ignored, so "
+                f"installing it would look like success and produce nothing."
+            )
+        front, rest = split
+        marker = MARKER_TEMPLATE.format(digest=digest_of(body))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "\n".join([FENCE, marker, *front, FENCE, rest]), encoding="utf-8"
+        )
 
     def _wire_settings(self) -> None:
         settings_path = self.claude_dir / "settings.json"
@@ -130,7 +264,7 @@ class ClaudeCodeHost:
         hooks_dir = self.claude_dir / "hooks"
         missing = [e for e in EVENTS if not (hooks_dir / f"invariant-{e}.sh").is_file()]
         checks.append(
-            ("hook shims installed", not missing, f"{len(EVENTS) - len(missing)}/{len(EVENTS)}")
+            (CHECK_HOOKS, not missing, f"{len(EVENTS) - len(missing)}/{len(EVENTS)}")
         )
 
         settings_path = self.claude_dir / "settings.json"
@@ -141,28 +275,63 @@ class ClaudeCodeHost:
                 wired = all(f"invariant-{e}.sh" in text for e in EVENTS)
             except OSError:
                 wired = False
-        checks.append(("hooks wired in settings", wired, str(settings_path)))
+        checks.append((CHECK_WIRED, wired, str(settings_path)))
+        checks.extend(self.agent_checks())
+        return checks
 
-        drifted = []
+    def agent_checks(self) -> list[tuple[str, bool, str]]:
+        """Two questions, kept apart on purpose.
+
+        *Loadable* asks whether the host can turn this file into an agent at
+        all. *Current* asks whether it is the version the library ships. The
+        original implementation asked only the second, and answered it by
+        looking for a marker whose placement was what broke the first — so a
+        project with zero working agents was reported as fully in order. One
+        check standing in for the other is the whole bug.
+        """
+        unloadable: list[str] = []
+        stale: list[str] = []
+        total = 0
+
         for source in sorted((DATA_DIR / "agents").glob("*.md")):
+            total += 1
             target = self.claude_dir / "agents" / source.name
             if not target.is_file():
-                drifted.append(f"{source.name} (absent)")
+                unloadable.append(f"{source.stem} (absent)")
+                stale.append(f"{source.stem} (absent)")
                 continue
-            expected = hashlib.sha256(
-                source.read_text(encoding="utf-8").encode("utf-8")
-            ).hexdigest()[:16]
-            first = target.read_text(encoding="utf-8").splitlines()[:1]
-            if not first or expected not in first[0]:
-                drifted.append(source.name)
-        checks.append(
+
+            text = target.read_text(encoding="utf-8")
+            problem = loadability_problem(text, source.stem)
+            if problem:
+                unloadable.append(f"{source.stem} ({problem})")
+
+            shipped = source.read_text(encoding="utf-8")
+            reconstructed = _reconstruct_source(text)
+            if reconstructed is None:
+                stale.append(f"{source.stem} (unreadable)")
+            elif reconstructed != shipped:
+                if _marker_digest(text) == digest_of(shipped):
+                    stale.append(f"{source.stem} (edited locally)")
+                else:
+                    stale.append(f"{source.stem} (installed from an older version)")
+
+        return [
             (
-                "library agents current",
-                not drifted,
-                ", ".join(drifted) if drifted else "all match the shipped version",
-            )
-        )
-        return checks
+                CHECK_AGENTS_LOADABLE,
+                not unloadable,
+                (
+                    ", ".join(unloadable) + " — repair with: invariant agents install"
+                    if unloadable
+                    else f"{total} agent(s) parse and are addressable by name"
+                ),
+            ),
+            (
+                CHECK_AGENTS_CURRENT,
+                not stale,
+                ", ".join(stale) if stale else "all match the shipped version",
+            ),
+        ]
 
     # -- request handling ----------------------------------------------
 
@@ -205,19 +374,28 @@ class ClaudeCodeHost:
         return {}
 
     def _post_tool_use(self, payload: dict, ctx) -> dict:
-        # Reading an architecture doc is the evidence the docs-first gate
-        # consumes. Recording it here is what makes that gate a check on
-        # something that happened rather than on something claimed.
-        if payload.get("tool_name") != "Read":
+        # Two facts get recorded here, for the same reason: a gate that reads
+        # what happened is a gate that cannot be satisfied by assertion.
+        # Reading an architecture doc feeds the docs-first gate; dispatching a
+        # subagent feeds the agent-role gates.
+        tool = str(payload.get("tool_name", ""))
+        if tool != "Read" and tool not in AGENT_TOOLS:
             return {}
-        target = (payload.get("tool_input") or {}).get("file_path")
-        if not target:
-            return {}
+
+        tool_input = payload.get("tool_input") or {}
         session = ctx.current_session(strict=False)
         if session is None:
             return {}
+
         try:
-            ctx.pipelines.record_docs_read(session.id, str(target))
+            if tool == "Read":
+                target = tool_input.get("file_path")
+                if target:
+                    ctx.pipelines.record_docs_read(session.id, str(target))
+            else:
+                agent_type = tool_input.get("subagent_type")
+                if agent_type:
+                    ctx.pipelines.record_agent_run(session.id, str(agent_type))
         except InvariantError:
             pass
         return {}

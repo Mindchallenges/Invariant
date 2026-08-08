@@ -66,6 +66,9 @@ privacy:
 agents:
   library: [feature-architect, compliance-reviewer, backlog-curator, bug-reproducer]
   local: []                    # project-owned agents the library leaves alone
+  roles:                       # which agent answers for which pipeline role
+    design: [feature-architect]
+    review: [compliance-reviewer]
 
 host:
   kind: claude_code

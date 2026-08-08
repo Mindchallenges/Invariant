@@ -132,6 +132,30 @@ Two details that are load-bearing rather than incidental:
   every gate. A narrower rule that gets used beats a broader one that gets
   bypassed.
 
+### Agent-role gates
+
+A second pair rides the same injection: `agents.design_agent_ran` leaving the
+design state, `agents.review_agent_ran` leaving review. They read the subagent
+invocations the host recorded as pipeline evidence, keyed by
+`agents.roles.<role>` in the manifest.
+
+They exist because installing an agent and using one are different events, and
+only the second changes any outcome. A project can carry four correctly
+installed agents and never dispatch one.
+
+Three properties, each deliberate:
+
+- **Advisory in every shipped profile, including `strict`.** The engine can
+  prove an agent *ran*; it cannot prove one was *needed*. A one-line fix made
+  inline is a legitimate exception, and a gate that legitimate work has to
+  override routinely is what teaches people to reach for `--force` on the gates
+  that do matter.
+- **An unconfigured role skips rather than passes.** A project with no review
+  agent should see the gate report "not applicable", not report green. Those
+  are different facts and `Verdict.skipped` keeps them apart.
+- **A wrong agent does not satisfy a role.** The failure names what did run, so
+  "I dispatched the curator" reads as the miss it is rather than as silence.
+
 ## Domain: work item
 
 Two item types with distinct lifecycles.

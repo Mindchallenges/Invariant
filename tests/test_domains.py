@@ -202,6 +202,40 @@ class TestPipelineDomain:
         pipeline, _ = pipelines.advance(session.id, "red", cwd=m.root)
         assert pipeline.state == "red"
 
+    def test_an_agent_run_is_recorded_as_evidence(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_agent_run(session.id, "feature-architect")
+        assert pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
+
+    def test_the_same_agent_twice_is_recorded_once(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_agent_run(session.id, "feature-architect")
+        pipelines.record_agent_run(session.id, "feature-architect")
+        assert pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
+
+    def test_an_agent_run_survives_a_reload(self, m):
+        """Evidence that is not persisted is not evidence."""
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_agent_run(session.id, "compliance-reviewer")
+        fresh = PipelineDomain(m)
+        assert "compliance-reviewer" in fresh.current(session.id).evidence["agents_run"]
+
+    def test_the_advance_gate_reads_that_evidence(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_docs_read(
+            session.id, str(m.root / "docs" / "architecture" / "overview.md")
+        )
+        pipelines.record_agent_run(session.id, "feature-architect")
+        verdicts = pipelines.evaluate_gates(
+            session.id, session=session.to_dict(), cwd=m.root
+        )
+        design = [v for v in verdicts if v.rule_id == "agents.design_agent_ran"]
+        assert design and design[0].verdict.ok
+
     def test_force_without_a_reason_is_refused(self, m):
         _, pipelines, session = self.setup_pipeline(m)
         with pytest.raises(UsageError, match="--force requires --reason"):

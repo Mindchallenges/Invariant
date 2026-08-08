@@ -136,6 +136,15 @@ DEFAULTS: dict[str, Any] = {
             "bug-reproducer",
         ],
         "local": [],
+        # Which agents satisfy which pipeline role. Installing an agent does
+        # not make anything use it, so this mapping is what the agent-role
+        # gates read. A role left empty makes its gate "not applicable" rather
+        # than passing: a project with no review agent should see the gate skip,
+        # not see it go green.
+        "roles": {
+            "design": ["feature-architect"],
+            "review": ["compliance-reviewer"],
+        },
     },
     "host": {"kind": "claude_code"},
 }

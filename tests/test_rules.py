@@ -573,3 +573,59 @@ class TestOutOfProjectPaths:
             cwd=ctx_factory.main, payload=edit_payload(ctx_factory.wt / "app.py")
         )
         assert not only(evaluate(["session.isolated_before_edit"], ctx)).verdict.ok
+
+
+class TestAgentRoleGates:
+    """Did an agent actually fire — read from evidence, not from intent."""
+
+    def test_na_when_the_role_has_no_agent_configured(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"design": []}},
+        })
+        ctx = ctx_factory(pipeline={"evidence": {}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        # Skipped, NOT passed. A project with no design agent has nothing
+        # checked here, and saying "clean" would claim otherwise.
+        assert verdict.skipped
+        assert verdict.ok
+
+    def test_fails_when_no_agent_ran(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": []}})
+        assert not evaluate(["agents.design_agent_ran"], ctx)[0].verdict.ok
+
+    def test_passes_when_the_configured_agent_ran(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["feature-architect"]}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_different_agent_does_not_satisfy_the_role(self, ctx_factory):
+        """An agent ran, but not one that does this job."""
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["backlog-curator"]}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        assert not verdict.ok
+        assert "backlog-curator" in verdict.detail  # names what did run
+
+    def test_the_review_role_is_independent_of_the_design_role(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["feature-architect"]}})
+        assert evaluate(["agents.design_agent_ran"], ctx)[0].verdict.ok
+        assert not evaluate(["agents.review_agent_ran"], ctx)[0].verdict.ok
+
+    def test_a_project_may_name_its_own_agent_for_a_role(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"review": ["house-reviewer"]}},
+        })
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["house-reviewer"]}})
+        assert evaluate(["agents.review_agent_ran"], ctx)[0].verdict.ok
+
+    def test_fails_outside_a_pipeline_rather_than_passing(self, ctx_factory):
+        ctx = ctx_factory(pipeline=None)
+        assert not evaluate(["agents.design_agent_ran"], ctx)[0].verdict.ok
+
+    def test_the_fix_names_the_agents_that_would_satisfy_it(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        assert any("feature-architect" in fix for fix in verdict.fixes)

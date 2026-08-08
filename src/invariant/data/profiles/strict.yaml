@@ -17,6 +17,11 @@ rules:
 
   pipeline.started_before_edit: block
 
+  # Advisory even here. "An agent was needed for this change" is a judgement,
+  # and this profile's own rule is that heuristics advise.
+  agents.design_agent_ran: warn
+  agents.review_agent_ran: warn
+
   docs.read_architecture: block
   docs.updated: block
   docs.diagrams_current: block

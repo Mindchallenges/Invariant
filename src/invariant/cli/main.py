@@ -272,6 +272,82 @@ def cmd_doctor(args) -> int:
     return 1 if failed else EXIT_OK
 
 
+# -- agents ------------------------------------------------------------
+
+
+def cmd_agents_list(args) -> int:
+    """What is installed, whether the host can load it, and who owns which role."""
+    from ..hosts.claude_code import DATA_DIR, ClaudeCodeHost, loadability_problem
+
+    ctx = Context()
+    host = ClaudeCodeHost(ctx.manifest.root)
+    roles = ctx.manifest.get("agents.roles") or {}
+    role_of = {a: role for role, agents in roles.items() for a in (agents or [])}
+
+    rows = []
+    for source in sorted((DATA_DIR / "agents").glob("*.md")):
+        target = host.claude_dir / "agents" / source.name
+        if not target.is_file():
+            status = "NOT INSTALLED"
+        else:
+            problem = loadability_problem(
+                target.read_text(encoding="utf-8"), source.stem
+            )
+            status = f"UNLOADABLE — {problem}" if problem else "loadable"
+        rows.append(
+            {"agent": source.stem, "status": status, "role": role_of.get(source.stem, "")}
+        )
+
+    width = max((len(r["agent"]) for r in rows), default=1)
+    text = "\n".join(
+        f"  {r['agent']:<{width}}  {r['status']}"
+        + (f"   [{r['role']} role]" if r["role"] else "")
+        for r in rows
+    )
+    return emit(args, {"agents": rows}, text or "  (none shipped)")
+
+
+def cmd_agents_install(args) -> int:
+    """Reinstall the library agents and nothing else.
+
+    Kept separate from ``init`` deliberately. ``init --force`` rewrites the
+    manifest, so pointing an agent repair at it would trade a broken agent file
+    for a discarded enforcement configuration — a worse loss than the fault
+    being repaired.
+    """
+    from ..hosts.claude_code import (
+        CHECK_AGENTS_LOADABLE,
+        DATA_DIR,
+        ClaudeCodeHost,
+    )
+
+    ctx = Context()
+    host = ClaudeCodeHost(ctx.manifest.root)
+    agents_dir = host.claude_dir / "agents"
+    sources = sorted((DATA_DIR / "agents").glob("*.md"))
+
+    if args.dry_run:
+        return emit(
+            args,
+            {"would_install": [s.stem for s in sources], "into": str(agents_dir)},
+            "\n".join(
+                [f"would install into {agents_dir}:"] + [f"  {s.stem}" for s in sources]
+            ),
+        )
+
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    for source in sources:
+        host.install_agent(source, agents_dir / source.name)
+
+    checks = {label: (ok, detail) for label, ok, detail in host.agent_checks()}
+    ok, detail = checks[CHECK_AGENTS_LOADABLE]
+    lines = [f"installed {len(sources)} agent(s) into {agents_dir}", f"  {detail}"]
+    if ok:
+        lines.append("  reload the host's configuration for it to pick them up")
+    emit(args, {"installed": [s.stem for s in sources], "loadable": ok}, "\n".join(lines))
+    return EXIT_OK if ok else 1
+
+
 def cmd_config_show(args) -> int:
     ctx = Context()
     rows = list(ctx.manifest.iter_provenance())
@@ -825,6 +901,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     sub.add_parser("doctor", help="check the installation").set_defaults(func=cmd_doctor)
+
+    # agents — repair without touching the manifest, which is why this is not
+    # a flag on `init`.
+    agents = sub.add_parser("agents").add_subparsers(dest="sub", required=True)
+    agents.add_parser("list", help="installed agents and whether the host can load them"
+                      ).set_defaults(func=cmd_agents_list)
+    q = agents.add_parser("install", help="reinstall the library agents")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_agents_install)
 
     p = sub.add_parser("config").add_subparsers(dest="sub", required=True)
     q = p.add_parser("show")

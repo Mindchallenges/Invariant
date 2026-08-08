@@ -29,6 +29,16 @@ invariant doctor
     settings wired, state root writable, adapter commands resolvable, memory
     index current. One line per check, exit 1 if any fails.
 
+invariant agents list
+    Every library agent: installed or not, whether the host can load it, and
+    which pipeline role it answers for.
+
+invariant agents install [--dry-run]
+    Reinstall the library agents and nothing else. Deliberately not a flag on
+    `init`: `init --force` rewrites the manifest, so routing an agent repair
+    through it would trade a broken agent file for a discarded enforcement
+    configuration.
+
 invariant config show [--provenance]
     Print resolved configuration and where each value came from.
 ```
