@@ -507,3 +507,61 @@ class _Stdin:
 def test_no_manifest_names_the_init_command(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main(["session", "status"]) == 2
+
+
+class TestHookAttribution:
+    """The hook must attribute from the payload, not from the directory."""
+
+    def _payload(self, host_session_id, file_path):
+        return json.dumps({
+            "session_id": host_session_id,
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(file_path), "content": "x"},
+        })
+
+    def test_the_hook_attributes_the_edit_to_the_right_session(
+        self, project, capsys, monkeypatch
+    ):
+        run("init", "--ecosystem", "python")
+        commit_all(project, "adopt")
+        run("session", "start", "alpha", "--host-session-id", "aa-1111-11110000aaaa")
+        run("session", "start", "beta", "--host-session-id", "bb-2222-22220000bbbb")
+        run("session", "isolate", "--execute", "--id", "0000bbbb")
+        capsys.readouterr()
+
+        # cwd is the main checkout — ambiguous by directory, resolvable by id.
+        from invariant.core.manifest import Manifest
+        from invariant.domains.session import SessionDomain
+
+        worktree = SessionDomain(Manifest.load(project)).get("0000bbbb").worktree
+        monkeypatch.setattr(
+            "sys.stdin", _Stdin(self._payload("bb-2222-22220000bbbb",
+                                              Path(worktree) / "app.py"))
+        )
+        run("hook", "pre-tool-use")
+        response = payload(capsys)
+        # Attributed to an isolated session editing inside its own worktree:
+        # nothing to deny.
+        assert response == {} or response.get(
+            "hookSpecificOutput", {}
+        ).get("permissionDecision") != "deny"
+
+    def test_an_unattributable_edit_is_still_denied(self, project, capsys, monkeypatch):
+        run("init", "--ecosystem", "python")
+        commit_all(project, "adopt")
+        run("session", "start", "alpha", "--host-session-id", "aa-1111-11110000aaaa")
+        capsys.readouterr()
+        monkeypatch.setattr(
+            "sys.stdin",
+            _Stdin(self._payload("unknown-9999", project / "app.py")),
+        )
+        run("hook", "pre-tool-use")
+        decision = payload(capsys)["hookSpecificOutput"]["permissionDecision"]
+        assert decision == "deny"
+
+    def test_adopt_binds_a_host_id_to_an_existing_session(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        run("session", "start", "legacy", "--id", "deadbeef")
+        capsys.readouterr()
+        run("--json", "session", "adopt", "ff-0000-00009999", "--id", "deadbeef")
+        assert payload(capsys)["host_session_id"] == "ff-0000-00009999"

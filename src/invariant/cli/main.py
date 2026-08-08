@@ -72,6 +72,7 @@ class Context:
         cwd: Path | None = None,
         required: bool = True,
         session_id: str | None = None,
+        host_session_id: str | None = None,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         self.manifest = Manifest.load(self.cwd, required=required)
@@ -80,6 +81,13 @@ class Context:
         #: os.environ would work and would also outlive the command, silently
         #: re-answering the same question for everything that ran afterwards.
         self.session_id = session_id
+        #: The agent host's session identifier, from the hook payload. The one
+        #: attribution signal that survives the host resetting cwd between
+        #: calls — without it, concurrent sessions are indistinguishable from
+        #: the main checkout, which is exactly when attribution matters.
+        self.host_session_id = host_session_id or os.environ.get(
+            "INVARIANT_HOST_SESSION_ID"
+        )
 
     @property
     def sessions(self) -> SessionDomain:
@@ -104,7 +112,9 @@ class Context:
     def current_session(self, strict: bool = True):
         if self.session_id:
             return self.sessions.require(self.session_id)
-        return self.sessions.current(self.cwd, strict=strict)
+        return self.sessions.current(
+            self.cwd, strict=strict, host_session_id=self.host_session_id
+        )
 
     def require_session(self):
         session = self.current_session()
@@ -278,7 +288,12 @@ def cmd_config_show(args) -> int:
 
 def cmd_session_start(args) -> int:
     ctx = Context()
-    session = ctx.sessions.start(args.name, session_id=args.id, base=args.base)
+    session = ctx.sessions.start(
+        args.name,
+        session_id=args.id,
+        base=args.base,
+        host_session_id=args.host_session_id or ctx.host_session_id,
+    )
     plan = ctx.sessions.isolation_plan(session)
     return emit(
         args,
@@ -348,6 +363,25 @@ def cmd_session_list(args) -> int:
         f"  {s.id}  {s.state:<12} {s.name:<24} {s.worktree or ''}" for s in sessions
     )
     return emit(args, {"sessions": [s.to_dict() for s in sessions]}, text)
+
+
+def cmd_session_adopt(args) -> int:
+    ctx = Context()
+    session_id = args.id
+    if not session_id:
+        current = ctx.current_session(strict=False)
+        if current is None:
+            raise UsageError(
+                "cannot tell which session to adopt from here; pass --id. "
+                "'invariant session list' shows the registered ones."
+            )
+        session_id = current.id
+    updated = ctx.sessions.adopt_host_session(session_id, args.host_session_id)
+    return emit(
+        args,
+        updated.to_dict(),
+        f"session {updated.id} now answers to this host session",
+    )
 
 
 def cmd_session_merge(args) -> int:
@@ -675,8 +709,13 @@ def cmd_hook(args) -> int:
     from ..hosts.claude_code import ClaudeCodeHost
 
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    host_session_id = None
     try:
-        ctx = Context(required=True)
+        host_session_id = (json.loads(raw) or {}).get("session_id")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    try:
+        ctx = Context(required=True, host_session_id=host_session_id)
     except InvariantError:
         # A repository without a manifest is not this hook's business. Staying
         # silent is correct; failing would break every tool call in a project
@@ -799,6 +838,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("name")
     q.add_argument("--id")
     q.add_argument("--base", default="master")
+    q.add_argument(
+        "--host-session-id",
+        help="the agent host's session identifier; attribution survives a cwd reset with it",
+    )
     q.set_defaults(func=cmd_session_start)
 
     q = session.add_parser("isolate")
@@ -820,6 +863,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("action", choices=["add"])
     q.add_argument("paths", nargs="+")
     q.set_defaults(func=cmd_session_files)
+
+    q = session.add_parser("adopt", help="bind a host session id to a session")
+    q.add_argument("host_session_id")
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_session_adopt)
 
     q = session.add_parser("merge")
     q.add_argument("--id")

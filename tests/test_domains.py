@@ -462,3 +462,98 @@ class TestBackends:
         self.roundtrip(backend)
         (tmp_path / "backlog" / "junk.md").write_text("no frontmatter", encoding="utf-8")
         assert len(backend.load_all()) == 1
+
+
+class TestHostSessionAttribution:
+    """Attribution must not depend on the working directory.
+
+    A host may reset cwd to the project root between tool calls. When it does,
+    every concurrent session looks identical from the main checkout — so
+    cwd-based attribution fails precisely when more than one session is live,
+    which is the case the isolation rules exist for.
+    """
+
+    def three_sessions(self, m):
+        domain = SessionDomain(m)
+        made = []
+        for name, host in (
+            ("alpha", "aaaaaaaa-1111-2222-3333-4444cc9185d7"),
+            ("beta", "bbbbbbbb-1111-2222-3333-44440615b555"),
+            ("gamma", "cccccccc-1111-2222-3333-44441654f8b0"),
+        ):
+            made.append(domain.start(name, host_session_id=host))
+        return domain, made
+
+    def test_cwd_alone_is_ambiguous_with_three_sessions(self, m):
+        domain, _ = self.three_sessions(m)
+        with pytest.raises(UsageError, match="INVARIANT_SESSION_ID"):
+            domain.current(cwd=m.root)
+
+    def test_the_host_identifier_resolves_it(self, m):
+        domain, made = self.three_sessions(m)
+        found = domain.current(
+            cwd=m.root, host_session_id="bbbbbbbb-1111-2222-3333-44440615b555"
+        )
+        assert found is not None and found.name == "beta"
+
+    def test_resolution_works_from_any_directory(self, m, tmp_path):
+        domain, _ = self.three_sessions(m)
+        for where in (m.root, tmp_path, Path("/")):
+            found = domain.current(
+                cwd=where,
+                strict=False,
+                host_session_id="cccccccc-1111-2222-3333-44441654f8b0",
+            )
+            assert found is not None and found.name == "gamma", where
+
+    def test_the_short_id_is_the_LAST_eight_alphanumerics(self, m):
+        # This project's own tooling has always derived worktree names that
+        # way. Taking the first eight would match nothing.
+        from invariant.domains.session import host_slug
+
+        assert host_slug("d3e22c15-f3c9-47da-b1e0-955ecc9185d7") == "cc9185d7"
+        assert host_slug("") == ""
+        assert host_slug(None) == ""
+
+    def test_a_session_registered_before_the_field_existed_still_matches(self, m):
+        """No migration: the derived short form is the fallback."""
+        domain = SessionDomain(m)
+        legacy = domain.start("legacy", session_id="cc9185d7")
+        assert legacy.host_session_id is None
+        found = domain.current(
+            cwd=m.root, host_session_id="d3e22c15-f3c9-47da-b1e0-955ecc9185d7"
+        )
+        assert found is not None and found.id == "cc9185d7"
+
+    def test_an_unknown_host_id_does_not_match_something_else(self, m):
+        domain, _ = self.three_sessions(m)
+        assert domain.by_host_session("zzzzzzzz-0000-0000-0000-000000000000") is None
+
+    def test_a_torn_down_session_is_never_matched(self, m):
+        domain, made = self.three_sessions(m)
+        session = made[0]
+        session.state = "torn_down"
+        domain._save(session)
+        assert domain.by_host_session("aaaaaaaa-1111-2222-3333-4444cc9185d7") is None
+
+    def test_explicit_env_still_outranks_the_host_id(self, m, monkeypatch):
+        domain, made = self.three_sessions(m)
+        monkeypatch.setenv("INVARIANT_SESSION_ID", made[0].id)
+        found = domain.current(
+            cwd=m.root, host_session_id="bbbbbbbb-1111-2222-3333-44440615b555"
+        )
+        assert found.id == made[0].id
+
+    def test_start_derives_the_id_from_the_host_when_not_given(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("derived", host_session_id="xxxx-1111-2222-abcd1234")
+        assert session.id == "abcd1234"
+
+    def test_adopt_binds_a_host_id_after_the_fact(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("later", session_id="deadbeef")
+        domain.adopt_host_session("deadbeef", "ffffffff-0000-0000-0000-000000009999")
+        found = domain.current(
+            cwd=m.root, host_session_id="ffffffff-0000-0000-0000-000000009999"
+        )
+        assert found is not None and found.id == "deadbeef"

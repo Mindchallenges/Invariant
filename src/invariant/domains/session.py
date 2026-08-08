@@ -38,6 +38,9 @@ class Session:
     #: has no worktree, and without this it would be unfindable — which would
     #: make the very next step, isolating it, impossible.
     origin: str | None = None
+    #: The agent host's own session identifier. The only attribution signal
+    #: that survives a host resetting the working directory between calls.
+    host_session_id: str | None = None
     base: str = "master"
     files: list[str] = field(default_factory=list)
     push_count: int = 0
@@ -85,12 +88,29 @@ class SessionDomain:
             if s is not None
         ]
 
-    def current(self, cwd: Path | None = None, *, strict: bool = True) -> Session | None:
+    def current(
+        self,
+        cwd: Path | None = None,
+        *,
+        strict: bool = True,
+        host_session_id: str | None = None,
+    ) -> Session | None:
         """The session this invocation belongs to.
 
-        An explicit identifier wins. Otherwise the session whose worktree
-        contains the working directory does — which is what makes a hook
-        running inside a worktree find its own session without being told.
+        Resolution order, most reliable first:
+
+        1. An explicit ``INVARIANT_SESSION_ID``.
+        2. The **host's** session identifier, when the caller supplies one.
+        3. The session whose worktree contains the working directory.
+        4. The single session registered at or above the working directory.
+
+        Order 2 exists because order 3 cannot be relied on. A host may reset
+        the working directory to the project root between tool calls, and when
+        it does, every concurrent session looks identical from the main
+        checkout — so cwd-based attribution fails precisely when more than one
+        session is live, which is the case the isolation rules exist for. The
+        host's own session identifier survives those resets and rides on every
+        hook payload.
 
         ``strict=False`` turns an unresolvable origin into ``None`` rather than
         an error. Ambiguity is a normal state for an advisory caller — a hook
@@ -101,6 +121,10 @@ class SessionDomain:
         explicit = os.environ.get("INVARIANT_SESSION_ID")
         if explicit:
             return self.get(explicit)
+
+        matched = self.by_host_session(host_session_id)
+        if matched is not None:
+            return matched
 
         cwd = Path(cwd or Path.cwd()).resolve()
         best: Session | None = None
@@ -147,10 +171,57 @@ class SessionDomain:
             and _contains(Path(s.origin), cwd)
         ]
 
+    def by_host_session(self, host_session_id: str | None) -> Session | None:
+        """Find the session belonging to a host session identifier.
+
+        Matches a recorded identifier exactly, and otherwise falls back to the
+        derived short form. The fallback is what makes this work for sessions
+        registered before the identifier was recorded at all — no migration,
+        no re-registration.
+        """
+        if not host_session_id:
+            return None
+
+        live = [s for s in self.list() if s.state not in {"torn_down", "abandoned"}]
+
+        for session in live:
+            if session.host_session_id and session.host_session_id == host_session_id:
+                return session
+
+        slug = host_slug(host_session_id)
+        if not slug:
+            return None
+        for session in live:
+            if session.id == slug:
+                return session
+        return None
+
+    def adopt_host_session(self, session_id: str, host_session_id: str) -> Session:
+        """Record the host identifier on an existing session."""
+        session = self.require(session_id)
+        session.host_session_id = host_session_id
+        self._save(session)
+        self._register(session)
+        return session
+
     # -- lifecycle -----------------------------------------------------
 
-    def start(self, name: str, session_id: str | None = None, base: str = "master") -> Session:
-        session_id = session_id or os.environ.get("INVARIANT_SESSION_ID") or uuid.uuid4().hex[:8]
+    def start(
+        self,
+        name: str,
+        session_id: str | None = None,
+        base: str = "master",
+        host_session_id: str | None = None,
+    ) -> Session:
+        host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        # Prefer the host's own short form as the identifier, so a session
+        # registered by hand and one seen by a hook agree without being told.
+        session_id = (
+            session_id
+            or os.environ.get("INVARIANT_SESSION_ID")
+            or host_slug(host_session_id)
+            or uuid.uuid4().hex[:8]
+        )
         if self.get(session_id) is not None:
             raise UsageError(f"session {session_id!r} already exists")
         session = Session(
@@ -158,6 +229,7 @@ class SessionDomain:
             name=_slug(name),
             base=base,
             origin=str(git.toplevel(self.manifest.root) or self.manifest.root),
+            host_session_id=host_session_id,
             heartbeat=time.time(),
         )
         self._save(session)
@@ -353,6 +425,20 @@ def ambiguity_message(candidates: list[Session]) -> str:
     lines.append("A session with no worktree gets one with:")
     lines.append("  invariant session isolate --execute --id <id>")
     return "\n".join(lines)
+
+
+def host_slug(host_session_id: str | None) -> str:
+    """The short form of a host session identifier.
+
+    The LAST eight alphanumerics, which is the form this project's own tooling
+    has used for its worktree names since before the library existed. Matching
+    it means sessions created by that tooling resolve here with no migration.
+    Taking the first eight instead would silently match nothing.
+    """
+    if not host_session_id:
+        return ""
+    alphanumeric = "".join(c for c in str(host_session_id) if c.isalnum())
+    return alphanumeric[-8:] if alphanumeric else ""
 
 
 def _contains(root: Path, candidate: Path) -> bool:
