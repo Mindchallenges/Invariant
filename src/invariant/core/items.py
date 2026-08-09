@@ -47,7 +47,7 @@ class Backend(Protocol):
     def load_all(self) -> list[Item]: ...
     def get(self, item_id: str) -> Item | None: ...
     def save(self, item: Item) -> None: ...
-    def next_id(self, item_type: str) -> str: ...
+    def next_id(self, item_type: str, title: str = "") -> str: ...
 
 
 # -- markdown ----------------------------------------------------------
@@ -56,7 +56,10 @@ class Backend(Protocol):
 class MarkdownBackend:
     """One file per item, frontmatter for fields. Git-native, no tooling."""
 
-    def __init__(self, path: Path, id_prefix: str = "") -> None:
+    def __init__(
+        self, path: Path, id_prefix: str = "", id_strategy: str = "numeric"
+    ) -> None:
+        self.id_strategy = id_strategy
         self.root = Path(path)
         self.id_prefix = id_prefix
 
@@ -94,8 +97,10 @@ class MarkdownBackend:
             f"---\n{front}\n---\n\n{item.body.strip()}\n", encoding="utf-8"
         )
 
-    def next_id(self, item_type: str) -> str:
-        return _next_id(self.load_all(), item_type, self.id_prefix)
+    def next_id(self, item_type: str, title: str = "") -> str:
+        return _next_id(
+            self.load_all(), item_type, self.id_prefix, self.id_strategy, title
+        )
 
     def _parse(self, path: Path) -> Item:
         text = path.read_text(encoding="utf-8")
@@ -122,7 +127,10 @@ class MarkdownBackend:
 class JsonBackend:
     """One document. For machine consumption rather than human editing."""
 
-    def __init__(self, path: Path, id_prefix: str = "") -> None:
+    def __init__(
+        self, path: Path, id_prefix: str = "", id_strategy: str = "numeric"
+    ) -> None:
+        self.id_strategy = id_strategy
         self.path = Path(path)
         self.id_prefix = id_prefix
 
@@ -150,8 +158,10 @@ class JsonBackend:
             encoding="utf-8",
         )
 
-    def next_id(self, item_type: str) -> str:
-        return _next_id(self.load_all(), item_type, self.id_prefix)
+    def next_id(self, item_type: str, title: str = "") -> str:
+        return _next_id(
+            self.load_all(), item_type, self.id_prefix, self.id_strategy, title
+        )
 
 
 # -- sphinx-needs ------------------------------------------------------
@@ -170,7 +180,10 @@ class SphinxNeedsBackend:
     through this library.
     """
 
-    def __init__(self, path: Path, id_prefix: str = "") -> None:
+    def __init__(
+        self, path: Path, id_prefix: str = "", id_strategy: str = "numeric"
+    ) -> None:
+        self.id_strategy = id_strategy
         self.path = Path(path)
         self.id_prefix = id_prefix
 
@@ -190,12 +203,49 @@ class SphinxNeedsBackend:
             start, end = existing
             text = text[:start] + rendered + text[end:]
         else:
-            text = text.rstrip() + "\n\n" + rendered
+            text = self._insert_new(text, item, rendered)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(text, encoding="utf-8")
 
-    def next_id(self, item_type: str) -> str:
-        return _next_id(self.load_all(), item_type, self.id_prefix)
+    def next_id(self, item_type: str, title: str = "") -> str:
+        return _next_id(
+            self.load_all(), item_type, self.id_prefix, self.id_strategy, title
+        )
+
+    def _insert_new(self, text: str, item: Item, rendered: str) -> str:
+        """Place a new entry beside its own kind, not at the end of the file.
+
+        Appending to the end put an entry outside whatever section it belonged
+        to — after the closing prose, past any summary table — so a human then
+        had to move it. A file the tool writes and a person must repair is
+        worse than one it declines to write, because the broken state is
+        commit-shaped.
+
+        This does not parse the document's structure, and does not pretend to:
+        it inserts after the LAST directive of the same type, which keeps the
+        entry inside whichever section that type already lives in. With no
+        entry of that type to anchor to, it falls back to the end and says
+        nothing clever.
+        """
+        lines = text.splitlines(keepends=True)
+        anchor_end: int | None = None
+        for index, line in enumerate(lines):
+            match = DIRECTIVE_RE.match(line.rstrip("\n"))
+            if not match or match.group("type") != item.type:
+                continue
+            end = index + 1
+            while end < len(lines):
+                if lines[end].strip() and not lines[end].startswith((" ", "\t")):
+                    break
+                end += 1
+            anchor_end = end
+
+        if anchor_end is None:
+            return text.rstrip() + "\n\n" + rendered
+
+        head = "".join(lines[:anchor_end]).rstrip() + "\n\n"
+        tail = "".join(lines[anchor_end:]).lstrip("\n")
+        return head + rendered.rstrip() + "\n\n" + tail
 
     # -- parsing ------------------------------------------------------
 
@@ -328,7 +378,7 @@ class NullBackend:
             "backend in the manifest to file items"
         )
 
-    def next_id(self, item_type: str) -> str:
+    def next_id(self, item_type: str, title: str = "") -> str:
         raise UsageError("the work-item domain is disabled")
 
 
@@ -338,20 +388,49 @@ class NullBackend:
 def backend_for(manifest) -> Backend:
     name = manifest.get("items.backend", "markdown")
     prefix = manifest.get("items.id_prefix", "") or ""
+    strategy = manifest.get("items.id_strategy", "numeric") or "numeric"
     if name == "none":
         return NullBackend()
     path = (manifest.root / (manifest.get("items.path") or "docs/backlog")).resolve()
     if name == "markdown":
-        return MarkdownBackend(path, prefix)
+        return MarkdownBackend(path, prefix, strategy)
     if name == "json":
-        return JsonBackend(path, prefix)
+        return JsonBackend(path, prefix, strategy)
     if name == "sphinx_needs":
-        return SphinxNeedsBackend(path, prefix)
+        return SphinxNeedsBackend(path, prefix, strategy)
     raise UsageError(f"unknown work-item backend {name!r}")
 
 
-def _next_id(items: list[Item], item_type: str, prefix: str) -> str:
+def _slug_id(stem: str, title: str, taken: set[str]) -> str:
+    """A descriptive id derived from the title.
+
+    For backlogs whose entries are referenced by name — as :need: targets in
+    architecture docs, say — where a numeric id is both inconsistent with every
+    neighbour and unlinkable.
+    """
+    words = re.findall(r"[A-Za-z0-9]+", title.upper())[:8]
+    base = f"{stem}{'_'.join(words)}" if words else stem.rstrip("_")
+    candidate, suffix = base, 2
+    while candidate in taken:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _next_id(
+    items: list[Item],
+    item_type: str,
+    prefix: str,
+    strategy: str = "numeric",
+    title: str = "",
+) -> str:
     stem = f"{prefix}{item_type.upper()}_"
+    if strategy == "slug":
+        return _slug_id(stem, title, {i.id for i in items})
+    if strategy != "numeric":
+        raise UsageError(
+            f"unknown items.id_strategy {strategy!r}; expected 'numeric' or 'slug'"
+        )
     highest = 0
     for item in items:
         match = re.match(rf"^{re.escape(stem)}(\d+)$", item.id)

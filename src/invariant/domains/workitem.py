@@ -67,7 +67,7 @@ class WorkItemDomain:
     ) -> Item:
         machine = self.machine(item_type)
         item = Item(
-            id=self.backend.next_id(item_type),
+            id=self.backend.next_id(item_type, title),
             type=item_type,
             title=title.strip(),
             status=machine.initial,

@@ -1301,3 +1301,111 @@ class TestSphinxMultiLineOptions:
         item = self.backend(tmp_path, text).load_all()[0]
         assert "Note: this is prose" in item.body
         assert "Note" not in item.fields
+
+
+class TestSphinxInsertsBesideItsOwnKind:
+    """Appending to the end of the file put an entry outside its section.
+
+    A file the tool writes and a person must then repair is worse than one it
+    declines to write, because the broken state is commit-shaped.
+    """
+
+    DOC = """Backlog
+=======
+
+Open bugs
+---------
+
+.. bug:: First
+   :id: BUG_ONE
+   :status: open
+
+   One.
+
+Closed
+------
+
+Nothing here yet.
+"""
+
+    def backend(self, tmp_path):
+        from invariant.core.items import Item, SphinxNeedsBackend
+
+        path = tmp_path / "backlog.rst"
+        path.write_text(self.DOC, encoding="utf-8")
+        return SphinxNeedsBackend(path), path, Item
+
+    def test_a_new_entry_lands_after_the_last_of_its_type(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        text = path.read_text(encoding="utf-8")
+        assert text.index("BUG_TWO") < text.index("Closed")
+
+    def test_the_trailing_section_survives(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        text = path.read_text(encoding="utf-8")
+        assert "Closed" in text and "Nothing here yet." in text
+
+    def test_the_existing_entry_is_untouched(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        assert backend.get("BUG_ONE").title == "First"
+
+    def test_both_entries_parse_back(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        assert {i.id for i in backend.load_all()} == {"BUG_ONE", "BUG_TWO"}
+
+    def test_with_no_entry_of_that_type_it_appends(self, tmp_path):
+        """No anchor, so nothing clever — it says so rather than guessing."""
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="IDEA_ONE", type="idea", title="An idea", status="open"))
+        text = path.read_text(encoding="utf-8")
+        assert text.index("IDEA_ONE") > text.index("Nothing here yet.")
+
+
+class TestSlugIdStrategy:
+    """A numeric id is unlinkable in a backlog whose entries are referenced by
+    name — as :need: targets in architecture docs, say — and inconsistent with
+    every neighbour."""
+
+    def domain(self, tmp_path, strategy):
+        m = git_project(
+            tmp_path / "proj",
+            {"version": 1, "items": {"backend": "markdown", "id_strategy": strategy}},
+        )
+        return WorkItemDomain(m)
+
+    def test_numeric_is_still_the_default(self, tmp_path):
+        m = git_project(tmp_path / "proj", {"version": 1})
+        assert WorkItemDomain(m).new("bug", "Anything at all").id == "BUG_001"
+
+    def test_slug_derives_from_the_title(self, tmp_path):
+        item = self.domain(tmp_path, "slug").new(
+            "bug", "Drain treats every failure as transient"
+        )
+        assert item.id == "BUG_DRAIN_TREATS_EVERY_FAILURE_AS_TRANSIENT"
+
+    def test_punctuation_and_case_are_normalised(self, tmp_path):
+        item = self.domain(tmp_path, "slug").new("bug", "xccov: it's 100.00% wrong!")
+        assert item.id == "BUG_XCCOV_IT_S_100_00_WRONG"
+
+    def test_a_colliding_slug_is_suffixed_rather_than_overwriting(self, tmp_path):
+        domain = self.domain(tmp_path, "slug")
+        first = domain.new("bug", "Same title")
+        second = domain.new("bug", "Same title")
+        assert first.id != second.id
+        assert second.id.endswith("_2")
+
+    def test_a_titleless_slug_falls_back_to_the_stem(self):
+        """Tested on the helper: the domain refuses an empty title upstream,
+        so this branch is unreachable through `new` and asserting it there
+        would be asserting nothing."""
+        from invariant.core.items import _slug_id
+
+        assert _slug_id("BUG_", "", set()) == "BUG"
+
+    def test_an_unknown_strategy_is_refused_by_name(self, tmp_path):
+        with pytest.raises(UsageError, match="id_strategy"):
+            self.domain(tmp_path, "hieroglyph").new("bug", "x")

@@ -121,7 +121,17 @@ DEFAULTS: dict[str, Any] = {
     },
     # The markdown backend stores one file per item, so its path is a
     # directory. The json and sphinx_needs backends treat it as a single file.
-    "items": {"backend": "markdown", "path": "docs/backlog", "id_prefix": ""},
+    "items": {
+        "backend": "markdown",
+        "path": "docs/backlog",
+        # An ADDITIONAL project prefix; the item type already contributes its
+        # own stem, so "BUG_" here mints BUG_BUG_001.
+        "id_prefix": "",
+        # numeric -> BUG_001. slug -> BUG_DRAIN_TREATS_EVERY_FAILURE, for a
+        # backlog whose entries are referenced by name, where a number is both
+        # inconsistent with its neighbours and unlinkable.
+        "id_strategy": "numeric",
+    },
     "memory": {"managed": True, "index_generated": True},
     "privacy": {
         "enabled": True,
