@@ -492,3 +492,108 @@ class TestAgentInvocationIsRecorded:
             {"tool_name": "Task", "tool_input": {"subagent_type": "feature-architect"}}, ctx
         )
         assert ctx.pipelines.agents == []
+
+
+
+class TestAutomaticBinding:
+    """`session start` runs through Bash, which carries no hook payload.
+
+    So the CLI cannot see the host identifier and cannot record it. PostToolUse
+    can: it has the identifier and it brackets the exact call that registered
+    the session, so the binding is made there rather than left to a flag
+    someone has to remember to pass.
+    """
+
+    def post(self, host, command, response, host_session_id="host-1111"):
+        ctx = FakeCtx(host_session_id=host_session_id)
+        host._post_tool_use(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": response,
+            },
+            ctx,
+        )
+        return ctx.sessions
+
+    def test_a_started_session_is_bound(self, host):
+        sessions = self.post(
+            host,
+            "invariant session start fix-the-thing",
+            "session ab12cd34 (fix-the-thing) registered\n  next: ...",
+        )
+        assert sessions.adopted == [("ab12cd34", "host-1111")]
+
+    def test_the_json_form_is_bound_too(self, host):
+        sessions = self.post(
+            host,
+            "invariant session start x --json",
+            '{"session": {"id": "ff00aa11", "name": "x"}}',
+        )
+        assert sessions.adopted == [("ff00aa11", "host-1111")]
+
+    def test_a_structured_tool_response_is_read(self, host):
+        sessions = self.post(
+            host,
+            "invariant session start x",
+            {"stdout": "session 99887766 (x) registered"},
+        )
+        assert sessions.adopted == [("99887766", "host-1111")]
+
+    def test_a_command_reached_through_cd_still_binds(self, host):
+        sessions = self.post(
+            host,
+            "cd /somewhere && invariant session start x",
+            "session 12345678 (x) registered",
+        )
+        assert sessions.adopted == [("12345678", "host-1111")]
+
+    def test_an_unrelated_command_binds_nothing(self, host):
+        assert self.post(host, "git status", "on branch master").adopted == []
+
+    def test_a_different_invariant_command_binds_nothing(self, host):
+        sessions = self.post(host, "invariant session list", "session ab12cd34 (x) ...")
+        assert sessions.adopted == []
+
+    def test_unparseable_output_binds_nothing(self, host):
+        """Guessing which session was created would bind the wrong one."""
+        sessions = self.post(host, "invariant session start x", "command failed")
+        assert sessions.adopted == []
+
+    def test_no_host_identifier_binds_nothing(self, host):
+        ctx = FakeCtx(host_session_id=None)
+        host._post_tool_use(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "invariant session start x"},
+                "tool_response": "session ab12cd34 (x) registered",
+            },
+            ctx,
+        )
+        assert ctx.sessions.adopted == []
+
+    def test_a_refused_binding_does_not_fail_the_command(self, host):
+        """The 1:1 rule working is not a reason to error a finished command."""
+        ctx = FakeCtx()
+        ctx.sessions.raises = InvariantError("this host already owns one")
+        host._post_tool_use(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "invariant session start x"},
+                "tool_response": "session ab12cd34 (x) registered",
+            },
+            ctx,
+        )
+        assert ctx.sessions.adopted == []
+
+
+class TestSessionEndReleasesTheBinding:
+    def test_the_host_session_is_marked_ended(self, host):
+        ctx = FakeCtx(host_session_id="host-9999")
+        host.handle("session-end", "{}", ctx)
+        assert ctx.sessions.ended == ["host-9999"]
+
+    def test_nothing_happens_without_a_host_identifier(self, host):
+        ctx = FakeCtx(host_session_id=None)
+        host.handle("session-end", "{}", ctx)
+        assert ctx.sessions.ended == []

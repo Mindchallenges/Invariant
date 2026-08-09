@@ -418,18 +418,13 @@ class SessionDomain:
         host_session_id: str | None = None,
     ) -> Session:
         host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
-        # Prefer the host's own short form as the identifier, so a session
-        # registered by hand and one seen by a hook agree without being told.
-        session_id = (
-            session_id
-            or os.environ.get("INVARIANT_SESSION_ID")
-            or host_slug(host_session_id)
-            or uuid.uuid4().hex[:8]
-        )
-        if self.get(session_id) is not None:
-            raise UsageError(f"session {session_id!r} already exists")
 
-        # One host session owns at most one live invariant session. Two would
+        # Checked before the identifier is settled, so the refusal explains the
+        # real problem. Deriving the id from the host means a second attempt
+        # collides on the id too, and "session 'aaaa1111' already exists" tells
+        # nobody that the rule they hit was one-session-per-host.
+        #
+        # One host session owns at most one LIVE invariant session. Two would
         # reintroduce the ambiguity the binding exists to remove, and the
         # second would be indistinguishable from the first for the rest of its
         # life. Owning a *worktree* stays optional — a device soak with no code
@@ -446,6 +441,22 @@ class SessionDomain:
                     f"  Or end it deliberately: invariant session transition "
                     f"abandoned --id {existing.id} --force --reason '<why>'"
                 )
+
+        # Prefer the host's own short form as the identifier, so a session
+        # registered by hand and one seen by a hook agree without being told.
+        requested = session_id or os.environ.get("INVARIANT_SESSION_ID")
+        if requested:
+            if self.get(requested) is not None:
+                raise UsageError(f"session {requested!r} already exists")
+            session_id = requested
+        else:
+            # A DERIVED identifier that is taken is not an error: a host
+            # session that finished one session and starts another derives the
+            # same slug from the same host id, and the record of the finished
+            # one is deliberately kept. Falling back keeps that legal.
+            session_id = host_slug(host_session_id) or uuid.uuid4().hex[:8]
+            if self.get(session_id) is not None:
+                session_id = uuid.uuid4().hex[:8]
 
         session = Session(
             id=session_id,

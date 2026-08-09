@@ -766,3 +766,188 @@ class TestTeardownRemovesTheBranch:
         session = domain.start("never-isolated")
         with pytest.raises(TransitionError):
             domain.teardown(session.id)
+
+
+
+class TestHostBindingIsOneToOne:
+    """A host session and an invariant session are the same unit of work.
+
+    They used to be independent namespaces, which meant an ambiguity report
+    could offer six candidates to a caller for whom five were provably wrong.
+    """
+
+    def test_a_host_may_not_own_two_sessions(self, m):
+        domain = SessionDomain(m)
+        domain.start("first", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="already owns session"):
+            domain.start("second", host_session_id="host-aaaa-1111")
+
+    def test_the_refusal_names_the_session_and_how_to_end_it(self, m):
+        domain = SessionDomain(m)
+        first = domain.start("first", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError) as exc:
+            domain.start("second", host_session_id="host-aaaa-1111")
+        assert first.id in str(exc.value)
+        assert "teardown" in str(exc.value)
+
+    def test_a_finished_session_frees_the_host(self, m):
+        """1:1 is about LIVE sessions; a host outlives the work it did."""
+        domain = SessionDomain(m)
+        first = domain.start("first", host_session_id="host-aaaa-1111")
+        first.state = "torn_down"
+        domain._save(first)
+        assert domain.start("second", host_session_id="host-aaaa-1111")
+
+    def test_rebinding_to_another_host_is_refused(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="already bound"):
+            domain.adopt_host_session(session.id, "host-bbbb-2222")
+
+    def test_rebinding_is_possible_deliberately(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        updated = domain.adopt_host_session(session.id, "host-bbbb-2222", force=True)
+        assert updated.host_session_id == "host-bbbb-2222"
+
+    def test_adopting_is_refused_when_the_host_already_owns_one(self, m):
+        domain = SessionDomain(m)
+        domain.start("owned", host_session_id="host-aaaa-1111")
+        other = domain.start("unowned")
+        with pytest.raises(UsageError, match="already owns"):
+            domain.adopt_host_session(other.id, "host-aaaa-1111")
+
+    def test_readopting_the_same_pair_is_not_an_error(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        assert domain.adopt_host_session(session.id, "host-aaaa-1111").id == session.id
+
+    def test_the_short_form_only_claims_an_unbound_session(self, m):
+        """Matching by derived id is a fallback, not an override.
+
+        A session already answering to another host that happens to share the
+        derived short form is a naming coincidence, not a match.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x", session_id="abcd1234")
+        domain.adopt_host_session(session.id, "host-zzzz-0000abcd1234", force=True)
+        assert domain.by_host_session("other-host-0000abcd1234") is None
+
+
+class TestAttributionCandidates:
+    """Who could plausibly be calling. Every exclusion removes a wrong answer."""
+
+    def test_a_stranded_session_stops_competing(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("gone")
+        domain.isolate(session.id, execute=True)
+        shutil.rmtree(domain.get(session.id).worktree)
+
+        assert domain.get(session.id).is_stranded
+        assert session.id not in [s.id for s in domain.attributable()]
+
+    def test_a_session_that_never_isolated_is_not_stranded(self, m):
+        """The deliberate no-worktree case: a soak owning no code.
+
+        The binding is host-to-session, never host-to-worktree, so having no
+        worktree must not read as having lost one.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("device-soak")
+        assert not session.is_stranded
+        assert session.id in [s.id for s in domain.attributable()]
+
+    def test_a_session_whose_host_ended_stops_competing(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("over", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        assert session.id not in [s.id for s in domain.attributable()]
+
+    def test_ending_a_host_does_not_destroy_the_work(self, m):
+        """A closed terminal is not a reason to abandon unmerged work."""
+        domain = SessionDomain(m)
+        session = domain.start("over", host_session_id="host-aaaa-1111")
+        domain.isolate(session.id, execute=True)
+        domain.end_host_session("host-aaaa-1111")
+
+        after = domain.get(session.id)
+        assert after.state == "isolated"
+        assert Path(after.worktree).exists()
+        assert after.host_ended
+
+    def test_a_session_bound_elsewhere_stops_competing(self, m):
+        domain = SessionDomain(m)
+        theirs = domain.start("theirs", host_session_id="host-bbbb-2222")
+        mine = domain.start("mine")
+        visible = [s.id for s in domain.attributable("host-aaaa-1111")]
+        assert theirs.id not in visible
+        assert mine.id in visible
+
+    def test_an_ended_host_cannot_reclaim_its_old_session(self, m):
+        """A new host reusing the record would inherit somebody else's work."""
+        domain = SessionDomain(m)
+        domain.start("over", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        assert domain.by_host_session("host-aaaa-1111") is None
+
+
+class TestReapStranded:
+    def test_a_worktree_and_branch_both_gone_is_reaped(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("dead")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        shutil.rmtree(session.worktree)
+        subprocess.run(
+            ["git", "worktree", "prune"], cwd=str(m.root), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "branch", "-D", session.branch],
+            cwd=str(m.root), check=True, capture_output=True,
+        )
+
+        assert [s.id for s in domain.reap_stranded()] == [session.id]
+        assert domain.get(session.id).state == "abandoned"
+
+    def test_a_surviving_branch_is_not_reaped(self, m):
+        """The narrow condition, and why it is narrow.
+
+        A worktree can be removed while its branch still holds unmerged
+        commits. That work is recoverable, so a missing directory alone must
+        not be enough to write the session off.
+        """
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("recoverable")
+        domain.isolate(session.id, execute=True)
+        shutil.rmtree(domain.get(session.id).worktree)
+
+        assert domain.reap_stranded() == []
+        assert domain.get(session.id).state == "isolated"
+
+    def test_dry_run_changes_nothing(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("dead")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        shutil.rmtree(session.worktree)
+        subprocess.run(["git", "worktree", "prune"], cwd=str(m.root), capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-D", session.branch], cwd=str(m.root), capture_output=True
+        )
+
+        assert [s.id for s in domain.reap_stranded(dry_run=True)] == [session.id]
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_live_session_is_never_reaped(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("alive")
+        domain.isolate(session.id, execute=True)
+        assert domain.reap_stranded() == []
