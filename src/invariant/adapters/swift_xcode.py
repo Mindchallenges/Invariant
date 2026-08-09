@@ -17,6 +17,25 @@ from pathlib import Path
 from .base import Adapter, Hazard, TestResult
 
 
+def _tool_is_reachable(tool: str, developer_dir) -> bool:
+    import subprocess
+
+    env = dict(os.environ)
+    if developer_dir:
+        env["DEVELOPER_DIR"] = str(developer_dir)
+    try:
+        proc = subprocess.run(
+            ["xcrun", "--find", tool],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
 def _newest_developer_dir() -> Path | None:
     """The newest installed Xcode's Developer directory, or ``None``.
 
@@ -200,6 +219,44 @@ class SwiftXcodeAdapter(Adapter):
             hazards=live,
             note=note,
         )
+
+    def self_check(self) -> list[tuple[str, bool, str]]:
+        """Can this process reach the Xcode tools, without help from a shell?
+
+        Deliberately run with the environment as-is. Exporting DEVELOPER_DIR to
+        make the check pass would reproduce the exact mistake this exists to
+        catch: proving a tool reachable under conditions its caller never has.
+        """
+        import subprocess
+
+        results: list[tuple[str, bool, str]] = []
+        fallback = _newest_developer_dir()
+
+        for tool in ("xcodebuild", "xcresulttool"):
+            direct = _tool_is_reachable(tool, None)
+            if direct:
+                results.append((f"xcode: {tool} reachable", True, "via xcrun"))
+                continue
+            if fallback and _tool_is_reachable(tool, fallback):
+                results.append(
+                    (
+                        f"xcode: {tool} reachable",
+                        True,
+                        f"NOT via xcrun — falling back to {fallback}. "
+                        f"xcode-select points somewhere without it; export "
+                        f"DEVELOPER_DIR to make every caller agree.",
+                    )
+                )
+                continue
+            results.append(
+                (
+                    f"xcode: {tool} reachable",
+                    False,
+                    "not found via xcrun and no installed Xcode has it; "
+                    "counts and coverage will be unavailable or scraped",
+                )
+            )
+        return results
 
     def result_bundle_counts(self, path) -> dict | None:
         """Counts from the .xcresult bundle — the run's own record of itself.

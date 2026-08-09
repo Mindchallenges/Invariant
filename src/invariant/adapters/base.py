@@ -104,6 +104,21 @@ class TestResult:
 class Adapter:
     """Base adapter. ``generic`` is this class, unmodified."""
 
+    def self_check(self) -> list[tuple[str, bool, str]]:
+        """Is the tooling this adapter depends on reachable FROM HERE?
+
+        Not "is it installed" — reachable in the environment this process has,
+        which is the environment the agent's shell has, which is frequently not
+        the one a human verifying by hand has. A reader was shipped as ground
+        truth and was inert on the machine it was written for, because the tool
+        it calls could not be found the way the caller resolves it; the check
+        that passed had been run with a variable exported by hand.
+
+        A verification inherits its environment, and the environment is part of
+        what is being asserted.
+        """
+        return []
+
     def result_bundle_counts(self, path) -> dict | None:
         """Authoritative counts from a machine-readable run artifact.
 

@@ -304,6 +304,13 @@ def cmd_doctor(args) -> int:
                 (f"commands.{name} configured", bool(configured), str(configured or "unset"))
             )
 
+        # The adapter's own tooling, resolved the way THIS process resolves it
+        # rather than the way a shell with hand-exported variables would.
+        from ..adapters import get_adapter
+
+        for label, ok, detail in get_adapter(ctx.manifest.ecosystems[0]).self_check():
+            checks.append((label, ok, detail))
+
         host = ClaudeCodeHost(ctx.manifest.root)
         for label, ok, detail in host.verify():
             checks.append((label, ok, detail))

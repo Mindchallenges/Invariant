@@ -523,3 +523,60 @@ class TestDeveloperDirFallback:
 
         found = _newest_developer_dir()
         assert found is None or found.name == "Developer"
+
+
+class TestAdapterSelfCheck:
+    """Reachable FROM HERE, not "installed somewhere".
+
+    A reader shipped as ground truth was inert on the machine it was written
+    for, because the tool it calls could not be found the way the caller
+    resolves it — and the check that passed had been run with a variable
+    exported by hand. A verification inherits its environment, and the
+    environment is part of what is being asserted.
+    """
+
+    def test_the_generic_adapter_claims_nothing(self):
+        """An adapter with no tooling has no reachability to assert."""
+        assert get_adapter("generic").self_check() == []
+
+    def test_swift_reports_both_tools(self):
+        labels = [row[0] for row in get_adapter("swift").self_check()]
+        assert any("xcodebuild" in label for label in labels)
+        assert any("xcresulttool" in label for label in labels)
+
+    def test_a_fallback_resolution_is_reported_as_such(self, monkeypatch):
+        """Working via fallback is not the same as working, and says so.
+
+        It means every caller that does NOT share this process's fallback sees
+        something different — which is exactly how the inert reader hid.
+        """
+        import invariant.adapters.swift_xcode as swift
+
+        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        monkeypatch.setattr(
+            swift, "_tool_is_reachable", lambda tool, dd: dd is not None
+        )
+        monkeypatch.setattr(swift, "_newest_developer_dir", lambda: Path("/X/Developer"))
+
+        rows = get_adapter("swift").self_check()
+        assert all(ok for _, ok, _ in rows)
+        assert all("NOT via xcrun" in detail for _, _, detail in rows)
+        assert all("DEVELOPER_DIR" in detail for _, _, detail in rows)
+
+    def test_an_unreachable_tool_fails_the_check(self, monkeypatch):
+        import invariant.adapters.swift_xcode as swift
+
+        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        monkeypatch.setattr(swift, "_tool_is_reachable", lambda tool, dd: False)
+        monkeypatch.setattr(swift, "_newest_developer_dir", lambda: None)
+
+        rows = get_adapter("swift").self_check()
+        assert rows and not any(ok for _, ok, _ in rows)
+        assert all("scraped" in detail or "unavailable" in detail for _, _, detail in rows)
+
+    def test_a_clean_resolution_is_not_annotated(self, monkeypatch):
+        import invariant.adapters.swift_xcode as swift
+
+        monkeypatch.setattr(swift, "_tool_is_reachable", lambda tool, dd: dd is None)
+        rows = get_adapter("swift").self_check()
+        assert all(ok and detail == "via xcrun" for _, ok, detail in rows)
