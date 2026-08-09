@@ -1,0 +1,42 @@
+id: docs
+kind: pipeline
+description: >
+  Documentation, records and backlog entries — work whose deliverable is prose,
+  with no implementation to test and no structure to diagram.
+
+  This exists because the alternative was worse. A docs-only change run through
+  `tdd` blocks on three gates it cannot satisfy even in principle: no
+  implementation means no test could have failed first, no code means nothing to
+  measure coverage of, and a change that adds no component or dependency cannot
+  honestly update a diagram. None of them can be acknowledged either, because
+  they block — so the only route was `advance --force`, and a tool that teaches
+  --force as routine has spent the thing it exists for.
+
+  The applicability is DECLARED, not inferred. A caller choosing this
+  methodology is stating what kind of work this is; a rule reading the diff's
+  file extensions and deciding for itself would be guessing, and would guess
+  wrong on the change that adds a doc and a schema together.
+
+  Note what is NOT relaxed: privacy still blocks, and the docs still have to be
+  read before the change and updated by it. A record that leaks a clock time or
+  a device id is exactly as bad in prose as in code.
+
+initial: drafting
+terminal: [committed, abandoned]
+
+states:
+  drafting:
+    description: Writing. The architecture docs are read here, as anywhere else.
+    roles: [design]
+    next: [reviewing, abandoned]
+  reviewing:
+    description: >
+      Read back what was written. `docs.diagrams_current` is deliberately absent:
+      it fires on a structural change, and a methodology declaring itself
+      documentation is declaring there is none. `docs.updated` stays, because
+      this pipeline's whole subject is the docs.
+    roles: [review]
+    exit_gates: [privacy.clean]
+    next: [committed, drafting, abandoned]
+  committed: {}
+  abandoned: {}

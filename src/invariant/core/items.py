@@ -212,15 +212,48 @@ class SphinxNeedsBackend:
             index += 1
             options: dict[str, str] = {}
             body: list[str] = []
+            # The option block runs until the first blank line, which is what
+            # ends it in reStructuredText. Everything after that is body.
+            #
+            # This used to end the option block at the first line that did not
+            # itself look like an option — so a WRAPPED option value fell into
+            # the body, and because the test was `option and not body`, every
+            # option after it fell in too. Silent, and on data this library did
+            # not write: entries authored by hand round-tripped with their
+            # fields moved into prose and nothing reported it.
+            in_options = True
+            last_option: str | None = None
             while index < len(lines):
                 line = lines[index]
                 if line.strip() and not line.startswith((" ", "\t")):
                     break
                 stripped = line.strip()
-                option = re.match(r"^:([\w-]+):\s*(.*)$", stripped)
-                if option and not body:
-                    options[option.group(1)] = option.group(2).strip()
-                elif stripped or body:
+
+                if in_options:
+                    if not stripped:
+                        # A blank line ends the options only once one has been
+                        # seen; a directive may be padded before its first.
+                        if options:
+                            in_options = False
+                        index += 1
+                        continue
+                    option = re.match(r"^:([\w-]+):\s*(.*)$", stripped)
+                    if option:
+                        last_option = option.group(1)
+                        options[last_option] = option.group(2).strip()
+                        index += 1
+                        continue
+                    if last_option is not None:
+                        # A continuation of the option above it.
+                        existing = options[last_option]
+                        options[last_option] = (
+                            f"{existing} {stripped}".strip() if existing else stripped
+                        )
+                        index += 1
+                        continue
+                    in_options = False
+
+                if stripped or body:
                     body.append(line[3:] if line.startswith("   ") else stripped)
                 index += 1
             reserved = {"id", "status", "residue"}

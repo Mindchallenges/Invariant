@@ -693,6 +693,17 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
     if fmt in {None, "none"}:
         return Verdict.na("no diagram format configured")
 
+    # A methodology that declares itself documentation is declaring there is no
+    # structural change, and this gate fires on structural change. Read from
+    # the pipeline's DECLARED kind rather than inferred from file extensions:
+    # a caller stating what kind of work this is has made a claim that can be
+    # wrong and reviewed, where a rule reading the diff would be guessing —
+    # and would guess wrong on the change that adds a doc and a schema at once.
+    if (ctx.pipeline or {}).get("methodology") == "docs":
+        return Verdict.na(
+            "documentation pipeline — no structural change is being claimed"
+        )
+
     docs_root = _docs_root(ctx)
     root = _repo_root(ctx)
     docs_changed = [p for p in git.changed_files(ctx.cwd) if _is_within(root / p, docs_root)]

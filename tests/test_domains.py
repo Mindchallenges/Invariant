@@ -1241,3 +1241,63 @@ class TestDescribeRunNamesItsSource:
             {"executed": 100, "failed": 0, "skipped": 2, "source": "result_bundle"}
         )
         assert "2 skipped" in line
+
+
+class TestSphinxMultiLineOptions:
+    """A wrapped option value used to fall into the body, and take every
+    option after it along. Silent, and on data this library did not write."""
+
+    def backend(self, tmp_path, text):
+        from invariant.core.items import SphinxNeedsBackend
+
+        path = tmp_path / "backlog.rst"
+        path.write_text(text, encoding="utf-8")
+        return SphinxNeedsBackend(path)
+
+    WRAPPED = """
+.. bug:: Drain treats every failure as transient
+   :id: BUG_DRAIN
+   :area: Frameworks/Intake,
+          Frameworks/Database
+   :severity: high
+   :status: open
+
+   The drain retries permanent failures forever.
+"""
+
+    def test_the_wrapped_value_stays_in_its_field(self, tmp_path):
+        item = self.backend(tmp_path, self.WRAPPED).load_all()[0]
+        assert item.fields["area"] == "Frameworks/Intake, Frameworks/Database"
+
+    def test_options_after_a_wrapped_one_are_not_lost(self, tmp_path):
+        """The compounding half: `option and not body` failed for all of them."""
+        item = self.backend(tmp_path, self.WRAPPED).load_all()[0]
+        assert item.fields["severity"] == "high"
+        assert item.status == "open"
+
+    def test_the_body_contains_only_the_body(self, tmp_path):
+        item = self.backend(tmp_path, self.WRAPPED).load_all()[0]
+        assert item.body == "The drain retries permanent failures forever."
+        assert "severity" not in item.body
+        assert "Frameworks/Database" not in item.body
+
+    def test_a_single_line_option_block_still_parses(self, tmp_path):
+        text = (
+            ".. bug:: Simple\n   :id: BUG_X\n   :status: open\n\n   Body here.\n"
+        )
+        item = self.backend(tmp_path, text).load_all()[0]
+        assert item.id == "BUG_X" and item.status == "open"
+        assert item.body == "Body here."
+
+    def test_an_entry_with_no_body_parses(self, tmp_path):
+        text = ".. bug:: Bare\n   :id: BUG_Y\n   :status: open\n"
+        item = self.backend(tmp_path, text).load_all()[0]
+        assert item.id == "BUG_Y" and item.body == ""
+
+    def test_a_colon_in_the_body_is_not_read_as_an_option(self, tmp_path):
+        text = (
+            ".. bug:: T\n   :id: BUG_Z\n\n   Note: this is prose, not a field.\n"
+        )
+        item = self.backend(tmp_path, text).load_all()[0]
+        assert "Note: this is prose" in item.body
+        assert "Note" not in item.fields

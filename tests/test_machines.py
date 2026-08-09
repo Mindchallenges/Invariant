@@ -249,3 +249,53 @@ class TestProjectMachines:
         assert set(machine.states) == {"only"}
         # Forking a methodology still cannot drop the core policy.
         assert "docs.read_architecture" in machine.state("only").exit_gates
+
+
+class TestDocsMethodology:
+    """A docs-only change had no honest route through `tdd`.
+
+    Three gates blocked that could not be satisfied in principle — no
+    implementation to fail a test first, no code to measure, no structure to
+    diagram — and none could be acknowledged, because they block. The only way
+    through was `advance --force`, and a tool that teaches --force as routine
+    has spent the thing it exists for.
+    """
+
+    def machine(self, make_manifest):
+        return load_pipeline_machine(make_manifest({"methodology": {"pipeline": "docs"}}))
+
+    def test_it_is_shipped(self):
+        assert "docs" in shipped_ids()
+
+    def test_it_demands_neither_a_red_test_nor_coverage(self, make_manifest):
+        gates = {
+            g
+            for s in self.machine(make_manifest).states.values()
+            for g in s.entry_gates + s.exit_gates
+        }
+        assert "test.new_test_fails" not in gates
+        assert "coverage.meets_floor" not in gates
+
+    def test_privacy_still_blocks(self, make_manifest):
+        """Not relaxed. A clock time in prose is exactly as bad as in code."""
+        gates = {
+            g
+            for s in self.machine(make_manifest).states.values()
+            for g in s.entry_gates + s.exit_gates
+        }
+        assert "privacy.clean" in gates
+
+    def test_the_docs_are_still_read_and_updated(self, make_manifest):
+        """It keeps the design and review roles, so docs-first still applies."""
+        gates = {
+            g
+            for s in self.machine(make_manifest).states.values()
+            for g in s.entry_gates + s.exit_gates
+        }
+        assert "docs.read_architecture" in gates
+        assert "docs.updated" in gates
+
+    def test_it_reaches_committed(self, make_manifest):
+        machine = self.machine(make_manifest)
+        assert machine.can("drafting", "reviewing")
+        assert machine.can("reviewing", "committed")

@@ -1277,3 +1277,24 @@ class TestPushBarrierMatchesRealPushes:
             payload=bash_payload("git push origin master"),
         )
         assert not only(evaluate(["session.push_barrier"], ctx)).verdict.ok
+
+
+class TestDiagramGateAbstainsForDocsPipelines:
+    def ctx_for(self, ctx_factory, methodology):
+        doc = ctx_factory.main / "docs" / "architecture" / "record.md"
+        doc.write_text("# A device measurement record\n\nNo structure here.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(ctx_factory.main), check=True,
+                       capture_output=True)
+        return ctx_factory(pipeline={"methodology": methodology, "evidence": {}})
+
+    def verdict(self, ctx):
+        return only(evaluate(["docs.diagrams_current"], ctx)).verdict
+
+    def test_a_docs_pipeline_is_not_asked_for_a_diagram(self, ctx_factory):
+        verdict = self.verdict(self.ctx_for(ctx_factory, "docs"))
+        assert verdict.skipped
+        assert "no structural change is being claimed" in verdict.message
+
+    def test_a_tdd_pipeline_is_still_asked(self, ctx_factory):
+        """The relaxation is scoped to a DECLARED documentation pipeline."""
+        assert not self.verdict(self.ctx_for(ctx_factory, "tdd")).ok
