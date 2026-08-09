@@ -220,20 +220,43 @@ class ClaudeCodeHost:
         actions.append(f"install {len(agents)} library agents into .claude/agents/")
         return actions
 
-    def install(self) -> None:
+    def install_hooks(self) -> list[str]:
+        """Shims and settings wiring, and nothing else.
+
+        Separate from :meth:`install` because it has to be runnable against a
+        project that is already set up. When the library gains an event, an
+        existing project has no shim for it and enforcement for that event is
+        simply off — silently, which is the failure mode this library exists to
+        remove. Until this existed the only repair ``doctor`` could offer was
+        ``init --force``, and that rewrites the manifest, discarding every
+        considered downgrade a project had recorded. Nobody trades their
+        configuration for a hook, so the honest outcome was that the hook never
+        got installed.
+
+        Returns what changed, so a caller can say so rather than claim work it
+        did not do.
+        """
         hooks_dir = self.claude_dir / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
+        written = []
         for event in EVENTS:
             path = hooks_dir / f"invariant-{event}.sh"
-            path.write_text(SHIM_TEMPLATE.format(event=event), encoding="utf-8")
+            body = SHIM_TEMPLATE.format(event=event)
+            existed = path.is_file() and path.read_text(encoding="utf-8") == body
+            path.write_text(body, encoding="utf-8")
             path.chmod(0o755)
+            if not existed:
+                written.append(f"invariant-{event}.sh")
+        self._wire_settings()
+        return written
+
+    def install(self) -> None:
+        self.install_hooks()
 
         agents_dir = self.claude_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         for source in sorted((DATA_DIR / "agents").glob("*.md")):
             self.install_agent(source, agents_dir / source.name)
-
-        self._wire_settings()
 
     def install_agent(self, source: Path, target: Path) -> None:
         body = source.read_text(encoding="utf-8")
@@ -288,9 +311,15 @@ class ClaudeCodeHost:
         checks: list[tuple[str, bool, str]] = []
         hooks_dir = self.claude_dir / "hooks"
         missing = [e for e in EVENTS if not (hooks_dir / f"invariant-{e}.sh").is_file()]
-        checks.append(
-            (CHECK_HOOKS, not missing, f"{len(EVENTS) - len(missing)}/{len(EVENTS)}")
-        )
+        # Name the repair. A failure whose only known fix is `init --force`
+        # gets left alone, because that rewrites the manifest and nobody trades
+        # a project's configuration for a hook.
+        detail = f"{len(EVENTS) - len(missing)}/{len(EVENTS)}"
+        if missing:
+            detail += (
+                f" — missing: {', '.join(missing)}. Repair with: invariant hooks install"
+            )
+        checks.append((CHECK_HOOKS, not missing, detail))
 
         settings_path = self.claude_dir / "settings.json"
         wired = False

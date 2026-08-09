@@ -1040,3 +1040,59 @@ class TestTheMergeCommandEvaluatesItsGates:
         """A gate with no honest exit gets worked around instead of obeyed."""
         sid = self.strict_project(project, capsys)
         assert run("session", "merge", "--id", sid, "--force") == 0
+
+
+class TestHooksAreInstallableWithoutRewritingTheManifest:
+    """A library that gains an event must be able to ship it to a live project.
+
+    Until this existed the shim was simply absent, enforcement for that event
+    was silently off, and `doctor`'s only repair was `init --force` — which
+    rewrites the manifest and discards every considered downgrade the project
+    recorded. Nobody trades their configuration for a hook, so the honest
+    outcome was that the hook never got installed.
+    """
+
+    def adopted(self, project):
+        assert run("init", "--name", "demo") == 0
+        manifest = project / ".claude" / "invariant.yaml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "\nenforcement:\n  profile: strict\n  rules:\n    test.all_pass: warn\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    def test_a_missing_shim_is_restored(self, project, capsys):
+        self.adopted(project)
+        shim = project / ".claude" / "hooks" / "invariant-stop.sh"
+        shim.unlink()
+        assert run("hooks", "install") == 0
+        assert shim.is_file()
+
+    def test_the_projects_configuration_survives(self, project, capsys):
+        """The whole reason this is not `init --force`."""
+        manifest = self.adopted(project)
+        before = manifest.read_text(encoding="utf-8")
+        (project / ".claude" / "hooks" / "invariant-stop.sh").unlink()
+        run("hooks", "install")
+        assert manifest.read_text(encoding="utf-8") == before
+        assert "test.all_pass: warn" in before
+
+    def test_settings_gain_the_new_event(self, project, capsys):
+        self.adopted(project)
+        settings = project / ".claude" / "settings.json"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        data["hooks"].pop("Stop", None)
+        settings.write_text(json.dumps(data), encoding="utf-8")
+
+        run("hooks", "install")
+        assert "invariant-stop.sh" in settings.read_text(encoding="utf-8")
+
+    def test_doctor_names_this_repair_rather_than_init_force(self, project, capsys):
+        """A failure with no safe repair gets ignored, which is worse than none."""
+        self.adopted(project)
+        (project / ".claude" / "hooks" / "invariant-stop.sh").unlink()
+        run("doctor")
+        text = out(capsys)
+        assert "invariant hooks install" in text
+        assert "stop" in text

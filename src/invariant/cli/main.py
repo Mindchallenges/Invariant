@@ -365,6 +365,29 @@ def cmd_doctor(args) -> int:
 # -- agents ------------------------------------------------------------
 
 
+def cmd_hooks_install(args) -> int:
+    """Install and wire the hook shims, touching nothing else.
+
+    Exists because the library gaining an event used to be unshippable to a
+    project that already had one: the shim was absent, enforcement for that
+    event was silently off, and `doctor`'s only repair was `init --force`,
+    which rewrites the manifest and discards every considered downgrade the
+    project had recorded.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    ctx = Context()
+    host = ClaudeCodeHost(ctx.manifest.root)
+    written = host.install_hooks()
+    return emit(
+        args,
+        {"installed": written},
+        "hook shims: " + (", ".join(written) if written else "all already current")
+        + "\n  settings wiring refreshed"
+        + "\n  verify they actually RUN: invariant doctor",
+    )
+
+
 def cmd_assets_list(args) -> int:
     """Every host asset, what kind it is, whether it loads, and who owns it."""
     from ..hosts import assets as A
@@ -1433,6 +1456,10 @@ def build_parser() -> argparse.ArgumentParser:
     q = state.add_parser("repair")
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_state_repair)
+
+    hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
+    q = hooks.add_parser("install")
+    q.set_defaults(func=cmd_hooks_install)
 
     # host bridge
     q = sub.add_parser("hook")
