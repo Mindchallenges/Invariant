@@ -12,7 +12,7 @@ from invariant.core.items import (
     backend_for,
 )
 from invariant.core.manifest import MANIFEST_RELPATH, Manifest
-from invariant.domains.pipeline import PipelineDomain, summarise
+from invariant.domains.pipeline import PipelineDomain, describe_run, summarise
 from invariant.domains.session import SessionDomain
 from invariant.domains.workitem import WorkItemDomain
 
@@ -1171,3 +1171,39 @@ exit 0
 
         pipelines.run_coverage(session.id, cwd=m.root)
         assert not (bundle / "marker").exists()
+
+
+class TestDescribeRun:
+    """Two numbers in one line must not be counted in different things.
+
+    `executed=14 failed=6` sent a reader hunting for six failing tests among
+    fourteen. There were two; the six were assertions, because one test tripped
+    four asserts after its first failed.
+    """
+
+    def test_assertions_and_tests_are_named_apart(self):
+        line = describe_run({"executed": 14, "failed": 6, "failed_tests": 2})
+        assert "6 assertion(s) failed in 2 test(s)" in line
+        assert "14 test(s) executed" in line
+
+    def test_a_single_number_is_not_padded_with_a_second_unit(self):
+        line = describe_run({"executed": 14, "failed": 2, "failed_tests": 2})
+        assert "2 failure(s)" in line
+        assert "assertion" not in line
+
+    def test_a_green_run_says_no_failures(self):
+        assert "no failures" in describe_run(
+            {"executed": 14, "failed": 0, "failed_tests": None}
+        )
+
+    def test_an_unknown_count_says_unknown_not_zero(self):
+        """`failed: None` means the run failed and the count could not be
+        parsed; rendering it as a number would invent one."""
+        line = describe_run({"executed": 13945, "failed": None, "failed_tests": None})
+        assert "unknown" in line
+        assert "0" not in line.split(",")[1]
+
+    def test_a_missing_executed_count_is_marked_rather_than_guessed(self):
+        assert "? test(s) executed" in describe_run(
+            {"executed": None, "failed": 0, "failed_tests": None}
+        )

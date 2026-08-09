@@ -357,3 +357,34 @@ class TestHazardDistortionDirection:
         assert by_id["xcode.exit65_drops_suites"].can_overstate is False
         assert by_id["xcode.only_testing_takes_target_class"].can_overstate is False
         assert by_id["xcode.destination_by_name_resolves_latest"].can_overstate is None
+
+
+class TestFailingCaseCount:
+    """Failing ASSERTIONS and failing TESTS are different numbers."""
+
+    ADAPTER = get_adapter("swift")
+
+    RUN = """
+Test Case '-[HeapTests.DrainTests testThrowsOnEmpty]' failed (0.01 seconds).
+Test Case '-[HeapTests.DrainTests testVerdictShape]' failed (0.02 seconds).
+Test Case '-[HeapTests.DrainTests testVerdictShape]' failed (0.02 seconds).
+Test Suite 'All tests' failed at 2026-08-09.
+\t Executed 14 tests, with 6 failures (0 unexpected) in 1.0 (1.1) seconds
+"""
+
+    def test_distinct_failing_cases_are_counted(self):
+        result = self.ADAPTER.parse_test_output(self.RUN, "", 65)
+        assert result.failed == 6        # assertions, xcodebuild's own count
+        assert result.failed_tests == 2  # distinct cases, deduplicated
+
+    def test_the_assertion_count_is_left_in_its_own_units(self):
+        """Converting it would invent a number xcodebuild never reported."""
+        assert self.ADAPTER.parse_test_output(self.RUN, "", 65).failed == 6
+
+    def test_a_log_naming_no_cases_reports_none_not_zero(self):
+        text = "\t Executed 14 tests, with 6 failures (0 unexpected) in 1.0 (1.1) s\n"
+        assert self.ADAPTER.parse_test_output(text, "", 65).failed_tests is None
+
+    def test_a_green_run_names_no_failing_cases(self):
+        text = "\t Executed 14 tests, with 0 failures (0 unexpected) in 1.0 (1.1) s\n"
+        assert self.ADAPTER.parse_test_output(text, "", 0).failed_tests is None

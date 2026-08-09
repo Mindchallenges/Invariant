@@ -59,8 +59,18 @@ class TestResult:
 
     passed: bool
     exit_code: int
+    #: Test CASES executed.
     total: int | None = None
+    #: Failures as the ecosystem counts them. For xcodebuild that is failing
+    #: ASSERTIONS, not failing test cases — one test tripping four asserts
+    #: reports four. Kept in the ecosystem's own units because converting it
+    #: would be inventing a number the tool did not report.
     failed: int | None = None
+    #: Failing test CASES, when the adapter can distinguish them. This exists
+    #: because `total` and `failed` are counted in different units, and a line
+    #: reading "executed=14 failed=6" invites the reader to look for six failing
+    #: tests among fourteen — there were two.
+    failed_tests: int | None = None
     hazards: list[Hazard] = field(default_factory=list)
     note: str = ""
 

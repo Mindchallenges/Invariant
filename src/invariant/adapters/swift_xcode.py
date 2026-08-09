@@ -146,6 +146,7 @@ class SwiftXcodeAdapter(Adapter):
         live = [h for h in self.hazards() if h.matches(combined)]
 
         executed, failed = _parse_counts(combined)
+        failed_tests = _count_failing_cases(combined)
 
         # A filtered run that executed nothing exits zero. Treat that as
         # untrustworthy rather than as a pass.
@@ -172,6 +173,7 @@ class SwiftXcodeAdapter(Adapter):
             )
 
         return TestResult(
+            failed_tests=failed_tests,
             passed=code == 0,
             exit_code=code,
             total=executed,
@@ -187,6 +189,23 @@ class SwiftXcodeAdapter(Adapter):
         ):
             out[match.group("file")] = float(match.group("pct"))
         return out
+
+
+#: A failing test CASE. xcodebuild names each one it runs, so counting the
+#: distinct identifiers that failed gives the unit a reader expects, alongside
+#: the assertion count the summary line reports.
+_FAILING_CASE = re.compile(r"Test Case '([^']+)' failed")
+
+
+def _count_failing_cases(text: str) -> int | None:
+    """Distinct failing test cases, or ``None`` if none were named.
+
+    ``None`` rather than 0: a log that never names a case has not told us there
+    were no failing cases, and a zero here would contradict a non-zero
+    assertion count for no reason a reader could resolve.
+    """
+    names = {m.group(1) for m in _FAILING_CASE.finditer(text)}
+    return len(names) or None
 
 
 #: One xcodebuild summary line, at any nesting level.

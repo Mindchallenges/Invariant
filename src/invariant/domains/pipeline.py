@@ -440,6 +440,7 @@ class PipelineDomain:
             "exit_code": result.exit_code,
             "executed": result.total,
             "failed": result.failed,
+            "failed_tests": result.failed_tests,
             "hazards": [h.id for h in result.hazards],
             "note": result.note,
         }
@@ -461,6 +462,30 @@ class PipelineDomain:
             self._path(session_id),
             {"current": pipeline.to_dict(), "completed": completed},
         )
+
+
+def describe_run(record: dict) -> str:
+    """One line naming each number's UNIT.
+
+    `executed=14 failed=6` invites the reader to look for six failing tests
+    among fourteen; there were two, and the six were assertions. Two numbers in
+    one line counted in different things is the same species of defect as a
+    number that lies outright — it just makes the reader do the lying.
+    """
+    executed = record.get("executed")
+    parts = [f"{executed if executed is not None else '?'} test(s) executed"]
+
+    failed_tests = record.get("failed_tests")
+    failed = record.get("failed")
+    if failed is None:
+        parts.append("failure count unknown")
+    elif failed_tests is not None and failed_tests != failed:
+        parts.append(f"{failed} assertion(s) failed in {failed_tests} test(s)")
+    elif failed:
+        parts.append(f"{failed} failure(s)")
+    else:
+        parts.append("no failures")
+    return ", ".join(parts)
 
 
 def summarise(verdicts: list[Evaluated]) -> str:

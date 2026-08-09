@@ -19,7 +19,7 @@ from ..core.errors import GateFailure, InvariantError, UsageError
 from ..core.manifest import Manifest
 from ..core.rules import RuleContext, all_rules, evaluate
 from ..core.store import JsonStore
-from ..domains.pipeline import PipelineDomain, summarise
+from ..domains.pipeline import PipelineDomain, describe_run, summarise
 from ..domains.session import SessionDomain
 
 EXIT_OK = 0
@@ -662,7 +662,7 @@ def cmd_pipeline_coverage(args) -> int:
         # — a simulator id most of all — and a wrong one produces a plausible
         # result with no sign of where it came from.
         f"ran: {result['command']}",
-        f"suite: {result['executed']} executed, {result['failed']} failed",
+        f"suite: {describe_run(result)}",
         f"recorded coverage for {result['files']} file(s)",
     ]
     for path, pct in sorted(result["coverage"].items())[:10]:
@@ -737,7 +737,7 @@ def cmd_pipeline_test(args) -> int:
     return emit(
         args,
         record,
-        f"{status}  executed={record['executed']} failed={record['failed']}{note}{hazards}",
+        f"{status}  {describe_run(record)}{note}{hazards}",
     )
 
 
