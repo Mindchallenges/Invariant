@@ -96,6 +96,47 @@ inside that branch's own worktree merges it into itself and the follow-up push
 pushes an unchanged target. Both commands exit zero. The failure is invisible
 without a check, which is exactly the class of problem this library exists for.
 
+### Host binding
+
+A host session and an invariant session are **1:1**. The binding is what makes
+attribution answerable at all: without it, several sessions running against one
+repository are indistinguishable from the shared checkout.
+
+It is made automatically. `session start` runs through a shell, and a shell
+tool call carries no hook payload, so the CLI cannot see the host identifier —
+the host adapter records it in `PostToolUse`, which has the identifier and
+brackets the exact call that registered the session, reading the new session's
+id out of that command's own output rather than guessing.
+
+Enforced in both directions. A host session that already owns a live session
+cannot start a second; a session bound to one host is not rebound to another
+without `--force`. Rebinding silently would hand a pipeline, its evidence and
+its declared file set to an owner that never did the work.
+
+The binding is host-to-session and **never** host-to-worktree. Registering
+without isolating is legitimate — a device soak owns no code — so a session
+with no worktree is fully bound and fully valid.
+
+Three kinds of session stop competing for attribution, because none of them was
+ever a real answer:
+
+| Excluded | Why it was never the caller |
+|---|---|
+| **Stranded** — worktree recorded, gone from disk | Cannot be worked in. Left in, it pads every ambiguity report forever. |
+| **Host ended** — `SessionEnd` fired | Whoever is asking, it is not them. |
+| **Bound elsewhere** | Under 1:1 that is a definite no, not an unknown. |
+
+A host session that owns nothing is therefore **not ambiguous** — it owns
+nothing. It is told to start a session, or to claim an unowned one, rather than
+asked to pick from a list in which none of the entries is it.
+
+`SessionEnd` marks the binding spent; it does **not** abandon the session. The
+session may hold unmerged work in a live worktree, and destroying that because
+a terminal closed would be the library doing the one thing it exists to
+prevent. `invariant session reap` abandons a stranded session only once its
+branch is gone too — a worktree can be removed while its branch still holds
+recoverable commits, so the narrow condition is the safe one.
+
 ### Attribution
 
 Which session a tool call belongs to, most reliable first:

@@ -510,22 +510,42 @@ def build_context(ctx, greeting: bool = False) -> str:
             ctx.cwd, host_session_id=ctx.host_session_id
         )
         unbound = [s for s in candidates if not s.host_session_id]
-        if len(unbound) > 1:
-            return "invariant: " + ambiguity_message(unbound)
-        if greeting:
+
+        if ctx.host_session_id:
+            # A host session that owns nothing is not ambiguous — it owns
+            # nothing. Listing other sessions and asking it to "name the one
+            # you mean" poses a question with no right answer, because under a
+            # 1:1 binding none of them is this caller. The two real options are
+            # to start a session or to claim one that has no owner.
+            if not greeting:
+                return ""
             lines = [
                 "invariant: this host session owns no session yet.",
                 "  Start one before editing: invariant session start <task-name>",
                 "  It binds to this host session automatically — one host "
                 "session, one invariant session.",
             ]
-            if len(unbound) == 1:
-                only = unbound[0]
+            if unbound:
                 lines.append(
-                    f"  Or claim the unowned one: invariant session adopt "
-                    f"<host-id> --id {only.id}  ({only.name}, {only.state})"
+                    f"  {len(unbound)} session(s) here have no owner; claim one "
+                    f"only if it is yours:"
                 )
+                for session in unbound[:6]:
+                    lines.append(
+                        f"    invariant session adopt <host-id> --id {session.id}"
+                        f"   ({session.name}, {session.state})"
+                    )
             return "\n".join(lines)
+
+        # No host identifier at all — a bare CLI call rather than a hook. Here
+        # the directory really is the only evidence, so ambiguity is genuine.
+        if len(unbound) > 1:
+            return "invariant: " + ambiguity_message(unbound)
+        if greeting:
+            return (
+                "invariant: no session is active in this directory.\n"
+                "  Start one before editing: invariant session start <task-name>"
+            )
         return ""
 
     lines.append(f"invariant — session {session.id} ({session.name}) is {session.state}")

@@ -58,6 +58,14 @@ invariant session merge               Validate the merge is being run from the
 invariant session push                Publish the base branch. Refused unless
                                       session.push is enabled (it is off by
                                       default); the barrier then allows one.
+invariant session adopt <host-id> [--id <id>] [--force]
+    Bind a host session to an invariant session. Normally automatic; needed by
+    hand only to claim a session registered before the binding existed.
+
+invariant session reap [--dry-run]
+    Abandon sessions whose worktree AND branch are both gone. A missing
+    worktree alone is not enough: its branch may still hold unmerged commits.
+
 invariant session teardown [--keep-worktree] [--keep-branch]            Verify pushed, remove the worktree,
                                       deregister.
 invariant session list                All registered sessions on this machine.
