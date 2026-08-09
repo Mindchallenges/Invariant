@@ -29,6 +29,15 @@ invariant doctor
     settings wired, state root writable, adapter commands resolvable, memory
     index current. One line per check, exit 1 if any fails.
 
+invariant assets list [--kind agent|command|skill]
+    Every host asset: kind, whether the host can load it, and whether this
+    library or the project owns it.
+
+invariant assets install [--kind ...] [--dry-run]
+    Reinstall library-shipped assets and nothing else. Not a flag on `init`:
+    `init --force` rewrites the manifest, so routing a repair through it would
+    trade a broken asset for a discarded enforcement configuration.
+
 invariant agents list
     Every library agent: installed or not, whether the host can load it, and
     which pipeline role it answers for.

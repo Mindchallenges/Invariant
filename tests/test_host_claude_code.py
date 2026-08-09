@@ -236,7 +236,7 @@ class TestVerifyLoadable:
     def test_loadable_check_names_the_repair(self, installed):
         (agents_dir(installed) / SHIPPED[0].name).unlink()
         _, detail = check(installed.verify(), CHECK_AGENTS_LOADABLE)
-        assert "invariant agents install" in detail
+        assert "invariant assets install" in detail
 
 
 class TestVerifyCurrency:

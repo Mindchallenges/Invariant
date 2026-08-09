@@ -296,7 +296,7 @@ class ClaudeCodeHost:
                 wired = False
         checks.append((CHECK_WIRED, wired, str(settings_path)))
         checks.append(self.hooks_run_check())
-        checks.extend(self.agent_checks())
+        checks.extend(self.asset_checks())
         return checks
 
     def hooks_run_check(self) -> tuple[str, bool, str]:
@@ -360,6 +360,167 @@ class ClaudeCodeHost:
                 else f"all {len(EVENTS)} evaluated and returned a verdict"
             ),
         )
+
+    def asset_checks(self) -> list[tuple[str, bool, str]]:
+        """Loadability and currency, for every kind the host reads.
+
+        Both questions for every kind, because they answer different things and
+        neither may stand in for the other — that conflation is what left four
+        agents unloadable while `verify` called them current.
+
+        Loadability covers PROJECT-OWNED files too. A local command that
+        silently fails to load is the same outage as a shipped one, and until
+        now nothing looked at commands or skills at all.
+        """
+        from . import assets
+
+        checks: list[tuple[str, bool, str]] = []
+        for kind in assets.KINDS:
+            installed = kind.paths(self.claude_dir)
+            unloadable: list[str] = []
+            for path in installed:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    unloadable.append(f"{kind.identity(path)} ({type(exc).__name__})")
+                    continue
+                problem = assets.loadability_problem(kind, text, kind.identity(path))
+                if problem:
+                    unloadable.append(f"{kind.identity(path)} ({problem})")
+
+            # A shipped asset that is absent cannot load, and absence is the
+            # strongest form of that. Currency reports it too, but a reader
+            # seeing "loadable: ok" beside a missing agent has been told the
+            # wrong thing by the check whose whole job is that question.
+            present = {kind.identity(path) for path in installed}
+            for identity in self._shipped_identities(kind):
+                if identity not in present:
+                    unloadable.append(f"{identity} (absent)")
+
+            checks.append(
+                (
+                    f"{kind.name}s loadable by host",
+                    not unloadable,
+                    (
+                        ", ".join(unloadable) + "  — repair with: invariant assets install"
+                        if unloadable
+                        else f"{len(installed)} {kind.name}(s) parse and are addressable"
+                    )
+                    if installed
+                    else f"no {kind.name}s installed",
+                )
+            )
+
+            stale = self._stale_for(kind)
+            if stale is not None:
+                checks.append(
+                    (
+                        f"library {kind.name}s current",
+                        not stale,
+                        ", ".join(stale) if stale else "all match the shipped version",
+                    )
+                )
+        return checks
+
+    def _shipped_identities(self, kind) -> list[str]:
+        """What this library ships of a kind, by name."""
+        root = DATA_DIR / kind.directory
+        if not root.is_dir():
+            return []
+        if kind.nested_file:
+            return sorted(
+                c.name for c in root.iterdir() if (c / kind.nested_file).is_file()
+            )
+        return sorted(p.stem for p in root.glob("*.md"))
+
+    def _stale_for(self, kind) -> list[str] | None:
+        """Which shipped assets of this kind differ from what we ship.
+
+        ``None`` when the library ships none of this kind — a project owning
+        every command is not drift, and reporting "0 stale" would imply this
+        library had an opinion about files it never wrote.
+        """
+        from . import assets
+
+        source_root = DATA_DIR / kind.directory
+        sources = (
+            sorted(source_root.glob("*.md"))
+            if not kind.nested_file
+            else sorted(
+                c / kind.nested_file
+                for c in source_root.iterdir()
+                if (c / kind.nested_file).is_file()
+            )
+            if source_root.is_dir()
+            else []
+        )
+        if not source_root.is_dir() or not sources:
+            return None
+
+        stale: list[str] = []
+        for source in sources:
+            identity = kind.identity(source)
+            target = self._target_for(kind, identity)
+            if not target.is_file():
+                stale.append(f"{identity} (absent)")
+                continue
+            text = target.read_text(encoding="utf-8")
+            shipped = source.read_text(encoding="utf-8")
+            rebuilt = assets.reconstruct_source(text)
+            if rebuilt is None:
+                stale.append(f"{identity} (unreadable)")
+            elif rebuilt != shipped:
+                if assets.marker_digest(text) == digest_of(shipped):
+                    stale.append(f"{identity} (edited locally)")
+                else:
+                    stale.append(f"{identity} (installed from an older version)")
+        return stale
+
+    def _target_for(self, kind, identity: str) -> Path:
+        base = self.claude_dir / kind.directory
+        if kind.nested_file:
+            return base / identity / kind.nested_file
+        return base / f"{identity}.md"
+
+    def install_assets(self, only: str | None = None) -> list[str]:
+        """Install every library-shipped asset, or one kind of them."""
+        from . import assets
+
+        installed: list[str] = []
+        for kind in assets.KINDS:
+            if only and kind.name != only:
+                continue
+            source_root = DATA_DIR / kind.directory
+            if not source_root.is_dir():
+                continue
+            sources = (
+                sorted(source_root.glob("*.md"))
+                if not kind.nested_file
+                else sorted(
+                    c / kind.nested_file
+                    for c in source_root.iterdir()
+                    if (c / kind.nested_file).is_file()
+                )
+            )
+            for source in sources:
+                identity = kind.identity(source)
+                target = self._target_for(kind, identity)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                body = source.read_text(encoding="utf-8")
+                try:
+                    target.write_text(
+                        assets.render_managed(body, digest_of(body)), encoding="utf-8"
+                    )
+                except ValueError as exc:
+                    raise InvariantError(
+                        f"{kind.name} {identity!r} has no YAML frontmatter starting "
+                        f"on line 1. The host identifies it by that block; a file "
+                        f"without one is copied into place and then silently "
+                        f"ignored, so installing it would look like success and "
+                        f"produce nothing."
+                    ) from exc
+                installed.append(f"{kind.name}:{identity}")
+        return installed
 
     def agent_checks(self) -> list[tuple[str, bool, str]]:
         """Two questions, kept apart on purpose.

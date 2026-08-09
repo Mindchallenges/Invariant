@@ -184,8 +184,10 @@ actually happened.
     invariant/
       state/                gitignored; per-session JSON + locked registry
     hooks/                  thin shims that exec the CLI
-    agents/                 library agents installed as copies with an
-                            in-frontmatter content hash; local agents untouched
+    agents/                 \
+    commands/                > managed host assets: library copies carry an
+    skills/<name>/SKILL.md  /  in-frontmatter content hash; project-owned files
+                               are checked for LOADABILITY but never for drift
   docs/                     architecture docs the docs-first gate reads
 ```
 

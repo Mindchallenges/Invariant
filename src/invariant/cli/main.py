@@ -365,6 +365,75 @@ def cmd_doctor(args) -> int:
 # -- agents ------------------------------------------------------------
 
 
+def cmd_assets_list(args) -> int:
+    """Every host asset, what kind it is, whether it loads, and who owns it."""
+    from ..hosts import assets as A
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    ctx = Context()
+    host = ClaudeCodeHost(ctx.manifest.root)
+    roles = ctx.manifest.get("agents.roles") or {}
+    role_of = {a: role for role, agents in roles.items() for a in (agents or [])}
+
+    rows = []
+    for kind in A.KINDS:
+        if args.kind and kind.name != args.kind:
+            continue
+        for path in kind.paths(host.claude_dir):
+            identity = kind.identity(path)
+            text = path.read_text(encoding="utf-8")
+            problem = A.loadability_problem(kind, text, identity)
+            rows.append(
+                {
+                    "kind": kind.name,
+                    "name": identity,
+                    "status": f"UNLOADABLE — {problem}" if problem else "loadable",
+                    # Ownership, because a project's own file is not drift and
+                    # must never be reported as such.
+                    "owner": "library" if A.is_managed(text) else "project",
+                    "role": role_of.get(identity, ""),
+                }
+            )
+
+    width = max((len(r["name"]) for r in rows), default=1)
+    text = "\n".join(
+        f"  {r['kind']:<8} {r['name']:<{width}}  {r['status']:<12} [{r['owner']}]"
+        + (f"  ({r['role']} role)" if r["role"] else "")
+        for r in rows
+    )
+    return emit(args, {"assets": rows}, text or "  (none installed)")
+
+
+def cmd_assets_install(args) -> int:
+    """Reinstall library-shipped assets and nothing else.
+
+    Separate from ``init`` deliberately: ``init --force`` rewrites the manifest,
+    so routing a repair through it would trade a broken asset file for a
+    discarded enforcement configuration.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    ctx = Context()
+    host = ClaudeCodeHost(ctx.manifest.root)
+
+    if args.dry_run:
+        return emit(args, {"dry_run": True}, "would reinstall library assets")
+
+    installed = host.install_assets(only=args.kind)
+    failures = [
+        (label, detail)
+        for label, ok, detail in host.asset_checks()
+        if not ok and "loadable" in label
+    ]
+    lines = [f"installed {len(installed)} asset(s)"] + [f"  {i}" for i in installed]
+    for label, detail in failures:
+        lines.append(f"  STILL BROKEN — {label}: {detail}")
+    if not failures:
+        lines.append("  reload the host's configuration for it to pick them up")
+    emit(args, {"installed": installed, "loadable": not failures}, "\n".join(lines))
+    return EXIT_OK if not failures else 1
+
+
 def cmd_agents_list(args) -> int:
     """What is installed, whether the host can load it, and who owns which role."""
     from ..hosts.claude_code import DATA_DIR, ClaudeCodeHost, loadability_problem
@@ -1128,6 +1197,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     # agents — repair without touching the manifest, which is why this is not
     # a flag on `init`.
+    kinds = [k.name for k in __import__(
+        "invariant.hosts.assets", fromlist=["KINDS"]
+    ).KINDS]
+    aset = sub.add_parser(
+        "assets", help="host assets: agents, commands, skills"
+    ).add_subparsers(dest="sub", required=True)
+    q = aset.add_parser("list", help="every asset, whether it loads, and who owns it")
+    q.add_argument("--kind", choices=kinds)
+    q.set_defaults(func=cmd_assets_list)
+    q = aset.add_parser("install", help="reinstall library-shipped assets")
+    q.add_argument("--kind", choices=kinds)
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_assets_install)
+
     agents = sub.add_parser("agents").add_subparsers(dest="sub", required=True)
     agents.add_parser("list", help="installed agents and whether the host can load them"
                       ).set_defaults(func=cmd_agents_list)
