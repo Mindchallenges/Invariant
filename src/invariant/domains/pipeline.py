@@ -278,6 +278,23 @@ class PipelineDomain:
             ran.append(agent_type)
             self._save(session_id, pipeline)
 
+    def _fresh_bundle(self, session_id: str, kind: str) -> Path:
+        """A per-run result-bundle path, cleared before use.
+
+        Per SESSION and per KIND, never shared: two concurrent sessions writing
+        one bundle would overwrite each other's measurements while both
+        reported success. Cleared because xcodebuild refuses an existing path,
+        and because a stale bundle read as a fresh one would republish the
+        previous run's numbers.
+        """
+        bundle = Path(self.store.root) / "coverage" / f"{session_id}.{kind}.xcresult"
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        if bundle.exists():
+            import shutil
+
+            shutil.rmtree(bundle, ignore_errors=True)
+        return bundle
+
     def run_coverage(self, session_id: str, cwd: Path | None = None) -> dict:
         """Run the configured coverage command and record what it measured.
 
@@ -295,13 +312,7 @@ class PipelineDomain:
         # result-bundle path into a manifest would make it shared state between
         # concurrent sessions, and two runs would overwrite each other's
         # measurements while both reported success.
-        bundle = Path(self.store.root) / "coverage" / f"{session_id}.xcresult"
-        bundle.parent.mkdir(parents=True, exist_ok=True)
-        if bundle.exists():
-            import shutil
-
-            shutil.rmtree(bundle, ignore_errors=True)
-
+        bundle = self._fresh_bundle(session_id, "coverage")
         command = self.manifest.command_for("coverage", result_bundle=str(bundle))
         adapter = get_adapter(self.manifest.ecosystems[0])
 
@@ -309,7 +320,9 @@ class PipelineDomain:
             command, shell=True, cwd=str(root), capture_output=True, text=True
         )
         combined = f"{proc.stdout}\n{proc.stderr}"
-        outcome = adapter.parse_test_output(proc.stdout, proc.stderr, proc.returncode)
+        outcome = adapter.read_run(
+            proc.stdout, proc.stderr, proc.returncode, bundle=bundle
+        )
         measured = adapter.parse_coverage(combined)
 
         # A suite that never ran cannot have measured anything, and a report
@@ -402,9 +415,11 @@ class PipelineDomain:
         """Run the configured suite and record what actually happened."""
         pipeline = self.require(session_id)
         command_key = "test_one" if selector else "test"
-        command = self.manifest.command_for(
-            command_key, **({"selector": selector} if selector else {})
-        )
+        bundle = self._fresh_bundle(session_id, "test")
+        extra = {"result_bundle": str(bundle)}
+        if selector:
+            extra["selector"] = selector
+        command = self.manifest.command_for(command_key, **extra)
         adapter = get_adapter(self.manifest.ecosystems[0])
 
         proc = subprocess.run(
@@ -414,7 +429,9 @@ class PipelineDomain:
             capture_output=True,
             text=True,
         )
-        result = adapter.parse_test_output(proc.stdout, proc.stderr, proc.returncode)
+        result = adapter.read_run(
+            proc.stdout, proc.stderr, proc.returncode, bundle=bundle
+        )
 
         return self._record_test_run(
             session_id, phase or pipeline.state, command, result
@@ -441,6 +458,13 @@ class PipelineDomain:
             "executed": result.total,
             "failed": result.failed,
             "failed_tests": result.failed_tests,
+            # Where the counts came from, and what they ran on. Both were
+            # unanswerable from the record until now, and both mattered: one
+            # session's numbers came from a peer's simulator, and another's
+            # came from a console layout that under-reported by 400x.
+            "source": result.source,
+            "device": result.device,
+            "skipped": result.skipped,
             "hazards": [h.id for h in result.hazards],
             "note": result.note,
         }
@@ -485,6 +509,15 @@ def describe_run(record: dict) -> str:
         parts.append(f"{failed} failure(s)")
     else:
         parts.append("no failures")
+
+    if record.get("skipped"):
+        parts.append(f"{record['skipped']} skipped")
+    # Where the number came from, because a console fallback and a bundle read
+    # produce the same-looking line and are not equally trustworthy.
+    if record.get("source") == "console":
+        parts.append("counts scraped from console output")
+    if record.get("device"):
+        parts.append(f"on {record['device']}")
     return ", ".join(parts)
 
 

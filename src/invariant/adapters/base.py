@@ -14,7 +14,7 @@ might not be.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,15 @@ class TestResult:
     #: reading "executed=14 failed=6" invites the reader to look for six failing
     #: tests among fourteen — there were two.
     failed_tests: int | None = None
+    #: Where the counts came from: ``"console"`` (scraped from output) or
+    #: ``"result_bundle"`` (read from the run's own machine-readable record).
+    #: Recorded rather than assumed, so a silent fall back to scraping is
+    #: visible in the evidence instead of looking like a bundle read.
+    source: str = "console"
+    #: The device the run actually executed on, when the source can say. Two
+    #: sessions ran on a peer's simulator without either being able to tell.
+    device: str | None = None
+    skipped: int | None = None
     hazards: list[Hazard] = field(default_factory=list)
     note: str = ""
 
@@ -94,6 +103,47 @@ class TestResult:
 
 class Adapter:
     """Base adapter. ``generic`` is this class, unmodified."""
+
+    def result_bundle_counts(self, path) -> dict | None:
+        """Authoritative counts from a machine-readable run artifact.
+
+        ``None`` means this ecosystem has no such artifact, or it could not be
+        read. Console output is a *rendering* of a run; where the run also
+        writes a structured record, that record is the fact and the text is a
+        summary of it — and scraping a summary has now been wrong twice in one
+        day, in both directions.
+        """
+        return None
+
+    def read_run(self, stdout: str, stderr: str, code: int, bundle=None) -> "TestResult":
+        """The run's outcome, preferring the structured record over the text.
+
+        The exit status still decides ``passed``, because a build that failed
+        before any test ran produces no bundle at all — the bundle can only
+        speak about tests that happened.
+        """
+        result = self.parse_test_output(stdout, stderr, code)
+        counts = self.result_bundle_counts(bundle) if bundle else None
+        if not counts:
+            return result
+
+        note = result.note
+        if code == 0 and str(counts.get("result", "")).lower() == "failed":
+            note = (
+                "the process exited zero but its result bundle records the run "
+                "as failed — trusting the bundle"
+            )
+        return replace(
+            result,
+            total=counts.get("total", result.total),
+            failed=counts.get("failed", result.failed),
+            failed_tests=counts.get("failed", result.failed_tests),
+            skipped=counts.get("skipped"),
+            device=counts.get("device"),
+            source="result_bundle",
+            passed=result.passed and str(counts.get("result", "")).lower() != "failed",
+            note=note,
+        )
 
     id = "generic"
     manifest_defaults: dict[str, Any] = {}

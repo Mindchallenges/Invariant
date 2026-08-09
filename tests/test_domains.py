@@ -1165,7 +1165,11 @@ exit 0
         pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
         pipelines.run_coverage(session.id, cwd=m.root)
 
-        bundle = Path(pipelines.store.root) / "coverage" / f"{session.id}.xcresult"
+        # Per session AND per kind: a test run and a coverage run must not
+        # share a bundle, or one would clear the other's mid-flight.
+        bundle = (
+            Path(pipelines.store.root) / "coverage" / f"{session.id}.coverage.xcresult"
+        )
         bundle.mkdir(parents=True, exist_ok=True)
         (bundle / "marker").write_text("stale", encoding="utf-8")
 
@@ -1207,3 +1211,33 @@ class TestDescribeRun:
         assert "? test(s) executed" in describe_run(
             {"executed": None, "failed": 0, "failed_tests": None}
         )
+
+
+class TestDescribeRunNamesItsSource:
+    def test_a_console_fallback_says_so(self):
+        """A scraped count and a bundle read render the same otherwise, and
+        they are not equally trustworthy."""
+        line = describe_run(
+            {"executed": 34, "failed": 0, "failed_tests": None, "source": "console"}
+        )
+        assert "scraped from console" in line
+
+    def test_a_bundle_read_is_not_annotated(self):
+        line = describe_run(
+            {"executed": 13950, "failed": 625, "failed_tests": 625,
+             "source": "result_bundle"}
+        )
+        assert "scraped" not in line
+
+    def test_the_device_is_named_when_known(self):
+        line = describe_run(
+            {"executed": 10, "failed": 0, "source": "result_bundle",
+             "device": "Heap-wt-mine (ABC)"}
+        )
+        assert "on Heap-wt-mine (ABC)" in line
+
+    def test_skipped_tests_are_reported(self):
+        line = describe_run(
+            {"executed": 100, "failed": 0, "skipped": 2, "source": "result_bundle"}
+        )
+        assert "2 skipped" in line

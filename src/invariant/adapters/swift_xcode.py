@@ -22,9 +22,14 @@ class SwiftXcodeAdapter(Adapter):
     manifest_defaults = {
         "commands": {
             "build": "xcodebuild build -workspace {workspace} -scheme {scheme}",
+            # -resultBundlePath is not optional decoration. The bundle is the
+            # run's own machine-readable record, and it is the only source that
+            # reports test CASES rather than a console layout that changes with
+            # parallelism. Console parsing stays as the fallback.
             "test": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
-                "-destination 'platform=iOS Simulator,id={destination_id}'"
+                "-destination 'platform=iOS Simulator,id={destination_id}' "
+                "-resultBundlePath {result_bundle}"
             ),
             # Two commands, which is presumably why this slot stayed empty
             # while the single-command ecosystems got one. xccov reads a result
@@ -49,6 +54,7 @@ class SwiftXcodeAdapter(Adapter):
             "test_one": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}' "
+                "-resultBundlePath {result_bundle} "
                 "-only-testing:{selector}"
             ),
         },
@@ -181,6 +187,59 @@ class SwiftXcodeAdapter(Adapter):
             hazards=live,
             note=note,
         )
+
+    def result_bundle_counts(self, path) -> dict | None:
+        """Counts from the .xcresult bundle — the run's own record of itself.
+
+        Every number here is in the unit a reader expects: ``totalTestCount``
+        and ``failedTests`` are test CASES, not assertions, and they do not
+        depend on how xcodebuild chose to lay out its console summaries. The
+        console parser stays as a fallback, because a bundle is only written
+        when ``-resultBundlePath`` was passed and ``xcresulttool`` is reachable
+        — on a machine whose ``xcode-select`` points at CommandLineTools it is
+        not, without DEVELOPER_DIR.
+        """
+        import json
+        import subprocess
+
+        if not path or not Path(path).exists():
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    "xcrun", "xcresulttool", "get", "test-results", "summary",
+                    "--path", str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or data.get("totalTestCount") is None:
+            return None
+
+        device = None
+        for entry in data.get("devicesAndConfigurations") or []:
+            name = (entry.get("device") or {}).get("deviceName")
+            identifier = (entry.get("device") or {}).get("deviceId")
+            if name or identifier:
+                device = f"{name or '?'} ({identifier or '?'})"
+                break
+
+        return {
+            "total": data.get("totalTestCount"),
+            "failed": data.get("failedTests"),
+            "skipped": data.get("skippedTests"),
+            "result": data.get("result"),
+            "device": device,
+        }
 
     def parse_coverage(self, raw: str) -> dict[str, float]:
         out: dict[str, float] = {}

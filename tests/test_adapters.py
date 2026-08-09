@@ -388,3 +388,79 @@ Test Suite 'All tests' failed at 2026-08-09.
     def test_a_green_run_names_no_failing_cases(self):
         text = "\t Executed 14 tests, with 0 failures (0 unexpected) in 1.0 (1.1) s\n"
         assert self.ADAPTER.parse_test_output(text, "", 0).failed_tests is None
+
+
+class TestResultBundleIsPreferredOverConsole:
+    """The console is a rendering of a run; the bundle is the run's own record.
+
+    Scraping the rendering was wrong twice in one day, in both directions —
+    over-counting by nesting depth, then under-counting by 400x because
+    parallel clones each print their own aggregate. The bundle reports test
+    CASES and does not change shape with parallelism.
+    """
+
+    ADAPTER = get_adapter("swift")
+
+    CONSOLE = (
+        "Test Suite 'All tests' failed at 2026-08-09.\n"
+        "\t Executed 34 tests, with 0 failures (0 unexpected) in 1.0 (1.0) seconds\n"
+    )
+
+    class FakeAdapter:
+        pass
+
+    def adapter_returning(self, counts):
+        from invariant.adapters.swift_xcode import SwiftXcodeAdapter
+
+        class Stub(SwiftXcodeAdapter):
+            def result_bundle_counts(self, path):
+                return counts
+
+        return Stub()
+
+    def test_bundle_counts_win_over_the_console(self):
+        adapter = self.adapter_returning(
+            {"total": 13950, "failed": 625, "skipped": 2, "result": "Failed",
+             "device": "Heap-wt-mine (ABC)"}
+        )
+        result = adapter.read_run(self.CONSOLE, "", 65, bundle="/some/path")
+        assert result.total == 13950
+        assert result.failed == 625
+        assert result.failed_tests == 625  # test CASES, the unit a reader expects
+        assert result.skipped == 2
+
+    def test_the_source_is_recorded_not_assumed(self):
+        adapter = self.adapter_returning({"total": 10, "failed": 0, "result": "Passed"})
+        assert adapter.read_run(self.CONSOLE, "", 0, bundle="/p").source == "result_bundle"
+
+    def test_the_device_is_carried_out_of_the_bundle(self):
+        """Two sessions ran on a peer's simulator with no way to tell."""
+        adapter = self.adapter_returning(
+            {"total": 10, "failed": 0, "result": "Passed", "device": "Heap-wt-mine (ABC)"}
+        )
+        assert adapter.read_run(self.CONSOLE, "", 0, bundle="/p").device == "Heap-wt-mine (ABC)"
+
+    def test_an_unreadable_bundle_falls_back_to_the_console_and_says_so(self):
+        """The fallback must be visible, not silent."""
+        adapter = self.adapter_returning(None)
+        result = adapter.read_run(self.CONSOLE, "", 65, bundle="/missing")
+        assert result.total == 34
+        assert result.source == "console"
+
+    def test_no_bundle_at_all_is_the_console_path(self):
+        result = self.ADAPTER.read_run(self.CONSOLE, "", 65, bundle=None)
+        assert result.source == "console"
+
+    def test_a_bundle_saying_failed_overrides_a_zero_exit(self):
+        """Exit zero with a failed bundle is a contradiction, resolved toward red."""
+        adapter = self.adapter_returning(
+            {"total": 100, "failed": 3, "result": "Failed"}
+        )
+        result = adapter.read_run(self.CONSOLE, "", 0, bundle="/p")
+        assert not result.passed
+        assert "exited zero" in result.note
+
+    def test_the_exit_code_still_decides_a_build_failure(self):
+        """A build that died before any test ran writes no usable bundle."""
+        adapter = self.adapter_returning(None)
+        assert not adapter.read_run("error: build failed", "", 65, bundle="/p").passed
