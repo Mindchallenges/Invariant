@@ -384,9 +384,26 @@ class FakeSession:
     id = "s1"
 
 
-class FakeCtx:
+class FakeSessions:
     def __init__(self):
+        self.adopted: list[tuple[str, str]] = []
+        self.ended: list[str] = []
+        self.raises = None
+
+    def adopt_host_session(self, session_id, host_session_id, force=False):
+        if self.raises:
+            raise self.raises
+        self.adopted.append((session_id, host_session_id))
+
+    def end_host_session(self, host_session_id):
+        self.ended.append(host_session_id)
+
+
+class FakeCtx:
+    def __init__(self, host_session_id="host-1111"):
         self.pipelines = FakePipelines()
+        self.sessions = FakeSessions()
+        self.host_session_id = host_session_id
 
     def current_session(self, strict=True):
         return FakeSession()

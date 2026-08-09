@@ -349,6 +349,45 @@ class ClaudeCodeHost:
             return _context_response("UserPromptSubmit", build_context(ctx))
         if event == "session-start":
             return _context_response("SessionStart", build_context(ctx, greeting=True))
+        if event == "session-end":
+            return self._session_end(ctx)
+        return {}
+
+    def _bind_started_session(self, payload: dict, ctx) -> None:
+        if not ctx.host_session_id:
+            return
+        tool_input = payload.get("tool_input") or {}
+        command = str(tool_input.get("command", ""))
+        if not _SESSION_START.search(command):
+            return
+
+        response = payload.get("tool_response")
+        if isinstance(response, dict):
+            response = response.get("stdout") or response.get("output") or ""
+        session_id = _bind_started_session_id(str(response or ""))
+        if not session_id:
+            return
+
+        try:
+            ctx.sessions.adopt_host_session(session_id, ctx.host_session_id)
+        except InvariantError:
+            # Already bound, or this host already owns one. Both are the 1:1
+            # rule working; neither is a reason to fail a completed command.
+            pass
+
+    def _session_end(self, ctx) -> dict:
+        """The host session is over; its invariant session is nobody's now.
+
+        Marked, not abandoned. The session may hold unmerged work in a live
+        worktree, and destroying that because a terminal closed would be the
+        library doing the exact thing it exists to prevent.
+        """
+        if not ctx.host_session_id:
+            return {}
+        try:
+            ctx.sessions.end_host_session(ctx.host_session_id)
+        except InvariantError:
+            pass
         return {}
 
     def _pre_tool_use(self, payload: dict, ctx) -> dict:
@@ -379,6 +418,17 @@ class ClaudeCodeHost:
         # Reading an architecture doc feeds the docs-first gate; dispatching a
         # subagent feeds the agent-role gates.
         tool = str(payload.get("tool_name", ""))
+
+        # A session registered through the CLI cannot see the host identifier:
+        # a Bash tool call carries no hook payload, so `session start` has
+        # nothing to record. This event does have it, and it brackets the exact
+        # call that did the registering — so the binding is made here, where
+        # both halves are in hand, rather than left to a flag someone has to
+        # remember to pass.
+        if tool == "Bash":
+            self._bind_started_session(payload, ctx)
+            return {}
+
         if tool != "Read" and tool not in AGENT_TOOLS:
             return {}
 
@@ -399,6 +449,29 @@ class ClaudeCodeHost:
         except InvariantError:
             pass
         return {}
+
+
+#: `invariant session start <name>` — with any flags, and however the command
+#: was reached (a bare call, or one wrapped in `cd … &&`).
+_SESSION_START = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+start\b")
+
+#: The identifier `session start` prints. Parsed rather than guessed, so the
+#: binding names the session that command actually created.
+_STARTED_ID = re.compile(r"session\s+([0-9a-z]+)\s+\(")
+
+
+def _bind_started_session_id(response: str) -> str | None:
+    """The session id out of `session start` output, text or JSON."""
+    try:
+        data = json.loads(response)
+    except (json.JSONDecodeError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        session = data.get("session")
+        if isinstance(session, dict) and session.get("id"):
+            return str(session["id"])
+    match = _STARTED_ID.search(response or "")
+    return match.group(1) if match else None
 
 
 def _context_response(event_name: str, text: str) -> dict:
@@ -427,14 +500,32 @@ def build_context(ctx, greeting: bool = False) -> str:
         # registered here (start one), or several are and the directory cannot
         # say which (name one). Telling an agent with three live sessions to
         # start a fourth is how this deadlocked in the first place.
-        candidates = ctx.sessions.origin_candidates(ctx.cwd)
-        if len(candidates) > 1:
-            return "invariant: " + ambiguity_message(candidates)
+        #
+        # Under the 1:1 binding, a host session that owns nothing is in the
+        # first case however many sessions exist — the others are provably not
+        # it, because they answer to a different host. Listing them as
+        # candidates asked the reader to choose between options that were all
+        # wrong.
+        candidates = ctx.sessions.origin_candidates(
+            ctx.cwd, host_session_id=ctx.host_session_id
+        )
+        unbound = [s for s in candidates if not s.host_session_id]
+        if len(unbound) > 1:
+            return "invariant: " + ambiguity_message(unbound)
         if greeting:
-            return (
-                "invariant: no session is active in this directory.\n"
-                "  Start one before editing: invariant session start <task-name>"
-            )
+            lines = [
+                "invariant: this host session owns no session yet.",
+                "  Start one before editing: invariant session start <task-name>",
+                "  It binds to this host session automatically — one host "
+                "session, one invariant session.",
+            ]
+            if len(unbound) == 1:
+                only = unbound[0]
+                lines.append(
+                    f"  Or claim the unowned one: invariant session adopt "
+                    f"<host-id> --id {only.id}  ({only.name}, {only.state})"
+                )
+            return "\n".join(lines)
         return ""
 
     lines.append(f"invariant — session {session.id} ({session.name}) is {session.state}")

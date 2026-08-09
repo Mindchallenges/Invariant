@@ -56,12 +56,33 @@ class Session:
     #: The agent host's own session identifier. The only attribution signal
     #: that survives a host resetting the working directory between calls.
     host_session_id: str | None = None
+    #: Set when the host session that owned this one ended. The record stays —
+    #: it is the evidence of what happened — but a session whose host is gone
+    #: is nobody's current session and must stop competing for attribution.
+    host_ended: bool = False
     base: str = "master"
     files: list[str] = field(default_factory=list)
     push_count: int = 0
     history: list[dict] = field(default_factory=list)
     overrides: list[dict] = field(default_factory=list)
     heartbeat: float = 0.0
+
+    @property
+    def is_stranded(self) -> bool:
+        """Recorded a worktree that is no longer on disk.
+
+        Touches the filesystem, deliberately: git prunes worktree metadata
+        lazily, so ``git worktree list`` still names a directory somebody
+        deleted by hand. The directory's existence is the signal that does not
+        lag. A session that never isolated is not stranded — it has nothing to
+        be missing.
+        """
+        if not self.worktree:
+            return False
+        try:
+            return not Path(self.worktree).exists()
+        except OSError:
+            return False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -191,7 +212,7 @@ class SessionDomain:
         # session was registered: a session that has not isolated yet has no
         # worktree at all, and one that just isolated leaves the caller
         # standing in the origin. Both need to stay addressable.
-        candidates = self.origin_candidates(cwd)
+        candidates = self.origin_candidates(cwd, host_session_id=host_session_id)
         if len(candidates) == 1:
             return Resolution(candidates[0], "origin")
         if len(candidates) > 1:
@@ -209,7 +230,7 @@ class SessionDomain:
         for session in self.list():
             if session.state in {"torn_down", "abandoned"}:
                 continue
-            if not session.worktree:
+            if not session.worktree or session.is_stranded:
                 continue
             try:
                 worktree = Path(session.worktree).resolve()
@@ -221,8 +242,44 @@ class SessionDomain:
                     best, best_len = session, len(str(worktree))
         return best
 
-    def origin_candidates(self, cwd: Path | None = None) -> list[Session]:
-        """Live sessions registered at or above ``cwd``.
+    def live(self) -> list[Session]:
+        return [s for s in self.list() if s.state not in {"torn_down", "abandoned"}]
+
+    def attributable(self, host_session_id: str | None = None) -> list[Session]:
+        """Live sessions that could plausibly be the caller.
+
+        Three kinds are excluded, and each exclusion removes a candidate that
+        was never a real answer:
+
+        * **Stranded** — a worktree was recorded and is no longer on disk. The
+          session cannot be worked in, and left in the list it pads every
+          ambiguity report forever.
+        * **Host ended** — the host session that owned it is gone. Whoever is
+          asking, it is not them.
+        * **Bound elsewhere** — owned by a different host session. Under a 1:1
+          binding that is a definite no, not an unknown.
+
+        A session with no worktree at all is *not* excluded: registering
+        without isolating is legitimate — a device soak owns no code — and the
+        binding is host-to-session, never host-to-worktree.
+        """
+        out = []
+        for session in self.live():
+            if session.host_ended or session.is_stranded:
+                continue
+            if (
+                host_session_id
+                and session.host_session_id
+                and session.host_session_id != host_session_id
+            ):
+                continue
+            out.append(session)
+        return out
+
+    def origin_candidates(
+        self, cwd: Path | None = None, host_session_id: str | None = None
+    ) -> list[Session]:
+        """Attributable sessions registered at or above ``cwd``.
 
         Split out from :meth:`current` so that a caller which must not fail on
         ambiguity can still describe it.
@@ -230,10 +287,8 @@ class SessionDomain:
         cwd = Path(cwd or Path.cwd()).resolve()
         return [
             s
-            for s in self.list()
-            if s.state not in {"torn_down", "abandoned"}
-            and s.origin
-            and _contains(Path(s.origin), cwd)
+            for s in self.attributable(host_session_id)
+            if s.origin and _contains(Path(s.origin), cwd)
         ]
 
     def by_host_session(self, host_session_id: str | None) -> Session | None:
@@ -247,7 +302,10 @@ class SessionDomain:
         if not host_session_id:
             return None
 
-        live = [s for s in self.list() if s.state not in {"torn_down", "abandoned"}]
+        # A session whose host ended is not a match for anyone, including the
+        # host id it used to carry: a new host session reusing the record would
+        # inherit somebody else's pipeline and file set.
+        live = [s for s in self.live() if not s.host_ended]
 
         for session in live:
             if session.host_session_id and session.host_session_id == host_session_id:
@@ -257,17 +315,98 @@ class SessionDomain:
         if not slug:
             return None
         for session in live:
-            if session.id == slug:
+            # Only an *unbound* session may be claimed by the derived short
+            # form. One already bound to a different host is a coincidence of
+            # naming, not a match.
+            if session.id == slug and not session.host_session_id:
                 return session
         return None
 
-    def adopt_host_session(self, session_id: str, host_session_id: str) -> Session:
-        """Record the host identifier on an existing session."""
+    def adopt_host_session(
+        self, session_id: str, host_session_id: str, force: bool = False
+    ) -> Session:
+        """Bind a host session to this session, 1:1 in both directions.
+
+        Rebinding is refused rather than silently allowed. A session that
+        changes hands keeps its pipeline, its evidence and its declared file
+        set, so the new owner would inherit work it never did — and the old
+        owner would keep editing a session that no longer answers to it.
+        """
         session = self.require(session_id)
+
+        if (
+            not force
+            and session.host_session_id
+            and session.host_session_id != host_session_id
+        ):
+            raise UsageError(
+                f"session {session.id} is already bound to another host "
+                f"session. Rebinding would hand over its pipeline and file "
+                f"set; pass force to do it deliberately."
+            )
+
+        if not force:
+            other = self.by_host_session(host_session_id)
+            if other is not None and other.id != session.id:
+                raise UsageError(
+                    f"this host session already owns session {other.id} "
+                    f"({other.name}). One host session, one invariant session."
+                )
+
         session.host_session_id = host_session_id
         self._save(session)
         self._register(session)
         return session
+
+    def end_host_session(self, host_session_id: str) -> Session | None:
+        """Note that the host session owning a session has ended.
+
+        The session is *not* abandoned. It may hold unmerged work in a live
+        worktree, and destroying that because a terminal closed would be the
+        library doing the one thing it exists to prevent. It stops being an
+        attribution candidate, which is the part that was causing harm, and
+        ``doctor`` reports it as needing a decision.
+        """
+        session = self.by_host_session(host_session_id)
+        if session is None:
+            return None
+        session.host_ended = True
+        self._save(session)
+        self._register(session)
+        return session
+
+    def reap_stranded(self, dry_run: bool = False) -> list[Session]:
+        """Abandon sessions whose worktree *and* branch are both gone.
+
+        Deliberately narrow. A missing worktree alone is not enough — a
+        worktree can be removed while its branch still holds unmerged commits,
+        and that work is recoverable. Once the branch is gone too there is
+        nothing left to protect, and the record is kept as evidence rather than
+        deleted.
+        """
+        existing = {
+            b.strip().lstrip("+* ")
+            for b in _branch_names(self.manifest.root)
+        }
+        reaped: list[Session] = []
+        for session in self.live():
+            if not session.is_stranded:
+                continue
+            if session.branch and session.branch in existing:
+                continue
+            reaped.append(session)
+            if not dry_run:
+                session.state = "abandoned"
+                session.history.append(
+                    {
+                        "from": session.state,
+                        "to": "abandoned",
+                        "reason": "worktree and branch both gone",
+                    }
+                )
+                self._save(session)
+                self._deregister(session.id)
+        return reaped
 
     # -- lifecycle -----------------------------------------------------
 
@@ -289,6 +428,25 @@ class SessionDomain:
         )
         if self.get(session_id) is not None:
             raise UsageError(f"session {session_id!r} already exists")
+
+        # One host session owns at most one live invariant session. Two would
+        # reintroduce the ambiguity the binding exists to remove, and the
+        # second would be indistinguishable from the first for the rest of its
+        # life. Owning a *worktree* stays optional — a device soak with no code
+        # is a legitimate session — so this is a check on the binding, never on
+        # isolation.
+        if host_session_id:
+            existing = self.by_host_session(host_session_id)
+            if existing is not None:
+                raise UsageError(
+                    f"this host session already owns session {existing.id} "
+                    f"({existing.name}, {existing.state}).\n"
+                    f"  Finish it first: invariant session teardown --id "
+                    f"{existing.id}\n"
+                    f"  Or end it deliberately: invariant session transition "
+                    f"abandoned --id {existing.id} --force --reason '<why>'"
+                )
+
         session = Session(
             id=session_id,
             name=_slug(name),
@@ -534,6 +692,18 @@ def host_slug(host_session_id: str | None) -> str:
         return ""
     alphanumeric = "".join(c for c in str(host_session_id) if c.isalnum())
     return alphanumeric[-8:] if alphanumeric else ""
+
+
+def _branch_names(root: Path) -> list[str]:
+    proc = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def _contains(root: Path, candidate: Path) -> bool:

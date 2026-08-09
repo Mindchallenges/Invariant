@@ -178,7 +178,14 @@ class Context:
         session = self.session_for_payload(payload or {})
         pipeline = self.pipelines.current(session.id) if session else None
         ambiguous = (
-            [] if session else [s.to_dict() for s in self.sessions.origin_candidates(self.cwd)]
+            []
+            if session
+            else [
+                s.to_dict()
+                for s in self.sessions.origin_candidates(
+                    self.cwd, host_session_id=self.host_session_id
+                )
+            ]
         )
         return RuleContext(
             manifest=self.manifest,
@@ -497,12 +504,26 @@ def cmd_session_adopt(args) -> int:
                 "'invariant session list' shows the registered ones."
             )
         session_id = current.id
-    updated = ctx.sessions.adopt_host_session(session_id, args.host_session_id)
+    updated = ctx.sessions.adopt_host_session(
+        session_id, args.host_session_id, force=args.force
+    )
     return emit(
         args,
         updated.to_dict(),
         f"session {updated.id} now answers to this host session",
     )
+
+
+def cmd_session_reap(args) -> int:
+    ctx = Context()
+    reaped = ctx.sessions.reap_stranded(dry_run=args.dry_run)
+    verb = "would abandon" if args.dry_run else "abandoned"
+    text = (
+        "\n".join(f"  {verb} {s.id} ({s.name}) — worktree and branch both gone"
+                   for s in reaped)
+        or "  nothing to reap"
+    )
+    return emit(args, {"reaped": [s.id for s in reaped]}, text)
 
 
 def cmd_session_merge(args) -> int:
@@ -1019,7 +1040,14 @@ def build_parser() -> argparse.ArgumentParser:
     q = session.add_parser("adopt", help="bind a host session id to a session")
     q.add_argument("host_session_id")
     q.add_argument("--id")
+    q.add_argument("--force", action="store_true", help="rebind deliberately")
     q.set_defaults(func=cmd_session_adopt)
+
+    q = session.add_parser(
+        "reap", help="abandon sessions whose worktree and branch are both gone"
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_session_reap)
 
     q = session.add_parser("merge")
     q.add_argument("--id")
