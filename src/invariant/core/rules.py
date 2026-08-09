@@ -86,7 +86,23 @@ class Evaluated:
         )
 
     def render(self) -> str:
-        marker = {Level.BLOCK: "BLOCK", Level.WARN: "warn", Level.OFF: "off"}[self.level]
+        """One line per verdict, led by what HAPPENED.
+
+        The marker used to be the rule's configured *level*, so a passing rule
+        in a strict project rendered as ``[BLOCK] coverage.meets_floor: all 3
+        file(s) at or above 90%`` — a pass that reads as a failure at a glance,
+        and was misread as one. The level is a property of the rule; the
+        verdict is what the reader came for. The level still leads on a
+        failure, where it is the part that decides whether work stops.
+        """
+        if self.verdict.skipped:
+            marker = "skip"
+        elif self.verdict.ok:
+            marker = "ok"
+        else:
+            marker = {Level.BLOCK: "BLOCK", Level.WARN: "warn", Level.OFF: "off"}[
+                self.level
+            ]
         lines = [f"[{marker}] {self.rule_id}: {self.verdict.message}"]
         if self.verdict.detail:
             lines.append(f"        {self.verdict.detail}")

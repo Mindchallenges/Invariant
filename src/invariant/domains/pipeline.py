@@ -343,6 +343,13 @@ class PipelineDomain:
         # should not flatten them into one.
         pipeline = self.require(session_id)
         pipeline.evidence["coverage_run"] = {
+            # The resolved command, as test_runs already records. Without it,
+            # a reader of this evidence cannot tell WHICH run produced the
+            # numbers — scoped or whole-suite, which simulator, which flags —
+            # and that ambiguity is not recoverable later. A peer hit exactly
+            # that: unable to tell whether an annotation was missing because
+            # nothing was recorded or because nothing needed annotating.
+            "command": command,
             "executed": outcome.total,
             "failed": outcome.failed,
             "exit_code": proc.returncode,

@@ -1110,3 +1110,40 @@ class TestSameFile:
 
     def test_different_files_do_not_match(self):
         assert not _same_file("Heap/A.swift", "/wt/Heap/B.swift")
+
+
+class TestVerdictRendering:
+    """The marker must say what happened, not what the rule's level is.
+
+    `[BLOCK] coverage.meets_floor: all 3 file(s) at or above 90%` is a PASS,
+    and it was read as a failure by someone who then had to check `--json` to
+    find `ok: true`. The level is a property of the rule; the verdict is what
+    the reader came for.
+    """
+
+    def evaluated(self, verdict, level=Level.BLOCK):
+        from invariant.core.rules import Evaluated
+
+        return Evaluated("some.rule", level, verdict)
+
+    def test_a_pass_leads_with_ok_even_at_block_level(self):
+        line = self.evaluated(Verdict.clean("all 3 file(s) above 90%")).render()
+        assert line.startswith("[ok]")
+        assert "BLOCK" not in line
+
+    def test_a_skip_says_skip(self):
+        assert self.evaluated(Verdict.na("not applicable")).render().startswith("[skip]")
+
+    def test_a_blocking_failure_still_leads_with_block(self):
+        """On a failure the level IS the news — it decides whether work stops."""
+        assert self.evaluated(Verdict.fail("nope")).render().startswith("[BLOCK]")
+
+    def test_an_advisory_failure_leads_with_warn(self):
+        line = self.evaluated(Verdict.fail("nope"), Level.WARN).render()
+        assert line.startswith("[warn]")
+
+    def test_detail_and_fixes_still_render(self):
+        line = self.evaluated(
+            Verdict.fail("nope", detail="because", fixes=("do this",))
+        ).render()
+        assert "because" in line and "try: do this" in line
