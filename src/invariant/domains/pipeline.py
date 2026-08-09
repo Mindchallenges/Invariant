@@ -337,6 +337,14 @@ class PipelineDomain:
 
         self.record_coverage(session_id, measured)
 
+        # A coverage run IS a test run — it runs the suite. Not recording it
+        # left `test.all_pass` reading the last `pipeline test` entry, which
+        # could be an older, narrower, greener run, and answering about that
+        # one as though it were current. A whole-suite run with 625 failures
+        # sat beside a rule saying "the suite is green and the pass is
+        # trustworthy", because the rule was never shown this run at all.
+        self._record_test_run(session_id, "coverage", command, outcome)
+
         # The suite's state at the moment of measurement, kept with it. A file
         # at 100% measured on a run where twelve tests failed is a different
         # fact from the same number measured on a green run, and the record
@@ -408,8 +416,20 @@ class PipelineDomain:
         )
         result = adapter.parse_test_output(proc.stdout, proc.stderr, proc.returncode)
 
+        return self._record_test_run(
+            session_id, phase or pipeline.state, command, result
+        )
+
+    def _record_test_run(self, session_id: str, phase: str, command: str, result):
+        """Append one run to the evidence every test rule reads.
+
+        Shared so that every path which runs the suite lands here. A path that
+        ran the suite and recorded it somewhere else left the test rules
+        answering about a different run than the one that just happened.
+        """
+        pipeline = self.require(session_id)
         record = {
-            "phase": phase or pipeline.state,
+            "phase": phase,
             # The RESOLVED command, placeholders substituted. A discovered
             # value that picked the wrong thing — another session's simulator,
             # say — is otherwise invisible: nothing in the output names what

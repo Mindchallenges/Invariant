@@ -1147,3 +1147,55 @@ class TestVerdictRendering:
             Verdict.fail("nope", detail="because", fixes=("do this",))
         ).render()
         assert "because" in line and "try: do this" in line
+
+
+class TestAllPassReadsTheRunThatHappened:
+    """A green here must mean THIS run was green.
+
+    It reported "suite is green and the pass is trustworthy" while a
+    whole-suite run with 625 failures had just finished — because the coverage
+    path ran the suite and recorded it somewhere the rule never looked, so the
+    rule answered about an older, narrower, greener run.
+    """
+
+    def ctx_with(self, ctx_factory, runs):
+        return ctx_factory(pipeline={"evidence": {"test_runs": runs}})
+
+    def verdict(self, ctx):
+        return only(evaluate(["test.all_pass"], ctx)).verdict
+
+    def test_a_failing_run_is_red(self, ctx_factory):
+        ctx = self.ctx_with(ctx_factory, [{"passed": False, "failed": 625, "executed": 13945}])
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "625" in verdict.message
+
+    def test_an_unknown_failure_count_does_not_read_as_zero(self, ctx_factory):
+        """`failed: None` means the run failed and the count could not be
+        parsed. "0 failing" would be green prose on a red verdict."""
+        ctx = self.ctx_with(
+            ctx_factory, [{"passed": False, "failed": None, "executed": 13945}]
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "unknown" in verdict.message
+        assert "0 failing" not in verdict.message
+
+    def test_a_clean_exit_with_zero_executed_is_not_green(self, ctx_factory):
+        ctx = self.ctx_with(ctx_factory, [{"passed": True, "failed": 0, "executed": 0}])
+        assert not self.verdict(ctx).ok
+
+    def test_a_later_red_run_overrides_an_earlier_green_one(self, ctx_factory):
+        """The reported failure, as a rule-level test."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            [
+                {"phase": "green", "passed": True, "failed": 0, "executed": 34},
+                {"phase": "coverage", "passed": False, "failed": 625, "executed": 13945},
+            ],
+        )
+        assert not self.verdict(ctx).ok
+
+    def test_a_genuine_green_still_passes(self, ctx_factory):
+        ctx = self.ctx_with(ctx_factory, [{"passed": True, "failed": 0, "executed": 34}])
+        assert self.verdict(ctx).ok

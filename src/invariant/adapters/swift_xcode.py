@@ -155,6 +155,21 @@ class SwiftXcodeAdapter(Adapter):
                 "the run exited clean having executed zero tests — check the "
                 "-only-testing: selector"
             )
+        elif code != 0 and failed == 0:
+            # The parse and the exit status disagree, and the exit status is
+            # ground truth: a non-zero exit means something failed, so a
+            # parsed count of zero failures did not come from a run with no
+            # failures — it came from a parse that did not find them.
+            #
+            # `failed` becomes None rather than 0. A zero derived from a failed
+            # parse is indistinguishable downstream from a real zero, and it
+            # renders as green. Absence of evidence is not evidence of absence,
+            # and this is where the difference gets recorded.
+            failed = None
+            note = (
+                f"exit {code} says the run failed, but no failure count could "
+                f"be parsed from its output — the count is unknown, not zero"
+            )
 
         return TestResult(
             passed=code == 0,
@@ -194,20 +209,29 @@ def _parse_counts(text: str) -> tuple[int, int]:
     on a green phase, is indistinguishable afterwards from a run that really
     did execute eighteen tests.
 
-    Taking the last match alone is not enough either, because a run over
-    several test targets emits summaries that genuinely should add up. The
-    outermost "All tests" line already totals those, so it is preferred, and
-    the last summary is the fallback for output that never printed one.
+    Taking the last match alone is not enough either, and taking the last
+    "All tests" line was itself a bug: under PARALLEL testing xcodebuild runs
+    clones and prints one "All tests" aggregate PER CLONE, so the last one is
+    a single clone's tally. A ~13,900-test run reported as 34 executed and 0
+    failed, and a rule downstream called that a trustworthy green.
+
+    Summing the "All tests" aggregates is right for both shapes at once. A
+    single serial run prints exactly one of them — the nested class and bundle
+    summaries are not "All tests" lines, which is what fixed the original
+    over-count — and a parallel run prints one per clone, which genuinely do
+    add up.
 
     ``failed`` is xcodebuild's failure count, which counts failing assertions
     rather than failing test methods; three failing tests raising four
     assertions between them reports four. That is xcodebuild's own accounting
     and is left as it is.
     """
-    outermost = list(_ALL_TESTS.finditer(text))
-    if outermost:
-        match = outermost[-1]
-        return int(match.group(1)), int(match.group(2))
+    aggregates = list(_ALL_TESTS.finditer(text))
+    if aggregates:
+        return (
+            sum(int(m.group(1)) for m in aggregates),
+            sum(int(m.group(2)) for m in aggregates),
+        )
 
     matches = list(_SUMMARY.finditer(text))
     if not matches:

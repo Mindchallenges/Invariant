@@ -231,7 +231,23 @@ Test Suite 'All tests' failed at 2026-08-09.
         )
         assert self.ADAPTER.parse_test_output(text, "", 0).total == 2
 
-    def test_a_rerun_in_one_log_takes_the_later_total(self):
+    def test_two_aggregates_are_summed_even_when_it_might_be_a_rerun(self):
+        """Two "All tests" blocks are ambiguous, and the tie goes to summing.
+
+        They mean parallel clones (which must be summed) or a rerun in one log
+        (which arguably should not be). The readings fail in opposite
+        directions, and only one of those directions is safe:
+
+        * Not summing clones under-reports catastrophically — a ~13,900-test
+          run read as 34 executed, 0 failed, and a rule called it a trustworthy
+          green. Silent, and it opens the gate.
+        * Summing a rerun over-reports and carries the earlier failures
+          forward, so a suite that went red then green reads red. Visible,
+          annoying, and it makes someone look at a suite that needed a retry.
+
+        This test previously asserted the opposite and had to be changed;
+        keeping it would have pinned the unsafe direction.
+        """
         text = (
             "Test Suite 'All tests' failed.\n"
             "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds\n"
@@ -239,7 +255,19 @@ Test Suite 'All tests' failed at 2026-08-09.
             "\t Executed 6 tests, with 0 failures (0 unexpected) in 6.4 (6.4) seconds\n"
         )
         result = self.ADAPTER.parse_test_output(text, "", 0)
-        assert (result.total, result.failed) == (6, 0)
+        assert (result.total, result.failed) == (12, 4)
+
+    def test_parallel_clones_are_summed(self):
+        """The reported case: one aggregate per clone, last one tiny."""
+        text = "".join(
+            f"Test Suite 'All tests' failed.\n"
+            f"\t Executed {n} tests, with {f} failures (0 unexpected) in 1.0 (1.0) seconds\n"
+            for n, f in [(6000, 300), (7000, 300), (34, 0)]
+        )
+        result = self.ADAPTER.parse_test_output(text, "", 65)
+        assert result.total == 13034
+        assert result.failed == 600
+        assert not result.trustworthy
 
     def test_no_summary_at_all_reports_zero_and_is_not_trusted(self):
         """Zero executed on a clean exit stays the untrustworthy case."""

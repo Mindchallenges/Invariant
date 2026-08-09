@@ -748,9 +748,23 @@ def _test_all_pass(ctx: RuleContext) -> Verdict:
         )
     last = runs[-1]
     if not last.get("passed"):
+        failed = last.get("failed")
+        # A failure count of None means the run failed and the count could not
+        # be parsed. Rendering that as "0 failing" would read as green prose
+        # attached to a red verdict.
+        count = "an unknown number of" if failed is None else failed
         return Verdict.fail(
-            f"the last test run failed ({last.get('failed', '?')} failing)",
+            f"the last test run failed ({count} failing)",
+            detail=str(last.get("note") or "") or "",
             fixes=("fix the failures, then re-run",),
+        )
+    if last.get("executed") == 0:
+        return Verdict.fail(
+            "the last run exited clean having executed zero tests",
+            detail="A filter that matches nothing exits zero. 'The suite is "
+            "green' and 'the suite did not run' are the same exit status, and "
+            "only the executed count separates them.",
+            fixes=("check the test selector",),
         )
     hazards = last.get("hazards") or []
     if hazards:
