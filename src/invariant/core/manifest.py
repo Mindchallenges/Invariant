@@ -109,6 +109,15 @@ DEFAULTS: dict[str, Any] = {
         # conflicts with no review value.
         "exempt_paths": [".claude/*", ".claude/**", "MEMORY.md"],
         "worktree_prefix": None,
+        # Whether publishing to a remote is part of the session lifecycle.
+        #
+        # Off by default. A session's job is to get reviewed work onto the base
+        # branch; the worktree and its branch are then removed and the work is
+        # already visible to every other worktree, because they share one object
+        # database. Publishing costs a CI run and is a decision about the
+        # project rather than about the session, so it belongs to whoever is
+        # making that decision — not to whichever agent happened to finish last.
+        "push": False,
     },
     # The markdown backend stores one file per item, so its path is a
     # directory. The json and sphinx_needs backends treat it as a single file.

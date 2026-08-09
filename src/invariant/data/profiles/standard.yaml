@@ -12,6 +12,7 @@ rules:
   session.isolated_before_edit: block
   session.no_edit_in_main_checkout: block
   session.push_barrier: block
+  session.push_enabled: block
   session.ff_merge_target: block
   session.own_file_set_only: warn
   session.named_after_isolating: warn

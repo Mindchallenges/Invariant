@@ -785,3 +785,61 @@ class TestEditAttributionThroughTheHook:
         assert self.hook("pre-tool-use", self.edit_payload(target)) == 0
         response = payload(capsys)
         assert response.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
+
+
+
+class TestPublishingIsOptInThroughTheCli:
+    def project_with(self, project, push: bool):
+        assert run("init", "--name", "demo") == 0
+        manifest = project / ".claude" / "invariant.yaml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + f"\nsession:\n  push: {str(push).lower()}\n",
+            encoding="utf-8",
+        )
+        commit_all(project, "adopt")
+
+    def test_push_is_refused_and_names_the_setting(self, project, capsys):
+        self.project_with(project, push=False)
+        run("session", "start", "x")
+        assert run("session", "push") == 2
+        message = capsys.readouterr().err
+        assert "not part of this project's session lifecycle" in message
+        assert "session.push: true" in message
+        assert "invariant session teardown" in message
+
+    def test_the_refusal_does_not_depend_on_the_barrier_verdict(self, project, capsys):
+        """With publishing off the barrier abstains, so it cannot be the check.
+
+        If `session push` consulted only the barrier it would find no
+        objection and publish — which is the opposite of what the setting says.
+        """
+        self.project_with(project, push=False)
+        run("session", "start", "x")
+        run("rules", "list", "--json")
+        assert run("session", "push") != 0
+
+    def test_enabling_it_makes_the_command_reachable_again(self, project, capsys):
+        self.project_with(project, push=True)
+        run("session", "start", "x")
+        # Refused by the barrier now (not merged), not by the setting.
+        assert run("session", "push") != 0
+        assert "session lifecycle" not in capsys.readouterr().err
+
+    def test_teardown_reports_what_it_removed(self, project, capsys):
+        self.project_with(project, push=False)
+        run("session", "start", "x", "--json")
+        sid = payload(capsys)["session"]["id"]
+        run("session", "isolate", "--execute", "--id", sid)
+        run("session", "list", "--json")
+        branch = payload(capsys)["sessions"][0]["branch"]
+        subprocess.run(
+            ["git", "merge", "--ff-only", branch],
+            cwd=project, check=True, capture_output=True,
+        )
+        for state in ("working", "reviewed", "merged"):
+            run("session", "transition", state, "--id", sid, "--force",
+                "--reason", "test fixture")
+        assert run("session", "teardown", "--id", sid) == 0
+        text = out(capsys)
+        assert "worktree" in text and branch in text

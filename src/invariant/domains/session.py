@@ -369,7 +369,21 @@ class SessionDomain:
         self._advance(session, "pushed", reason="push recorded")
         return session
 
-    def teardown(self, session_id: str, remove_worktree: bool = True) -> Session:
+    def teardown(
+        self,
+        session_id: str,
+        remove_worktree: bool = True,
+        remove_branch: bool = True,
+    ) -> Session:
+        """End the session: worktree gone, branch gone, registry entry gone.
+
+        The branch is deleted with ``git branch -d``, never ``-D``. A safe
+        delete refuses a branch holding commits the base does not have, and
+        that refusal is the whole point: reaching teardown is supposed to mean
+        the work is merged, so a branch that will not delete is evidence the
+        merge did not do what it appeared to. Forcing it would destroy the only
+        copy of that work and report success.
+        """
         session = self.require(session_id)
         if remove_worktree and session.worktree and Path(session.worktree).exists():
             proc = subprocess.run(
@@ -382,6 +396,22 @@ class SessionDomain:
                 raise StateError(
                     f"could not remove {session.worktree}: {proc.stderr.strip()}"
                 )
+
+        if remove_branch and session.branch:
+            proc = subprocess.run(
+                ["git", "branch", "-d", session.branch],
+                cwd=str(self.manifest.root),
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0 and "not found" not in proc.stderr.lower():
+                raise StateError(
+                    f"could not delete {session.branch}: {proc.stderr.strip()}\n"
+                    f"A safe delete refuses a branch whose commits are not in "
+                    f"the base — which means this session's work is not merged "
+                    f"after all. Merge it, or abandon the session deliberately."
+                )
+
         self._advance(session, "torn_down", reason="teardown")
         self._deregister(session.id)
         return session

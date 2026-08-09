@@ -164,10 +164,24 @@ class TestSessionMachine:
         assert not machine.can("reviewed", "pushed")
         assert machine.can("merged", "pushed")
 
-    def test_teardown_only_follows_a_push(self):
+    def test_teardown_follows_a_merge_or_a_push(self):
+        """Publishing is a detour, so the merge is the normal end.
+
+        `merged -> torn_down` is the edge that makes a session finishable
+        without touching a remote. `pushed -> torn_down` stays for projects
+        that opted in.
+        """
         machine = load_session_machine()
+        assert machine.can("merged", "torn_down")
         assert machine.can("pushed", "torn_down")
         assert not machine.can("working", "torn_down")
+        assert not machine.can("reviewed", "torn_down")
+
+    def test_publishing_is_held_by_a_gate_not_by_the_graph(self):
+        """Enabling it must be one manifest line, never a forked machine."""
+        machine = load_session_machine()
+        assert machine.can("merged", "pushed")
+        assert "session.push_enabled" in machine.state("pushed").entry_gates
 
     def test_abandon_is_reachable_from_every_working_state(self):
         machine = load_session_machine()

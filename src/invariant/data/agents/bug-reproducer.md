@@ -308,7 +308,7 @@ Then merge via `invariant session merge` (it validates the fast-forward merge
 is run from the right checkout — a merge run from inside the branch's own
 worktree merges it into itself and exits zero, `session.ff_merge_target`) and
 retire the worktree. **Do not push** — the repro commit rides the session's
-single push at teardown (`session.push_barrier`), and the peer sessions that
+optional single push (`session.push_barrier`), and the peer sessions that
 need to see it read it straight from the shared object store. If the main
 checkout is contended so the merge is refused, leave the commit on the repro
 branch and say so in your report rather than pushing the branch — pushing a

@@ -84,6 +84,7 @@ Invariants this domain enforces:
 |---|---|---|
 | `session.isolated_before_edit` | No file edit while in `registered` — isolate first | block |
 | `session.no_edit_in_main_checkout` | Edits land in the session worktree, never the shared checkout | block |
+| `session.push_enabled` | Publishing is a session step at all (`session.push`, off by default) | block |
 | `session.push_barrier` | At most one push per session, and only from `merged` | block |
 | `session.ff_merge_target` | A fast-forward merge must be run from the main checkout, not inside the worktree | block |
 | `session.own_file_set_only` | Commits touch only files this session declared | warn |

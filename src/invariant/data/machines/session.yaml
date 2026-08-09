@@ -1,9 +1,14 @@
 id: session
 kind: session
 description: >
-  A unit of agent work with an identity, an isolated worktree, and exactly one
-  push. The edges are ordered the way they are so that nothing irreversible
-  happens before something reviewable has.
+  A unit of agent work with an identity and an isolated worktree. The edges are
+  ordered the way they are so that nothing irreversible happens before
+  something reviewable has.
+
+  A session ends at the merge: the worktree and its branch are removed and the
+  work lives on the base branch. Publishing that branch is a separate decision
+  with a separate cost, so `pushed` is a detour rather than a step, reachable
+  only where `session.push` is enabled.
 
 initial: registered
 terminal: [torn_down, abandoned]
@@ -26,12 +31,15 @@ states:
   merged:
     description: Rebased and fast-forward merged into the base branch.
     entry_gates: [session.ff_merge_target]
-    next: [pushed, abandoned]
+    next: [torn_down, pushed, abandoned]
   pushed:
-    description: The single push has happened.
-    entry_gates: [session.push_barrier]
+    description: >
+      The single push has happened. Only reachable where session.push is on;
+      the gate, not the graph, is what holds that, so turning it on needs no
+      change to the machine.
+    entry_gates: [session.push_enabled, session.push_barrier]
     next: [torn_down]
   torn_down:
-    description: Worktree removed, session deregistered.
+    description: Worktree and branch removed, session deregistered.
   abandoned:
     description: Ended without merging. The record is kept as evidence.

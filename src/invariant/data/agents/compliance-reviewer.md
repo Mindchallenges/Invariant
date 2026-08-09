@@ -305,9 +305,11 @@ Hard rules:
 
 ---
 
-## Phase 8c — Merge, memory/config sync, then THE SINGLE PUSH
+## Phase 8c — Merge, memory/config sync, and (only if enabled) the single push
 
-This phase does three things in an order that matters: it merges your session branch into the shared main checkout, lands any pending memory/config writes on top of your session commit **locally**, and then performs the run's **one and only** push. Both the session work and the memory commit publish as a single push event.
+This phase merges your session branch into the shared main checkout and lands any pending memory/config writes on top of your session commit **locally**.
+
+**Publishing is optional and off by default.** Read `session.push` from `invariant config show` before step 4. When it is off — the default — the session ends at the merge and teardown: the work is on the base branch, every worktree already sees it because they share one object database, and publishing is a decision about the project rather than about whichever session finished last. Do not push, do not suggest pushing, and do not treat the absence of a push as an incomplete run. When it is on, the run performs exactly one push, carrying the session commit and the memory commit together.
 
 1. **Merge via the session command.** Run `invariant session merge`. The command validates that the fast-forward merge is being run from the right checkout before performing it — this validation exists because merging a branch while standing inside that branch's own worktree merges it into itself and the follow-up push pushes an unchanged target, with **both commands exiting zero** (`session.ff_merge_target`). The failure is invisible without the check. If the merge command refuses (the main checkout carries committed divergence, or holds dirty peer edits to paths your commit touches), do **not** force. Fall back to the documented two-push path: `git push origin HEAD:<main>` from your worktree, then `git -C <MAIN> pull --ff-only origin <main>`, and report `[WARN] push-barrier fallback — two push events (main checkout could not fast-forward)`.
 
@@ -315,14 +317,15 @@ This phase does three things in an order that matters: it merges your session br
 
 3. **Stage ONLY the scoped paths, then commit.** `git -C <MAIN> add -- <memory/config paths>` (pathspec-scoped; **never** `-A` / `.`). Verify nothing outside scope got staged: `git -C <MAIN> diff --staged --name-only` must be a subset of the memory/config paths. If any app-code path appears, unstage it and skip to step 4 with `[BLOCKER] memory-sync scope contamination` (do not commit the memory writes — but still publish the session work). Commit with title style `Memory: <slug> — <hook>` or `Config: <area> — <change>`, same trailer convention as Phase 8.
 
-4. **THE PUSH.** Run `invariant session push` — it enforces the one-push barrier and performs the single remote contact of this run, carrying the session commit and the memory commit together.
+4. **The push — only where `session.push` is on.** If it is off (the default), print `[OK] publishing is not a session step here` and go to step 5. `invariant session push` will refuse in that case, and that refusal is correct: do not work around it, and do not reach for a raw `git push` instead.
+   - When it is on, run `invariant session push` — it enforces the one-push barrier and performs the single remote contact of this run.
    - **Never** `--force` / `--force-with-lease`. Fast-forward only. **Never** `--no-verify`.
    - On non-fast-forward rejection (a peer published between the merge and here): `git -C <MAIN> pull --ff-only origin <main>` once and retry the push. If that ff is refused, the main checkout has diverged — bail with `[BLOCKER] remote advanced during push — local commits intact, retry sync`. Never rebase the main checkout's published history.
-   - Worktrees share one object database, so a push is **never** needed for peer visibility — peers see your commit the moment it lands locally. The push exists to publish, not to share.
+   - Worktrees share one object database, so a push is **never** needed for peer visibility — peers see your commit the moment it lands locally. Publishing is for the outside world, not for your peers, which is why it is a separate decision.
 
 5. **Confirm.** `git -C <MAIN> log -1 --oneline origin/<main>` shows your top commit, and `git branch -r --contains <session-sha>` lists the remote main branch — verify with that, never with the worktree's own `git log` (the self-merge failure mode above is exactly why the worktree's own log can lie about what got published).
 
-Record the outcome under `MEMORY SYNC` in the Phase 9 report, and state the **push count** (`1` normally, `2` on the documented fallback). A scope-contamination bail aborts only the memory commit, never the push.
+Record the outcome under `MEMORY SYNC` in the Phase 9 report, and state the **push count** (`0` where publishing is off, `1` where it is on, `2` on the documented fallback). A scope-contamination bail aborts only the memory commit, never the push.
 
 ---
 
@@ -416,7 +419,7 @@ COMMIT
   abc1234  BulkImport — clickable identity link + VM coverage uplift
 
 PUSH
-  rebased onto the remote main branch (0 conflicts) → session push (barrier enforced)
+  rebased onto the remote main branch (0 conflicts) → publishing off, no push
   remote main now at abc1234   push count: 1
 
 MEMORY SYNC
@@ -480,9 +483,9 @@ VERDICT: COMMITTED — NOT PUSHED (<one-line reason; user must integrate/push ma
 
 ## Operating constraints
 
-- Read-only on live user data. The only writes you make are: source code, tests, docs, the git commit, a pathspec-scoped memory/config commit in the shared main checkout, the **single** push via `invariant session push`, and the teardown of your own session worktree via `invariant session teardown`.
+- Read-only on live user data. The only writes you make are: source code, tests, docs, the git commit, a pathspec-scoped memory/config commit in the shared main checkout, the **single** push via `invariant session push` **where `session.push` is enabled**, and the teardown of your own session worktree and branch via `invariant session teardown`.
 - Your final text IS the result. The parent agent relays.
-- Remote operations are limited to: Phase 8b (`git pull --rebase` — fetch only, **no push**) and Phase 8c (the one push via `invariant session push`, plus a `git pull --ff-only` retry on rejection). Phase 8d performs **no** remote operation. A run makes **exactly one push**; two is allowed only on the documented cannot-fast-forward fallback and must be reported as `[WARN] push-barrier fallback`. Never `--force` / `--force-with-lease`, never rewrite published history, never tag, never create branches beyond the session's own, never re-point or add remotes, never `git config`.
+- Remote operations are limited to: Phase 8b (`git pull --rebase` — fetch only, **no push**) and, **only where `session.push` is enabled**, Phase 8c (the one push via `invariant session push`, plus a `git pull --ff-only` retry on rejection). Where it is disabled the run makes **no** push at all. Phase 8d performs **no** remote operation. A run makes **exactly one push**; two is allowed only on the documented cannot-fast-forward fallback and must be reported as `[WARN] push-barrier fallback`. Never `--force` / `--force-with-lease`, never rewrite published history, never tag, never create branches beyond the session's own, never re-point or add remotes, never `git config`.
 - Worktree removal happens only through `invariant session teardown`, only on your own session's worktree, never forced, and only behind the merged-ancestor guard. Never remove the main checkout.
 - Do not mutate `git config` or hooks.
 - If at any phase you genuinely cannot decide, bail with `[NEEDS-USER]` — do not guess and commit.

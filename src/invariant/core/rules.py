@@ -318,6 +318,14 @@ def _push_barrier(ctx: RuleContext) -> Verdict:
     command = str(ctx.tool_input.get("command", "")) if ctx.tool_name == "Bash" else ""
     if "git push" not in command and not ctx.extra.get("pushing"):
         return Verdict.na()
+    if not ctx.manifest.get("session.push", False):
+        # Nothing to count. This barrier rations a session's *one* push; where
+        # publishing is not a session step, there is no session push to be the
+        # second of, and a rule that fired anyway would be gating a human's
+        # decision under the name of a session policy.
+        return Verdict.na(
+            "publishing is not a session step here (session.push is off)"
+        )
     if ctx.session is None:
         # Exempt paths — configuration and the knowledge store — commit
         # straight to the shared branch by design; that is what the exemption
@@ -364,6 +372,32 @@ def _push_barrier(ctx: RuleContext) -> Verdict:
             fixes=("invariant session review", "invariant session merge"),
         )
     return Verdict.clean("first push, post-merge")
+
+
+@rule(
+    "session.push_enabled",
+    summary="A session only publishes where the project asks it to.",
+    events=(),
+)
+def _push_enabled(ctx: RuleContext) -> Verdict:
+    """Guards entry to the ``pushed`` state.
+
+    Held as a gate rather than by removing the edge, so that enabling
+    publishing is one manifest line and never a fork of the state machine.
+    """
+    if ctx.manifest.get("session.push", False):
+        return Verdict.clean("publishing is part of this project's sessions")
+    return Verdict.fail(
+        "publishing is not part of this project's session lifecycle",
+        detail="A session ends at the merge: its work is on the base branch "
+        "and every worktree already sees it, because they share one object "
+        "database. Publishing costs a CI run and is a decision about the "
+        "project, so it is left to whoever is making that decision.",
+        fixes=(
+            "invariant session teardown  (the normal end of a session)",
+            "set session.push: true in the manifest to make it a session step",
+        ),
+    )
 
 
 @rule(
@@ -436,16 +470,22 @@ def _named_after_isolating(ctx: RuleContext) -> Verdict:
 
 @rule(
     "session.teardown_complete",
-    summary="A pushed session's worktree is removed.",
+    summary="A finished session's worktree is removed.",
     events=(),
 )
 def _teardown_complete(ctx: RuleContext) -> Verdict:
-    if ctx.session is None or ctx.session.get("state") != "pushed":
+    # Both ends of the lifecycle, because publishing is optional: a session
+    # that merged and stopped there is just as finished as one that published,
+    # and checking only the published state would exempt the common case.
+    if ctx.session is None or ctx.session.get("state") not in {"merged", "pushed"}:
         return Verdict.na()
+    state = ctx.session.get("state")
     worktree = ctx.session.get("worktree")
     if worktree and Path(worktree).exists():
         return Verdict.fail(
-            "the session pushed but its worktree still exists",
+            f"the session {state} but its worktree still exists",
+            detail="A worktree left behind keeps a branch alive and costs "
+            "disk; the next session then works around it rather than in it.",
             fixes=("invariant session teardown",),
         )
     return Verdict.clean("worktree removed")

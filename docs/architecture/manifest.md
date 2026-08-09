@@ -47,6 +47,11 @@ enforcement:
     session.own_file_set_only: block
     memory.index_current: warn
 
+session:
+  exempt_paths: [".claude/*", ".claude/**", "MEMORY.md"]
+  worktree_prefix: null        # null derives it from the project directory name
+  push: false                  # is publishing to a remote a session step at all
+
 items:
   backend: markdown            # markdown | sphinx_needs | json | none
   path: docs/backlog.md

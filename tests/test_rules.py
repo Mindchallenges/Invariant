@@ -203,6 +203,15 @@ class TestIsolationRules:
 
 
 class TestPushBarrier:
+    """The barrier only exists where publishing is a session step."""
+
+    @pytest.fixture(autouse=True)
+    def publishing_on(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+
     def test_second_push_is_refused(self, ctx_factory):
         ctx = ctx_factory(
             session={"state": "merged", "push_count": 1},
@@ -642,6 +651,13 @@ class TestPushBarrierAndExemptPaths:
 
     PUSH = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
 
+    @pytest.fixture(autouse=True)
+    def publishing_on(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+
     def push_ctx(self, ctx_factory, cwd, session=None):
         return ctx_factory(cwd=cwd, session=session, payload=self.PUSH)
 
@@ -695,3 +711,58 @@ class TestPushBarrierAndExemptPaths:
             session={"id": "s1", "state": "working", "push_count": 0},
         )
         assert not verdict.ok
+
+
+
+class TestPublishingIsOptIn:
+    """Off by default: a session ends at the merge, not at a remote.
+
+    The work is on the base branch and every worktree already sees it — they
+    share one object database. Publishing costs a CI run and is a decision
+    about the project rather than about whichever session finished last.
+    """
+
+    PUSH = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
+
+    def test_the_barrier_abstains_when_publishing_is_off(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "merged", "push_count": 3}, payload=self.PUSH)
+        verdict = only(evaluate(["session.push_barrier"], ctx)).verdict
+        # Skipped, not passed. There is no session push for this to be the
+        # fourth of, so the barrier has nothing to say — which is a different
+        # statement from "this push is fine".
+        assert verdict.skipped
+
+    def test_the_barrier_returns_when_publishing_is_enabled(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+        ctx = ctx_factory(session={"state": "merged", "push_count": 3}, payload=self.PUSH)
+        assert not only(evaluate(["session.push_barrier"], ctx)).verdict.ok
+
+    def test_the_pushed_state_is_refused_by_default(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "merged"})
+        verdict = only(evaluate(["session.push_enabled"], ctx)).verdict
+        assert not verdict.ok
+        assert "session.push: true" in " ".join(verdict.fixes)
+
+    def test_the_pushed_state_opens_when_enabled(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+        assert only(evaluate(["session.push_enabled"], ctx_factory())).verdict.ok
+
+    def test_teardown_is_owed_from_merged_not_only_from_pushed(self, ctx_factory):
+        """The common ending must be the one that is checked.
+
+        Publishing is the detour now, so a rule that only looked at `pushed`
+        would exempt every session that took the normal route.
+        """
+        ctx = ctx_factory(session={"state": "merged", "worktree": str(ctx_factory.wt)})
+        assert not only(evaluate(["session.teardown_complete"], ctx)).verdict.ok
+
+    def test_teardown_is_satisfied_once_the_worktree_is_gone(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "merged", "worktree": "/nonexistent/wt"})
+        verdict = only(evaluate(["session.teardown_complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped

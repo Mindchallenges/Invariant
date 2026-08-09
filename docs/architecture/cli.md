@@ -55,8 +55,10 @@ invariant session files add <path>...    Declare this session's file set.
 invariant session review              Run the review gates.
 invariant session merge               Validate the merge is being run from the
                                       right checkout, then perform it.
-invariant session push                Enforce the one-push barrier.
-invariant session teardown            Verify pushed, remove the worktree,
+invariant session push                Publish the base branch. Refused unless
+                                      session.push is enabled (it is off by
+                                      default); the barrier then allows one.
+invariant session teardown [--keep-worktree] [--keep-branch]            Verify pushed, remove the worktree,
                                       deregister.
 invariant session list                All registered sessions on this machine.
 ```

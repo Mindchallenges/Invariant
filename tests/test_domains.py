@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from invariant.core.errors import GateFailure, TransitionError, UsageError
+from invariant.core.errors import GateFailure, StateError, TransitionError, UsageError
 from invariant.core.items import (
     JsonBackend,
     MarkdownBackend,
@@ -682,3 +682,87 @@ class TestAttributionByEditTarget:
         resolution = domain.resolve(m.root, target=m.root / "src" / "f.swift")
         assert resolution.session.id == session.id
         assert resolution.how == "origin"
+
+
+
+class TestTeardownRemovesTheBranch:
+    """A session ends by leaving nothing behind but the merged work."""
+
+    def merged_session(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("feature")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        # Land the branch on the base so a safe delete will accept it.
+        subprocess.run(
+            ["git", "merge", "--ff-only", session.branch],
+            cwd=str(m.root), check=True, capture_output=True,
+        )
+        # Teardown is only legal from `merged`; the transitions themselves are
+        # covered elsewhere, and driving them here would test them twice while
+        # obscuring what these cases are actually about.
+        session.state = "merged"
+        domain._save(session)
+        return domain, session
+
+    def branches(self, m):
+        out = subprocess.run(
+            ["git", "branch", "--format=%(refname:short)"],
+            cwd=str(m.root), capture_output=True, text=True,
+        ).stdout
+        return set(out.split())
+
+    def test_the_branch_is_gone_afterwards(self, m):
+        domain, session = self.merged_session(m)
+        assert session.branch in self.branches(m)
+        domain.teardown(session.id)
+        assert session.branch not in self.branches(m)
+
+    def test_the_worktree_is_gone_afterwards(self, m):
+        domain, session = self.merged_session(m)
+        domain.teardown(session.id)
+        assert not Path(session.worktree).exists()
+
+    def test_keep_branch_leaves_it(self, m):
+        domain, session = self.merged_session(m)
+        domain.teardown(session.id, remove_branch=False)
+        assert session.branch in self.branches(m)
+
+    def test_an_unmerged_branch_is_refused_rather_than_forced(self, m):
+        """The refusal is the signal, not an obstacle to route around.
+
+        Reaching teardown is supposed to mean the work is merged. A branch that
+        will not delete safely is evidence the merge did not do what it looked
+        like it did — and forcing it would destroy the only copy and report
+        success.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("unmerged")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        worktree = Path(session.worktree)
+        (worktree / "new.txt").write_text("work\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(worktree), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "unmerged work"],
+            cwd=str(worktree), check=True, capture_output=True,
+        )
+
+        session.state = "merged"  # claimed, but the branch says otherwise
+        domain._save(session)
+
+        with pytest.raises(StateError, match="not merged"):
+            domain.teardown(session.id)
+        assert session.branch in self.branches(m)
+
+    def test_a_session_that_never_isolated_cannot_be_torn_down(self, m):
+        """It has nothing to tear down; the honest ending is `abandoned`.
+
+        Written the other way round first, which was wrong: teardown means
+        "the merged work is in and the scaffolding is gone", and a session
+        that never had scaffolding never got there.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("never-isolated")
+        with pytest.raises(TransitionError):
+            domain.teardown(session.id)

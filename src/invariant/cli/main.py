@@ -555,6 +555,18 @@ def cmd_session_push(args) -> int:
 
     ctx = Context()
     session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    if not ctx.manifest.get("session.push", False):
+        # Refused outright rather than gated. With publishing off, the barrier
+        # abstains by design, so consulting it would report no objection to a
+        # command the project does not want run at all.
+        raise UsageError(
+            "publishing is not part of this project's session lifecycle "
+            "(session.push is off).\n"
+            "  A session ends at the merge: 'invariant session teardown'.\n"
+            "  Every worktree already sees the merged work — they share one "
+            "object database.\n"
+            "  To make publishing a session step, set session.push: true."
+        )
     verdicts = evaluate(
         ["session.push_barrier"], ctx.rule_context(extra={"pushing": True})
     )
@@ -578,8 +590,18 @@ def cmd_session_push(args) -> int:
 def cmd_session_teardown(args) -> int:
     ctx = Context()
     session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
-    updated = ctx.sessions.teardown(session.id, remove_worktree=not args.keep_worktree)
-    return emit(args, updated.to_dict(), f"session {updated.id} torn down")
+    updated = ctx.sessions.teardown(
+        session.id,
+        remove_worktree=not args.keep_worktree,
+        remove_branch=not args.keep_branch,
+    )
+    removed = []
+    if not args.keep_worktree and session.worktree:
+        removed.append("worktree")
+    if not args.keep_branch and session.branch:
+        removed.append(f"branch {session.branch}")
+    detail = f" ({', '.join(removed)} removed)" if removed else ""
+    return emit(args, updated.to_dict(), f"session {updated.id} torn down{detail}")
 
 
 # -- pipeline ----------------------------------------------------------
@@ -1012,6 +1034,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = session.add_parser("teardown")
     q.add_argument("--id")
     q.add_argument("--keep-worktree", action="store_true")
+    q.add_argument("--keep-branch", action="store_true")
     q.set_defaults(func=cmd_session_teardown)
 
     # pipeline
