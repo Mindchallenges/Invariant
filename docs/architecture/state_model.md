@@ -184,6 +184,7 @@ Shipped methodologies:
 | `spec-first` | Design-heavy work where the spec is the deliverable | designing → specified → implementing → reviewing → committed |
 | `bugfix` | Proving a reported defect is real before fixing it | triaging → reproducing → fixing → verifying → committed |
 | `chore` | Mechanical work with no design content | doing → reviewing → committed |
+| `docs` | Prose, records, backlog entries — nothing to test or diagram | drafting → reviewing → committed |
 | `none` | Escape hatch — a single state, no gates | working |
 
 `docs-first` is not in this list because it is not a methodology (D12). It is a
@@ -207,6 +208,21 @@ Two details that are load-bearing rather than incidental:
   formatter pass makes `chore` useless and pushes people to `none`, which drops
   every gate. A narrower rule that gets used beats a broader one that gets
   bypassed.
+
+A note on `docs`, because the reasoning generalises. A documentation-only
+change run through `tdd` blocks on three gates it cannot satisfy in principle —
+no implementation means no test could have failed first, no code means nothing
+to measure, and a change adding no component cannot honestly update a diagram —
+and none can be acknowledged, because they block. `advance --force` was the
+only route, and a tool that teaches `--force` as routine has spent the thing it
+exists for.
+
+Applicability is **declared, not inferred**. A caller choosing a methodology is
+making a claim that can be wrong and can be reviewed; a rule reading the diff's
+file extensions would be guessing, and would guess wrong on the change that adds
+a doc and a schema together. Privacy still blocks and the docs are still read
+and updated — only the diagram gate steps aside, and only for a pipeline that
+has declared there is no structure to draw.
 
 ### Agent-role gates
 

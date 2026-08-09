@@ -1173,7 +1173,21 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     """
     if target is None:
         return False
-    patterns = ctx.manifest.get("session.exempt_paths") or []
+    patterns = list(ctx.manifest.get("session.exempt_paths") or [])
+
+    # The work-item store is exempt for the same stated reason as config and
+    # memory: it is data every session touches, and routing it through a branch
+    # produces conflicts with no review value. It is not in the default list
+    # because its path is configurable — the library knows where it put it, so
+    # it adds it here rather than asking every project to repeat it.
+    #
+    # A project that wants backlog edits reviewed can say so with
+    # items.exempt: false.
+    if ctx.manifest.get("items.exempt", True):
+        items_path = ctx.manifest.get("items.path")
+        if items_path:
+            patterns.extend([str(items_path), f"{str(items_path).rstrip('/')}/**"])
+
     if not patterns:
         return False
 

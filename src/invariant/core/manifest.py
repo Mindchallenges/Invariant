@@ -131,6 +131,10 @@ DEFAULTS: dict[str, Any] = {
         # backlog whose entries are referenced by name, where a number is both
         # inconsistent with its neighbours and unlinkable.
         "id_strategy": "numeric",
+        # Work items are data every session touches, like configuration and
+        # memory, so the store is exempt from worktree isolation by default.
+        # Set false where backlog edits should be reviewed with the code.
+        "exempt": True,
     },
     "memory": {"managed": True, "index_generated": True},
     "privacy": {

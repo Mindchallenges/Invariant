@@ -1298,3 +1298,56 @@ class TestDiagramGateAbstainsForDocsPipelines:
     def test_a_tdd_pipeline_is_still_asked(self, ctx_factory):
         """The relaxation is scoped to a DECLARED documentation pipeline."""
         assert not self.verdict(self.ctx_for(ctx_factory, "tdd")).ok
+
+
+class TestWorkItemPathsAreExempt:
+    """The backlog is data every session touches, like config and memory.
+
+    Routing it through a branch produces conflicts with no review value —
+    which is the stated rationale for the exemptions that already existed. It
+    is not in the default LIST because its path is configurable; the library
+    knows where it put it.
+    """
+
+    def ctx_for(self, ctx_factory, target, extra=None):
+        body = {"version": 1, "project": {"name": "demo"},
+                "items": {"path": "docs/backlog"}}
+        if extra:
+            body["items"].update(extra)
+        write_manifest(ctx_factory.main, body)
+        return ctx_factory(payload=edit_payload(ctx_factory.main / target))
+
+    def verdict(self, ctx):
+        return only(evaluate(["session.isolated_before_edit"], ctx)).verdict
+
+    def test_a_backlog_edit_in_the_shared_tree_is_exempt(self, ctx_factory):
+        assert self.verdict(self.ctx_for(ctx_factory, "docs/backlog/BUG_1.md")).skipped
+
+    def test_the_backlog_directory_itself_is_exempt(self, ctx_factory):
+        assert self.verdict(self.ctx_for(ctx_factory, "docs/backlog")).skipped
+
+    def test_source_beside_it_is_not_exempt(self, ctx_factory):
+        """The exemption is the work-item store, not everything under docs."""
+        assert not self.verdict(self.ctx_for(ctx_factory, "src/app.py")).skipped
+
+    def test_a_project_can_turn_it_off(self, ctx_factory):
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, "docs/backlog/BUG_1.md", {"exempt": False})
+        )
+        assert not verdict.skipped
+
+
+class TestAmbiguityAdviceIsHonestAboutHooks:
+    def test_it_no_longer_implies_the_env_var_reaches_a_hook(self):
+        """A hook runs as its own process, so a variable exported in front of a
+        tool call never gets there. Advice the tool cannot honour is a dead end
+        — the same shape as --id being rejected by the commands that printed it.
+        """
+        from invariant.domains.session import Session, ambiguity_message
+
+        text = ambiguity_message(
+            [Session(id="aaa", name="one"), Session(id="bbb", name="two")]
+        )
+        assert "--id" in text
+        assert "never gets there" in text
+        assert "host session bound to it" in text

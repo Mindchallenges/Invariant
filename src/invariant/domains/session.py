@@ -685,7 +685,20 @@ def ambiguity_message(candidates: list[Session]) -> str:
         where = s.worktree or "(not isolated yet)"
         lines.append(f"  {s.id}  {s.name}  [{s.state}]  {where}")
     lines.append("Name the one you mean:")
-    lines.append("  INVARIANT_SESSION_ID=<id> invariant <command>   (or pass --id <id>)")
+    lines.append("  invariant <command> --id <id>")
+    lines.append("  INVARIANT_SESSION_ID=<id> invariant <command>")
+    lines.append(
+        "  (both name a session for an `invariant` command. Neither reaches a"
+    )
+    lines.append(
+        "   HOOK: it runs as its own process, so a variable exported in front"
+    )
+    lines.append(
+        "   of a tool call never gets there. A hook identifies a session by the"
+    )
+    lines.append(
+        "   host session bound to it, or by the path an edit is aimed at.)"
+    )
     lines.append("A session with no worktree gets one with:")
     lines.append("  invariant session isolate --execute --id <id>")
     return "\n".join(lines)

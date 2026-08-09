@@ -55,7 +55,9 @@ session:
 items:
   backend: markdown            # markdown | sphinx_needs | json | none
   path: docs/backlog.md
-  id_prefix: ""
+  id_prefix: ""                # an ADDITIONAL prefix; the type supplies its own
+  id_strategy: numeric         # numeric -> BUG_001 | slug -> BUG_DRAIN_STALLS
+  exempt: true                 # work items are data; exempt from isolation
 
 memory:
   managed: true

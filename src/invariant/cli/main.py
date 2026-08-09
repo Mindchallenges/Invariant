@@ -315,6 +315,37 @@ def cmd_doctor(args) -> int:
         for label, ok, detail in host.verify():
             checks.append((label, ok, detail))
 
+        # Item statuses against the configured machine. A project whose backlog
+        # says open/investigating/fixed while the machine says filed/triaged
+        # has entries invisible to every query keyed off its own vocabulary,
+        # and nothing said so — the machine is already pluggable through
+        # methodology.extra_machines, so this is a mismatch nobody was told
+        # about rather than a missing feature.
+        try:
+            unknown: dict[str, set[str]] = {}
+            for item in ctx.items.backend.load_all():
+                if not item.status:
+                    continue
+                try:
+                    machine = ctx.items.machine(item.type)
+                except InvariantError:
+                    continue
+                if item.status not in machine.states:
+                    unknown.setdefault(item.type, set()).add(item.status)
+            detail = (
+                "; ".join(
+                    f"{kind}: {', '.join(sorted(values))}"
+                    for kind, values in sorted(unknown.items())
+                )
+                + " — not states of the configured machine; add one via "
+                "methodology.extra_machines"
+                if unknown
+                else "every item status is a state of its machine"
+            )
+            checks.append(("item statuses match their machine", not unknown, detail))
+        except InvariantError:
+            pass
+
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()
             checks.append(

@@ -940,3 +940,41 @@ class TestSessionReviewExists:
         sid = payload(capsys)["session"]["id"]
         assert run("session", "review", "--id", sid) != 0
         assert "not legal" in capsys.readouterr().err
+
+
+class TestItemVocabularyCheck:
+    """A project whose backlog says open/fixed while the machine says
+    filed/triaged has entries invisible to every query keyed off its own
+    vocabulary — and nothing said so. The machine is already pluggable via
+    methodology.extra_machines, so this was a mismatch nobody was told about
+    rather than a missing feature."""
+
+    def project_with_item(self, project, status):
+        assert run("init", "--name", "demo") == 0
+        backlog = project / "docs" / "backlog"
+        backlog.mkdir(parents=True, exist_ok=True)
+        (backlog / "BUG_001.md").write_text(
+            f"---\nid: BUG_001\ntype: bug\ntitle: A bug\nstatus: {status}\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+
+    def row(self, capsys):
+        return {c["check"]: c for c in payload(capsys)["checks"]}
+
+    def test_a_foreign_status_is_reported(self, project, capsys):
+        self.project_with_item(project, "investigating")
+        run("doctor", "--json")
+        row = self.row(capsys)["item statuses match their machine"]
+        assert row["ok"] is False
+        assert "investigating" in row["detail"]
+
+    def test_a_status_from_the_machine_passes(self, project, capsys):
+        self.project_with_item(project, "filed")
+        run("doctor", "--json")
+        assert self.row(capsys)["item statuses match their machine"]["ok"] is True
+
+    def test_the_check_names_how_to_fix_it(self, project, capsys):
+        self.project_with_item(project, "investigating")
+        run("doctor", "--json")
+        detail = self.row(capsys)["item statuses match their machine"]["detail"]
+        assert "extra_machines" in detail
