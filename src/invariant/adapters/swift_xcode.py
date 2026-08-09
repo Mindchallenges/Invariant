@@ -31,11 +31,20 @@ class SwiftXcodeAdapter(Adapter):
             # bundle, so the run has to produce one first; {result_bundle} is
             # supplied by the caller, never written into a manifest, because it
             # is a per-run path rather than configuration.
+            #
+            # Separated by `;` and NOT `&&`. Chaining on success makes the
+            # report conditional on a full-suite pass, which silently reimposes
+            # test.all_pass as a block on any project that deliberately
+            # downgraded it — and a project whose main branch is not green is
+            # precisely the one that downgraded it. "The suite failed" and "the
+            # measurement is untrustworthy" are different claims. Whether the
+            # measurement can be trusted is decided in run_coverage, from
+            # whether the suite RAN, not from whether it passed.
             "coverage": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}' "
                 "-enableCodeCoverage YES -resultBundlePath {result_bundle} "
-                "&& xcrun xccov view --report {result_bundle}"
+                "; xcrun xccov view --report {result_bundle}"
             ),
             "test_one": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "

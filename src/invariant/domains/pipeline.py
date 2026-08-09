@@ -308,7 +308,23 @@ class PipelineDomain:
         proc = subprocess.run(
             command, shell=True, cwd=str(root), capture_output=True, text=True
         )
-        measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
+        combined = f"{proc.stdout}\n{proc.stderr}"
+        outcome = adapter.parse_test_output(proc.stdout, proc.stderr, proc.returncode)
+        measured = adapter.parse_coverage(combined)
+
+        # A suite that never ran cannot have measured anything, and a report
+        # produced from a build that fell over describes the previous state of
+        # the world at best. `total is None` means this adapter does not count
+        # tests, which is not the same as counting zero.
+        if outcome.total == 0:
+            raise UsageError(
+                "the coverage run executed no tests, so its measurement "
+                "describes nothing.\n"
+                f"  command: {command}\n"
+                f"  exit: {proc.returncode}\n"
+                "  Usually a build or launch failure rather than a coverage "
+                "problem — read the build output first."
+            )
 
         if not measured:
             raise UsageError(
@@ -320,11 +336,28 @@ class PipelineDomain:
             )
 
         self.record_coverage(session_id, measured)
+
+        # The suite's state at the moment of measurement, kept with it. A file
+        # at 100% measured on a run where twelve tests failed is a different
+        # fact from the same number measured on a green run, and the record
+        # should not flatten them into one.
+        pipeline = self.require(session_id)
+        pipeline.evidence["coverage_run"] = {
+            "executed": outcome.total,
+            "failed": outcome.failed,
+            "exit_code": proc.returncode,
+            "suite_passed": outcome.passed,
+        }
+        self._save(session_id, pipeline)
+
         return {
             "command": command,
             "exit_code": proc.returncode,
             "files": len(measured),
             "coverage": measured,
+            "executed": outcome.total,
+            "failed": outcome.failed,
+            "suite_passed": outcome.passed,
         }
 
     def record_coverage(self, session_id: str, coverage: dict[str, float]) -> None:

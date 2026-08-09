@@ -1060,3 +1060,114 @@ class TestAcknowledgingAnAdvisoryGate:
         pipelines.acknowledge(session.id, "agents.design_agent_ran", "belt and braces")
         evaluated = self.verdict_for(pipelines, session, m, "agents.design_agent_ran")
         assert evaluated.verdict.ok and not evaluated.verdict.skipped
+
+
+
+class TestCoverageFromARedSuite:
+    """Whether a measurement can be trusted depends on whether the suite RAN.
+
+    Not on whether it passed. Those are different claims, and in a repository
+    whose main branch is not green the first is the steady state.
+    """
+
+    def pipeline_with(self, m, script):
+        """A project whose 'coverage' command is a script we control."""
+        path = m.root / "fake-coverage.sh"
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo", "ecosystems": ["swift"]},
+                    "commands": {"coverage": f"sh {path}"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        fresh = Manifest.load(m.root)
+        sessions = SessionDomain(fresh)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(fresh)
+        pipelines.start(session.id, task="t")
+        return pipelines, session
+
+    RED_RUN_WITH_REPORT = """
+echo "Test Suite 'All tests' failed at 2026-08-09."
+echo "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds"
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 65
+"""
+
+    def test_a_failing_suite_still_yields_a_measurement(self, m):
+        pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
+        result = pipelines.run_coverage(session.id, cwd=m.root)
+        assert result["files"] == 1
+        assert result["suite_passed"] is False
+
+    def test_the_suite_state_is_recorded_with_the_numbers(self, m):
+        """100% measured on a red run is not the same fact as on a green one."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
+        pipelines.run_coverage(session.id, cwd=m.root)
+        run = pipelines.current(session.id).evidence["coverage_run"]
+        assert run["executed"] == 6
+        assert run["failed"] == 4
+        assert run["suite_passed"] is False
+
+    def test_a_run_that_executed_nothing_is_refused(self, m):
+        """A build failure produces a report describing the previous world."""
+        script = """
+echo "error: build failed"
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 65
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        with pytest.raises(UsageError, match="executed no tests"):
+            pipelines.run_coverage(session.id, cwd=m.root)
+
+    def test_nothing_is_recorded_when_the_run_is_refused(self, m):
+        script = """
+echo "error: build failed"
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 65
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        with pytest.raises(UsageError):
+            pipelines.run_coverage(session.id, cwd=m.root)
+        assert "coverage" not in pipelines.current(session.id).evidence
+
+    def test_a_run_with_tests_but_no_report_is_still_refused(self, m):
+        script = """
+echo "Test Suite 'All tests' failed at 2026-08-09."
+echo "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds"
+echo "xccov: error: could not read bundle"
+exit 65
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        with pytest.raises(UsageError, match="no per-file measurements"):
+            pipelines.run_coverage(session.id, cwd=m.root)
+
+    def test_a_green_run_records_normally(self, m):
+        script = """
+echo "Test Suite 'All tests' passed at 2026-08-09."
+echo "\t Executed 6 tests, with 0 failures (0 unexpected) in 6.5 (6.5) seconds"
+echo "    /repo/Sources/App/Store.swift    92.00% (46/50)"
+exit 0
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        result = pipelines.run_coverage(session.id, cwd=m.root)
+        assert result["suite_passed"] is True
+        assert result["coverage"]["/repo/Sources/App/Store.swift"] == 92.0
+
+    def test_a_stale_bundle_cannot_be_reported_as_a_fresh_measurement(self, m):
+        """The bundle is removed before each run, so a failed run cannot
+        silently republish the previous run's numbers."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
+        pipelines.run_coverage(session.id, cwd=m.root)
+
+        bundle = Path(pipelines.store.root) / "coverage" / f"{session.id}.xcresult"
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "marker").write_text("stale", encoding="utf-8")
+
+        pipelines.run_coverage(session.id, cwd=m.root)
+        assert not (bundle / "marker").exists()

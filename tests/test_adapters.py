@@ -278,3 +278,26 @@ class TestSwiftCoverageCommand:
             "/Users/x/Heap/Frameworks/Intake/IntakeDrainDisposition.swift": 100.0,
             "/Users/x/Heap/Frameworks/Intake/FileBytesIngester.swift": 56.25,
         }
+
+
+
+class TestCoverageDoesNotRequireAGreenSuite:
+    """`&&` made the report conditional on a full-suite pass.
+
+    That silently reimposed `test.all_pass` as a block on any project that had
+    deliberately downgraded it — and a project whose main branch is not green
+    is precisely the one that downgraded it. The result was that such a project
+    could never obtain coverage at all, through a door nobody had opened on
+    purpose.
+    """
+
+    ADAPTER = get_adapter("swift")
+
+    def test_the_report_step_is_not_chained_on_success(self):
+        command = self.ADAPTER.default_commands()["coverage"]
+        assert "&& xcrun xccov" not in command
+        assert "; xcrun xccov" in command
+
+    def test_the_report_still_runs_after_the_test_step(self):
+        command = self.ADAPTER.default_commands()["coverage"]
+        assert command.index("-resultBundlePath") < command.index("xccov")
