@@ -26,6 +26,17 @@ class SwiftXcodeAdapter(Adapter):
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}'"
             ),
+            # Two commands, which is presumably why this slot stayed empty
+            # while the single-command ecosystems got one. xccov reads a result
+            # bundle, so the run has to produce one first; {result_bundle} is
+            # supplied by the caller, never written into a manifest, because it
+            # is a per-run path rather than configuration.
+            "coverage": (
+                "xcodebuild test -workspace {workspace} -scheme {scheme} "
+                "-destination 'platform=iOS Simulator,id={destination_id}' "
+                "-enableCodeCoverage YES -resultBundlePath {result_bundle} "
+                "&& xcrun xccov view --report {result_bundle}"
+            ),
             "test_one": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}' "

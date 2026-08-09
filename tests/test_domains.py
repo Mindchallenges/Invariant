@@ -951,3 +951,112 @@ class TestReapStranded:
         session = domain.start("alive")
         domain.isolate(session.id, execute=True)
         assert domain.reap_stranded() == []
+
+
+
+class TestAcknowledgingAnAdvisoryGate:
+    """A warn that repeats forever cannot distinguish two very different states.
+
+    "Considered and declined" and "never read" produce identical output, which
+    is the real defect — more than the repetition is. An acknowledgement costs
+    an explicit act with a stated reason and leaves that reason in the record.
+    """
+
+    def pipeline_at(self, m):
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, task="a task")
+        return pipelines, session
+
+    def verdict_for(self, pipelines, session, m, rule_id):
+        verdicts = pipelines.evaluate_gates(session.id, cwd=m.root)
+        for evaluated in verdicts:
+            if evaluated.rule_id == rule_id:
+                return evaluated
+        raise AssertionError(f"{rule_id} was not among the gates here")
+
+    def test_the_gate_warns_before_it_is_acknowledged(self, m):
+        pipelines, session = self.pipeline_at(m)
+        evaluated = self.verdict_for(
+            pipelines, session, m, "agents.design_agent_ran"
+        )
+        assert not evaluated.verdict.ok
+
+    def test_acknowledging_turns_it_into_a_recorded_skip(self, m):
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(
+            session.id, "agents.design_agent_ran", "one-line fix; no design content"
+        )
+        evaluated = self.verdict_for(
+            pipelines, session, m, "agents.design_agent_ran"
+        )
+        # Skipped, not passed. The gate did not become satisfied; it became
+        # answered.
+        assert evaluated.verdict.skipped
+        assert "one-line fix" in evaluated.verdict.message
+
+    def test_the_reason_is_kept_in_the_record(self, m):
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+        evidence = pipelines.current(session.id).evidence
+        assert evidence["acknowledged"]["agents.design_agent_ran"] == "deliberate"
+
+    def test_it_survives_a_reload(self, m):
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+        fresh = PipelineDomain(m)
+        evaluated = self.verdict_for(fresh, session, m, "agents.design_agent_ran")
+        assert evaluated.verdict.skipped
+
+    def test_a_reason_is_required(self, m):
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError, match="silencer"):
+            pipelines.acknowledge(session.id, "agents.design_agent_ran", "   ")
+
+    def test_a_blocking_gate_cannot_be_acknowledged(self, m):
+        """Otherwise block and warn are the same level, spelled differently.
+
+        A blocking gate is satisfied, or overridden on the transition itself
+        where the override is recorded against that transition rather than
+        standing for the rest of the run.
+        """
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError, match="blocks in this project"):
+            pipelines.acknowledge(session.id, "docs.read_architecture", "later")
+
+    def test_the_refusal_points_at_the_recorded_override_instead(self, m):
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError) as exc:
+            pipelines.acknowledge(session.id, "docs.read_architecture", "later")
+        assert "--force --reason" in str(exc.value)
+
+    def test_an_unknown_rule_is_refused(self, m):
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError, match="no rule"):
+            pipelines.acknowledge(session.id, "agents.no_such_rule", "why")
+
+    def test_acknowledging_does_not_affect_other_gates(self, m):
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+        other = self.verdict_for(pipelines, session, m, "docs.read_architecture")
+        assert not other.verdict.ok
+
+    def test_it_is_scoped_to_one_pipeline(self, m):
+        """It must not quietly become project policy."""
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+
+        sessions = SessionDomain(m)
+        other = sessions.start("second")
+        pipelines.start(other.id, task="another task")
+        evaluated = self.verdict_for(pipelines, other, m, "agents.design_agent_ran")
+        assert not evaluated.verdict.ok
+
+    def test_a_passing_gate_is_unaffected_by_an_acknowledgement(self, m):
+        """It rewrites failures only — never manufactures a skip over a pass."""
+        pipelines, session = self.pipeline_at(m)
+        pipelines.record_agent_run(session.id, "feature-architect")
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "belt and braces")
+        evaluated = self.verdict_for(pipelines, session, m, "agents.design_agent_ran")
+        assert evaluated.verdict.ok and not evaluated.verdict.skipped

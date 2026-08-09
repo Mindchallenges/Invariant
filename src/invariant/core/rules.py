@@ -756,12 +756,52 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
     floor = float(ctx.manifest.get("methodology.gates.coverage_min", 0) or 0)
     if floor <= 0:
         return Verdict.na("no coverage floor configured")
-    coverage = ctx.evidence("coverage", {}) or {}
-    if not coverage:
+    recorded = ctx.evidence("coverage", {}) or {}
+    if not recorded:
         return Verdict.fail(
             "no coverage was recorded",
-            fixes=("run the configured coverage command",),
+            detail="The gate reads what a coverage run measured; nothing has "
+            "measured anything in this pipeline.",
+            fixes=("invariant pipeline coverage",),
         )
+
+    # Reporters emit absolute paths; changed files are repo-relative. Comparing
+    # the two spellings directly yields an empty intersection, and an empty
+    # intersection would report "all files at or above the floor" — a gate
+    # passing vacuously, which is worse than the blocking it replaced.
+    root = _repo_root(ctx)
+    coverage = {_relative_to_root(path, root): pct for path, pct in recorded.items()}
+
+    scope = str(ctx.manifest.get("methodology.gates.coverage_scope", "touched"))
+    if scope == "touched":
+        # The session's declared file set as well as the working tree, because
+        # by the time this gate runs the work is usually committed — and
+        # `git diff` reports nothing for committed work. Reading only the
+        # working tree would empty the touched set at exactly the state where
+        # the gate matters, and an empty touched set means every measured file
+        # in the project gets held to the floor.
+        declared = set((ctx.session or {}).get("files") or [])
+        changed = {
+            _relative_to_root(path, root)
+            for path in [*git.changed_files(ctx.cwd), *declared]
+        }
+        source_changed = {p for p in changed if not _looks_like_docs(p)}
+        if source_changed:
+            touched = {f: pct for f, pct in coverage.items() if f in source_changed}
+            if not touched:
+                return Verdict.fail(
+                    "coverage was measured, but none of it covers the changed files",
+                    detail=(
+                        f"{len(coverage)} file(s) measured, "
+                        f"{len(source_changed)} changed, no overlap. Usually a "
+                        f"path-spelling mismatch between the coverage reporter "
+                        f"and git. Reporting this as a pass would be the gate "
+                        f"approving a measurement of something else."
+                    ),
+                    fixes=("check the coverage command covers the changed target",),
+                )
+            coverage = touched
+
     below = {f: pct for f, pct in coverage.items() if float(pct) < floor}
     if not below:
         return Verdict.clean(f"all {len(coverage)} file(s) at or above {floor:g}%")
@@ -1006,6 +1046,31 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
         if any(fnmatch.fnmatch(rel, pattern) for pattern in patterns):
             return True
     return False
+
+
+def _relative_to_root(path, root: Path) -> str:
+    """One spelling for a path, so two sources can be compared at all.
+
+    Coverage reporters emit absolute paths and git emits repo-relative ones.
+    Left as they are, the two sets never intersect, and the coverage gate reads
+    an empty intersection as "nothing below the floor".
+    """
+    candidate = Path(str(path))
+    try:
+        if candidate.is_absolute():
+            return str(candidate.resolve().relative_to(Path(root).resolve()))
+    except (ValueError, OSError):
+        return str(candidate)
+    return str(candidate)
+
+
+#: Paths whose coverage nobody measures. Counting them as "changed source"
+#: would make the no-overlap check fire on a docs-only edit.
+_UNMEASURED_SUFFIXES = (".md", ".rst", ".txt", ".yaml", ".yml", ".json", ".toml")
+
+
+def _looks_like_docs(path: str) -> bool:
+    return str(path).lower().endswith(_UNMEASURED_SUFFIXES)
 
 
 def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:

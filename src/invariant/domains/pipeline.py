@@ -18,7 +18,7 @@ from ..adapters import get_adapter
 from ..core.errors import GateFailure, TransitionError, UsageError
 from ..core.machines import load_pipeline_machine
 from ..core.manifest import Level
-from ..core.rules import Evaluated, RuleContext, evaluate
+from ..core.rules import Evaluated, RuleContext, Verdict, evaluate, get_rule
 from ..core.store import JsonStore
 
 
@@ -125,7 +125,77 @@ class PipelineDomain:
             session=session,
             pipeline=pipeline.to_dict(),
         )
-        return evaluate(gate_ids, ctx)
+        return self._apply_acknowledgements(pipeline, evaluate(gate_ids, ctx))
+
+    def _apply_acknowledgements(
+        self, pipeline: Pipeline, verdicts: list[Evaluated]
+    ) -> list[Evaluated]:
+        """Turn an acknowledged advisory failure into a recorded skip.
+
+        Not a silencer. The reason travels with the verdict and shows in
+        ``pipeline status``, so "considered and declined" stops being
+        indistinguishable from "never read" — which is the real defect a
+        repeating warning has, more than the repetition is.
+        """
+        acknowledged = pipeline.evidence.get("acknowledged") or {}
+        if not acknowledged:
+            return verdicts
+
+        out: list[Evaluated] = []
+        for evaluated in verdicts:
+            reason = acknowledged.get(evaluated.rule_id)
+            if (
+                reason
+                and not evaluated.verdict.ok
+                and evaluated.level is not Level.BLOCK
+            ):
+                out.append(
+                    Evaluated(
+                        evaluated.rule_id,
+                        evaluated.level,
+                        Verdict.na(f"acknowledged — {reason}"),
+                    )
+                )
+            else:
+                out.append(evaluated)
+        return out
+
+    def acknowledge(self, session_id: str, rule_id: str, reason: str) -> Pipeline:
+        """Record a deliberate decision to proceed against an advisory gate.
+
+        Refused for blocking gates. Allowing it there would make ``block`` and
+        ``warn`` the same level with different spelling, and the whole design
+        rests on those being different: a blocking gate is dealt with, or
+        overridden on the transition itself where the override is recorded
+        against that transition rather than standing for the rest of the run.
+        """
+        if not reason or not reason.strip():
+            raise UsageError(
+                "acknowledging a gate requires --reason. An acknowledgement "
+                "with no stated reason is a silencer, and a silencer is the "
+                "thing this is designed not to be."
+            )
+
+        if get_rule(rule_id) is None:
+            raise UsageError(
+                f"no rule {rule_id!r}; 'invariant rules list' shows them all"
+            )
+
+        level = self.manifest.rule_level(rule_id)
+        if level is Level.BLOCK:
+            raise UsageError(
+                f"{rule_id} blocks in this project and cannot be acknowledged.\n"
+                f"  Satisfy it, or record a deliberate override on the "
+                f"transition itself:\n"
+                f"    invariant pipeline advance <state> --force --reason '<why>'"
+            )
+        if level is Level.OFF:
+            raise UsageError(f"{rule_id} is off in this project; nothing to acknowledge")
+
+        pipeline = self.require(session_id)
+        pipeline.evidence.setdefault("acknowledged", {})[rule_id] = reason.strip()
+        self._save(session_id, pipeline)
+        return pipeline
 
     def advance(
         self,
@@ -207,6 +277,55 @@ class PipelineDomain:
         if agent_type not in ran:
             ran.append(agent_type)
             self._save(session_id, pipeline)
+
+    def run_coverage(self, session_id: str, cwd: Path | None = None) -> dict:
+        """Run the configured coverage command and record what it measured.
+
+        This is the missing half of ``coverage.meets_floor``. The rule, the
+        manifest slot and every adapter's parser all existed; nothing ever
+        called them, so the gate blocked on evidence no code path could
+        produce and advised running "the configured coverage command" — which
+        no command ever ran. A blocking gate that cannot be satisfied does not
+        enforce a standard, it teaches people to reach for --force.
+        """
+        pipeline = self.require(session_id)
+        root = Path(cwd or self.manifest.root)
+
+        # A per-run path, supplied here rather than configured. Writing a
+        # result-bundle path into a manifest would make it shared state between
+        # concurrent sessions, and two runs would overwrite each other's
+        # measurements while both reported success.
+        bundle = Path(self.store.root) / "coverage" / f"{session_id}.xcresult"
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        if bundle.exists():
+            import shutil
+
+            shutil.rmtree(bundle, ignore_errors=True)
+
+        command = self.manifest.command_for("coverage", result_bundle=str(bundle))
+        adapter = get_adapter(self.manifest.ecosystems[0])
+
+        proc = subprocess.run(
+            command, shell=True, cwd=str(root), capture_output=True, text=True
+        )
+        measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
+
+        if not measured:
+            raise UsageError(
+                "the coverage command produced no per-file measurements.\n"
+                f"  command: {command}\n"
+                f"  exit: {proc.returncode}\n"
+                "  Recording an empty result would make the gate pass on a "
+                "measurement that never happened, so nothing was recorded."
+            )
+
+        self.record_coverage(session_id, measured)
+        return {
+            "command": command,
+            "exit_code": proc.returncode,
+            "files": len(measured),
+            "coverage": measured,
+        }
 
     def record_coverage(self, session_id: str, coverage: dict[str, float]) -> None:
         pipeline = self.require(session_id)

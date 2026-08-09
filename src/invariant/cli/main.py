@@ -640,6 +640,29 @@ def cmd_pipeline_start(args) -> int:
     )
 
 
+def cmd_pipeline_ack(args) -> int:
+    ctx = Context()
+    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    pipeline = ctx.pipelines.acknowledge(session.id, args.rule, args.reason)
+    return emit(
+        args,
+        pipeline.to_dict(),
+        f"acknowledged {args.rule} for this pipeline\n"
+        f"  reason: {args.reason}\n"
+        f"  it will report as skipped, with that reason, until this pipeline ends",
+    )
+
+
+def cmd_pipeline_coverage(args) -> int:
+    ctx = Context()
+    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    result = ctx.pipelines.run_coverage(session.id, cwd=ctx.cwd)
+    lines = [f"recorded coverage for {result['files']} file(s)"]
+    for path, pct in sorted(result["coverage"].items())[:10]:
+        lines.append(f"  {path}  {pct:g}%")
+    return emit(args, result, "\n".join(lines))
+
+
 def cmd_pipeline_status(args) -> int:
     ctx = Context()
     session = ctx.require_session()
@@ -1067,6 +1090,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     # pipeline
     pipeline = sub.add_parser("pipeline").add_subparsers(dest="sub", required=True)
+
+    q = pipeline.add_parser(
+        "ack", help="record a deliberate decision to proceed against an advisory gate"
+    )
+    q.add_argument("rule")
+    q.add_argument("--reason", required=True)
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_pipeline_ack)
+
+    q = pipeline.add_parser(
+        "coverage", help="run the configured coverage command and record it"
+    )
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_pipeline_coverage)
 
     q = pipeline.add_parser("start")
     q.add_argument("--methodology")

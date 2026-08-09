@@ -246,3 +246,35 @@ Test Suite 'All tests' failed at 2026-08-09.
         result = self.ADAPTER.parse_test_output("nothing here", "", 0)
         assert result.total == 0
         assert not result.trustworthy
+
+
+
+class TestSwiftCoverageCommand:
+    """The slot existed and was empty, so the gate reading it could never pass."""
+
+    ADAPTER = get_adapter("swift")
+
+    def test_a_coverage_command_is_supplied(self):
+        assert self.ADAPTER.default_commands().get("coverage")
+
+    def test_it_produces_a_result_bundle_before_reading_one(self):
+        command = self.ADAPTER.default_commands()["coverage"]
+        assert "-enableCodeCoverage YES" in command
+        assert command.index("-resultBundlePath") < command.index("xccov")
+
+    def test_the_bundle_path_is_a_placeholder_not_a_fixed_path(self):
+        """A fixed path would be shared state between concurrent sessions."""
+        assert "{result_bundle}" in self.ADAPTER.default_commands()["coverage"]
+
+    def test_its_output_is_what_parse_coverage_already_reads(self):
+        raw = (
+            "    /Users/x/Heap/Frameworks/Intake/IntakeDrainDisposition.swift"
+            "    100.00% (55/55)\n"
+            "    /Users/x/Heap/Frameworks/Intake/FileBytesIngester.swift"
+            "     56.25% (56/99)\n"
+        )
+        parsed = self.ADAPTER.parse_coverage(raw)
+        assert parsed == {
+            "/Users/x/Heap/Frameworks/Intake/IntakeDrainDisposition.swift": 100.0,
+            "/Users/x/Heap/Frameworks/Intake/FileBytesIngester.swift": 56.25,
+        }

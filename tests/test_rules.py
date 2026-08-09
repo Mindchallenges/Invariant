@@ -766,3 +766,85 @@ class TestPublishingIsOptIn:
         ctx = ctx_factory(session={"state": "merged", "worktree": "/nonexistent/wt"})
         verdict = only(evaluate(["session.teardown_complete"], ctx)).verdict
         assert verdict.ok and not verdict.skipped
+
+
+
+class TestCoverageScopeAndPathSpelling:
+    """The gate had three separate holes, and one fix would have hidden another.
+
+    `record_coverage` had no callers, so the evidence could never exist;
+    `coverage_scope: touched` was configured but never implemented; and the
+    reporter emits absolute paths while git emits repo-relative ones. Wiring
+    only the first would have produced a gate that passed vacuously on an empty
+    intersection — quieter than blocking, and much worse.
+    """
+
+    def ctx_with(self, ctx_factory, coverage, changed=()):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        # Declared on the session rather than left dirty in the tree: by the
+        # time this gate runs the work is normally committed, and `git diff`
+        # reports nothing for committed work.
+        return ctx_factory(
+            session={"id": "s1", "files": list(changed)},
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_absolute_reporter_paths_match_relative_changed_files(self, ctx_factory):
+        """The mismatch that would have made the gate pass on nothing."""
+        absolute = str(ctx_factory.main / "src" / "app.swift")
+        ctx = self.ctx_with(ctx_factory, {absolute: 95.0}, changed=["src/app.swift"])
+        verdict = self.verdict(ctx)
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_changed_file_below_the_floor_is_caught(self, ctx_factory):
+        absolute = str(ctx_factory.main / "src" / "app.swift")
+        ctx = self.ctx_with(ctx_factory, {absolute: 40.0}, changed=["src/app.swift"])
+        assert not self.verdict(ctx).ok
+
+    def test_an_untouched_file_below_the_floor_is_ignored(self, ctx_factory):
+        """`coverage_scope: touched` means touched, and it was never applied."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {
+                str(ctx_factory.main / "src" / "app.swift"): 95.0,
+                str(ctx_factory.main / "src" / "ancient.swift"): 10.0,
+            },
+            changed=["src/app.swift"],
+        )
+        assert self.verdict(ctx).ok
+
+    def test_no_overlap_fails_rather_than_passing_vacuously(self, ctx_factory):
+        ctx = self.ctx_with(
+            ctx_factory,
+            {"/somewhere/else/other.swift": 100.0},
+            changed=["src/app.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "none of it covers the changed files" in verdict.message
+
+    def test_a_docs_only_change_does_not_trip_the_overlap_check(self, ctx_factory):
+        """Nothing measures coverage of a markdown file."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.swift"): 95.0},
+            changed=["docs/architecture/overview.md"],
+        )
+        assert self.verdict(ctx).ok
+
+    def test_missing_evidence_names_the_command_that_produces_it(self, ctx_factory):
+        """The old advice named a command no code path ran."""
+        ctx = self.ctx_with(ctx_factory, {})
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert any("invariant pipeline coverage" in fix for fix in verdict.fixes)

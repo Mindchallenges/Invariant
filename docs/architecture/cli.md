@@ -58,6 +58,16 @@ invariant session merge               Validate the merge is being run from the
 invariant session push                Publish the base branch. Refused unless
                                       session.push is enabled (it is off by
                                       default); the barrier then allows one.
+invariant pipeline coverage
+    Run commands.coverage, parse it with the adapter, and record per-file
+    numbers as pipeline evidence. This is what coverage.meets_floor reads.
+
+invariant pipeline ack <rule> --reason "<why>"
+    Record a deliberate decision to proceed against an ADVISORY gate. It then
+    reports as skipped, carrying that reason, for the rest of the pipeline.
+    Refused for blocking gates: satisfy those, or record an override on the
+    transition with `advance --force --reason`.
+
 invariant session adopt <host-id> [--id <id>] [--force]
     Bind a host session to an invariant session. Normally automatic; needed by
     hand only to claim a session registered before the binding existed.
