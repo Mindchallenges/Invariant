@@ -629,3 +629,69 @@ class TestAgentRoleGates:
         ctx = ctx_factory(pipeline={"evidence": {}})
         verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
         assert any("feature-architect" in fix for fix in verdict.fixes)
+
+
+
+class TestPushBarrierAndExemptPaths:
+    """Config and memory commit straight to the shared branch by design.
+
+    Such a commit can never acquire a session, so a barrier that demands one
+    enforces nothing — it makes those commits permanently unpushable. That was
+    not hypothetical: it blocked a real push of already-committed memory.
+    """
+
+    PUSH = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
+
+    def push_ctx(self, ctx_factory, cwd, session=None):
+        return ctx_factory(cwd=cwd, session=session, payload=self.PUSH)
+
+    def with_upstream(self, main, tmp_path, files):
+        """A repo with a real upstream, ahead by one commit touching `files`."""
+        remote = tmp_path / "remote.git"
+        run(["git", "init", "-q", "--bare", str(remote)], main)
+        run(["git", "remote", "add", "origin", str(remote)], main)
+        run(["git", "push", "-q", "-u", "origin", "master"], main)
+        for rel in files:
+            path = main / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x\n", encoding="utf-8")
+        if files:
+            run(["git", "add", "-A"], main)
+            run(["git", "commit", "-qm", "ahead"], main)
+
+    def verdict(self, ctx_factory, tmp_path, files, session=None):
+        main = ctx_factory.main
+        self.with_upstream(main, tmp_path, files)
+        ctx = self.push_ctx(ctx_factory, main, session=session)
+        return evaluate(["session.push_barrier"], ctx)[0].verdict
+
+    def test_a_push_of_only_exempt_paths_is_allowed(self, ctx_factory, tmp_path):
+        verdict = self.verdict(ctx_factory, tmp_path, [".claude/memory/a-note.md"])
+        # Skipped, not passed: the barrier did not apply, rather than being met.
+        assert verdict.skipped and verdict.ok
+
+    def test_one_non_exempt_path_reinstates_the_barrier(self, ctx_factory, tmp_path):
+        verdict = self.verdict(
+            ctx_factory, tmp_path, [".claude/memory/a-note.md", "src/app.py"]
+        )
+        assert not verdict.ok
+
+    def test_no_upstream_does_not_open_the_gate(self, ctx_factory):
+        """An unanswerable question is not a negative answer."""
+        ctx = self.push_ctx(ctx_factory, ctx_factory.main)
+        assert not evaluate(["session.push_barrier"], ctx)[0].verdict.ok
+
+    def test_nothing_ahead_does_not_open_the_gate(self, ctx_factory, tmp_path):
+        assert not self.verdict(ctx_factory, tmp_path, []).ok
+
+    def test_a_registered_session_is_still_held_to_the_barrier(
+        self, ctx_factory, tmp_path
+    ):
+        """The relaxation is for sessionless pushes only."""
+        verdict = self.verdict(
+            ctx_factory,
+            tmp_path,
+            [".claude/memory/a-note.md"],
+            session={"id": "s1", "state": "working", "push_count": 0},
+        )
+        assert not verdict.ok

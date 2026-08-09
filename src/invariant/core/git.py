@@ -118,6 +118,26 @@ def changed_files(cwd: Path, since: str | None = None) -> list[Path]:
     return sorted(seen.values(), key=str)
 
 
+def unpushed_files(cwd: Path) -> list[Path] | None:
+    """Paths touched by commits the upstream does not have yet.
+
+    ``None`` means the question could not be answered — no upstream configured,
+    a detached head, an unreadable repository. A caller deciding whether to
+    *relax* a rule must treat ``None`` as "do not relax": an unanswered
+    question is not a negative answer, and reading it as one turns every
+    unusual repository state into an open gate.
+    """
+    code, upstream, _ = _run(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd
+    )
+    if code != 0 or not upstream.strip():
+        return None
+    code, out, _ = _run(["diff", "--name-only", f"{upstream.strip()}...HEAD"], cwd)
+    if code != 0:
+        return None
+    return [Path(p) for p in out.splitlines() if p]
+
+
 def branch_is_merged_into(cwd: Path, branch: str, target: str) -> bool:
     code, out, _ = _run(["branch", "--contains", branch, "--list", target], cwd)
     return code == 0 and bool(out.strip())

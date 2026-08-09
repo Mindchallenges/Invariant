@@ -319,9 +319,33 @@ def _push_barrier(ctx: RuleContext) -> Verdict:
     if "git push" not in command and not ctx.extra.get("pushing"):
         return Verdict.na()
     if ctx.session is None:
+        # Exempt paths — configuration and the knowledge store — commit
+        # straight to the shared branch by design; that is what the exemption
+        # in session.exempt_paths means. Such a commit can therefore never
+        # acquire a session, so demanding one here does not enforce the
+        # barrier, it makes those commits permanently unpushable. The barrier
+        # counts *session* work, and a push carrying none has nothing to count.
+        #
+        # Deliberately narrow: one non-exempt path in the unpushed set and the
+        # barrier applies in full, and an unanswerable question (no upstream,
+        # detached head) is not treated as an answer.
+        unpushed = git.unpushed_files(ctx.cwd)
+        # git reports these repo-relative; anchor them to the repository before
+        # asking, or they resolve against the process working directory and
+        # match nothing — an exemption that silently stops applying.
+        top = git.toplevel(ctx.cwd)
+        if unpushed and top is not None:
+            unpushed = [Path(top) / path for path in unpushed]
+        if unpushed and all(_is_exempt(ctx, path) for path in unpushed):
+            return Verdict.na(
+                f"{len(unpushed)} unpushed path(s), all exempt from session "
+                "isolation — this push carries no session work"
+            )
         return Verdict.fail(
             "a push with no registered session cannot be counted against the "
             "one-push barrier",
+            detail="Exempt paths are the exception, and every unpushed commit "
+            "here touches something outside them.",
             fixes=("invariant session start <task-name>",),
         )
     already = int(ctx.session.get("push_count", 0))
