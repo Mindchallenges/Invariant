@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -79,7 +80,25 @@ FENCE = "---"
 #: Check labels. Named constants because ``doctor`` prints them and the tests
 #: assert on them, and a silently renamed check is a silently dropped test.
 CHECK_HOOKS = "hook shims installed"
+CHECK_HOOKS_RUN = "hook shims actually run"
 CHECK_WIRED = "hooks wired in settings"
+
+#: Set on a hook response when the engine failed and fell back to advisory
+#: silence. See ``_hook_degraded``.
+DEGRADED_KEY = "invariantDegraded"
+
+#: Payloads for the liveness check. Each is chosen to exercise the whole path
+#: — shim resolution, interpreter start, module import, rule evaluation, JSON
+#: out — while writing nothing: no file_path so no session is adopted and no
+#: docs read is recorded, no session_id so no host binding is ended, and a
+#: command that matches no rule's trigger.
+_PROBE_PAYLOADS = {
+    "session-start": {},
+    "user-prompt-submit": {},
+    "pre-tool-use": {"tool_name": "Bash", "tool_input": {"command": "true"}},
+    "post-tool-use": {"tool_name": "Read", "tool_input": {}},
+    "session-end": {},
+}
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
 CHECK_AGENTS_CURRENT = "library agents current"
 
@@ -276,8 +295,71 @@ class ClaudeCodeHost:
             except OSError:
                 wired = False
         checks.append((CHECK_WIRED, wired, str(settings_path)))
+        checks.append(self.hooks_run_check())
         checks.extend(self.agent_checks())
         return checks
+
+    def hooks_run_check(self) -> tuple[str, bool, str]:
+        """Invoke every hook and see whether it actually works.
+
+        The other two hook checks confirm the shims *exist* and are *wired*.
+        Both stayed green through an entire session in which every hook crashed
+        on import and enforcement was off for every call — because "installed"
+        is a fact about a file and "works" is a fact about running it, and only
+        one of them was ever checked.
+
+        That is the same mistake, in this same module, as the one that left
+        four agents unloadable while ``verify`` reported them current: a check
+        on the artifact of an installation is not a check on the installation.
+        """
+        import subprocess
+
+        hooks_dir = self.claude_dir / "hooks"
+        broken: list[str] = []
+
+        for event in EVENTS:
+            shim = hooks_dir / f"invariant-{event}.sh"
+            if not shim.is_file():
+                broken.append(f"{event} (absent)")
+                continue
+            try:
+                proc = subprocess.run(
+                    ["bash", str(shim)],
+                    input=json.dumps(_PROBE_PAYLOADS.get(event, {})),
+                    cwd=str(self.root),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env={**os.environ, "CLAUDE_PROJECT_DIR": str(self.root)},
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                broken.append(f"{event} ({type(exc).__name__})")
+                continue
+
+            if proc.returncode != 0:
+                broken.append(f"{event} (exit {proc.returncode})")
+                continue
+            try:
+                response = json.loads(proc.stdout or "{}")
+            except json.JSONDecodeError:
+                broken.append(f"{event} (output is not JSON)")
+                continue
+            # The case that matters. A crashed engine answers with valid JSON
+            # and exit zero deliberately — it must, or a broken library would
+            # deny every tool call — so only the marker separates "it ran" from
+            # "it worked".
+            if isinstance(response, dict) and response.get(DEGRADED_KEY):
+                broken.append(f"{event}: {response[DEGRADED_KEY]}")
+
+        return (
+            CHECK_HOOKS_RUN,
+            not broken,
+            (
+                "; ".join(broken) + "  — enforcement is OFF for these"
+                if broken
+                else f"all {len(EVENTS)} evaluated and returned a verdict"
+            ),
+        )
 
     def agent_checks(self) -> list[tuple[str, bool, str]]:
         """Two questions, kept apart on purpose.

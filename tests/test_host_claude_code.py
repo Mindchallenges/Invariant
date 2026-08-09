@@ -17,6 +17,7 @@ A test that only proved "current" is what let this reach a user.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,8 @@ from invariant.core.errors import InvariantError
 from invariant.hosts import claude_code
 from invariant.hosts.claude_code import (
     CHECK_AGENTS_CURRENT,
+    CHECK_HOOKS,
+    CHECK_HOOKS_RUN,
     CHECK_AGENTS_LOADABLE,
     ClaudeCodeHost,
     agent_frontmatter,
@@ -597,3 +600,121 @@ class TestSessionEndReleasesTheBinding:
         ctx = FakeCtx(host_session_id=None)
         host.handle("session-end", "{}", ctx)
         assert ctx.sessions.ended == []
+
+
+
+class TestHooksActuallyRun:
+    """Installed, wired, and working are three different facts.
+
+    An entire session ran with every hook crashing on import and enforcement
+    off for every call, while `doctor` reported "hook shims installed 5/5" and
+    "hooks wired in settings" the whole time. Both were true. Neither was the
+    question.
+
+    This is the same mistake as the agent-loading one, in the same module: a
+    check on the artifact of an installation is not a check on the
+    installation. So these tests hand the checker known-broken hooks and
+    require it to go red — a checker that has only ever been run against a
+    healthy install is not evidence of anything.
+    """
+
+    def stub(self, host, event, body):
+        shim = host.claude_dir / "hooks" / f"invariant-{event}.sh"
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        shim.write_text(body, encoding="utf-8")
+        shim.chmod(0o755)
+
+    def run_check(self, host):
+        _, ok, detail = host.hooks_run_check()
+        return ok, detail
+
+    def test_healthy_shims_pass(self, installed):
+        """The shipped shims fall back to echoing {} when invariant is absent,
+        which is correct behaviour and must not read as broken."""
+        ok, detail = self.run_check(installed)
+        assert ok, detail
+
+    def test_a_crashing_hook_is_caught(self, installed):
+        self.stub(installed, "pre-tool-use", "#!/usr/bin/env bash\nexit 1\n")
+        ok, detail = self.run_check(installed)
+        assert not ok
+        assert "pre-tool-use" in detail
+
+    def test_non_json_output_is_caught(self, installed):
+        self.stub(
+            installed, "post-tool-use", "#!/usr/bin/env bash\necho 'not json'\n"
+        )
+        ok, detail = self.run_check(installed)
+        assert not ok
+        assert "not JSON" in detail
+
+    def test_the_degraded_marker_is_caught(self, installed):
+        """The case the old checks could never have seen.
+
+        A crashed engine answers with exit 0 and valid JSON on purpose — it has
+        to, or a broken library would deny every tool call in the project. So
+        exit status and parseability both look healthy, and only the marker
+        separates "the hook ran" from "the hook worked".
+        """
+        payload = json.dumps(
+            {
+                "hookSpecificOutput": {"hookEventName": "PreToolUse"},
+                claude_code.DEGRADED_KEY: "NameError: name 'Resolution' is not defined",
+            }
+        )
+        self.stub(
+            installed,
+            "pre-tool-use",
+            f"#!/usr/bin/env bash\ncat <<'EOF'\n{payload}\nEOF\n",
+        )
+        ok, detail = self.run_check(installed)
+        assert not ok
+        assert "NameError" in detail
+
+    def test_exit_zero_and_valid_json_alone_would_have_passed_it(self, installed):
+        """Why the marker had to exist, stated as a test."""
+        payload = json.dumps(
+            {
+                "hookSpecificOutput": {"hookEventName": "PreToolUse"},
+                claude_code.DEGRADED_KEY: "ImportError: boom",
+            }
+        )
+        self.stub(
+            installed,
+            "pre-tool-use",
+            f"#!/usr/bin/env bash\ncat <<'EOF'\n{payload}\nEOF\n",
+        )
+        shim = installed.claude_dir / "hooks" / "invariant-pre-tool-use.sh"
+        import subprocess
+
+        proc = subprocess.run(
+            ["bash", str(shim)], input="{}", capture_output=True, text=True
+        )
+        assert proc.returncode == 0            # looks healthy
+        assert json.loads(proc.stdout)         # looks healthy
+        assert not self.run_check(installed)[0]  # is not healthy
+
+    def test_a_missing_shim_is_caught(self, installed):
+        (installed.claude_dir / "hooks" / "invariant-session-end.sh").unlink()
+        ok, detail = self.run_check(installed)
+        assert not ok
+        assert "session-end" in detail
+
+    def test_the_failure_says_enforcement_is_off(self, installed):
+        self.stub(installed, "pre-tool-use", "#!/usr/bin/env bash\nexit 3\n")
+        assert "enforcement is OFF" in self.run_check(installed)[1]
+
+    def test_it_is_reported_as_its_own_check(self, installed):
+        labels = [name for name, _, _ in installed.verify()]
+        assert CHECK_HOOKS_RUN in labels
+        assert CHECK_HOOKS in labels  # the old one stays; they answer differently
+
+    def test_installed_and_running_are_reported_apart(self, installed):
+        """A shim can be present and still not work; the report must say which."""
+        self.stub(installed, "pre-tool-use", "#!/usr/bin/env bash\nexit 1\n")
+        checks = {name: ok for name, ok, _ in installed.verify()}
+        assert checks[CHECK_HOOKS] is True
+        assert checks[CHECK_HOOKS_RUN] is False
+
+    def test_the_probe_payloads_cover_every_event(self, installed):
+        assert set(claude_code._PROBE_PAYLOADS) == set(claude_code.EVENTS)

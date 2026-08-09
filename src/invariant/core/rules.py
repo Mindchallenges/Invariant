@@ -802,9 +802,25 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                 )
             coverage = touched
 
+    # How the measurement was obtained, carried into the verdict. A clean pass
+    # measured on a run with a live hazard is not the same claim as one
+    # measured on a clean run, and a reader cannot tell them apart afterwards
+    # unless the verdict says so.
+    run = ctx.evidence("coverage_run", {}) or {}
+    caveats = []
+    if run.get("hazards"):
+        caveats.append("hazards on the measuring run: " + ", ".join(run["hazards"]))
+    if run.get("suite_passed") is False:
+        caveats.append(
+            f"measured on a run where {run.get('failed', '?')} test(s) failed"
+        )
+    suffix = ("  (" + "; ".join(caveats) + ")") if caveats else ""
+
     below = {f: pct for f, pct in coverage.items() if float(pct) < floor}
     if not below:
-        return Verdict.clean(f"all {len(coverage)} file(s) at or above {floor:g}%")
+        return Verdict.clean(
+            f"all {len(coverage)} file(s) at or above {floor:g}%{suffix}"
+        )
     listed = ", ".join(f"{f} {pct:g}%" for f, pct in sorted(below.items())[:6])
     return Verdict.fail(
         f"{len(below)} file(s) below the {floor:g}% floor",

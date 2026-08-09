@@ -347,6 +347,12 @@ class PipelineDomain:
             "failed": outcome.failed,
             "exit_code": proc.returncode,
             "suite_passed": outcome.passed,
+            # A hazard on the measuring run travels with the measurement. Exit
+            # 65 can mean whole suites never ran, which makes coverage
+            # UNDERSTATED — and an understated number is still a number
+            # somebody will act on. Annotating beats silently trusting, for the
+            # same reason TestResult.trustworthy is narrower than passed.
+            "hazards": [h.id for h in outcome.hazards],
         }
         self._save(session_id, pipeline)
 
@@ -391,6 +397,11 @@ class PipelineDomain:
 
         record = {
             "phase": phase or pipeline.state,
+            # The RESOLVED command, placeholders substituted. A discovered
+            # value that picked the wrong thing — another session's simulator,
+            # say — is otherwise invisible: nothing in the output names what
+            # was chosen, so a run against the wrong device is indistinguishable
+            # from a run against the right one.
             "command": command,
             "passed": result.passed,
             "exit_code": result.exit_code,

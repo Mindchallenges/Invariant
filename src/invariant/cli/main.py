@@ -657,7 +657,14 @@ def cmd_pipeline_coverage(args) -> int:
     ctx = Context()
     session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
     result = ctx.pipelines.run_coverage(session.id, cwd=ctx.cwd)
-    lines = [f"recorded coverage for {result['files']} file(s)"]
+    lines = [
+        # Echo what was actually run. Discovery substitutes values nobody typed
+        # — a simulator id most of all — and a wrong one produces a plausible
+        # result with no sign of where it came from.
+        f"ran: {result['command']}",
+        f"suite: {result['executed']} executed, {result['failed']} failed",
+        f"recorded coverage for {result['files']} file(s)",
+    ]
     for path, pct in sorted(result["coverage"].items())[:10]:
         lines.append(f"  {path}  {pct:g}%")
     return emit(args, result, "\n".join(lines))
@@ -931,7 +938,7 @@ def cmd_hook(args) -> int:
 
 def _hook_degraded(event: str, exc: Exception) -> dict:
     """Report a broken hook as context, never as a decision."""
-    from ..hosts.claude_code import EVENTS, _context_response
+    from ..hosts.claude_code import DEGRADED_KEY, EVENTS, _context_response
 
     text = (
         f"invariant: the {event} hook could not evaluate and was skipped — "
@@ -940,7 +947,14 @@ def _hook_degraded(event: str, exc: Exception) -> dict:
         f"  Diagnose with 'invariant doctor'. Gates are not being checked "
         f"until this is fixed."
     )
-    return _context_response(EVENTS.get(event, "PreToolUse"), text)
+    response = _context_response(EVENTS.get(event, "PreToolUse"), text)
+    # A machine-readable marker, because this path exits zero with valid JSON
+    # by design — it must, or a broken library would deny every tool call in
+    # the project. That makes "the hook ran" indistinguishable from "the hook
+    # worked" to anything checking from outside, and an entire session went
+    # unenforced behind exactly that gap.
+    response[DEGRADED_KEY] = f"{type(exc).__name__}: {exc}"
+    return response
 
 
 def cmd_context(args) -> int:
