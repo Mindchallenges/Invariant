@@ -978,3 +978,65 @@ class TestItemVocabularyCheck:
         run("doctor", "--json")
         detail = self.row(capsys)["item statuses match their machine"]["detail"]
         assert "extra_machines" in detail
+
+
+class TestTheMergeCommandEvaluatesItsGates:
+    """`merged`'s entry gates were declared and never read.
+
+    `session merge` checked only that the edge existed, then ran git. The merge
+    drives git through a subprocess rather than a tool call, so the pre-tool-use
+    hook never sees it either — between the two, the irreversible step was the
+    least guarded one in the whole lifecycle.
+
+    Every assertion here is made against a project whose profile actually
+    blocks. The default profile leaves `pipeline.complete` advisory, so a suite
+    written against the default would pass whether or not the gate was wired at
+    all — which is how a gate comes to look tested while being inert.
+    """
+
+    def strict_project(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        manifest = project / ".claude" / "invariant.yaml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "\nenforcement:\n  profile: strict\n",
+            encoding="utf-8",
+        )
+        commit_all(project, "adopt")
+        run("session", "start", "x", "--json")
+        sid = payload(capsys)["session"]["id"]
+        run("session", "isolate", "--execute", "--id", sid)
+        for state in ("working", "reviewed"):
+            run("session", "transition", state, "--id", sid, "--force",
+                "--reason", "test fixture")
+        return sid
+
+    def base_head(self, project):
+        return subprocess.run(
+            ["git", "rev-parse", "master"], cwd=project, capture_output=True, text=True
+        ).stdout.strip()
+
+    def test_a_refusing_gate_stops_the_merge(self, project, capsys):
+        """The known positive: legal edge, no pipeline, must not merge."""
+        sid = self.strict_project(project, capsys)
+        before = self.base_head(project)
+
+        assert run("session", "merge", "--id", sid) != 0
+        assert self.base_head(project) == before
+
+    def test_the_refusal_names_the_gate_and_says_nothing_merged(
+        self, project, capsys
+    ):
+        sid = self.strict_project(project, capsys)
+        run("session", "merge", "--id", sid)
+        captured = capsys.readouterr()
+        message = captured.err + captured.out
+        assert "pipeline.complete" in message
+        assert "nothing has been merged" in message
+
+    def test_force_records_the_override_rather_than_hiding_it(
+        self, project, capsys
+    ):
+        """A gate with no honest exit gets worked around instead of obeyed."""
+        sid = self.strict_project(project, capsys)
+        assert run("session", "merge", "--id", sid, "--force") == 0

@@ -15,10 +15,12 @@ rules:
   session.push_enabled: block
   session.ff_merge_target: block
   session.own_file_set_only: warn
+  session.work_would_be_stranded: block
   session.named_after_isolating: warn
   session.teardown_complete: warn
 
   # Pipeline ordering.
+  pipeline.complete: warn
   pipeline.started_before_edit: warn
 
   # Installing an agent is not using one. These advise rather than block: the

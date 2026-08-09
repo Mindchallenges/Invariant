@@ -21,10 +21,32 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from . import git
+from .errors import InvariantError
+from .machines import load_pipeline_machine, load_session_machine
 from .manifest import Level, Manifest
 from .privacy import PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+#: The terminal state that means "gave up", as opposed to "finished".
+#:
+#: Every shipped machine spells it this way. It is named rather than derived
+#: because a machine records only THAT a state is terminal, not whether
+#: arriving there was the point — and a rule about unfinished work has to tell
+#: those apart.
+ABANDONED = "abandoned"
+
+
+def _terminal_states(loader, manifest) -> frozenset[str]:
+    """A machine's terminal states, read from the machine itself.
+
+    Copying the list into this module would let the two drift, and the copy
+    would be the one nobody updates when a machine gains a state.
+    """
+    try:
+        return loader(manifest).terminal
+    except InvariantError:
+        return frozenset()
 
 
 # -- result types ------------------------------------------------------
@@ -513,9 +535,83 @@ def _named_after_isolating(ctx: RuleContext) -> Verdict:
 
 
 @rule(
+    "session.work_would_be_stranded",
+    summary="A turn does not end with committed work sitting on an unmerged branch.",
+    events=("stop",),
+)
+def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
+    """The last moment at which the Definition of Done can still be demanded.
+
+    Everything else in this file fires while work is happening — before a tool
+    call, on entering a state. The closeout is the one obligation that comes
+    due when work *stops*, and nothing fired there at all: the pipeline's
+    terminal state is ``committed``, which hands off to the session machine,
+    and the session machine was never asked again. ``SessionEnd`` is the hook
+    that carries the right name and it is the one hook whose output is
+    discarded, so a demand made there reaches nobody.
+
+    The trigger is deliberately narrow — a pipeline that declared itself done
+    AND a branch holding commits the base does not have. Both halves matter. A
+    session mid-work is ahead of its base constantly and blocking on that alone
+    would fire on every turn until it learned to be ignored, which is how a
+    blocking gate becomes an obstacle instead of a control. And a pipeline that
+    reached ``committed`` with nothing ahead of the base has already merged;
+    what it owes then is tidiness, not rescue, and that is a different rule.
+    """
+    # Asked once already this turn and the caller is acting on it. Asking again
+    # would be a loop, and a gate that cannot be satisfied gets forced.
+    if ctx.payload.get("stop_hook_active"):
+        return Verdict.na("already raised this turn")
+    if ctx.session is None:
+        return Verdict.na("no session")
+
+    state = str(ctx.session.get("state") or "")
+    if state in _terminal_states(load_session_machine, ctx.manifest):
+        return Verdict.na(f"session is {state}")
+
+    # "The work is done" is a claim the pipeline makes, not one inferred from
+    # the diff. Inferring it would guess, and would guess wrong on the session
+    # that is mid-refactor with three commits down.
+    pipeline_state = str((ctx.pipeline or {}).get("state") or "")
+    if pipeline_state == ABANDONED:
+        return Verdict.na("pipeline abandoned — nothing is being claimed as done")
+    if pipeline_state not in _terminal_states(load_pipeline_machine, ctx.manifest):
+        return Verdict.na(
+            f"pipeline is {pipeline_state or 'not started'} — work is still in flight"
+        )
+
+    branch = str(ctx.session.get("branch") or "")
+    if not branch:
+        return Verdict.na("session owns no branch")
+    base = str(ctx.session.get("base") or "master")
+
+    ahead = git.commits_ahead(_repo_root(ctx), branch, base)
+    if ahead is None:
+        return Verdict.na(f"could not compare {branch} against {base}")
+    if ahead == 0:
+        return Verdict.clean(f"{branch} holds nothing {base} does not")
+
+    return Verdict.fail(
+        f"{ahead} commit(s) on {branch} are not on {base}",
+        detail="The pipeline says this work is finished and the turn is "
+        "ending, but the commits live only on the session branch. Nobody "
+        "outside this session is looking at that branch, so stopping here "
+        "leaves the work where the next person to need it will not find it. "
+        "Merging is the step that makes it real; teardown is the step that "
+        "makes the session over.",
+        fixes=(
+            "invariant session review",
+            "invariant session merge      # from the main checkout",
+            "invariant session teardown   # removes the worktree AND the branch",
+            "invariant session abandon    # if this work is deliberately dropped",
+        ),
+    )
+
+
+@rule(
     "session.teardown_complete",
     summary="A finished session's worktree is removed.",
-    events=(),
+    events=("stop",),
 )
 def _teardown_complete(ctx: RuleContext) -> Verdict:
     # Both ends of the lifecycle, because publishing is optional: a session
@@ -555,6 +651,69 @@ def _pipeline_started_before_edit(ctx: RuleContext) -> Verdict:
     return Verdict.fail(
         "no pipeline is running, so this change has no recorded methodology",
         fixes=("invariant pipeline start --task '<what you are doing>'",),
+    )
+
+
+@rule(
+    "pipeline.complete",
+    summary="The methodology ran to its end before the work lands.",
+    events=(),
+)
+def _pipeline_complete(ctx: RuleContext) -> Verdict:
+    """The gate that makes every other pipeline gate mandatory.
+
+    ``pipeline.started_before_edit`` proved a pipeline exists. Nothing proved
+    it ever moved. Starting one in ``designing`` satisfied that rule for the
+    rest of the session, and two sessions merged and tore down with their
+    pipeline still in its initial state — which silently skipped every gate the
+    methodology owns, because all of them are EXIT gates on states nobody was
+    required to pass through: the red state's failing test, the green state's
+    green suite, the review state's coverage, privacy, docs and agent checks.
+
+    One gate closes all of it. The machine's ``next`` lists already forbid
+    skipping a state, so requiring the pipeline to be TERMINAL before the work
+    lands transitively requires every exit gate along the way. Nothing here
+    re-derives what those gates decided; it requires that they were asked.
+    """
+    if ctx.pipeline is None or not ctx.pipeline.get("state"):
+        return Verdict.fail(
+            "no pipeline ran for this work",
+            detail="The methodology is what makes the review gates apply. "
+            "Without one, nothing recorded how this change was arrived at.",
+            fixes=("invariant pipeline start --task '<what you are doing>'",),
+        )
+
+    state = str(ctx.pipeline.get("state"))
+    if state == ABANDONED:
+        return Verdict.fail(
+            "the pipeline was abandoned",
+            detail="Abandoning is how work is dropped, not how it lands. A "
+            "session carrying an abandoned pipeline is asking to merge work "
+            "whose methodology was called off.",
+            fixes=(
+                "invariant pipeline start --task '<what you are doing>'",
+                "invariant session abandon    # if the work really is dropped",
+            ),
+        )
+
+    try:
+        machine = load_pipeline_machine(ctx.manifest)
+    except InvariantError as exc:
+        return Verdict.na(f"pipeline machine unreadable: {exc}")
+
+    if state in machine.terminal:
+        return Verdict.clean(f"pipeline reached {state!r}")
+
+    remaining = ", ".join(machine.next_states(state)) or "(none)"
+    return Verdict.fail(
+        f"the pipeline is still in {state!r}",
+        detail="Every gate this methodology owns is an exit gate on a state "
+        "further along, so landing from here skips all of them rather than "
+        "passing them. Walk it forward, or abandon it deliberately.",
+        fixes=(
+            f"invariant pipeline gates      # what {state!r} owes",
+            f"invariant pipeline advance <{remaining}>",
+        ),
     )
 
 

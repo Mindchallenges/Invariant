@@ -1446,3 +1446,170 @@ class TestAmbiguityAdviceIsHonestAboutHooks:
         assert "--id" in text
         assert "never gets there" in text
         assert "host session bound to it" in text
+
+
+class TestClosingTheSessionIsGated:
+    """The Definition of Done had no enforcement point at all.
+
+    Every other rule fires while work is happening — before a tool call, on
+    entering a state. The closeout comes due when work *stops*, and nothing
+    fired there: the pipeline's terminal state hands off to the session
+    machine, and the session machine was never asked again. Two sessions were
+    found parked with four commits stranded on branches nobody was looking at,
+    and three merged branches that were never deleted.
+
+    `session.teardown_complete` had existed for the tidiness half the whole
+    time — registered, profiled `block` under strict, covered by tests, and
+    bound to no event and no machine state. It could not fail because nothing
+    ever ran it. That is the failure mode these tests exist to prevent, so the
+    binding itself is asserted, not just the logic.
+    """
+
+    def committed_ahead(self, ctx_factory, commits=1):
+        """A session branch holding work the base does not have."""
+        for n in range(commits):
+            (ctx_factory.wt / f"work{n}.txt").write_text("x", encoding="utf-8")
+            run(["git", "add", "-A"], ctx_factory.wt)
+            run(["git", "commit", "-qm", f"work {n}"], ctx_factory.wt)
+        return {"state": "working", "branch": "session/x", "base": "master"}
+
+    # -- the binding, not just the logic -------------------------------
+
+    def test_both_closeout_rules_actually_run_on_stop(self):
+        """A gate bound to no event is inert however good its logic is."""
+        bound = {spec.id for spec in rules_for_event("stop")}
+        assert "session.work_would_be_stranded" in bound
+        assert "session.teardown_complete" in bound
+
+    # -- the known positive --------------------------------------------
+
+    def test_finished_work_on_an_unmerged_branch_is_a_finding(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory, commits=2),
+            pipeline={"state": "committed"},
+        )
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "2 commit(s)" in verdict.message
+        assert any("session merge" in fix for fix in verdict.fixes)
+
+    def test_a_merged_branch_leaves_nothing_stranded(self, ctx_factory):
+        session = self.committed_ahead(ctx_factory)
+        run(["git", "merge", "--ff-only", "session/x"], ctx_factory.main)
+        ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    # -- the narrowing that keeps it from firing every turn -------------
+
+    def test_work_still_in_flight_is_not_a_finding(self, ctx_factory):
+        """The half that makes this liveable.
+
+        A session mid-work is ahead of its base constantly. Blocking on that
+        alone would fire on every turn until it was ignored, which is how a
+        blocking gate becomes an obstacle instead of a control.
+        """
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "green"},
+        )
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_no_pipeline_at_all_is_not_a_finding(self, ctx_factory):
+        ctx = ctx_factory(session=self.committed_ahead(ctx_factory), pipeline=None)
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_an_abandoned_pipeline_claims_nothing(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "abandoned"},
+        )
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_a_finished_session_is_not_asked_again(self, ctx_factory):
+        session = self.committed_ahead(ctx_factory)
+        session["state"] = "torn_down"
+        ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_asking_twice_in_one_turn_is_a_loop(self, ctx_factory):
+        """A gate that cannot be satisfied gets forced.
+
+        The host returns the turn to the agent with the reason attached; if the
+        rule fired again on the next stop the pair would never terminate, and
+        the way out of a non-terminating gate is always to disable it.
+        """
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "committed"},
+            payload={"stop_hook_active": True},
+        )
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_terminal_states_are_read_from_the_machine_not_copied(self, ctx_factory):
+        """A copied list is the one nobody updates when a machine gains a state."""
+        from invariant.core.machines import load_session_machine
+        from invariant.core.rules import _terminal_states
+
+        found = _terminal_states(load_session_machine, ctx_factory().manifest)
+        assert found == load_session_machine(ctx_factory().manifest).terminal
+        assert "torn_down" in found
+
+
+class TestTheMethodologyMustActuallyRun:
+    """`pipeline.started_before_edit` proved a pipeline exists, never that it moved.
+
+    Starting one in `designing` satisfied that rule for the rest of the
+    session. Two sessions were found `torn_down` with their pipeline still in
+    `designing` — which skipped every gate the methodology owns, because all of
+    them are EXIT gates on states nobody was required to pass through.
+
+    One gate closes all of it: the machine's `next` lists already forbid
+    skipping a state, so requiring the pipeline to be terminal before the work
+    lands transitively requires every exit gate along the way.
+    """
+
+    def test_the_initial_state_is_not_good_enough(self, ctx_factory):
+        """The exact shape found on disk."""
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "designing"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "designing" in verdict.message
+
+    def test_a_finished_pipeline_passes(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "committed"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_missing_pipeline_is_a_finding_not_a_skip(self, ctx_factory):
+        """Otherwise deleting the pipeline is the way past the gate."""
+        ctx = ctx_factory(session={"state": "working"}, pipeline=None)
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_an_abandoned_pipeline_does_not_count_as_finished(self, ctx_factory):
+        """`abandoned` is terminal, and terminal is not the property wanted.
+
+        Reading "terminal" alone would let a called-off methodology land work,
+        which is the opposite of what abandoning it meant.
+        """
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "abandoned"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and "abandoned" in verdict.message
+
+    def test_the_message_names_where_to_go_next(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "red"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert any("green" in fix for fix in verdict.fixes)
+
+    def test_it_guards_both_the_reviewable_step_and_the_irreversible_one(self):
+        """A gate only on `reviewed` guards nothing once the work moves on.
+
+        `reviewed` can be re-entered from `working`, so a session may pass it,
+        go back, and merge from a state the gate never saw.
+        """
+        from invariant.core.machines import load_session_machine
+
+        machine = load_session_machine(None)
+        assert "pipeline.complete" in machine.state("reviewed").entry_gates
+        assert "pipeline.complete" in machine.state("merged").entry_gates

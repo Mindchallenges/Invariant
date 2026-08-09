@@ -13,9 +13,11 @@ rules:
   session.push_enabled: warn
   session.ff_merge_target: warn
   session.own_file_set_only: warn
+  session.work_would_be_stranded: "off"
   session.named_after_isolating: "off"
   session.teardown_complete: "off"
 
+  pipeline.complete: warn
   pipeline.started_before_edit: warn
 
   agents.design_agent_ran: warn

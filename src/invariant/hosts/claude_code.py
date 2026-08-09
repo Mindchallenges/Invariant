@@ -38,6 +38,7 @@ EVENTS = {
     "user-prompt-submit": "UserPromptSubmit",
     "pre-tool-use": "PreToolUse",
     "post-tool-use": "PostToolUse",
+    "stop": "Stop",
     "session-end": "SessionEnd",
 }
 
@@ -97,6 +98,11 @@ _PROBE_PAYLOADS = {
     "user-prompt-submit": {},
     "pre-tool-use": {"tool_name": "Bash", "tool_input": {"command": "true"}},
     "post-tool-use": {"tool_name": "Read", "tool_input": {}},
+    # `stop_hook_active` is what a real turn sets once the closeout has already
+    # been demanded, so the probe exercises the whole path and provably cannot
+    # block: a liveness check that could halt the caller's turn would be a
+    # worse defect than the outage it looks for.
+    "stop": {"stop_hook_active": True},
     "session-end": {},
 }
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
@@ -592,8 +598,41 @@ class ClaudeCodeHost:
             return _context_response("UserPromptSubmit", build_context(ctx))
         if event == "session-start":
             return _context_response("SessionStart", build_context(ctx, greeting=True))
+        if event == "stop":
+            return self._stop(payload, ctx)
         if event == "session-end":
             return self._session_end(ctx)
+        return {}
+
+    def _stop(self, payload: dict, ctx) -> dict:
+        """The turn is ending. The last point at which the closeout can be asked for.
+
+        Every other gate fires while work is happening. The Definition of Done
+        is the one obligation that comes due when work *stops*, and until this
+        existed nothing fired there: the pipeline's terminal state hands off to
+        the session machine, and the session machine was never asked again.
+
+        ``SessionEnd`` looks like the right place by name and is the wrong one
+        — the host runs it for cleanup and discards what it says, so a demand
+        made there is made to nobody. This event is the one that can still be
+        answered, because blocking here returns the turn to the agent with the
+        reason attached instead of ending it.
+        """
+        rule_ctx = ctx.rule_context(payload=payload)
+        verdicts = evaluate_event("stop", rule_ctx)
+
+        blocking = [v for v in verdicts if v.blocks]
+        if blocking:
+            return {
+                "decision": "block",
+                "reason": "invariant — the session is not finished:\n"
+                + "\n".join(v.render() for v in blocking),
+            }
+
+        warning = [v for v in verdicts if v.warns]
+        if warning:
+            # Advisory here means advisory: surfaced, and the turn still ends.
+            return {"systemMessage": "\n".join(v.render() for v in warning)}
         return {}
 
     def _bind_started_session(self, payload: dict, ctx) -> None:

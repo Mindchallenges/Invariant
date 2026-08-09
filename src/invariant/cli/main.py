@@ -708,6 +708,28 @@ def cmd_session_merge(args) -> int:
             f"--id {session.id}"
         )
 
+    # The gates the machine declares for this edge, evaluated BEFORE the merge.
+    #
+    # They were declared and never read: this command checked only that the
+    # edge existed, so `merged`'s entry gates were decoration. The merge runs
+    # git through a subprocess rather than a tool call, so the pre-tool-use
+    # hook never sees it either — between the two, the irreversible step was
+    # the least guarded one in the lifecycle.
+    machine = ctx.sessions.machine
+    gates = list(
+        dict.fromkeys(
+            machine.state("merged").entry_gates + machine.state(session.state).exit_gates
+        )
+    )
+    verdicts = evaluate(gates, ctx.rule_context())
+    blocking = [v for v in verdicts if v.blocks]
+    if blocking and not args.force:
+        report_verdicts(verdicts, args)
+        raise GateFailure(
+            "the merge gates refused this session — nothing has been merged",
+            verdicts=verdicts,
+        )
+
     # Run from the main checkout, never from the branch's own worktree: that
     # merges the branch into itself and the follow-up push pushes an unchanged
     # target, with both commands exiting zero.
@@ -1282,6 +1304,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = session.add_parser("merge")
     q.add_argument("--id")
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="merge despite a refusing gate; the override is recorded",
+    )
     q.set_defaults(func=cmd_session_merge)
 
     q = session.add_parser("push")

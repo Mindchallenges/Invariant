@@ -26,11 +26,19 @@ states:
     next: [working, reviewed, abandoned]
   reviewed:
     description: The review gates have passed against the declared file set.
+    # The methodology must have run to its end. Every gate a pipeline owns is
+    # an EXIT gate on one of its states, so a session that never advanced its
+    # pipeline skipped all of them rather than passing them — which is exactly
+    # how work reached `torn_down` with the pipeline still in `designing`.
+    entry_gates: [pipeline.complete]
     exit_gates: [privacy.clean]
     next: [merged, working, abandoned]
   merged:
     description: Rebased and fast-forward merged into the base branch.
-    entry_gates: [session.ff_merge_target]
+    # Repeated here deliberately. `reviewed` can be re-entered from `working`,
+    # and the merge is the irreversible step; a gate that only guards the
+    # reviewable step guards nothing once the work moves on from it.
+    entry_gates: [session.ff_merge_target, pipeline.complete]
     next: [torn_down, pushed, abandoned]
   pushed:
     description: >

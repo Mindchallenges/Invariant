@@ -718,3 +718,82 @@ class TestHooksActuallyRun:
 
     def test_the_probe_payloads_cover_every_event(self, installed):
         assert set(claude_code._PROBE_PAYLOADS) == set(claude_code.EVENTS)
+
+
+class TestStopDeliversTheCloseoutDemand:
+    """`SessionEnd` carries the right name and is the wrong hook.
+
+    A closeout demand belongs where work stops. `SessionEnd` is where the name
+    says it goes — and it is the one hook whose output the host discards, so a
+    demand made there is made to nobody. That is why every session that ended
+    without merging did so in silence.
+
+    `Stop` is the hook that can still be answered: blocking returns the turn to
+    the agent with the reason attached instead of ending it.
+    """
+
+    class Ctx:
+        def __init__(self, verdicts):
+            self._verdicts = verdicts
+            self.seen_payload = None
+            self.host_session_id = "host-1111"
+
+        def rule_context(self, payload=None):
+            self.seen_payload = payload
+            return payload
+
+    def evaluate_to(self, monkeypatch, verdicts):
+        monkeypatch.setattr(claude_code, "evaluate_event", lambda event, ctx: verdicts)
+
+    class Fake:
+        def __init__(self, blocks=False, warns=False, text="reason"):
+            self.blocks = blocks
+            self.warns = warns
+            self._text = text
+
+        def render(self):
+            return self._text
+
+    def test_stop_is_a_wired_event(self, installed):
+        """It has to be installed and wired, or it is prose again."""
+        assert "stop" in claude_code.EVENTS
+        assert (installed.claude_dir / "hooks" / "invariant-stop.sh").is_file()
+        settings = json.loads(
+            (installed.claude_dir / "settings.json").read_text(encoding="utf-8")
+        )
+        wired = json.dumps(settings["hooks"]["Stop"])
+        assert "invariant-stop.sh" in wired
+
+    def test_a_blocking_verdict_returns_the_turn_to_the_agent(
+        self, host, monkeypatch
+    ):
+        self.evaluate_to(monkeypatch, [self.Fake(blocks=True, text="4 commits stranded")])
+        result = host.handle("stop", "{}", self.Ctx([]))
+        assert result["decision"] == "block"
+        assert "4 commits stranded" in result["reason"]
+
+    def test_a_warning_does_not_hold_the_turn(self, host, monkeypatch):
+        """Advisory means advisory: surfaced, and the turn still ends."""
+        self.evaluate_to(monkeypatch, [self.Fake(warns=True, text="worktree left behind")])
+        result = host.handle("stop", "{}", self.Ctx([]))
+        assert "decision" not in result
+        assert "worktree left behind" in result["systemMessage"]
+
+    def test_a_clean_stop_says_nothing(self, host, monkeypatch):
+        self.evaluate_to(monkeypatch, [self.Fake()])
+        assert host.handle("stop", "{}", self.Ctx([])) == {}
+
+    def test_the_payload_reaches_the_rules(self, host, monkeypatch):
+        """`stop_hook_active` lives in the payload and is the loop guard.
+
+        A handler that dropped it would make the demand unsatisfiable, and an
+        unsatisfiable gate gets disabled rather than obeyed.
+        """
+        self.evaluate_to(monkeypatch, [])
+        ctx = self.Ctx([])
+        host.handle("stop", json.dumps({"stop_hook_active": True}), ctx)
+        assert ctx.seen_payload == {"stop_hook_active": True}
+
+    def test_the_liveness_probe_cannot_block_the_caller(self):
+        """A check that could halt a real turn is worse than the outage it hunts."""
+        assert claude_code._PROBE_PAYLOADS["stop"]["stop_hook_active"] is True
