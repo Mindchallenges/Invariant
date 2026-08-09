@@ -249,7 +249,7 @@ class TestMergeTarget:
         ctx = ctx_factory(cwd=ctx_factory.wt, payload=bash_payload("git merge --ff-only session/x"))
         result = only(evaluate(["session.ff_merge_target"], ctx))
         assert not result.verdict.ok
-        assert "merges it into itself" in result.verdict.detail
+        assert "into itself" in result.verdict.detail
 
     def test_merging_from_the_main_checkout_passes(self, ctx_factory):
         ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload("git merge --ff-only session/x"))
@@ -1199,3 +1199,81 @@ class TestAllPassReadsTheRunThatHappened:
     def test_a_genuine_green_still_passes(self, ctx_factory):
         ctx = self.ctx_with(ctx_factory, [{"passed": True, "failed": 0, "executed": 34}])
         assert self.verdict(ctx).ok
+
+
+class TestMergeDirection:
+    """Merging a branch into ITSELF is the trap. The mainline into a feature
+    branch is the ordinary way to pick up other people's work — and blocking it
+    pushed conflict resolution to the final merge, where it is harder and has
+    no tests around it.
+    """
+
+    def ctx_in_worktree(self, ctx_factory, command):
+        return ctx_factory(cwd=ctx_factory.wt, payload=bash_payload(command))
+
+    def verdict(self, ctx):
+        return only(evaluate(["session.ff_merge_target"], ctx)).verdict
+
+    def test_mainline_into_a_feature_branch_is_allowed(self, ctx_factory):
+        """The reported false positive. The worktree is on session/x."""
+        verdict = self.verdict(self.ctx_in_worktree(ctx_factory, "git merge master"))
+        assert verdict.ok
+
+    def test_merging_the_branch_into_itself_is_refused(self, ctx_factory):
+        verdict = self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git merge session/x")
+        )
+        assert not verdict.ok
+        assert "into itself" in verdict.message
+
+    def test_its_own_remote_ref_counts_as_itself(self, ctx_factory):
+        assert not self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git merge origin/session/x")
+        ).ok
+
+    def test_merge_base_is_not_a_merge(self, ctx_factory):
+        """`\\bmerge\\b` also matches `merge-base`; that is a read, not a merge."""
+        assert self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git merge-base HEAD master")
+        ).skipped
+
+    def test_log_with_no_merges_is_not_a_merge(self, ctx_factory):
+        assert self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git log --no-merges")
+        ).skipped
+
+    def test_a_heredoc_that_merely_writes_the_word_is_not_a_merge(self, ctx_factory):
+        assert self.verdict(
+            self.ctx_in_worktree(ctx_factory, "cat > f <<'EOF'\ngit merge x\nEOF")
+        ).skipped
+
+    def test_from_the_main_checkout_nothing_is_refused(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload("git merge session/x"))
+        assert self.verdict(ctx).ok
+
+    def test_the_session_merge_command_still_requires_the_main_checkout(
+        self, ctx_factory
+    ):
+        """The other half of the rule, unchanged: landing a branch on the base."""
+        ctx = ctx_factory(cwd=ctx_factory.wt, extra={"merging": True})
+        assert not self.verdict(ctx).ok
+
+
+class TestPushBarrierMatchesRealPushes:
+    def test_a_heredoc_writing_the_words_is_not_a_push(self, ctx_factory):
+        """It refused one of these while a test file was being written."""
+        ctx = ctx_factory(
+            payload=bash_payload("cat > f <<'EOF'\nrun git push origin master\nEOF")
+        )
+        assert only(evaluate(["session.push_barrier"], ctx)).verdict.skipped
+
+    def test_a_real_push_is_still_matched(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+        ctx = ctx_factory(
+            session={"state": "working", "push_count": 0},
+            payload=bash_payload("git push origin master"),
+        )
+        assert not only(evaluate(["session.push_barrier"], ctx)).verdict.ok

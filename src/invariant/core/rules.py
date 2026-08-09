@@ -15,6 +15,7 @@ a gate that can be satisfied by accident.
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -332,7 +333,7 @@ def _no_edit_in_main_checkout(ctx: RuleContext) -> Verdict:
 )
 def _push_barrier(ctx: RuleContext) -> Verdict:
     command = str(ctx.tool_input.get("command", "")) if ctx.tool_name == "Bash" else ""
-    if "git push" not in command and not ctx.extra.get("pushing"):
+    if not _GIT_PUSH.search(command) and not ctx.extra.get("pushing"):
         return Verdict.na()
     if not ctx.manifest.get("session.push", False):
         # Nothing to count. This barrier rations a session's *one* push; where
@@ -422,17 +423,44 @@ def _push_enabled(ctx: RuleContext) -> Verdict:
     events=("pre-tool-use",),
 )
 def _ff_merge_target(ctx: RuleContext) -> Verdict:
+    # The session-merge command: landing this branch on the base, which must
+    # happen from the main checkout. Unchanged.
+    if ctx.extra.get("merging"):
+        if not git.in_linked_worktree(ctx.cwd):
+            return Verdict.clean("running from the main checkout")
+        return Verdict.fail(
+            "this merge is being run from inside a linked worktree",
+            detail="Merging a branch while standing in that branch's own "
+            "worktree merges it into itself, and the follow-up push then "
+            "pushes an unchanged target. Both commands exit zero, so nothing "
+            "reports the failure. Verify with 'git branch -r --contains'.",
+            fixes=("run it from the main checkout",),
+        )
+
     command = str(ctx.tool_input.get("command", "")) if ctx.tool_name == "Bash" else ""
-    if "merge" not in command and not ctx.extra.get("merging"):
+    target = _merge_target(command)
+    if target is None:
         return Verdict.na()
     if not git.in_linked_worktree(ctx.cwd):
         return Verdict.clean("running from the main checkout")
+
+    # The trap is merging a branch INTO ITSELF, which is what happens when the
+    # argument names the branch you are standing on. `git merge master` from a
+    # feature branch is the opposite operation — integrating the mainline so
+    # conflicts surface here, with tests around them, instead of at the final
+    # merge. Blocking that pushed conflict resolution to a worse place and gave
+    # a correct-sounding reason for it.
+    current = git.current_branch(ctx.cwd)
+    if not current or _short_ref(target) != _short_ref(current):
+        return Verdict.na(
+            f"merging {target!r} into {current or 'HEAD'} — not a self-merge"
+        )
+
     return Verdict.fail(
-        "this merge is being run from inside a linked worktree",
-        detail="Merging a branch while standing in that branch's own worktree "
-        "merges it into itself, and the follow-up push then pushes an "
-        "unchanged target. Both commands exit zero, so nothing reports the "
-        "failure. Verify with 'git branch -r --contains' afterwards.",
+        f"merging {target!r} into itself from its own worktree",
+        detail="This merges the branch into itself and a follow-up push then "
+        "pushes an unchanged target. Both commands exit zero, so nothing "
+        "reports the failure. Verify with 'git branch -r --contains'.",
         fixes=("invariant session merge",),
     )
 
@@ -1164,6 +1192,44 @@ def _coverage_roots(ctx: RuleContext) -> list[Path]:
     roots.append(_repo_root(ctx))
     roots.append(ctx.manifest.root)
     return roots
+
+
+#: A real `git push`, not the words "git push" occurring in a command. The
+#: substring form refused a heredoc that merely WROTE those words into a test
+#: file — a gate blocking work that was not the thing it guards teaches people
+#: to route around it, which is the one outcome it cannot afford.
+_GIT_PUSH = re.compile(r"\bgit\b[^|;&]*?\bpush\b(?![-\w])")
+
+
+#: A real `git merge` invocation. `\bmerge\b` alone also matches `merge-base`,
+#: `--no-merges`, and any prose containing the word — the same substring
+#: over-match that made the push barrier refuse a heredoc that merely WROTE
+#: "git push".
+_GIT_MERGE = re.compile(r"\bgit\b[^|;&]*?\bmerge\b(?![-\w])")
+
+
+def _merge_target(command: str) -> str | None:
+    """The ref a ``git merge`` names, or ``None`` if this is not one."""
+    match = _GIT_MERGE.search(command or "")
+    if match is None:
+        return None
+    rest = command[match.end() :]
+    for token in rest.split():
+        if token.startswith("-"):
+            continue
+        if token in {"|", "&&", ";", "||"}:
+            break
+        return token.strip("'\"")
+    return ""  # `git merge` with no ref merges the upstream, never itself
+
+
+def _short_ref(ref: str) -> str:
+    """`origin/session/x` and `session/x` name the same branch here."""
+    cleaned = (ref or "").strip().removeprefix("refs/heads/").removeprefix("refs/remotes/")
+    for remote_prefix in ("origin/", "upstream/"):
+        if cleaned.startswith(remote_prefix):
+            cleaned = cleaned[len(remote_prefix) :]
+    return cleaned
 
 
 def _relative_to_root(path, root: Path) -> str:
