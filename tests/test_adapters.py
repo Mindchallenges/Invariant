@@ -464,3 +464,62 @@ class TestResultBundleIsPreferredOverConsole:
         """A build that died before any test ran writes no usable bundle."""
         adapter = self.adapter_returning(None)
         assert not adapter.read_run("error: build failed", "", 65, bundle="/p").passed
+
+
+class TestBundleReadFailureIsLoud:
+    """A reader that silently falls back is a reader that is not there.
+
+    This one WAS inert for a day: `xcrun` resolves through `xcode-select`, and
+    on a machine pointing at CommandLineTools it cannot find xcresulttool at
+    all — so every run fell back to the console parser the bundle read was
+    built to replace, with nothing saying so.
+    """
+
+    def adapter_returning(self, counts):
+        from invariant.adapters.swift_xcode import SwiftXcodeAdapter
+
+        class Stub(SwiftXcodeAdapter):
+            def result_bundle_counts(self, path):
+                return counts
+
+        return Stub()
+
+    def test_an_existing_but_unreadable_bundle_says_so(self, tmp_path):
+        bundle = tmp_path / "run.xcresult"
+        bundle.mkdir()
+        result = self.adapter_returning(None).read_run(
+            "\t Executed 34 tests, with 0 failures (0 unexpected) in 1.0 (1.0) s\n",
+            "",
+            65,
+            bundle=bundle,
+        )
+        assert "could not be read" in result.note
+        assert result.source == "console"
+
+    def test_an_absent_bundle_is_not_reported_as_unreadable(self, tmp_path):
+        """No bundle and an unreadable bundle are different facts."""
+        result = self.adapter_returning(None).read_run(
+            "\t Executed 34 tests, with 0 failures (0 unexpected) in 1.0 (1.0) s\n",
+            "",
+            65,
+            bundle=tmp_path / "never-written.xcresult",
+        )
+        assert "could not be read" not in (result.note or "")
+
+    def test_a_readable_bundle_carries_no_such_note(self, tmp_path):
+        bundle = tmp_path / "run.xcresult"
+        bundle.mkdir()
+        result = self.adapter_returning(
+            {"total": 13950, "failed": 625, "result": "Failed"}
+        ).read_run("", "", 65, bundle=bundle)
+        assert "could not be read" not in (result.note or "")
+        assert result.total == 13950
+
+
+class TestDeveloperDirFallback:
+    def test_a_developer_dir_is_locatable_on_this_platform(self):
+        """Guards the retry path that made the reader work here at all."""
+        from invariant.adapters.swift_xcode import _newest_developer_dir
+
+        found = _newest_developer_dir()
+        assert found is None or found.name == "Developer"

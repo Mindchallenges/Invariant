@@ -125,6 +125,18 @@ class Adapter:
         result = self.parse_test_output(stdout, stderr, code)
         counts = self.result_bundle_counts(bundle) if bundle else None
         if not counts:
+            # A bundle that exists but cannot be read is a different situation
+            # from no bundle at all, and it is the dangerous one: the run wrote
+            # its record and something stopped us reading it, so the counts
+            # come from the parser this was meant to replace. Silence there is
+            # how a "ground truth" reader stays inert for a day.
+            if bundle is not None and Path(str(bundle)).exists():
+                note = result.note or ""
+                extra = (
+                    "a result bundle was written but could not be read; counts "
+                    "below are scraped from console output"
+                )
+                return replace(result, note=f"{note}; {extra}" if note else extra)
             return result
 
         note = result.note

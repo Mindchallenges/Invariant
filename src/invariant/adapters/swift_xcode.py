@@ -10,10 +10,23 @@ Every hazard below is recorded from an observed failure, not imagined.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 from .base import Adapter, Hazard, TestResult
+
+
+def _newest_developer_dir() -> Path | None:
+    """The newest installed Xcode's Developer directory, or ``None``.
+
+    Only consulted when ``xcrun`` cannot find the tool, which means
+    ``xcode-select`` is pointing somewhere without it. Deliberately not written
+    into any config: a toolchain path is machine state, and machine state in a
+    committed file is both stale and somebody's disk layout.
+    """
+    candidates = sorted(Path("/Applications").glob("Xcode*.app/Contents/Developer"))
+    return candidates[-1] if candidates else None
 
 
 class SwiftXcodeAdapter(Adapter):
@@ -204,23 +217,42 @@ class SwiftXcodeAdapter(Adapter):
 
         if not path or not Path(path).exists():
             return None
-        try:
-            proc = subprocess.run(
-                [
-                    "xcrun", "xcresulttool", "get", "test-results", "summary",
-                    "--path", str(path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if proc.returncode != 0:
-            return None
-        try:
-            data = json.loads(proc.stdout)
-        except json.JSONDecodeError:
+
+        argv = [
+            "xcrun", "xcresulttool", "get", "test-results", "summary",
+            "--path", str(path),
+        ]
+
+        # `xcrun` resolves tools through `xcode-select`, and a machine whose
+        # xcode-select points at CommandLineTools cannot find xcresulttool at
+        # all. That is not hypothetical: it is the state of the machine this
+        # was written on, and it made this whole reader inert — falling back to
+        # the console parser it was built to replace, silently, on every run.
+        # So a failed lookup is retried against an actual Xcode.
+        attempts = [None]
+        if not os.environ.get("DEVELOPER_DIR"):
+            attempts.append(_newest_developer_dir())
+
+        data = None
+        for developer_dir in attempts:
+            env = dict(os.environ)
+            if developer_dir:
+                env["DEVELOPER_DIR"] = str(developer_dir)
+            try:
+                proc = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=120, env=env
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if proc.returncode != 0:
+                continue
+            try:
+                data = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                continue
+            break
+
+        if data is None:
             return None
         if not isinstance(data, dict) or data.get("totalTestCount") is None:
             return None

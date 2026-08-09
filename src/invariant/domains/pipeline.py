@@ -397,6 +397,15 @@ class PipelineDomain:
             "coverage": measured,
             "executed": outcome.total,
             "failed": outcome.failed,
+            # These were missing, and their absence made describe_run silent
+            # about the very thing it was added to announce: a console fallback
+            # rendered identically to a bundle read, so a scraped count that
+            # was wrong by 400x printed with no caveat at all.
+            "failed_tests": outcome.failed_tests,
+            "skipped": outcome.skipped,
+            "source": outcome.source,
+            "device": outcome.device,
+            "note": outcome.note,
             "suite_passed": outcome.passed,
         }
 
