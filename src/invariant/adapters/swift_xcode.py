@@ -73,6 +73,10 @@ class SwiftXcodeAdapter(Adapter):
                     "before reading the result as a test failure."
                 ),
                 detect=r"\*\* TEST FAILED \*\*|Exit status: 65",
+                # Dropped suites mean files never exercised, so coverage
+                # comes out LOW. It can block work that was fine; it cannot
+                # pass work that was not covered.
+                can_overstate=False,
             ),
             Hazard(
                 id="xcode.destination_by_name_resolves_latest",
@@ -84,6 +88,10 @@ class SwiftXcodeAdapter(Adapter):
                     "at runtime rather than written down."
                 ),
                 detect=r"platform=iOS Simulator,\s*name=",
+                # Left unclassified deliberately. Resolving to a different
+                # runtime means the measurement describes something other
+                # than the thing under test, and "different" has no
+                # direction — so it takes the safe default and blocks.
             ),
             Hazard(
                 id="xcode.only_testing_takes_target_class",
@@ -94,6 +102,9 @@ class SwiftXcodeAdapter(Adapter):
                     "run is only meaningful alongside a non-zero executed count."
                 ),
                 detect=r"-only-testing:[^\s']*/[^\s']*\.(swift|m)\b|Executed 0 tests",
+                # A filter matching nothing runs nothing, so coverage is
+                # empty or low — never inflated.
+                can_overstate=False,
             ),
             Hazard(
                 id="xcode.debug_device_binary_is_a_stub",
@@ -104,6 +115,7 @@ class SwiftXcodeAdapter(Adapter):
                     "absent'. Search the companion debug dylib instead before "
                     "concluding a symbol did not ship."
                 ),
+                can_overstate=False,  # about symbol search, not measurement
             ),
             Hazard(
                 id="xcode.fd_exhaustion_tail_failures",
@@ -114,6 +126,7 @@ class SwiftXcodeAdapter(Adapter):
                     "suspect. Re-run those suites in isolation before attributing "
                     "the failure to shared state between tests."
                 ),
+                can_overstate=False,  # exhausted descriptors fail suites, lowering coverage
             ),
             Hazard(
                 id="xcode.rotated_simulator_reds_snapshots",
@@ -124,6 +137,7 @@ class SwiftXcodeAdapter(Adapter):
                     "suites' is a symptom of simulator orientation far more often "
                     "than of shared state."
                 ),
+                can_overstate=False,  # reds snapshots; coverage is still measured
             ),
         ]
 

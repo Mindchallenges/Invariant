@@ -769,8 +769,8 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
     # the two spellings directly yields an empty intersection, and an empty
     # intersection would report "all files at or above the floor" — a gate
     # passing vacuously, which is worse than the blocking it replaced.
-    root = _repo_root(ctx)
-    coverage = {_relative_to_root(path, root): pct for path, pct in recorded.items()}
+    roots = _coverage_roots(ctx)
+    coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
 
     scope = str(ctx.manifest.get("methodology.gates.coverage_scope", "touched"))
     if scope == "touched":
@@ -782,12 +782,20 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         # in the project gets held to the floor.
         declared = set((ctx.session or {}).get("files") or [])
         changed = {
-            _relative_to_root(path, root)
+            _relative_to_any(path, roots)
             for path in [*git.changed_files(ctx.cwd), *declared]
         }
         source_changed = {p for p in changed if not _looks_like_docs(p)}
         if source_changed:
-            touched = {f: pct for f, pct in coverage.items() if f in source_changed}
+            touched: dict[str, float] = {}
+            unmatched: list[str] = []
+            for wanted in sorted(source_changed):
+                hits = {f: pct for f, pct in coverage.items() if _same_file(wanted, f)}
+                if hits:
+                    touched.update(hits)
+                else:
+                    unmatched.append(wanted)
+
             if not touched:
                 return Verdict.fail(
                     "coverage was measured, but none of it covers the changed files",
@@ -800,6 +808,27 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                     ),
                     fixes=("check the coverage command covers the changed target",),
                 )
+
+            # A partial intersection is the dangerous middle. Left unreported,
+            # the gate answers for the files it happened to match and stays
+            # silent about the ones it could not — which reads as a pass for
+            # all of them. Not knowing is a different answer from knowing it
+            # is fine, and this is where that distinction has teeth.
+            if unmatched:
+                return Verdict.fail(
+                    f"{len(unmatched)} changed source file(s) have no coverage row",
+                    detail=(
+                        ", ".join(unmatched[:6])
+                        + ". Either they are outside the measured target, or the "
+                        "path spellings still disagree. The gate cannot answer "
+                        "for a file it did not find, and answering anyway for "
+                        "the rest would report a pass it has not established."
+                    ),
+                    fixes=(
+                        "check these files are in the coverage target",
+                        "or drop them from the session file set if they are not code",
+                    ),
+                )
             coverage = touched
 
     # How the measurement was obtained, carried into the verdict. A clean pass
@@ -807,6 +836,27 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
     # measured on a clean run, and a reader cannot tell them apart afterwards
     # unless the verdict says so.
     run = ctx.evidence("coverage_run", {}) or {}
+
+    # A measurement that can only read LOW may be annotated: it blocks work
+    # that was fine, which is visible and self-correcting, because being
+    # blocked is what sends someone to look. A measurement that can read HIGH
+    # must block: it passes work that was never covered, silently, and nobody
+    # goes to look. Same evidence, opposite handling, because the two failures
+    # are not symmetrical.
+    overstating = run.get("overstating_hazards") or []
+    if overstating:
+        return Verdict.fail(
+            "the coverage measurement cannot be trusted upward",
+            detail=(
+                "Live on the measuring run: "
+                + ", ".join(overstating)
+                + ". These can make coverage read HIGHER than reality, so a "
+                "pass here would be the gate approving work it has no evidence "
+                "about. A hazard that can only understate is annotated instead."
+            ),
+            fixes=("re-measure once the hazard is resolved",),
+        )
+
     caveats = []
     if run.get("hazards"):
         caveats.append("hazards on the measuring run: " + ", ".join(run["hazards"]))
@@ -1064,20 +1114,62 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     return False
 
 
-def _relative_to_root(path, root: Path) -> str:
-    """One spelling for a path, so two sources can be compared at all.
+def _coverage_roots(ctx: RuleContext) -> list[Path]:
+    """Every root a measured path could be relative to, best first.
 
-    Coverage reporters emit absolute paths and git emits repo-relative ones.
-    Left as they are, the two sets never intersect, and the coverage gate reads
-    an empty intersection as "nothing below the floor".
+    An isolated session has TWO. State lives in the main checkout, because
+    worktrees share one ``.git``, while compilation happens in the session's
+    worktree — so the absolute paths a coverage tool emits carry the WORKTREE
+    prefix, and the rule evaluating them may well be running from the main
+    checkout, because that is where hooks run from. Stripping only the root the
+    rule happens to see removes nothing, the relative form never appears, and
+    the intersection is empty for a reason that has nothing to do with
+    coverage. The session record names its own worktree, which is the one fact
+    here that does not depend on who is asking.
     """
+    roots: list[Path] = []
+    worktree = (ctx.session or {}).get("worktree")
+    if worktree:
+        roots.append(Path(worktree))
+    roots.append(_repo_root(ctx))
+    roots.append(ctx.manifest.root)
+    return roots
+
+
+def _relative_to_root(path, root: Path) -> str:
+    """One spelling for a path, so two sources can be compared at all."""
+    return _relative_to_any(path, [root])
+
+
+def _relative_to_any(path, roots: Iterable[Path]) -> str:
+    """The shortest project-relative spelling under any candidate root."""
     candidate = Path(str(path))
-    try:
-        if candidate.is_absolute():
-            return str(candidate.resolve().relative_to(Path(root).resolve()))
-    except (ValueError, OSError):
+    if not candidate.is_absolute():
         return str(candidate)
-    return str(candidate)
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return str(candidate)
+    for root in roots:
+        try:
+            return str(resolved.relative_to(Path(root).resolve()))
+        except (ValueError, OSError):
+            continue
+    return str(resolved)
+
+
+def _same_file(declared: str, measured: str) -> bool:
+    """Whether two spellings name the same file.
+
+    Suffix matching is the belt to the braces above: it survives a root this
+    code did not think of. It is deliberately paired with "no overlap is a
+    failure" — a loose matcher's bug produces PARTIAL intersections rather than
+    empty ones, and a partial intersection that passed silently would be the
+    same vacuous green one layer down.
+    """
+    if declared == measured:
+        return True
+    return measured.endswith("/" + declared) or declared.endswith("/" + measured)
 
 
 #: Paths whose coverage nobody measures. Counting them as "changed source"

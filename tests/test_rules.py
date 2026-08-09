@@ -5,6 +5,9 @@ import pytest
 
 from invariant.core.manifest import Level
 from invariant.core.rules import (
+    _coverage_roots,
+    _relative_to_any,
+    _same_file,
     RuleContext,
     Verdict,
     all_rules,
@@ -848,3 +851,262 @@ class TestCoverageScopeAndPathSpelling:
         verdict = self.verdict(ctx)
         assert not verdict.ok
         assert any("invariant pipeline coverage" in fix for fix in verdict.fixes)
+
+
+
+class TestCoverageAcrossTwoRoots:
+    """An isolated session has two roots, and the gate saw only one.
+
+    State lives in the MAIN checkout, because worktrees share one `.git`.
+    Compilation happens in the session's WORKTREE, so every path the coverage
+    tool emits carries the worktree prefix. Hooks run from the main checkout,
+    so the rule was stripping a prefix the measured paths did not have — the
+    relative form never appeared and the intersection was empty for a reason
+    that had nothing to do with coverage.
+
+    Invisible in a single-checkout repo, which is why it survived until a
+    session actually isolated.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,  # the rule runs from the MAIN checkout
+            session={"id": "s1", "files": declared, "worktree": str(ctx_factory.wt)},
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_the_reported_failure_now_passes(self, ctx_factory):
+        """End to end, as reported.
+
+        Note this passes on EITHER mechanism — worktree-root stripping or
+        suffix matching — so it does not isolate which. `TestCoverageRoots`
+        below tests them apart; this one asserts the user-visible outcome.
+        """
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 100.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory, measured, ["Heap/Intake/FileBytesIngester.swift"]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok and not verdict.skipped, verdict.message
+
+    def test_the_main_checkout_root_still_works(self, ctx_factory):
+        """A session that never isolated has one root, and must keep working."""
+        measured = {str(ctx_factory.main / "src" / "app.swift"): 95.0}
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            session={"id": "s1", "files": ["src/app.swift"]},
+            pipeline={"evidence": {"coverage": measured}},
+        )
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        assert self.verdict(ctx).ok
+
+    def test_a_root_nobody_anticipated_still_matches_by_suffix(self, ctx_factory):
+        """Belt to the braces: a prefix from neither known root."""
+        measured = {"/build/somewhere/else/Heap/Intake/FileBytesIngester.swift": 100.0}
+        ctx = self.ctx_for(
+            ctx_factory, measured, ["Heap/Intake/FileBytesIngester.swift"]
+        )
+        assert self.verdict(ctx).ok
+
+    def test_a_partial_intersection_fails_rather_than_passing(self, ctx_factory):
+        """The failure mode a lenient matcher would introduce.
+
+        Suffix matching is loose enough that a bug in it yields PARTIAL
+        overlaps rather than empty ones — and a partial overlap that answered
+        only for the files it matched would report a pass for the ones it never
+        found. That is the vacuous green one layer below the one already
+        closed.
+        """
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 100.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory,
+            measured,
+            [
+                "Heap/Intake/FileBytesIngester.swift",
+                "Heap/Intake/IntakeDrainDisposition.swift",  # never measured
+            ],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "IntakeDrainDisposition.swift" in verdict.detail
+
+    def test_docs_in_the_declared_set_are_not_expected_to_have_coverage(
+        self, ctx_factory
+    ):
+        """A session declares its docs too; nothing measures a .rst file."""
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 100.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory,
+            measured,
+            [
+                "Heap/Intake/FileBytesIngester.swift",
+                "docs/architecture/intake_sources.rst",
+                "docs/backlog.rst",
+            ],
+        )
+        assert self.verdict(ctx).ok
+
+    def test_a_matched_file_below_the_floor_still_fails(self, ctx_factory):
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 40.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory, measured, ["Heap/Intake/FileBytesIngester.swift"]
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "below the" in verdict.message
+
+
+class TestOverstatingHazardsBlock:
+    """Bent low and bent high are not the same risk.
+
+    Low blocks work that was fine: visible, and self-correcting, because being
+    blocked is what sends someone to look. High passes work that was never
+    covered, silently, and nobody looks. Same evidence, opposite handling.
+    """
+
+    def ctx_for(self, ctx_factory, run):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "all"}},
+            },
+        )
+        return ctx_factory(
+            session={"id": "s1"},
+            pipeline={
+                "evidence": {
+                    "coverage": {"src/app.swift": 100.0},
+                    "coverage_run": run,
+                }
+            },
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_an_understating_hazard_is_annotated_not_blocked(self, ctx_factory):
+        ctx = self.ctx_for(
+            ctx_factory,
+            {"hazards": ["xcode.exit65_drops_suites"], "overstating_hazards": []},
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok
+        assert "exit65_drops_suites" in verdict.message
+
+    def test_an_overstating_hazard_blocks(self, ctx_factory):
+        ctx = self.ctx_for(
+            ctx_factory,
+            {"hazards": ["some.unknown"], "overstating_hazards": ["some.unknown"]},
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "cannot be trusted upward" in verdict.message
+
+    def test_a_failing_suite_is_recorded_in_a_passing_verdict(self, ctx_factory):
+        ctx = self.ctx_for(
+            ctx_factory,
+            {"hazards": [], "overstating_hazards": [], "suite_passed": False, "failed": 104},
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok
+        assert "104" in verdict.message
+
+
+
+class TestCoverageRoots:
+    """The two mechanisms, tested apart.
+
+    The end-to-end case passes on either one, so an integration test cannot say
+    which is working — and a test whose name claims a mechanism it does not
+    exercise is the shape this whole day has been about.
+    """
+
+    def test_the_session_worktree_is_tried_first(self, ctx_factory):
+        ctx = ctx_factory(session={"id": "s1", "worktree": str(ctx_factory.wt)})
+        assert _coverage_roots(ctx)[0] == Path(ctx_factory.wt)
+
+    def test_a_session_without_a_worktree_falls_back_to_the_repo(self, ctx_factory):
+        ctx = ctx_factory(session={"id": "s1"})
+        roots = _coverage_roots(ctx)
+        assert roots and Path(ctx_factory.wt) not in roots
+
+    def test_no_session_at_all_still_yields_roots(self, ctx_factory):
+        assert _coverage_roots(ctx_factory(session=None))
+
+    def test_a_worktree_path_relativises_against_the_worktree(self, ctx_factory):
+        """The mechanism the reported bug needed, in isolation.
+
+        The rule runs from the main checkout while the measured path carries
+        the worktree prefix, so stripping the checkout removes nothing.
+        """
+        measured = ctx_factory.wt / "Heap" / "Intake" / "F.swift"
+        assert (
+            _relative_to_any(measured, [Path(ctx_factory.wt), Path(ctx_factory.main)])
+            == "Heap/Intake/F.swift"
+        )
+
+    def test_the_main_checkout_root_is_used_when_it_is_the_match(self, ctx_factory):
+        measured = ctx_factory.main / "src" / "app.swift"
+        assert (
+            _relative_to_any(measured, [Path(ctx_factory.wt), Path(ctx_factory.main)])
+            == "src/app.swift"
+        )
+
+    def test_a_path_under_no_known_root_is_left_absolute(self, ctx_factory):
+        """Left absolute rather than mangled, so suffix matching can still try."""
+        out = _relative_to_any("/elsewhere/x/F.swift", [Path(ctx_factory.main)])
+        assert out.startswith("/")
+
+    def test_a_relative_path_is_returned_unchanged(self, ctx_factory):
+        assert _relative_to_any("Heap/Intake/F.swift", [Path(ctx_factory.main)]) == (
+            "Heap/Intake/F.swift"
+        )
+
+
+class TestSameFile:
+    """Suffix matching, tested apart from the root stripping."""
+
+    def test_identical_spellings_match(self):
+        assert _same_file("a/b.swift", "a/b.swift")
+
+    def test_a_longer_measured_path_matches(self):
+        assert _same_file("Heap/Intake/F.swift", "/wt/Heap/Intake/F.swift")
+
+    def test_a_longer_declared_path_matches(self):
+        assert _same_file("/wt/Heap/Intake/F.swift", "Heap/Intake/F.swift")
+
+    def test_a_partial_component_does_not_match(self):
+        """`Ingester.swift` must not match `FileBytesIngester.swift`."""
+        assert not _same_file("Ingester.swift", "/wt/Heap/FileBytesIngester.swift")
+
+    def test_different_files_do_not_match(self):
+        assert not _same_file("Heap/A.swift", "/wt/Heap/B.swift")

@@ -28,6 +28,25 @@ class Hazard:
     detail: str
     detect: str | None = None  # optional regex over combined output
 
+    #: Can this hazard make a *measurement* read BETTER than reality?
+    #:
+    #: The two directions are not equally dangerous, so they must not be
+    #: handled alike. A measurement bent low blocks work that was fine: it is
+    #: visible, it is annoying, and it is self-correcting, because being
+    #: blocked is what sends someone to look. A measurement bent high passes
+    #: work that was never covered, silently, and nobody goes to look — which
+    #: is the whole problem. So the first may be annotated and recorded; the
+    #: second has to block.
+    #:
+    #: ``None`` means "not examined yet" and is treated as True. The default
+    #: for an unclassified hazard must be the safe one, or a hazard added
+    #: without thought inherits "annotate" and goes quiet.
+    can_overstate: bool | None = None
+
+    @property
+    def may_overstate(self) -> bool:
+        return self.can_overstate is not False
+
     def matches(self, text: str) -> bool:
         return bool(self.detect) and re.search(self.detect, text) is not None
 

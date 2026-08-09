@@ -353,6 +353,12 @@ class PipelineDomain:
             # somebody will act on. Annotating beats silently trusting, for the
             # same reason TestResult.trustworthy is narrower than passed.
             "hazards": [h.id for h in outcome.hazards],
+            # Split at record time, because the reader of the evidence cannot
+            # re-derive it: the adapter knows which way each hazard bends a
+            # measurement, the rule does not.
+            "overstating_hazards": [
+                h.id for h in outcome.hazards if h.may_overstate
+            ],
         }
         self._save(session_id, pipeline)
 

@@ -301,3 +301,31 @@ class TestCoverageDoesNotRequireAGreenSuite:
     def test_the_report_still_runs_after_the_test_step(self):
         command = self.ADAPTER.default_commands()["coverage"]
         assert command.index("-resultBundlePath") < command.index("xccov")
+
+
+
+class TestHazardDistortionDirection:
+    def test_an_unclassified_hazard_is_assumed_dangerous(self):
+        """The default has to be the safe one.
+
+        A hazard added without thought would otherwise inherit "annotate" and
+        go quiet, which is the direction that passes uncovered work.
+        """
+        assert Hazard(id="h", summary="s", detail="d").may_overstate
+
+    def test_an_understating_hazard_says_so(self):
+        assert not Hazard(
+            id="h", summary="s", detail="d", can_overstate=False
+        ).may_overstate
+
+    def test_every_shipped_swift_hazard_is_classified_deliberately(self):
+        """Unclassified is allowed, but only where it is the honest answer.
+
+        `destination_by_name` stays unclassified because resolving to another
+        runtime means the measurement describes something else, and "something
+        else" has no direction — so it takes the safe default.
+        """
+        by_id = {h.id: h for h in get_adapter("swift").hazards()}
+        assert by_id["xcode.exit65_drops_suites"].can_overstate is False
+        assert by_id["xcode.only_testing_takes_target_class"].can_overstate is False
+        assert by_id["xcode.destination_by_name_resolves_latest"].can_overstate is None
