@@ -1,0 +1,58 @@
+version: 1
+
+# The library's own manifest. ADR-001's closing note says "a control the
+# library will not run against itself is a control it should not ship", and
+# until now that was aspiration: there was no manifest here, so none of it ran.
+
+project:
+  name: invariant
+  ecosystems: [python]
+
+paths:
+  docs: docs/architecture
+  memory: .claude/memory
+  memory_index: MEMORY.md
+
+docs:
+  format: markdown
+  diagrams: mermaid
+
+items:
+  backend: markdown
+  path: docs/backlog
+  # An ADDITIONAL project prefix, if a repo wants one (e.g. "HEAP_"). The item
+  # type already contributes its own stem, so setting "BUG_" here mints
+  # BUG_BUG_001 — which is what it did on the first attempt.
+  id_prefix: ""
+
+methodology:
+  pipeline: tdd
+  gates:
+    coverage_min: 85
+    coverage_scope: touched
+
+enforcement:
+  # Deliberately NOT strict. This repository is the one place where a gate
+  # failing is as likely to be a defect in the gate as in the work, and a
+  # blocking rule here can wedge the tool that would fix it.
+  profile: standard
+  rules:
+    # The library's own suite is green, but its coverage floor is a target
+    # rather than a fact on every file. Advisory until it is.
+    coverage.meets_floor: warn
+
+session:
+  exempt_paths:
+    - ".claude/*"
+    - ".claude/**"
+    - "MEMORY.md"
+  # A session here does not publish; see ADR-001 D18.
+  push: false
+
+privacy:
+  enabled: true
+  patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
+  scope: [docs, memory, commit_messages]
+
+memory:
+  managed: false
