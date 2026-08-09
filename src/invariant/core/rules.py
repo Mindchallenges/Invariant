@@ -218,15 +218,25 @@ def _isolated_before_edit(ctx: RuleContext) -> Verdict:
         return Verdict.na("path is exempt from isolation")
     if ctx.session is None:
         if ctx.ambiguous:
+            # Reaching here means the target is inside no session's worktree,
+            # since a path that names its owner never gets this far. So the
+            # actionable fix is about *where* the edit is aimed, not about
+            # naming a session: an environment variable cannot be attached to
+            # an edit anyway, which made the old advice unusable by the caller
+            # it was shown to.
+            worktrees = [s.get("worktree") for s in ctx.ambiguous if s.get("worktree")]
             return Verdict.fail(
                 f"{len(ctx.ambiguous)} live sessions are registered here and "
-                "this directory cannot say which one is editing",
-                detail="Naming one resolves it; starting another does not — "
-                "it adds a fourth candidate to the same question.",
+                "this path is inside none of their worktrees",
+                detail="An edit is attributed by where it lands. A path in the "
+                "shared checkout belongs to no session, so no session can be "
+                "held responsible for it.",
                 fixes=tuple(
-                    f"INVARIANT_SESSION_ID={s.get('id')} invariant session "
-                    f"isolate --execute  ({s.get('name')})"
-                    for s in ctx.ambiguous
+                    [f"aim the edit inside your worktree: {w}" for w in worktrees[:4]]
+                    + [
+                        "or, if this session has no worktree yet: "
+                        "invariant session isolate --execute --id <id>"
+                    ]
                 ),
             )
         return Verdict.fail(

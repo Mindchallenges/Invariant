@@ -27,6 +27,21 @@ from ..core.store import JsonStore
 REGISTRY = "registry.json"
 
 
+@dataclass(frozen=True)
+class Resolution:
+    """Which session, and on what evidence.
+
+    ``how`` is not decoration. A caller that wants to *record* an attribution —
+    binding a host identifier to a session so later calls resolve cheaply — may
+    only do so when the evidence actually identified the editor. Learning the
+    wrong mapping from a weak signal would be worse than not learning one.
+    """
+
+    session: "Session | None"
+    how: str  # explicit | host | target | cwd | origin | ambiguous | none
+    candidates: tuple["Session", ...] = ()
+
+
 @dataclass
 class Session:
     id: str
@@ -93,6 +108,7 @@ class SessionDomain:
         cwd: Path | None = None,
         *,
         strict: bool = True,
+        target: Path | str | None = None,
         host_session_id: str | None = None,
     ) -> Session | None:
         """The session this invocation belongs to.
@@ -101,16 +117,27 @@ class SessionDomain:
 
         1. An explicit ``INVARIANT_SESSION_ID``.
         2. The **host's** session identifier, when the caller supplies one.
-        3. The session whose worktree contains the working directory.
-        4. The single session registered at or above the working directory.
+        3. The session whose worktree contains the **file being written to**.
+        4. The session whose worktree contains the working directory.
+        5. The single session registered at or above the working directory.
 
-        Order 2 exists because order 3 cannot be relied on. A host may reset
-        the working directory to the project root between tool calls, and when
-        it does, every concurrent session looks identical from the main
+        Orders 2 and 3 exist because order 4 cannot be relied on. A host may
+        reset the working directory to the project root between tool calls, and
+        when it does, every concurrent session looks identical from the main
         checkout — so cwd-based attribution fails precisely when more than one
-        session is live, which is the case the isolation rules exist for. The
-        host's own session identifier survives those resets and rides on every
-        hook payload.
+        session is live, which is the case the isolation rules exist for.
+
+        Order 3 is what unblocks an edit. The host identifier is only present
+        on a hook payload, and a session registered before it was recorded has
+        none, so order 2 can be silently unavailable — and the documented
+        remedy, ``INVARIANT_SESSION_ID``, is an environment variable that an
+        Edit tool call has no way to carry. The destination path does not
+        depend on the caller's environment at all.
+
+        ``target`` ranks below the host identifier deliberately: who is writing
+        beats where the bytes land, so a session writing into a peer's worktree
+        stays attributed to the writer and remains a detectable violation
+        rather than a silent reattribution.
 
         ``strict=False`` turns an unresolvable origin into ``None`` rather than
         an error. Ambiguity is a normal state for an advisory caller — a hook
@@ -118,15 +145,65 @@ class SessionDomain:
         that must not be reported by failing, because a hook that fails denies
         the tool call that would have resolved it.
         """
+        resolution = self.resolve(cwd, target=target, host_session_id=host_session_id)
+        if resolution.how == "ambiguous" and strict:
+            raise UsageError(ambiguity_message(list(resolution.candidates)))
+        return resolution.session
+
+    def resolve(
+        self,
+        cwd: Path | None = None,
+        *,
+        target: Path | str | None = None,
+        host_session_id: str | None = None,
+    ) -> "Resolution":
+        """:meth:`current`, plus *how* it decided.
+
+        Callers that only need the answer use ``current``. The ``how`` matters
+        to one caller: a hook that has just learned which session a host
+        identifier belongs to, which may only record that mapping when the
+        evidence actually identified the editor.
+        """
         explicit = os.environ.get("INVARIANT_SESSION_ID")
         if explicit:
-            return self.get(explicit)
+            return Resolution(self.get(explicit), "explicit")
 
         matched = self.by_host_session(host_session_id)
         if matched is not None:
-            return matched
+            return Resolution(matched, "host")
+
+        # The edit's destination, not the caller's location. A host runs hooks
+        # from the project root and resets the working directory between tool
+        # calls, so with several sessions live, cwd names nobody — which is
+        # exactly when the isolation rules need an answer. The path being
+        # written to is inside one session's worktree and no other's.
+        if target is not None:
+            owner = self.by_worktree_containing(target)
+            if owner is not None:
+                return Resolution(owner, "target")
 
         cwd = Path(cwd or Path.cwd()).resolve()
+        here = self.by_worktree_containing(cwd)
+        if here is not None:
+            return Resolution(here, "cwd")
+
+        # No worktree contains the working directory. Fall back to where the
+        # session was registered: a session that has not isolated yet has no
+        # worktree at all, and one that just isolated leaves the caller
+        # standing in the origin. Both need to stay addressable.
+        candidates = self.origin_candidates(cwd)
+        if len(candidates) == 1:
+            return Resolution(candidates[0], "origin")
+        if len(candidates) > 1:
+            return Resolution(None, "ambiguous", tuple(candidates))
+        return Resolution(None, "none")
+
+    def by_worktree_containing(self, path: Path | str) -> Session | None:
+        """The live session whose worktree contains ``path``, deepest first."""
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            return None
         best: Session | None = None
         best_len = -1
         for session in self.list():
@@ -138,23 +215,11 @@ class SessionDomain:
                 worktree = Path(session.worktree).resolve()
             except OSError:
                 continue
-            if cwd == worktree or worktree in cwd.parents:
+            if resolved == worktree or worktree in resolved.parents:
                 # Deepest match wins, so a nested worktree beats its parent.
                 if len(str(worktree)) > best_len:
                     best, best_len = session, len(str(worktree))
-        if best is not None:
-            return best
-
-        # No worktree contains the working directory. Fall back to where the
-        # session was registered: a session that has not isolated yet has no
-        # worktree at all, and one that just isolated leaves the caller
-        # standing in the origin. Both need to stay addressable.
-        candidates = self.origin_candidates(cwd)
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1 and strict:
-            raise UsageError(ambiguity_message(candidates))
-        return None
+        return best
 
     def origin_candidates(self, cwd: Path | None = None) -> list[Session]:
         """Live sessions registered at or above ``cwd``.

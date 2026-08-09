@@ -7,6 +7,7 @@ everywhere it matters.
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -652,3 +653,135 @@ class TestAgentsCommand:
         run("doctor", "--json")
         rows = {c["check"]: c["ok"] for c in payload(capsys)["checks"]}
         assert rows["agents loadable by host"] is False
+
+
+class TestEditAttributionThroughTheHook:
+    """The blocked-session scenario, reproduced at the hook boundary.
+
+    Several live sessions, the hook running from the main checkout (as this
+    host does — it resets cwd between tool calls), no host identifier recorded
+    on any session, and an Edit aimed into one session's worktree.
+    """
+
+    def setup(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "invariant")
+        worktrees = {}
+        for name in ("alpha", "beta"):
+            run("session", "start", name, "--json")
+            sid = payload(capsys)["session"]["id"]
+            run("session", "isolate", "--execute", "--id", sid)
+        run("session", "list", "--json")
+        for row in payload(capsys)["sessions"]:
+            worktrees[row["name"]] = row["worktree"]
+        return worktrees
+
+    def hook(self, event, body):
+        import io
+
+        stdin = sys.stdin
+        sys.stdin = io.StringIO(json.dumps(body))
+        try:
+            return main(["hook", event])
+        finally:
+            sys.stdin = stdin
+
+    def edit_payload(self, path, session_id="host-1111-2222-3333"):
+        return {
+            "session_id": session_id,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": str(path), "old_string": "a", "new_string": "b"},
+        }
+
+    def test_an_edit_into_a_worktree_is_allowed(self, project, capsys):
+        worktrees = self.setup(project, capsys)
+        target = Path(worktrees["alpha"]) / "src" / "thing.swift"
+
+        assert self.hook("pre-tool-use", self.edit_payload(target)) == 0
+        response = payload(capsys)
+        decision = response.get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decision != "deny", response
+
+    def test_the_same_edit_is_denied_in_the_shared_checkout(self, project, capsys):
+        """The rule still works — this is not attribution turned off."""
+        self.setup(project, capsys)
+        target = project / "src" / "thing.swift"
+
+        self.hook("pre-tool-use", self.edit_payload(target))
+        response = payload(capsys)
+        assert response["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_the_denial_no_longer_prescribes_an_environment_variable(
+        self, project, capsys
+    ):
+        """An Edit call carries no environment, so that advice was unusable."""
+        self.setup(project, capsys)
+        self.hook("pre-tool-use", self.edit_payload(project / "src" / "f.swift"))
+        reason = payload(capsys)["hookSpecificOutput"]["permissionDecisionReason"]
+        assert "INVARIANT_SESSION_ID=" not in reason
+        assert "aim the edit inside your worktree" in reason
+
+    def test_the_host_mapping_is_learned_from_the_first_edit(self, project, capsys):
+        """After one attributed edit, a call carrying no path resolves too."""
+        worktrees = self.setup(project, capsys)
+        target = Path(worktrees["beta"]) / "f.swift"
+        self.hook("pre-tool-use", self.edit_payload(target, session_id="host-abc-def"))
+
+        assert self.hook("user-prompt-submit", {"session_id": "host-abc-def"}) == 0
+        text = out(capsys)
+        assert "beta" in text
+
+    def test_an_unattributable_edit_is_still_denied(self, project, capsys):
+        """Learning must not degrade into guessing."""
+        self.setup(project, capsys)
+        self.hook("pre-tool-use", self.edit_payload(project / "app.py"))
+        assert payload(capsys)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    def test_an_explicit_id_outranks_the_target(self, project, capsys):
+        """Naming a session is still the last word."""
+        from invariant.cli.main import Context
+
+        worktrees = self.setup(project, capsys)
+        run("session", "list", "--json")
+        beta = [s for s in payload(capsys)["sessions"] if s["name"] == "beta"][0]
+
+        ctx = Context(session_id=beta["id"], host_session_id="host-xyz")
+        resolved = ctx.session_for_payload(
+            {"tool_input": {"file_path": str(Path(worktrees["alpha"]) / "f.swift")}}
+        )
+        assert resolved.id == beta["id"]
+
+    def test_the_target_decides_when_nothing_is_named(self, project, capsys):
+        from invariant.cli.main import Context
+
+        worktrees = self.setup(project, capsys)
+        run("session", "list", "--json")
+        alpha = [s for s in payload(capsys)["sessions"] if s["name"] == "alpha"][0]
+
+        ctx = Context(host_session_id="host-xyz")
+        resolved = ctx.session_for_payload(
+            {"tool_input": {"file_path": str(Path(worktrees["alpha"]) / "f.swift")}}
+        )
+        assert resolved.id == alpha["id"]
+        assert resolved.host_session_id == "host-xyz"  # learned
+
+    def test_a_failed_adoption_does_not_deny_the_edit(self, project, capsys, monkeypatch):
+        """Learning is an optimisation; it may not acquire veto power.
+
+        If recording the mapping can fail the call, an unwritable state
+        directory turns every edit in the project into a denial — strictly
+        worse than never learning anything.
+        """
+        worktrees = self.setup(project, capsys)
+        from invariant.core.errors import StateError
+        from invariant.domains.session import SessionDomain
+
+        def explode(self, session_id, host_session_id):
+            raise StateError("state root is read-only")
+
+        monkeypatch.setattr(SessionDomain, "adopt_host_session", explode)
+
+        target = Path(worktrees["alpha"]) / "f.swift"
+        assert self.hook("pre-tool-use", self.edit_payload(target)) == 0
+        response = payload(capsys)
+        assert response.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"

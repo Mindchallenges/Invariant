@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..core.errors import GateFailure, InvariantError, UsageError
@@ -109,11 +110,14 @@ class Context:
 
         return MemoryStore.from_manifest(self.manifest)
 
-    def current_session(self, strict: bool = True):
+    def current_session(self, strict: bool = True, target=None):
         if self.session_id:
             return self.sessions.require(self.session_id)
         return self.sessions.current(
-            self.cwd, strict=strict, host_session_id=self.host_session_id
+            self.cwd,
+            strict=strict,
+            target=target,
+            host_session_id=self.host_session_id,
         )
 
     def require_session(self):
@@ -125,12 +129,53 @@ class Context:
             )
         return session
 
+    def session_for_payload(self, payload: dict):
+        """Who this tool call belongs to, using the call's own destination.
+
+        The path a write is aimed at is the strongest attribution signal a hook
+        ever gets: it is in the payload, it is absolute, and it does not depend
+        on the working directory the host happens to be in or on an environment
+        variable a tool call cannot carry.
+
+        When that path identifies a session which has no host identifier
+        recorded — every session registered before the identifier existed — the
+        mapping is learned here, so the *next* call from the same host session
+        resolves by identifier alone and works for tool calls that carry no
+        path at all.
+        """
+        if self.session_id:
+            return self.sessions.require(self.session_id)
+
+        tool_input = payload.get("tool_input")
+        target = None
+        if isinstance(tool_input, Mapping):
+            raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+            target = Path(str(raw)) if raw else None
+
+        resolution = self.sessions.resolve(
+            self.cwd, target=target, host_session_id=self.host_session_id
+        )
+        session = resolution.session
+        if (
+            resolution.how == "target"
+            and session is not None
+            and self.host_session_id
+            and not session.host_session_id
+        ):
+            try:
+                session = self.sessions.adopt_host_session(
+                    session.id, self.host_session_id
+                )
+            except InvariantError:
+                pass  # a failed optimisation must not deny the tool call
+        return session
+
     def rule_context(self, payload=None, extra=None) -> RuleContext:
         # Non-strict on purpose. Rules are evaluated on behalf of hooks, and an
         # unidentifiable session is something the rules already model: no
         # session means the session-scoped gates abstain. Raising here would
         # convert "I do not know who you are" into "you may not act".
-        session = self.current_session(strict=False)
+        session = self.session_for_payload(payload or {})
         pipeline = self.pipelines.current(session.id) if session else None
         ambiguous = (
             [] if session else [s.to_dict() for s in self.sessions.origin_candidates(self.cwd)]

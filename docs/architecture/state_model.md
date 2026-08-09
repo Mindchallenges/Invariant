@@ -95,6 +95,40 @@ inside that branch's own worktree merges it into itself and the follow-up push
 pushes an unchanged target. Both commands exit zero. The failure is invisible
 without a check, which is exactly the class of problem this library exists for.
 
+### Attribution
+
+Which session a tool call belongs to, most reliable first:
+
+1. An explicit `INVARIANT_SESSION_ID` / `--id`.
+2. The host's session identifier, when the caller supplies one.
+3. The session whose worktree contains **the file being written to**.
+4. The session whose worktree contains the working directory.
+5. The single session registered at or above the working directory.
+
+Steps 2 and 3 exist because step 4 cannot be relied on: a host runs hooks from
+the project root and may reset the working directory between tool calls, so
+with several sessions live, every one of them looks identical from the shared
+checkout — attribution fails precisely when the isolation rules need it.
+
+Step 3 is what keeps an edit attributable when step 2 is unavailable, which is
+the common case rather than a rare one: a session registered before the host
+identifier was recorded has none, and the documented fallback —
+`INVARIANT_SESSION_ID` — is an environment variable that an edit tool call has
+no way to carry. A destination path depends on neither.
+
+The order matters. `target` sits *below* the host identifier so that who is
+writing beats where the bytes land: a session writing into a peer's worktree
+stays attributed to the writer, which is what makes that a detectable
+violation instead of a silent reattribution. And a target that belongs to no
+worktree is not an answer — resolution falls through, so an edit aimed at the
+shared checkout still reaches `session.no_edit_in_main_checkout` with a session
+to report against.
+
+When step 3 succeeds and the session has no host identifier recorded, the
+mapping is **learned**: the next call from that host session resolves by
+identifier alone, including calls that carry no path at all. Only step 3 may
+teach it. Learning from a weaker signal would bind the wrong pair permanently.
+
 ## Domain: pipeline
 
 One task's progress through the configured methodology. Scoped to a session;

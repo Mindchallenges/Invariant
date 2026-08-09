@@ -591,3 +591,94 @@ class TestHostSessionAttribution:
             cwd=m.root, host_session_id="ffffffff-0000-0000-0000-000000009999"
         )
         assert found is not None and found.id == "deadbeef"
+
+
+class TestAttributionByEditTarget:
+    """Who is editing is answered by where the edit lands.
+
+    The host runs hooks from the project root and resets the working directory
+    between tool calls, so with several sessions live, cwd identifies nobody.
+    An Edit call carries an absolute target path, and that path is inside
+    exactly one session's worktree — a fact, not a heuristic.
+    """
+
+    def two_sessions(self, m):
+        domain = SessionDomain(m)
+        ids = []
+        for name in ("alpha", "beta"):
+            session = domain.start(name)
+            domain.isolate(session.id, execute=True)
+            ids.append(session.id)
+        return domain, domain.get(ids[0]), domain.get(ids[1])
+
+    def test_a_target_inside_a_worktree_names_its_session(self, m):
+        domain, a, b = self.two_sessions(m)
+        target = Path(a.worktree) / "src" / "thing.swift"
+        assert domain.current(m.root, strict=False, target=target).id == a.id
+
+    def test_the_other_worktree_names_the_other_session(self, m):
+        domain, a, b = self.two_sessions(m)
+        target = Path(b.worktree) / "src" / "thing.swift"
+        assert domain.current(m.root, strict=False, target=target).id == b.id
+
+    def test_without_a_target_the_same_call_is_ambiguous(self, m):
+        """The blocked case, stated as a test.
+
+        Two live sessions, cwd in the main checkout, no host identifier: this
+        is precisely what an Edit call looked like, and it resolved to nobody.
+        """
+        domain, _, _ = self.two_sessions(m)
+        assert domain.current(m.root, strict=False) is None
+
+    def test_a_target_in_the_main_checkout_does_not_invent_a_session(self, m):
+        domain, _, _ = self.two_sessions(m)
+        target = m.root / "src" / "thing.swift"
+        assert domain.current(m.root, strict=False, target=target) is None
+
+    def test_an_explicit_id_still_wins(self, m, monkeypatch):
+        domain, a, b = self.two_sessions(m)
+        monkeypatch.setenv("INVARIANT_SESSION_ID", b.id)
+        target = Path(a.worktree) / "f.swift"
+        assert domain.current(m.root, strict=False, target=target).id == b.id
+
+    def test_the_host_identifier_still_outranks_the_target(self, m):
+        """Who is calling beats where the bytes land.
+
+        Kept in that order so that a session writing into a peer's worktree is
+        still attributed to the writer — which is what makes that a detectable
+        violation rather than a silent reattribution.
+        """
+        domain, a, b = self.two_sessions(m)
+        domain.adopt_host_session(b.id, "host-aaaa-bbbb-" + b.id)
+        target = Path(a.worktree) / "f.swift"
+        resolved = domain.current(
+            m.root, strict=False, target=target, host_session_id="host-aaaa-bbbb-" + b.id
+        )
+        assert resolved.id == b.id
+
+    def test_resolution_reports_how_it_decided(self, m):
+        domain, a, _ = self.two_sessions(m)
+        assert domain.resolve(m.root, target=Path(a.worktree) / "f").how == "target"
+        assert domain.resolve(m.root).how == "ambiguous"
+
+    def test_a_dead_session_does_not_claim_its_old_worktree(self, m):
+        domain, a, b = self.two_sessions(m)
+        a.state = "abandoned"
+        domain._save(a)
+        target = Path(a.worktree) / "f.swift"
+        assert domain.resolve(m.root, target=target).session != a
+
+    def test_an_unclaimed_target_falls_through_rather_than_stopping(self, m):
+        """A target nobody owns is not an answer, so resolution continues.
+
+        This is what keeps an edit to the main checkout attributable: the path
+        belongs to no worktree, resolution falls through to the registered
+        session, and `session.no_edit_in_main_checkout` — whose job it actually
+        is — gets a session to report against instead of abstaining.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("solo")
+        domain.isolate(session.id, execute=True)
+        resolution = domain.resolve(m.root, target=m.root / "src" / "f.swift")
+        assert resolution.session.id == session.id
+        assert resolution.how == "origin"
