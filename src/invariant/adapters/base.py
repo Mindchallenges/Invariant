@@ -47,8 +47,20 @@ class TestResult:
 
     @property
     def trustworthy(self) -> bool:
-        """A pass with a live hazard is not a trustworthy pass."""
-        return self.passed and not self.hazards
+        """Narrower than ``passed``, on purpose.
+
+        A pass with a live hazard is not a trustworthy pass. Neither is a pass
+        that executed nothing: a filter matching no tests exits clean, and
+        "the suite is green" and "the suite did not run" are the same exit
+        status. Treating zero-executed as trustworthy is how a run that proved
+        nothing gets recorded as proof.
+
+        ``total is None`` is not zero. It means this adapter cannot count, not
+        that nothing ran; holding a missing adapter feature against a real run
+        would leave the generic adapter unable to report a trustworthy pass at
+        all.
+        """
+        return self.passed and not self.hazards and self.total != 0
 
 
 class Adapter:

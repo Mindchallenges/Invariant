@@ -111,8 +111,7 @@ class SwiftXcodeAdapter(Adapter):
         combined = f"{stdout}\n{stderr}"
         live = [h for h in self.hazards() if h.matches(combined)]
 
-        executed = _sum_executed(combined)
-        failed = _sum_failures(combined)
+        executed, failed = _parse_counts(combined)
 
         # A filtered run that executed nothing exits zero. Treat that as
         # untrustworthy rather than as a pass.
@@ -141,13 +140,42 @@ class SwiftXcodeAdapter(Adapter):
         return out
 
 
-def _sum_executed(text: str) -> int:
-    return sum(
-        int(m.group(1)) for m in re.finditer(r"Executed (\d+) tests?", text)
-    )
+#: One xcodebuild summary line, at any nesting level.
+_SUMMARY = re.compile(r"Executed (\d+) tests?, with (\d+) failures?")
+
+#: The OUTERMOST summary — the one under "Test Suite 'All tests'".
+_ALL_TESTS = re.compile(
+    r"Test Suite '?All tests'?[^\n]*\n\s*Executed (\d+) tests?, with (\d+) failures?"
+)
 
 
-def _sum_failures(text: str) -> int:
-    return sum(
-        int(m.group(1)) for m in re.finditer(r"with (\d+) failures?", text)
-    )
+def _parse_counts(text: str) -> tuple[int, int]:
+    """``(executed, failed)`` from xcodebuild's summary lines.
+
+    xcodebuild prints one summary per nesting level for a single run — the test
+    class, then the bundle, then "All tests" — so **summing** the matches
+    multiplies the true figures by the nesting depth. A six-test suite was
+    recorded as ``executed=18``, and that number lands in the durable pipeline
+    record: a count inflated in the direction of more coverage than there was,
+    on a green phase, is indistinguishable afterwards from a run that really
+    did execute eighteen tests.
+
+    Taking the last match alone is not enough either, because a run over
+    several test targets emits summaries that genuinely should add up. The
+    outermost "All tests" line already totals those, so it is preferred, and
+    the last summary is the fallback for output that never printed one.
+
+    ``failed`` is xcodebuild's failure count, which counts failing assertions
+    rather than failing test methods; three failing tests raising four
+    assertions between them reports four. That is xcodebuild's own accounting
+    and is left as it is.
+    """
+    outermost = list(_ALL_TESTS.finditer(text))
+    if outermost:
+        match = outermost[-1]
+        return int(match.group(1)), int(match.group(2))
+
+    matches = list(_SUMMARY.finditer(text))
+    if not matches:
+        return 0, 0
+    return int(matches[-1].group(1)), int(matches[-1].group(2))
