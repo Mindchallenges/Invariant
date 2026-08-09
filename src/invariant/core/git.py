@@ -118,6 +118,33 @@ def changed_files(cwd: Path, since: str | None = None) -> list[Path]:
     return sorted(seen.values(), key=str)
 
 
+def branch_files(cwd: Path, base: str) -> list[Path] | None:
+    """Paths touched by commits on this branch since ``base``.
+
+    ``changed_files`` answers for the working tree and the index, which is the
+    right question while work is in progress and the wrong one afterwards: a
+    commit empties both. Any gate that runs at the END of a phase — when the
+    work is, by construction, already committed — therefore sees nothing
+    changed unless it also asks this.
+
+    ``None`` means the question could not be answered: no base, an unknown
+    ref, an unreadable repository. It carries the same obligation as
+    :func:`unpushed_files` — a caller deciding whether to *relax* must treat
+    ``None`` as "do not relax", because an unanswered question is not a
+    negative answer, and reading it as one turns every unusual repository
+    state into an open gate.
+    """
+    if not base:
+        return None
+    # Three dots: the merge base, not the tip. Diffing against the tip
+    # attributes every commit the base gained since the branch left to this
+    # branch, which on a busy base branch is most of the project.
+    code, out, _ = _run(["diff", "--name-only", f"{base}...HEAD"], cwd)
+    if code != 0:
+        return None
+    return [Path(p) for p in out.splitlines() if p]
+
+
 def unpushed_files(cwd: Path) -> list[Path] | None:
     """Paths touched by commits the upstream does not have yet.
 

@@ -843,62 +843,97 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
 
     scope = str(ctx.manifest.get("methodology.gates.coverage_scope", "touched"))
     if scope == "touched":
-        # The session's declared file set as well as the working tree, because
-        # by the time this gate runs the work is usually committed — and
-        # `git diff` reports nothing for committed work. Reading only the
-        # working tree would empty the touched set at exactly the state where
-        # the gate matters, and an empty touched set means every measured file
-        # in the project gets held to the floor.
+        # Three sources, because each one alone goes empty in a state the
+        # others survive. The working tree and index answer for work in
+        # progress and go empty on commit. The declared file set answers only
+        # for sessions that declare one, which is a habit a project acquires
+        # rather than has. The branch's own commits answer for exactly the
+        # state this gate runs in — after the commit — and are what makes the
+        # set non-empty when it matters most.
         declared = set((ctx.session or {}).get("files") or [])
+        base = str((ctx.session or {}).get("base") or "")
+        committed = git.branch_files(ctx.cwd, base)
         changed = {
             _relative_to_any(path, roots)
-            for path in [*git.changed_files(ctx.cwd), *declared]
+            for path in [*git.changed_files(ctx.cwd), *(committed or []), *declared]
         }
         source_changed = {p for p in changed if not _looks_like_docs(p)}
-        if source_changed:
-            touched: dict[str, float] = {}
-            unmatched: list[str] = []
-            for wanted in sorted(source_changed):
-                hits = {f: pct for f, pct in coverage.items() if _same_file(wanted, f)}
-                if hits:
-                    touched.update(hits)
-                else:
-                    unmatched.append(wanted)
 
-            if not touched:
+        # An empty touched set used to fall through to the full measured set,
+        # silently converting a touched-scope floor into a project-wide one.
+        # Every legacy file below the floor then blocks a change that never
+        # went near it, and the verdict names those files — so it reads as a
+        # coverage failure rather than as the scoping failure it is, and the
+        # author goes looking in the wrong place. "Nothing was touched" and
+        # "everything was touched" are opposite answers; defaulting to the
+        # second because the first could not be established is the widest
+        # possible reading of the narrowest possible evidence.
+        if not source_changed:
+            if committed is None and not declared:
                 return Verdict.fail(
-                    "coverage was measured, but none of it covers the changed files",
+                    "the touched set could not be established",
                     detail=(
-                        f"{len(coverage)} file(s) measured, "
-                        f"{len(source_changed)} changed, no overlap. Usually a "
-                        f"path-spelling mismatch between the coverage reporter "
-                        f"and git. Reporting this as a pass would be the gate "
-                        f"approving a measurement of something else."
-                    ),
-                    fixes=("check the coverage command covers the changed target",),
-                )
-
-            # A partial intersection is the dangerous middle. Left unreported,
-            # the gate answers for the files it happened to match and stays
-            # silent about the ones it could not — which reads as a pass for
-            # all of them. Not knowing is a different answer from knowing it
-            # is fine, and this is where that distinction has teeth.
-            if unmatched:
-                return Verdict.fail(
-                    f"{len(unmatched)} changed source file(s) have no coverage row",
-                    detail=(
-                        ", ".join(unmatched[:6])
-                        + ". Either they are outside the measured target, or the "
-                        "path spellings still disagree. The gate cannot answer "
-                        "for a file it did not find, and answering anyway for "
-                        "the rest would report a pass it has not established."
+                        "Scope is 'touched', but the working tree is clean, no "
+                        "file set was declared, and the branch's commits could "
+                        f"not be read{f' against base {base!r}' if base else ' — no base recorded'}. "
+                        "The gate will not answer a question it could not "
+                        "scope: holding the whole project to the floor would "
+                        "block on files nobody edited, and skipping the floor "
+                        "would pass work it never measured."
                     ),
                     fixes=(
-                        "check these files are in the coverage target",
-                        "or drop them from the session file set if they are not code",
+                        "invariant session files add <path>",
+                        "or check the session's base branch is reachable",
                     ),
                 )
-            coverage = touched
+            return Verdict.na(
+                "no source file was touched; a touched-scope floor has nothing "
+                "to answer for"
+            )
+
+        touched: dict[str, float] = {}
+        unmatched: list[str] = []
+        for wanted in sorted(source_changed):
+            hits = {f: pct for f, pct in coverage.items() if _same_file(wanted, f)}
+            if hits:
+                touched.update(hits)
+            else:
+                unmatched.append(wanted)
+
+        if not touched:
+            return Verdict.fail(
+                "coverage was measured, but none of it covers the changed files",
+                detail=(
+                    f"{len(coverage)} file(s) measured, "
+                    f"{len(source_changed)} changed, no overlap. Usually a "
+                    f"path-spelling mismatch between the coverage reporter "
+                    f"and git. Reporting this as a pass would be the gate "
+                    f"approving a measurement of something else."
+                ),
+                fixes=("check the coverage command covers the changed target",),
+            )
+
+        # A partial intersection is the dangerous middle. Left unreported,
+        # the gate answers for the files it happened to match and stays
+        # silent about the ones it could not — which reads as a pass for
+        # all of them. Not knowing is a different answer from knowing it
+        # is fine, and this is where that distinction has teeth.
+        if unmatched:
+            return Verdict.fail(
+                f"{len(unmatched)} changed source file(s) have no coverage row",
+                detail=(
+                    ", ".join(unmatched[:6])
+                    + ". Either they are outside the measured target, or the "
+                    "path spellings still disagree. The gate cannot answer "
+                    "for a file it did not find, and answering anyway for "
+                    "the rest would report a pass it has not established."
+                ),
+                fixes=(
+                    "check these files are in the coverage target",
+                    "or drop them from the session file set if they are not code",
+                ),
+            )
+        coverage = touched
 
     # How the measurement was obtained, carried into the verdict. A clean pass
     # measured on a run with a live hazard is not the same claim as one

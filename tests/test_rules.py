@@ -385,16 +385,111 @@ class TestTestRules:
 class TestCoverageRule:
     def test_below_floor_is_reported(self, ctx_factory):
         pipeline = {"evidence": {"coverage": {"a.py": 40.0, "b.py": 95.0}}}
-        result = only(evaluate(["coverage.meets_floor"], ctx_factory(pipeline=pipeline)))
+        session = {"files": ["a.py", "b.py"], "base": "master"}
+        result = only(
+            evaluate(["coverage.meets_floor"], ctx_factory(session=session, pipeline=pipeline))
+        )
         assert "1 file(s) below" in result.verdict.message
         assert "a.py" in result.verdict.detail
 
     def test_all_above_floor_passes(self, ctx_factory):
         pipeline = {"evidence": {"coverage": {"a.py": 95.0}}}
-        assert only(evaluate(["coverage.meets_floor"], ctx_factory(pipeline=pipeline))).verdict.ok
+        session = {"files": ["a.py"], "base": "master"}
+        assert only(
+            evaluate(["coverage.meets_floor"], ctx_factory(session=session, pipeline=pipeline))
+        ).verdict.ok
 
     def test_no_recorded_coverage_fails(self, ctx_factory):
         assert not only(evaluate(["coverage.meets_floor"], ctx_factory(pipeline={}))).verdict.ok
+
+    # -- scope -------------------------------------------------------
+    #
+    # The touched set is what makes this a "touched" gate rather than a
+    # whole-project one. Every test below is about the set being computed
+    # from the wrong facts, which does not look like a scope bug from the
+    # outside: it looks like a coverage failure in a file nobody edited.
+
+    def test_committed_work_is_still_in_scope(self, ctx_factory):
+        """`git diff` reports nothing for committed work.
+
+        The exit gate runs after the commit, so reading only the working tree
+        and the index empties the touched set at exactly the state where the
+        gate is asked its question.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        (wt / "a.py").write_text("x = 1\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "work"], wt)
+
+        pipeline = {"evidence": {"coverage": {"a.py": 40.0, "b.py": 10.0}}}
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert "1 file(s) below" in result.verdict.message
+        assert "a.py" in result.verdict.detail
+        # b.py was never touched by this session. Holding it to the floor is
+        # the whole defect: it blocks on a file the author did not write.
+        assert "b.py" not in result.verdict.detail
+
+    def test_an_empty_touched_set_does_not_widen_to_the_whole_project(self, ctx_factory):
+        """Nothing touched is not the same question as everything touched.
+
+        Falling through to the full measured set turns a touched-scope floor
+        into a project-wide one, and every legacy file below the floor then
+        blocks a change that never went near it.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert result.verdict.ok and result.verdict.skipped
+        assert "legacy.py" not in (result.verdict.detail or "")
+
+    def test_a_docs_only_change_has_nothing_for_the_floor_to_answer(self, ctx_factory):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text("# hi\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "docs"], wt)
+
+        pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert result.verdict.ok and result.verdict.skipped
+
+    def test_an_undeterminable_scope_blocks_rather_than_relaxing(self, ctx_factory):
+        """An unanswered question is not a negative answer.
+
+        With no base to diff against, the touched set cannot be established.
+        Reporting that as "nothing was touched" would skip the floor on real
+        source work — the vacuous green this gate exists to prevent.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
+        session = {"worktree": str(wt), "base": "no-such-base", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert not result.verdict.ok
+        assert "touched set could not be established" in result.verdict.message
+        # And it must not answer for the project it could not scope.
+        assert "legacy.py" not in (result.verdict.detail or "")
 
 
 # -- privacy rule ------------------------------------------------------
