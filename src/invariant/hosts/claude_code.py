@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 
 from ..core.errors import InvariantError
-from ..core.rules import evaluate_event
+from ..core.rules import EDIT_TOOLS, evaluate_event
 from ..domains.session import ambiguity_message
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -686,6 +686,41 @@ class ClaudeCodeHost:
             # rule working; neither is a reason to fail a completed command.
             pass
 
+    def _bind_by_successful_edit(self, payload: dict, ctx) -> None:
+        """Claim an unowned session from an edit that actually landed in it.
+
+        This used to happen during pre-tool-use rule evaluation, which made
+        ownership a side effect of asking a question: every evaluation ran it,
+        including ones whose verdict was DENY, so a refused edit still claimed
+        the session — as did a diagnostic that never touched a file. One stray
+        call aimed into an unowned worktree transferred a peer's session to
+        whoever made it, silently, with no way for the owner to reclaim it.
+
+        Here the tool has provably run. That is the difference between evidence
+        of ownership and evidence of curiosity.
+        """
+        if not ctx.host_session_id:
+            return
+        tool_input = payload.get("tool_input") or {}
+        raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if not raw:
+            return
+
+        resolution = ctx.sessions.resolve(
+            ctx.cwd, target=Path(str(raw)), host_session_id=ctx.host_session_id
+        )
+        session = resolution.session
+        # Only the path-based answer, and only for a session nobody owns. Any
+        # other route either already knows the owner or is guessing.
+        if resolution.how != "target" or session is None or session.host_session_id:
+            return
+        try:
+            ctx.sessions.adopt_host_session(session.id, ctx.host_session_id)
+        except InvariantError:
+            # Already bound, or this host owns one. Both are the 1:1 rule
+            # working, and neither is a reason to fail a completed tool call.
+            pass
+
     def _session_end(self, ctx) -> dict:
         """The host session is over; its invariant session is nobody's now.
 
@@ -738,6 +773,10 @@ class ClaudeCodeHost:
         # remember to pass.
         if tool == "Bash":
             self._bind_started_session(payload, ctx)
+            return {}
+
+        if tool in EDIT_TOOLS:
+            self._bind_by_successful_edit(payload, ctx)
             return {}
 
         if tool != "Read" and tool not in AGENT_TOOLS:

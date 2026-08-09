@@ -155,20 +155,18 @@ class Context:
         resolution = self.sessions.resolve(
             self.cwd, target=target, host_session_id=self.host_session_id
         )
-        session = resolution.session
-        if (
-            resolution.how == "target"
-            and session is not None
-            and self.host_session_id
-            and not session.host_session_id
-        ):
-            try:
-                session = self.sessions.adopt_host_session(
-                    session.id, self.host_session_id
-                )
-            except InvariantError:
-                pass  # a failed optimisation must not deny the tool call
-        return session
+        # Resolution only. This used to ADOPT here — bind the resolved session
+        # to the calling host — and that made ownership a side effect of asking
+        # a question. Every pre-tool-use evaluation ran it, including calls that
+        # were then DENIED, so a refused edit still claimed the session, and so
+        # did a diagnostic that never touched a file. One stray call aimed into
+        # an unowned worktree transferred a peer's session to whoever made it,
+        # silently and with no way for the real owner to reclaim it.
+        #
+        # The binding now happens in post-tool-use, where the tool provably ran.
+        # "Someone successfully edited inside this worktree" is evidence of
+        # ownership; "someone asked whether they could" is not.
+        return resolution.session
 
     def rule_context(self, payload=None, extra=None) -> RuleContext:
         # Non-strict on purpose. Rules are evaluated on behalf of hooks, and an

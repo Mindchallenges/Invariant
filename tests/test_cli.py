@@ -655,13 +655,8 @@ class TestAgentsCommand:
         assert rows["agents loadable by host"] is False
 
 
-class TestEditAttributionThroughTheHook:
-    """The blocked-session scenario, reproduced at the hook boundary.
-
-    Several live sessions, the hook running from the main checkout (as this
-    host does — it resets cwd between tool calls), no host identifier recorded
-    on any session, and an Edit aimed into one session's worktree.
-    """
+class EditHookHarness:
+    """Shared setup for the hook-boundary suites. Not collected on its own."""
 
     def setup(self, project, capsys):
         assert run("init", "--name", "demo") == 0
@@ -693,6 +688,15 @@ class TestEditAttributionThroughTheHook:
             "tool_input": {"file_path": str(path), "old_string": "a", "new_string": "b"},
         }
 
+
+class TestEditAttributionThroughTheHook(EditHookHarness):
+    """The blocked-session scenario, reproduced at the hook boundary.
+
+    Several live sessions, the hook running from the main checkout (as this
+    host does — it resets cwd between tool calls), no host identifier recorded
+    on any session, and an Edit aimed into one session's worktree.
+    """
+
     def test_an_edit_into_a_worktree_is_allowed(self, project, capsys):
         worktrees = self.setup(project, capsys)
         target = Path(worktrees["alpha"]) / "src" / "thing.swift"
@@ -722,10 +726,16 @@ class TestEditAttributionThroughTheHook:
         assert "aim the edit inside your worktree" in reason
 
     def test_the_host_mapping_is_learned_from_the_first_edit(self, project, capsys):
-        """After one attributed edit, a call carrying no path resolves too."""
+        """After one attributed edit, a call carrying no path resolves too.
+
+        The learning is the intent and is kept. What moved is WHEN: post-tool-
+        use binds, because that event only fires for a tool that actually ran.
+        """
         worktrees = self.setup(project, capsys)
         target = Path(worktrees["beta"]) / "f.swift"
-        self.hook("pre-tool-use", self.edit_payload(target, session_id="host-abc-def"))
+        body = self.edit_payload(target, session_id="host-abc-def")
+        self.hook("pre-tool-use", body)
+        self.hook("post-tool-use", body)
 
         assert self.hook("user-prompt-submit", {"session_id": "host-abc-def"}) == 0
         text = out(capsys)
@@ -763,7 +773,9 @@ class TestEditAttributionThroughTheHook:
             {"tool_input": {"file_path": str(Path(worktrees["alpha"]) / "f.swift")}}
         )
         assert resolved.id == alpha["id"]
-        assert resolved.host_session_id == "host-xyz"  # learned
+        # Resolved, NOT claimed. Adoption here made ownership a side effect of
+        # asking a question — see TestAskingIsNotOwning below.
+        assert resolved.host_session_id is None
 
     def test_a_failed_adoption_does_not_deny_the_edit(self, project, capsys, monkeypatch):
         """Learning is an optimisation; it may not acquire veto power.
@@ -1096,3 +1108,70 @@ class TestHooksAreInstallableWithoutRewritingTheManifest:
         text = out(capsys)
         assert "invariant hooks install" in text
         assert "stop" in text
+
+
+class TestAskingIsNotOwning(EditHookHarness):
+    """Ownership must not be a side effect of asking whether an edit is allowed.
+
+    Adoption used to run inside pre-tool-use rule evaluation, so it fired for
+    EVERY evaluated call — including ones whose verdict was `deny`, and
+    including a diagnostic that never touched a file. One stray call aimed into
+    an unowned worktree transferred a peer's session to whoever made it,
+    silently, with no way for the real owner to reclaim it.
+
+    This was found the way these things are found: a probe run to diagnose
+    something else bound a live session to a host named `probe-xyz`, which then
+    changed which session the next real turn appeared to own.
+    """
+
+    def owner_of(self, project, name, capsys):
+        run("session", "list", "--json")
+        row = [s for s in payload(capsys)["sessions"] if s["name"] == name][0]
+        state = json.loads(
+            (project / ".git" / "invariant" / "state" / "sessions" / f"{row['id']}.json")
+            .read_text(encoding="utf-8")
+        )
+        return state.get("host_session_id")
+
+    def test_a_probe_that_never_edits_claims_nothing(self, project, capsys):
+        """The exact call that corrupted real state."""
+        worktrees = self.setup(project, capsys)
+        target = Path(worktrees["alpha"]) / "f.swift"
+        self.hook("pre-tool-use", self.edit_payload(target, session_id="probe-xyz"))
+
+        assert self.owner_of(project, "alpha", capsys) is None
+
+    def test_a_denied_edit_claims_nothing(self, project, capsys):
+        """A refused call is evidence of nothing at all."""
+        self.setup(project, capsys)
+        self.hook(
+            "pre-tool-use",
+            self.edit_payload(project / "src" / "f.swift", session_id="host-deny"),
+        )
+        assert self.owner_of(project, "alpha", capsys) is None
+        assert self.owner_of(project, "beta", capsys) is None
+
+    def test_an_edit_that_ran_does_claim_it(self, project, capsys):
+        """The learning is kept — it just needs the tool to have run."""
+        worktrees = self.setup(project, capsys)
+        body = self.edit_payload(
+            Path(worktrees["alpha"]) / "f.swift", session_id="host-real"
+        )
+        self.hook("pre-tool-use", body)
+        self.hook("post-tool-use", body)
+
+        assert self.owner_of(project, "alpha", capsys) == "host-real"
+
+    def test_a_peer_cannot_take_an_already_owned_session(self, project, capsys):
+        worktrees = self.setup(project, capsys)
+        body = self.edit_payload(
+            Path(worktrees["alpha"]) / "f.swift", session_id="host-real"
+        )
+        self.hook("pre-tool-use", body)
+        self.hook("post-tool-use", body)
+
+        stolen = self.edit_payload(
+            Path(worktrees["alpha"]) / "g.swift", session_id="host-peer"
+        )
+        self.hook("post-tool-use", stolen)
+        assert self.owner_of(project, "alpha", capsys) == "host-real"
