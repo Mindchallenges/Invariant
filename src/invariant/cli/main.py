@@ -450,7 +450,10 @@ def cmd_session_isolate(args) -> int:
 
 def cmd_session_status(args) -> int:
     ctx = Context()
-    session = ctx.current_session()
+    session = (
+        ctx.sessions.require(args.id) if getattr(args, "id", None)
+        else ctx.current_session()
+    )
     if session is None:
         return emit(args, {"session": None}, "no session is active in this directory")
     pipeline = ctx.pipelines.current(session.id)
@@ -480,7 +483,10 @@ def cmd_session_transition(args) -> int:
 
 def cmd_session_files(args) -> int:
     ctx = Context()
-    session = ctx.require_session()
+    session = (
+        ctx.sessions.require(args.id) if getattr(args, "id", None)
+        else ctx.require_session()
+    )
     updated = ctx.sessions.add_files(session.id, args.paths)
     return emit(
         args,
@@ -533,6 +539,46 @@ def cmd_session_reap(args) -> int:
     return emit(args, {"reaped": [s.id for s in reaped]}, text)
 
 
+def cmd_session_review(args) -> int:
+    """Evaluate the review gates, and advance if they hold.
+
+    Documented in two places and implemented in none — the CLI rejected it as
+    an unknown subcommand while `CLAUDE.md` and the CLI reference both told
+    people to run it. A doc-promised check that was never written is the exact
+    thing this library exists to make impossible, so it is written rather than
+    deleted from the docs.
+    """
+    ctx = Context()
+    session = ctx.sessions.require(args.id) if args.id else ctx.require_session()
+
+    machine = ctx.sessions.machine
+    if not machine.can(session.state, "reviewed"):
+        legal = ", ".join(machine.next_states(session.state)) or "(none)"
+        raise UsageError(
+            f"session {session.id} is {session.state!r}; review is not legal "
+            f"from there.\n  Legal from {session.state!r}: {legal}"
+        )
+
+    gates = machine.state("reviewed").entry_gates + machine.state(
+        session.state
+    ).exit_gates
+    verdicts = evaluate(list(dict.fromkeys(gates)), ctx.rule_context())
+    blocking = [v for v in verdicts if v.blocks]
+    if blocking and not args.force:
+        report_verdicts(verdicts, args)
+        raise GateFailure("the review gates refused this session", verdicts=verdicts)
+
+    ctx.sessions.transition(
+        session.id, "reviewed", reason=args.reason or "review gates evaluated",
+        force=args.force,
+    )
+    return emit(
+        args,
+        {"session": session.id, "verdicts": verdicts_payload(verdicts)},
+        f"session {session.id} reviewed ({len(verdicts)} gate(s) evaluated)",
+    )
+
+
 def cmd_session_merge(args) -> int:
     import subprocess
 
@@ -546,6 +592,21 @@ def cmd_session_merge(args) -> int:
     main = git.main_checkout(ctx.cwd)
     if main is None:
         raise UsageError("not inside a git repository")
+
+    # Checked BEFORE the merge runs, not after. This used to advance git and
+    # then refuse the transition, leaving the branch merged and the record
+    # still reading `isolated` — git and the registry disagreeing, which is the
+    # phantom-session class arrived at from the other end. A validation that
+    # runs after the irreversible step is not a gate, it is a report.
+    if not ctx.sessions.machine.can(session.state, "merged"):
+        legal = ", ".join(ctx.sessions.machine.next_states(session.state)) or "(none)"
+        raise UsageError(
+            f"session {session.id} is {session.state!r}; a merge is not legal "
+            f"from there, and nothing has been merged.\n"
+            f"  Legal from {session.state!r}: {legal}\n"
+            f"  Walk it forward first: invariant session transition <state> "
+            f"--id {session.id}"
+        )
 
     # Run from the main checkout, never from the branch's own worktree: that
     # merges the branch into itself and the follow-up push pushes an unchanged
@@ -1066,7 +1127,12 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--execute", action="store_true")
     q.set_defaults(func=cmd_session_isolate)
 
-    session.add_parser("status").set_defaults(func=cmd_session_status)
+    # --id everywhere it can mean something. Every ambiguity message tells the
+    # caller to pass it, and a subcommand that then rejects it makes the advice
+    # a dead end.
+    q = session.add_parser("status")
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_session_status)
     session.add_parser("list").set_defaults(func=cmd_session_list)
 
     q = session.add_parser("transition")
@@ -1079,6 +1145,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = session.add_parser("files")
     q.add_argument("action", choices=["add"])
     q.add_argument("paths", nargs="+")
+    q.add_argument("--id")
     q.set_defaults(func=cmd_session_files)
 
     q = session.add_parser("adopt", help="bind a host session id to a session")
@@ -1092,6 +1159,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_session_reap)
+
+    q = session.add_parser("review", help="evaluate the review gates and advance")
+    q.add_argument("--id")
+    q.add_argument("--force", action="store_true")
+    q.add_argument("--reason")
+    q.set_defaults(func=cmd_session_review)
 
     q = session.add_parser("merge")
     q.add_argument("--id")

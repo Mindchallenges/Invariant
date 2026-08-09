@@ -843,3 +843,100 @@ class TestPublishingIsOptInThroughTheCli:
         assert run("session", "teardown", "--id", sid) == 0
         text = out(capsys)
         assert "worktree" in text and branch in text
+
+
+class TestMergeIsGatedBeforeItRuns:
+    """A validation that runs after the irreversible step is a report.
+
+    `session merge` used to advance git and THEN refuse the transition, leaving
+    the branch merged on the base while the record still read `isolated` — git
+    and the registry disagreeing, which is the phantom-session class arrived at
+    from the other end.
+    """
+
+    def isolated_session(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "adopt")
+        run("session", "start", "x", "--json")
+        sid = payload(capsys)["session"]["id"]
+        run("session", "isolate", "--execute", "--id", sid)
+        return sid
+
+    def base_head(self, project):
+        return subprocess.run(
+            ["git", "rev-parse", "master"], cwd=project, capture_output=True, text=True
+        ).stdout.strip()
+
+    def test_an_illegal_transition_refuses_before_touching_git(self, project, capsys):
+        sid = self.isolated_session(project, capsys)
+        before = self.base_head(project)
+
+        assert run("session", "merge", "--id", sid) != 0
+        assert "nothing has been merged" in capsys.readouterr().err
+        assert self.base_head(project) == before
+
+    def test_the_refusal_names_the_legal_states(self, project, capsys):
+        sid = self.isolated_session(project, capsys)
+        run("session", "merge", "--id", sid)
+        message = capsys.readouterr().err
+        assert "working" in message and "abandoned" in message
+
+    def test_a_legal_merge_still_works(self, project, capsys):
+        sid = self.isolated_session(project, capsys)
+        for state in ("working", "reviewed"):
+            run("session", "transition", state, "--id", sid, "--force",
+                "--reason", "test fixture")
+        assert run("session", "merge", "--id", sid) == 0
+
+
+class TestIdIsAcceptedConsistently:
+    """Every ambiguity message tells the caller to pass --id; a subcommand that
+    then rejects it makes the advice a dead end."""
+
+    def setup_session(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "adopt")
+        run("session", "start", "x", "--json")
+        return payload(capsys)["session"]["id"]
+
+    def test_status_accepts_id(self, project, capsys):
+        sid = self.setup_session(project, capsys)
+        assert run("session", "status", "--id", sid, "--json") == 0
+        assert payload(capsys)["session"]["id"] == sid
+
+    def test_files_accepts_id(self, project, capsys):
+        sid = self.setup_session(project, capsys)
+        assert run("session", "files", "add", "a.py", "--id", sid, "--json") == 0
+        assert "a.py" in payload(capsys)["files"]
+
+
+class TestSessionReviewExists:
+    """It was documented in CLAUDE.md and the CLI reference, and implemented
+    nowhere. A doc-promised check that was never written is the exact failure
+    this library exists to make impossible."""
+
+    def working_session(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "adopt")
+        run("session", "start", "x", "--json")
+        sid = payload(capsys)["session"]["id"]
+        run("session", "isolate", "--execute", "--id", sid)
+        run("session", "transition", "working", "--id", sid, "--force", "--reason", "fixture")
+        return sid
+
+    def test_the_command_exists(self, project, capsys):
+        assert run("session", "review", "--id", self.working_session(project, capsys)) == 0
+
+    def test_it_advances_the_session(self, project, capsys):
+        sid = self.working_session(project, capsys)
+        run("session", "review", "--id", sid)
+        run("session", "status", "--id", sid, "--json")
+        assert payload(capsys)["session"]["state"] == "reviewed"
+
+    def test_it_refuses_from_a_state_that_cannot_review(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "adopt")
+        run("session", "start", "x", "--json")
+        sid = payload(capsys)["session"]["id"]
+        assert run("session", "review", "--id", sid) != 0
+        assert "not legal" in capsys.readouterr().err
