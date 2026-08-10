@@ -473,14 +473,21 @@ class SessionDomain:
     def isolation_plan(self, session: Session) -> dict[str, str]:
         """Where this session's worktree and branch would go.
 
-        Derived from the session identifier so that two sessions never collide,
-        and placed beside the repository rather than inside it so that the
-        worktree is not itself a tracked path.
+        Derived from the session identifier so that two sessions never collide.
+        Placed beside the repository by default, so that the worktree is not
+        itself a tracked path; ``session.worktree_dir`` moves it, including to a
+        directory inside the repository, for hosts that trust one location and
+        confirm every other.
         """
         root = git.toplevel(self.manifest.root) or self.manifest.root
         prefix = self.manifest.get("session.worktree_prefix") or f"{root.name}-wt"
+        parent = root.parent
+        configured = self.manifest.get("session.worktree_dir")
+        if configured:
+            configured = Path(str(configured)).expanduser()
+            parent = configured if configured.is_absolute() else root / configured
         return {
-            "worktree": str(root.parent / f"{prefix}-{session.id}"),
+            "worktree": str(parent / f"{prefix}-{session.id}"),
             "branch": f"session/{session.id}",
             "base": session.base,
         }

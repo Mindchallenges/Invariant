@@ -115,6 +115,21 @@ DEFAULTS: dict[str, Any] = {
         # conflicts with no review value.
         "exempt_paths": [".claude/*", ".claude/**", "MEMORY.md"],
         "worktree_prefix": None,
+        # Where session worktrees are created. Unset means beside the
+        # repository, which keeps the worktree off every path the repository
+        # itself tracks. A project sets this when its host trusts one specific
+        # location — some hosts confirm before moving their permission root
+        # into a directory they do not manage, and the confirmation is not
+        # suppressible by any permission rule, so the only way to stop asking
+        # is to put the worktree where the host already trusts.
+        #
+        # A relative value is resolved against the repository root. Placing
+        # worktrees INSIDE the repository is therefore supported, but it makes
+        # exempt_paths load-bearing in a way it is not otherwise: see
+        # _project_relative_forms, which resolves a path in a linked worktree
+        # against that worktree alone so a directory prefix cannot exempt the
+        # sources underneath it.
+        "worktree_dir": None,
         # Whether publishing to a remote is part of the session lifecycle.
         #
         # Off by default. A session's job is to get reviewed work onto the base

@@ -53,6 +53,9 @@ enforcement:
 session:
   exempt_paths: [".claude/*", ".claude/**", "MEMORY.md"]
   worktree_prefix: null        # null derives it from the project directory name
+  worktree_dir: null           # null puts worktrees beside the repository;
+                               # a relative value resolves against the repo root,
+                               # so worktrees may live INSIDE it
   push: false                  # is publishing to a remote a session step at all
 
 items:
@@ -83,6 +86,32 @@ agents:
 host:
   kind: claude_code
 ```
+
+### Where worktrees live
+
+`session.worktree_dir` exists for hosts that trust one location and confirm
+every other. Claude Code, for one, asks before relocating its permission root
+into a worktree outside `.claude/worktrees/`, and that confirmation is
+deliberately not suppressible by any permission rule — so a project whose
+worktrees sit beside the repository is asked once per session, forever. Pointing
+this at the trusted directory ends that, and the trust is decided by path: a
+worktree created there by plain `git worktree add` is entered without a prompt.
+
+Placing worktrees inside the repository has one consequence worth stating,
+because it fails silently rather than loudly. Exempt patterns are matched with
+`fnmatch`, whose `*` spans path separators, so `.claude/*` matches
+`.claude/worktrees/wt-1/src/app.py` — every source file in a worktree placed
+there. The isolation rule consults the exemption first and skips on a match, so
+the result would not be an error but an absence of enforcement. The library
+therefore resolves a path inside a linked worktree against **that worktree
+alone**, which is the more accurate reading anyway: a file's project-relative
+identity is where it sits in its own checkout, not where its checkout sits. A
+directory prefix cannot exempt what is underneath it.
+
+The directory should also be ignored by git, or the main checkout is dirtied by
+every live session. Claude Code writes `.claude/worktrees/` into
+`.git/info/exclude`, which is local to one clone — a project that wants this to
+hold on every machine commits the entry to `.gitignore` instead.
 
 Every key has a default. A minimal usable manifest is three lines:
 

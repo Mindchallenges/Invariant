@@ -1506,11 +1506,39 @@ def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:
     project-relative pattern, so the exemption silently stops applying exactly
     when several worktrees exist. That is the situation this library is for, so
     every known base is tried.
+
+    A file inside a linked worktree is the exception: it is spelled against that
+    worktree and nothing else. Otherwise the worktree's own location joins every
+    path underneath it, and a worktree sitting under an exempt directory —
+    which ``session.worktree_dir`` makes an ordinary configuration, since some
+    hosts trust only a location inside the repository — would exempt every
+    source file it holds. Since the caller matches with ``any()`` and the
+    isolation rule consults the exemption FIRST, that reads as "nothing to
+    enforce" rather than as an error: the guarantee would be off, silently, in
+    exactly the multi-worktree setup it exists for.
     """
     try:
         absolute = Path(target).resolve()
     except OSError:
         return [str(target)]
+
+    # Most specific first: worktrees may nest, and the innermost one owns the
+    # file. The main checkout is skipped because it contains every other.
+    owning = sorted(
+        (w for w in git.worktrees(ctx.cwd) if not w.is_main),
+        key=lambda w: len(str(w.path)),
+        reverse=True,
+    )
+    for worktree in owning:
+        try:
+            path = worktree.path.resolve()
+        except OSError:
+            continue
+        if absolute == path or path in absolute.parents:
+            try:
+                return [str(absolute.relative_to(path))]
+            except ValueError:  # pragma: no cover - implied by the check above
+                continue
 
     bases = [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
     forms: list[str] = []
@@ -1522,15 +1550,10 @@ def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:
         except (ValueError, OSError):
             continue
 
-    # A path in a peer's worktree matches none of the bases above. Its
-    # project-relative form is still recoverable from the worktree list.
-    if not forms:
-        for worktree in git.worktrees(ctx.cwd):
-            try:
-                forms.append(str(absolute.relative_to(worktree.path.resolve())))
-            except (ValueError, OSError):
-                continue
-
+    # A path in a peer's worktree matches none of the bases above, and used to
+    # be recovered by a second pass over the worktree list here. The pass above
+    # subsumes it: a peer's worktree is a linked worktree, so such a path has
+    # already returned its worktree-relative form and never reaches this point.
     return forms or [str(absolute)]
 
 

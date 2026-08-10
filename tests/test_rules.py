@@ -610,6 +610,77 @@ class TestExemptionAcrossWorktrees:
         assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
 
 
+class TestAWorktreeUnderAnExemptDirectoryStillEnforces:
+    """A worktree's LOCATION must not exempt the sources inside it.
+
+    ``session.worktree_dir`` lets a project put worktrees inside the repository,
+    which some hosts require before they will treat the directory as trusted.
+    The default exemption covers ``.claude/*``, and fnmatch's ``*`` spans path
+    separators, so every file in a worktree placed there spells as an exempt
+    path when resolved against the main checkout. The isolation rule consults
+    the exemption first, so the result is not an error but a skip: enforcement
+    off, silently, in the multi-worktree case it exists for.
+    """
+
+    @pytest.fixture
+    def nested(self, repo):
+        main, _ = repo
+        inner = main / ".claude" / "worktrees" / "wt-1"
+        inner.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "worktree", "add", "-q", str(inner), "-b", "session/nested"], main)
+        return main, inner
+
+    @pytest.fixture
+    def nested_ctx(self, nested):
+        main, inner = nested
+        from invariant.core.manifest import Manifest
+
+        def build(payload=None, cwd=None):
+            return RuleContext(
+                manifest=Manifest.load(main),
+                cwd=Path(cwd or main),
+                session=None,
+                pipeline=None,
+                payload=payload or {},
+                extra={},
+            )
+
+        build.main = main
+        build.inner = inner
+        return build
+
+    def test_a_source_file_in_the_nested_worktree_is_not_exempt(self, nested_ctx):
+        """The regression this guards: skipped here means unenforced."""
+        ctx = nested_ctx(payload=edit_payload(nested_ctx.inner / "src" / "app.py"))
+        verdict = only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict
+        assert not verdict.skipped, "the worktree's own location exempted its sources"
+        assert verdict.ok, "an edit inside a linked worktree is what the rule allows"
+
+    def test_the_main_checkouts_own_config_is_still_exempt(self, nested_ctx):
+        ctx = nested_ctx(payload=edit_payload(nested_ctx.main / ".claude" / "settings.json"))
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_config_inside_the_nested_worktree_is_exempt_on_its_own_merit(self, nested_ctx):
+        """Judged by its path WITHIN the worktree, not by where the worktree is.
+
+        Distinct from the source-file case: this one is exempt for the reason
+        the exemption exists, and would stay exempt at any worktree location.
+        """
+        target = nested_ctx.inner / ".claude" / "memory" / "a.md"
+        ctx = nested_ctx(payload=edit_payload(target))
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_the_main_checkout_is_still_refused_from_inside_the_nested_worktree(
+        self, nested_ctx
+    ):
+        """Nesting must not make the main checkout look like part of a worktree."""
+        ctx = nested_ctx(
+            cwd=nested_ctx.inner,
+            payload=edit_payload(nested_ctx.main / "src" / "app.py"),
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+
 class TestPrivacyScopeAcrossWorktrees:
     """Scope must not depend on which worktree the caller is standing in."""
 

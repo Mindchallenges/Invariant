@@ -126,6 +126,62 @@ class TestSessionDomain:
         assert Path(plan["worktree"]).is_dir()
         assert domain.get(session.id).state == "isolated"
 
+    def test_worktree_dir_places_the_worktree_inside_the_repository(self, tmp_path):
+        """Some hosts trust exactly one location and confirm every other.
+
+        The default deliberately sits beside the repository; a project that
+        needs the worktree somewhere specific must be able to say so without
+        the location being smuggled into the name via worktree_prefix.
+        """
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "session": {"worktree_dir": ".claude/worktrees"},
+            },
+        )
+        domain = SessionDomain(m)
+        plan = domain.isolation_plan(domain.start("x", session_id="deadbeef"))
+        assert Path(plan["worktree"]) == m.root / ".claude" / "worktrees" / "proj-wt-deadbeef"
+
+    def test_an_absolute_worktree_dir_is_used_as_given(self, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "session": {"worktree_dir": str(elsewhere)},
+            },
+        )
+        domain = SessionDomain(m)
+        plan = domain.isolation_plan(domain.start("x", session_id="deadbeef"))
+        assert Path(plan["worktree"]).parent == elsewhere
+
+    def test_isolate_creates_a_configured_directory_that_does_not_exist_yet(self, tmp_path):
+        """The first session of a fresh checkout must not fail on a missing dir.
+
+        No code here creates it: `git worktree add` makes the leading
+        directories itself. Asserted rather than assumed, because the opposite
+        would break every project that configures a directory, and only on the
+        very first session — the least convenient moment to discover it.
+        """
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "session": {"worktree_dir": ".claude/worktrees"},
+            },
+        )
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        assert not (m.root / ".claude" / "worktrees").exists()
+        plan = domain.isolate(session.id, execute=True)
+        assert Path(plan["worktree"]).is_dir()
+        assert domain.get(session.id).state == "isolated"
+
     def test_illegal_transition_is_refused(self, m):
         domain = SessionDomain(m)
         session = domain.start("x")
