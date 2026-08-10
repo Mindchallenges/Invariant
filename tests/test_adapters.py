@@ -539,10 +539,35 @@ class TestAdapterSelfCheck:
         """An adapter with no tooling has no reachability to assert."""
         assert get_adapter("generic").self_check() == []
 
-    def test_swift_reports_both_tools(self):
+    def test_swift_reports_every_tool_the_commands_invoke(self):
         labels = [row[0] for row in get_adapter("swift").self_check()]
         assert any("xcodebuild" in label for label in labels)
         assert any("xcresulttool" in label for label in labels)
+        assert any("xccov" in label for label in labels)
+
+    def test_the_tools_checked_are_the_tools_the_commands_run(self):
+        """The check must not stop at the FIRST leg of a chained command.
+
+        The coverage template is two commands joined by `;`, and a project
+        repairs the toolchain by prefixing `DEVELOPER_DIR=` — a PER-COMMAND
+        assignment, so it reaches xcodebuild and not the xccov leg behind the
+        semicolon. That leg resolves through xcode-select instead; where that
+        answers CommandLineTools there is no xccov and xcrun exits 72, which
+        reads exactly like "the bundle produced no per-file measurements".
+
+        Checking only the first leg's tools reported a healthy toolchain while
+        the binary the coverage gate needs was missing. Deriving the expected
+        set from the command templates is what keeps the two from drifting
+        apart again.
+        """
+        adapter = get_adapter("swift")
+        commands = " ".join(adapter.manifest_defaults["commands"].values())
+        # Labels read "xcode: <tool> reachable".
+        checked = {label.split()[-2] for label, _, _ in adapter.self_check()}
+
+        for tool in ("xcodebuild", "xccov"):
+            assert tool in commands, f"{tool} is no longer invoked; update this test"
+            assert tool in checked, f"{tool} is run but never checked for reachability"
 
     def test_a_fallback_resolution_is_reported_as_such(self, monkeypatch):
         """Working via fallback is not the same as working, and says so.

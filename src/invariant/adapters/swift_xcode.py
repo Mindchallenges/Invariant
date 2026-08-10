@@ -232,7 +232,18 @@ class SwiftXcodeAdapter(Adapter):
         results: list[tuple[str, bool, str]] = []
         fallback = _newest_developer_dir()
 
-        for tool in ("xcodebuild", "xcresulttool"):
+        # ``xccov`` belongs here as much as the other two, and leaving it out
+        # let a real outage go unreported. The coverage template is two
+        # commands joined by ``;``, and a project repairs the toolchain by
+        # prefixing ``DEVELOPER_DIR=`` — a PER-COMMAND assignment, so it
+        # reaches xcodebuild and NOT the xccov leg behind the semicolon. That
+        # leg resolves through xcode-select instead, and where that answers
+        # CommandLineTools there is no xccov: xcrun exits 72, which reads
+        # exactly like "the bundle produced no per-file measurements".
+        #
+        # Probing only the tools on the FIRST leg reported a healthy toolchain
+        # while the binary the coverage gate actually needs was missing.
+        for tool in ("xcodebuild", "xcresulttool", "xccov"):
             direct = _tool_is_reachable(tool, None)
             if direct:
                 results.append((f"xcode: {tool} reachable", True, "via xcrun"))
