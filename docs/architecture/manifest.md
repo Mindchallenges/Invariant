@@ -26,7 +26,10 @@ commands:                      # adapters supply defaults; these override
   test: null
   test_one: null               # {selector} is substituted
   lint: null
-  coverage: null
+  coverage: null                 # runs the suite; {result_bundle} substituted
+  coverage_report: null          # optional: reads the measurement, separately
+                                 # — a shell reports only the LAST command's
+                                 # status, so the two must not be one command
 
 docs:
   format: markdown             # markdown | sphinx

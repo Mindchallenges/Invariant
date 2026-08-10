@@ -286,13 +286,15 @@ class TestSwiftCoverageCommand:
         assert self.ADAPTER.default_commands().get("coverage")
 
     def test_it_produces_a_result_bundle_before_reading_one(self):
-        command = self.ADAPTER.default_commands()["coverage"]
-        assert "-enableCodeCoverage YES" in command
-        assert command.index("-resultBundlePath") < command.index("xccov")
+        commands = self.ADAPTER.default_commands()
+        assert "-enableCodeCoverage YES" in commands["coverage"]
+        assert "xccov" in commands["coverage_report"]
 
     def test_the_bundle_path_is_a_placeholder_not_a_fixed_path(self):
         """A fixed path would be shared state between concurrent sessions."""
-        assert "{result_bundle}" in self.ADAPTER.default_commands()["coverage"]
+        commands = self.ADAPTER.default_commands()
+        assert "{result_bundle}" in commands["coverage"]
+        assert "{result_bundle}" in commands["coverage_report"]
 
     def test_its_output_is_what_parse_coverage_already_reads(self):
         raw = (
@@ -317,18 +319,24 @@ class TestCoverageDoesNotRequireAGreenSuite:
     is precisely the one that downgraded it. The result was that such a project
     could never obtain coverage at all, through a door nobody had opened on
     purpose.
+
+    `;` cured that and introduced its own lie, because the shell then reports
+    the READER's status as the run's. Neither operator can express two
+    independent results, so the two legs are two commands.
     """
 
     ADAPTER = get_adapter("swift")
 
-    def test_the_report_step_is_not_chained_on_success(self):
+    def test_the_report_step_is_not_chained_at_all(self):
         command = self.ADAPTER.default_commands()["coverage"]
-        assert "&& xcrun xccov" not in command
-        assert "; xcrun xccov" in command
+        assert "&&" not in command
+        assert ";" not in command
+        assert "xccov" not in command
 
-    def test_the_report_still_runs_after_the_test_step(self):
-        command = self.ADAPTER.default_commands()["coverage"]
-        assert command.index("-resultBundlePath") < command.index("xccov")
+    def test_the_report_is_its_own_command(self):
+        commands = self.ADAPTER.default_commands()
+        assert commands.get("coverage_report")
+        assert "xccov" in commands["coverage_report"]
 
 
 
@@ -546,19 +554,18 @@ class TestAdapterSelfCheck:
         assert any("xccov" in label for label in labels)
 
     def test_the_tools_checked_are_the_tools_the_commands_run(self):
-        """The check must not stop at the FIRST leg of a chained command.
+        """Every tool in every command slot, not the ones on the obvious slot.
 
-        The coverage template is two commands joined by `;`, and a project
-        repairs the toolchain by prefixing `DEVELOPER_DIR=` — a PER-COMMAND
-        assignment, so it reaches xcodebuild and not the xccov leg behind the
-        semicolon. That leg resolves through xcode-select instead; where that
-        answers CommandLineTools there is no xccov and xcrun exits 72, which
-        reads exactly like "the bundle produced no per-file measurements".
+        xccov is invoked by `coverage_report` and by nothing else, and it was
+        unchecked while `doctor` reported a healthy toolchain — so the coverage
+        gate's binary could be missing with no instrument saying so. Where
+        xcode-select answers CommandLineTools there is no xccov and xcrun exits
+        72, which reads exactly like "the bundle produced no per-file
+        measurements", and it was misdiagnosed twice.
 
-        Checking only the first leg's tools reported a healthy toolchain while
-        the binary the coverage gate needs was missing. Deriving the expected
-        set from the command templates is what keeps the two from drifting
-        apart again.
+        Deriving the expected set from the command templates is what keeps the
+        checked tools and the run tools from drifting apart again — including
+        when a command is split into a new slot, as this one was.
         """
         adapter = get_adapter("swift")
         commands = " ".join(adapter.manifest_defaults["commands"].values())

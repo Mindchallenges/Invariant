@@ -71,6 +71,15 @@ invariant pipeline coverage
     Run commands.coverage, parse it with the adapter, and record per-file
     numbers as pipeline evidence. This is what coverage.meets_floor reads.
 
+    Where an ecosystem measures and reports with separate programs, set
+    commands.coverage_report too: the suite's exit status is then read from
+    the first command and the numbers from the second, and neither can be
+    mistaken for the other. Joining them into one command is REFUSED — a
+    shell reports only the LAST command's status, so a red suite followed by
+    a clean read exits 0 and a green suite followed by a failed read exits
+    non-zero. Whatever the first leg needs in its environment the second
+    needs too: a `VAR=value cmd` prefix applies to that one command alone.
+
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
     reports as skipped, carrying that reason, for the rest of the pipeline.

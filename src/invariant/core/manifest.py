@@ -82,6 +82,12 @@ DEFAULTS: dict[str, Any] = {
         "test_one": None,
         "lint": None,
         "coverage": None,
+        # Optional second leg, for ecosystems where measuring coverage and
+        # READING the measurement are separate programs. Where it is unset the
+        # coverage command speaks for itself and nothing changes; where it is
+        # set, the suite's exit status comes from the first command and the
+        # numbers from the second, so neither can be mistaken for the other.
+        "coverage_report": None,
     },
     # Static substitutions for command templates.
     "vars": {},

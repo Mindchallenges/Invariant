@@ -63,26 +63,39 @@ class SwiftXcodeAdapter(Adapter):
                 "-destination 'platform=iOS Simulator,id={destination_id}' "
                 "-resultBundlePath {result_bundle}"
             ),
-            # Two commands, which is presumably why this slot stayed empty
-            # while the single-command ecosystems got one. xccov reads a result
+            # TWO SLOTS, not one command with a `;` in it. xccov reads a result
             # bundle, so the run has to produce one first; {result_bundle} is
             # supplied by the caller, never written into a manifest, because it
             # is a per-run path rather than configuration.
             #
-            # Separated by `;` and NOT `&&`. Chaining on success makes the
-            # report conditional on a full-suite pass, which silently reimposes
+            # These were one chained command until it was shown to lie in both
+            # directions, because a shell reports the LAST command's status:
+            #
+            #   - a red suite followed by a clean read exits 0, and the run was
+            #     recorded as a passing suite with a measurement beside it;
+            #   - a green suite followed by a failed read exits non-zero, and a
+            #     perfectly good suite was recorded as failed. That one is not
+            #     hypothetical: `xcrun` answers 72 for "utility not found", and
+            #     because `DEVELOPER_DIR=x cmd` is a PER-COMMAND assignment it
+            #     never reached the leg behind the semicolon, so every project
+            #     repairing its toolchain that way repaired only the first half.
+            #
+            # Chaining with `&&` would have fixed neither: it makes the report
+            # conditional on a full-suite pass, silently reimposing
             # test.all_pass as a block on any project that deliberately
             # downgraded it — and a project whose main branch is not green is
-            # precisely the one that downgraded it. "The suite failed" and "the
-            # measurement is untrustworthy" are different claims. Whether the
-            # measurement can be trusted is decided in run_coverage, from
-            # whether the suite RAN, not from whether it passed.
+            # precisely the one that downgraded it.
+            #
+            # Split, each leg's status means one thing. "The suite failed" and
+            # "the measurement could not be read" stay different claims, and
+            # whether the measurement can be trusted is still decided in
+            # run_coverage from whether the suite RAN, not whether it passed.
             "coverage": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}' "
-                "-enableCodeCoverage YES -resultBundlePath {result_bundle} "
-                "; xcrun xccov view --report {result_bundle}"
+                "-enableCodeCoverage YES -resultBundlePath {result_bundle}"
             ),
+            "coverage_report": "xcrun xccov view --report {result_bundle}",
             "test_one": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}' "
@@ -233,16 +246,15 @@ class SwiftXcodeAdapter(Adapter):
         fallback = _newest_developer_dir()
 
         # ``xccov`` belongs here as much as the other two, and leaving it out
-        # let a real outage go unreported. The coverage template is two
-        # commands joined by ``;``, and a project repairs the toolchain by
-        # prefixing ``DEVELOPER_DIR=`` — a PER-COMMAND assignment, so it
-        # reaches xcodebuild and NOT the xccov leg behind the semicolon. That
-        # leg resolves through xcode-select instead, and where that answers
-        # CommandLineTools there is no xccov: xcrun exits 72, which reads
-        # exactly like "the bundle produced no per-file measurements".
+        # let a real outage go unreported. It is invoked by ``coverage_report``
+        # and by nothing else, so a probe that looked only at the commands
+        # everyone thinks about missed it entirely: where xcode-select answers
+        # CommandLineTools there is no xccov, xcrun exits 72, and that reads
+        # exactly like "the bundle produced no per-file measurements" — which
+        # is how it was misdiagnosed twice.
         #
-        # Probing only the tools on the FIRST leg reported a healthy toolchain
-        # while the binary the coverage gate actually needs was missing.
+        # Probing only the obvious tools reported a healthy toolchain while
+        # the binary the coverage gate actually needs was missing.
         for tool in ("xcodebuild", "xcresulttool", "xccov"):
             direct = _tool_is_reachable(tool, None)
             if direct:

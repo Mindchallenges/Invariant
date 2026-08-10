@@ -1063,24 +1063,32 @@ class TestAcknowledgingAnAdvisoryGate:
 
 
 
-class TestCoverageFromARedSuite:
-    """Whether a measurement can be trusted depends on whether the suite RAN.
+class CoverageFixture:
+    """Shared setup only — a mixin, so its cases are not inherited and re-run."""
 
-    Not on whether it passed. Those are different claims, and in a repository
-    whose main branch is not green the first is the steady state.
-    """
+    def pipeline_with(self, m, script, report=None):
+        """A project whose coverage command(s) are scripts we control.
 
-    def pipeline_with(self, m, script):
-        """A project whose 'coverage' command is a script we control."""
+        `report=None` is the single-command ecosystem: one program both runs
+        the suite and prints the numbers, so `commands.coverage_report` is
+        explicitly null and the command speaks for itself. The adapter default
+        would otherwise supply one, since this fixture claims an ecosystem.
+        """
         path = m.root / "fake-coverage.sh"
         path.write_text(script, encoding="utf-8")
         path.chmod(0o755)
+        commands = {"coverage": f"sh {path}", "coverage_report": None}
+        if report is not None:
+            report_path = m.root / "fake-report.sh"
+            report_path.write_text(report, encoding="utf-8")
+            report_path.chmod(0o755)
+            commands["coverage_report"] = f"sh {report_path}"
         (m.root / MANIFEST_RELPATH).write_text(
             yaml.safe_dump(
                 {
                     "version": 1,
                     "project": {"name": "demo", "ecosystems": ["swift"]},
-                    "commands": {"coverage": f"sh {path}"},
+                    "commands": commands,
                 }
             ),
             encoding="utf-8",
@@ -1091,6 +1099,14 @@ class TestCoverageFromARedSuite:
         pipelines = PipelineDomain(fresh)
         pipelines.start(session.id, task="t")
         return pipelines, session
+
+
+class TestCoverageFromARedSuite(CoverageFixture):
+    """Whether a measurement can be trusted depends on whether the suite RAN.
+
+    Not on whether it passed. Those are different claims, and in a repository
+    whose main branch is not green the first is the steady state.
+    """
 
     RED_RUN_WITH_REPORT = """
 echo "Test Suite 'All tests' failed at 2026-08-09."
@@ -1175,6 +1191,103 @@ exit 0
 
         pipelines.run_coverage(session.id, cwd=m.root)
         assert not (bundle / "marker").exists()
+
+
+class TestTheSuiteStatusAndTheReadStatusAreNotTheSameNumber(CoverageFixture):
+    """A shell reports the LAST command's status, so a chain cannot say both.
+
+    These two legs were one command joined by `;` and the conflation lied in
+    both directions: a red suite followed by a clean read exited 0, and a green
+    suite followed by a failed read exited non-zero. The second one is what
+    actually happened — `xcrun` answers 72 for "utility not found", the
+    `DEVELOPER_DIR=` prefix repairing the toolchain applied to the first
+    command alone and never crossed the semicolon, and the resulting empty
+    measurement was twice attributed to the suite and once to an imagined race
+    before anyone looked at the reporting tool.
+    """
+
+    RED_RUN = """
+echo "Test Suite 'All tests' failed at 2026-08-09."
+echo "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds"
+exit 65
+"""
+    GREEN_RUN = """
+echo "Test Suite 'All tests' passed at 2026-08-09."
+echo "\t Executed 6 tests, with 0 failures (0 unexpected) in 6.5 (6.5) seconds"
+exit 0
+"""
+    CLEAN_REPORT = """
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 0
+"""
+    UNREACHABLE_REPORT = """
+echo "xcrun: error: unable to find utility \\"xccov\\"" >&2
+exit 72
+"""
+
+    def test_a_red_suite_is_not_laundered_by_a_clean_read(self, m):
+        """Chained, this exited 0 and the suite was recorded as passing."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN, self.CLEAN_REPORT)
+        result = pipelines.run_coverage(session.id, cwd=m.root)
+        assert result["files"] == 1
+        assert result["suite_passed"] is False
+        assert result["failed"] == 4
+
+    def test_the_two_statuses_are_recorded_apart(self, m):
+        pipelines, session = self.pipeline_with(m, self.RED_RUN, self.CLEAN_REPORT)
+        pipelines.run_coverage(session.id, cwd=m.root)
+        run = pipelines.current(session.id).evidence["coverage_run"]
+        assert run["exit_code"] == 65
+        assert run["report_exit_code"] == 0
+
+    def test_an_unreadable_report_does_not_accuse_the_suite(self, m):
+        """The real incident. The suite was green; only the reader was missing."""
+        pipelines, session = self.pipeline_with(
+            m, self.GREEN_RUN, self.UNREACHABLE_REPORT
+        )
+        with pytest.raises(UsageError) as raised:
+            pipelines.run_coverage(session.id, cwd=m.root)
+        message = str(raised.value)
+        assert "Only the reporting leg came back empty" in message
+        assert "executed=6 failed=0" in message
+        assert "fake-report.sh" in message
+
+    def test_a_manifest_that_still_chains_the_legs_is_refused(self, m):
+        """Adopting the split without splitting must not look like adopting it.
+
+        Left alone, such a manifest runs the reporter twice AND keeps the
+        first command's status meaning the reporter's — the defect intact
+        behind a configuration that appears migrated.
+        """
+        pipelines, session = self.pipeline_with(m, self.GREEN_RUN, self.CLEAN_REPORT)
+        chained = yaml.safe_load(
+            (m.root / MANIFEST_RELPATH).read_text(encoding="utf-8")
+        )
+        commands = chained["commands"]
+        commands["coverage"] = f"{commands['coverage']} ; {commands['coverage_report']}"
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(chained), encoding="utf-8"
+        )
+        fresh = Manifest.load(m.root)
+        with pytest.raises(UsageError, match="still runs the reporting tool"):
+            PipelineDomain(fresh).run_coverage(session.id, cwd=m.root)
+
+    def test_a_command_that_merely_chains_something_else_is_allowed(self, m):
+        """Detection is by containment, not by the presence of a `;`."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN, self.CLEAN_REPORT)
+        chained = yaml.safe_load(
+            (m.root / MANIFEST_RELPATH).read_text(encoding="utf-8")
+        )
+        chained["commands"]["coverage"] = (
+            f"echo preparing ; {chained['commands']['coverage']}"
+        )
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(chained), encoding="utf-8"
+        )
+        fresh = Manifest.load(m.root)
+        result = PipelineDomain(fresh).run_coverage(session.id, cwd=m.root)
+        assert result["suite_passed"] is False
+        assert result["files"] == 1
 
 
 class TestDescribeRun:

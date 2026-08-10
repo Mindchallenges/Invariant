@@ -22,6 +22,41 @@ from ..core.rules import Evaluated, RuleContext, Verdict, evaluate, get_rule
 from ..core.store import JsonStore
 
 
+def _refuse_chained_coverage(coverage: str, report: str, bundle: str) -> None:
+    """Stop a manifest that still runs both legs as one command.
+
+    Projects wrote ``xcodebuild ... ; xcrun xccov ...`` into ``commands.coverage``
+    because that is what this engine used to ship. Such a manifest cannot simply
+    be tolerated once the report leg exists on its own: the report would run
+    twice, and — the part that matters — the first command's exit status would
+    STILL be the reporter's, so the split would appear to be adopted while the
+    defect it exists to remove carried on unchanged. A migration that silently
+    does nothing is worse than one that asks.
+
+    Detection is by containment rather than by looking for a ``;``, so a project
+    that legitimately chains setup into its coverage command is not caught: the
+    resolved report command, minus the per-run bundle path, must literally
+    appear inside the coverage command.
+    """
+    probe = " ".join(report.replace(bundle, " ").split())
+    if not probe or probe not in " ".join(coverage.split()):
+        return
+    raise UsageError(
+        "commands.coverage still runs the reporting tool itself.\n"
+        f"  coverage:        {coverage}\n"
+        f"  coverage_report: {report}\n"
+        "  A shell reports the LAST command's status, so chained this way a "
+        "red suite followed by a clean read exits 0 and a green suite "
+        "followed by a failed read exits non-zero — the suite's own result "
+        "is unreadable in both directions.\n"
+        "  Split them: leave ONLY the command that runs the suite in "
+        "commands.coverage, and put the reporting command in "
+        "commands.coverage_report. Anything the first leg needs in its "
+        "environment the second leg needs too — a `VAR=value cmd` prefix "
+        "applies to that one command alone and never crossed the `;`."
+    )
+
+
 @dataclass
 class Pipeline:
     session_id: str
@@ -316,14 +351,41 @@ class PipelineDomain:
         command = self.manifest.command_for("coverage", result_bundle=str(bundle))
         adapter = get_adapter(self.manifest.ecosystems[0])
 
+        # The measurement and the reading of it are separate programs in some
+        # ecosystems and one program in others. Where they are separate, they
+        # are run separately — see _refuse_chained_coverage for what joining
+        # them with a `;` cost, and why it cannot simply be tolerated.
+        report_command: str | None = None
+        if self.manifest.get("commands.coverage_report"):
+            report_command = self.manifest.command_for(
+                "coverage_report", result_bundle=str(bundle)
+            )
+            _refuse_chained_coverage(command, report_command, str(bundle))
+
         proc = subprocess.run(
             command, shell=True, cwd=str(root), capture_output=True, text=True
         )
-        combined = f"{proc.stdout}\n{proc.stderr}"
+        # The suite's own status, read from the command that RAN the suite.
+        # When a report leg follows, this is the whole point of the split: the
+        # exit code here is the compiler's and the test runner's, and nothing
+        # a reporting tool does afterwards can overwrite it.
         outcome = adapter.read_run(
             proc.stdout, proc.stderr, proc.returncode, bundle=bundle
         )
-        measured = adapter.parse_coverage(combined)
+
+        if report_command is None:
+            measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
+            report_exit = proc.returncode
+        else:
+            report = subprocess.run(
+                report_command,
+                shell=True,
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+            )
+            measured = adapter.parse_coverage(f"{report.stdout}\n{report.stderr}")
+            report_exit = report.returncode
 
         # A suite that never ran cannot have measured anything, and a report
         # produced from a build that fell over describes the previous state of
@@ -340,11 +402,24 @@ class PipelineDomain:
             )
 
         if not measured:
+            # Naming the leg matters. While the two were chained, this message
+            # printed the whole chain and its LAST exit status, so a reader
+            # diagnosing "no measurements" was shown a command whose test half
+            # had in fact succeeded — and the failure was twice attributed to
+            # the suite, and once to an imagined race, before anyone looked at
+            # the reporting tool.
             raise UsageError(
-                "the coverage command produced no per-file measurements.\n"
-                f"  command: {command}\n"
-                f"  exit: {proc.returncode}\n"
-                "  Recording an empty result would make the gate pass on a "
+                "the coverage run produced no per-file measurements.\n"
+                f"  command: {report_command or command}\n"
+                f"  exit: {report_exit}\n"
+                + (
+                    f"  The suite itself ran: executed={outcome.total} "
+                    f"failed={outcome.failed}, exit {proc.returncode}. Only "
+                    "the reporting leg came back empty.\n"
+                    if report_command
+                    else ""
+                )
+                + "  Recording an empty result would make the gate pass on a "
                 "measurement that never happened, so nothing was recorded."
             )
 
@@ -374,6 +449,12 @@ class PipelineDomain:
             "executed": outcome.total,
             "failed": outcome.failed,
             "exit_code": proc.returncode,
+            # Kept apart on purpose. One number used to stand for both, and
+            # which one it stood for depended on which command the shell
+            # happened to finish with — so the evidence could not answer "did
+            # the suite fail, or did the reader fail?" at all.
+            "report_command": report_command,
+            "report_exit_code": report_exit,
             "suite_passed": outcome.passed,
             # A hazard on the measuring run travels with the measurement. Exit
             # 65 can mean whole suites never ran, which makes coverage
@@ -393,6 +474,8 @@ class PipelineDomain:
         return {
             "command": command,
             "exit_code": proc.returncode,
+            "report_command": report_command,
+            "report_exit_code": report_exit,
             "files": len(measured),
             "coverage": measured,
             "executed": outcome.total,
