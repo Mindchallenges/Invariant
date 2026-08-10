@@ -11,3 +11,9 @@ htmlcov/
 
 # Runtime state is machine-local and session-scoped; it is never committed.
 .claude/invariant/state/
+
+# Session worktrees live here (session.worktree_dir). A worktree is a second
+# checkout of the whole repository: left untracked it appears as one enormous
+# unstaged directory, and any peer running `git add -A` in this checkout
+# commits it wholesale.
+.claude/worktrees/

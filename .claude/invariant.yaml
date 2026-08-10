@@ -41,11 +41,30 @@ enforcement:
     # rather than a fact on every file. Advisory until it is.
     coverage.meets_floor: warn
 
+    # The exception to "deliberately not strict" above. Coding is done through
+    # the agents and the pipeline is always followed — that rule holds here
+    # too, and a library that will not run its own control has no business
+    # shipping it (ADR-001's closing note, applied to itself).
+    #
+    # The wedge hazard this block warns about is real here in a specific way:
+    # a pipeline in this repository is driven from a host session whose project
+    # root is a different repository, so an agent dispatched for this work may
+    # not be recorded against this pipeline at all. If that wedges, the defect
+    # is in the recording and gets fixed there. It is not a reason to lower the
+    # gate — a gate lowered the first time it is inconvenient was never a gate.
+    agents.design_agent_ran: block
+    agents.review_agent_ran: block
+
 session:
   exempt_paths:
     - ".claude/*"
     - ".claude/**"
     - "MEMORY.md"
+  # Worktrees live inside the repository so the host trusts the directory it
+  # already manages and stops confirming every entry. Safe here for the reason
+  # d160d40 records: a path inside a linked worktree resolves against that
+  # worktree, so the `.claude/*` exemptions above cannot swallow its sources.
+  worktree_dir: ".claude/worktrees"
   # A session here does not publish; see ADR-001 D18.
   push: false
 
