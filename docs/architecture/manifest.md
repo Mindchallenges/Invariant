@@ -20,6 +20,7 @@ paths:
   docs: docs/architecture      # the docs-first gate reads these
   memory: .claude/memory
   memory_index: MEMORY.md
+  reports: docs/reports        # where `stats report --write` puts its artifact
 
 commands:                      # adapters supply defaults; these override
   build: null
@@ -86,6 +87,20 @@ agents:
 host:
   kind: claude_code
 ```
+
+### Declared stores are writable stores
+
+`items.path`, `paths.memory` and `paths.reports` are not merely locations —
+declaring one is what makes the CLI's write-scope invariant cover it, and what
+exempts it from session isolation. `cli.md` states the invariant as "the state
+root and the stores the manifest declares" (ADR-002 D4) rather than as a list,
+so a feature that needs somewhere to write adds a key here instead of adding
+an exception there.
+
+The consequence to be aware of: `paths.reports` defaults to `docs/reports`, so
+a project that already keeps hand-written prose at that path would find it
+exempt from isolation. Point the key somewhere else if so — the exemption
+follows the declaration, which is the whole point.
 
 ### Where worktrees live
 

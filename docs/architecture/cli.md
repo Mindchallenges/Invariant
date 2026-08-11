@@ -12,8 +12,17 @@ Nothing reaches the engine another way.
   the same code, because a shim must be able to tell them apart.
 - Every command that mutates state is idempotent where that is meaningful, and
   says so in `--help` where it is not.
-- No command ever writes to the repository outside the state root, the item
-  store, and the memory store.
+- No command ever writes to the repository outside the state root and **the
+  stores the manifest declares** (`items.path`, `paths.memory`,
+  `paths.reports`).
+
+  This was once a flat list of three exceptions. ADR-002 D4 generalised it
+  rather than adding a fourth, and the reason is worth stating: an enumeration
+  grows on every feature, and the second exception is always easier to justify
+  than the first. Expressed this way, a feature that needs a writable location
+  adds a manifest key — which is visible in `config show`, reviewable in the
+  manifest diff, and exempt from session isolation by the same mechanism that
+  already exempts the backlog — instead of quietly widening a guarantee.
 
 ## Setup
 
@@ -135,6 +144,59 @@ invariant memory index           Regenerate the index from the directory.
 invariant memory dedup           Report candidate duplicate pairs.
 invariant memory link-check      Report dead [[links]].
 ```
+
+## Stats
+
+What a session took and what it cost. Measurement is **scripted** — parsing
+and arithmetic, no model in the loop — because a measurement that varies
+between runs is not a measurement. See ADR-002.
+
+```
+invariant stats refresh [--force]
+    Rebuild the raw store from the host's own transcripts. A record whose
+    source watermark has not moved is left alone; --force re-parses anyway.
+    The JOIN to an invariant session is re-run either way, because a session
+    can be named, bound or advanced without its transcript changing.
+
+invariant stats report [--write]
+    Render the report. Without --write it goes to stdout and nothing is
+    written. With it, the artifact lands in paths.reports, carrying a
+    fingerprint of the store it was rendered from — which is what `stats
+    check` compares against, and why stdout-only was rejected: the staleness
+    contract needs an anchor.
+
+invariant stats show <session>
+    One session in full, including its per-state breakdown. A session recorded
+    before per-state attribution existed says "no breakdown available"
+    explicitly. Never a zero and never a blank: a blank invites the reader to
+    conclude the work was free.
+
+invariant stats archive <session>
+    Promote a record to permanent. The raw store is a cache only while the
+    host's transcripts survive; once they are pruned it is the only copy, and
+    this is where the user decides what outlives the host's retention.
+
+invariant stats check
+    Staleness against the source, host sessions not yet ingested, records that
+    are now the only copy and are not archived, models missing from the price
+    table, and whether the rendered report matches the store. Exit 1 on any.
+```
+
+Two properties of the output are not stylistic:
+
+- **Every currency figure is a floor**, labelled "excludes subagent spend". A
+  subagent's own loop is billed and never written down, so the honest answer
+  is "at least this much". The agents view reports launches, declared model
+  and frequency, and no cost at all — estimating the missing share would be
+  modelling stacked on modelling, producing an invented number in the same
+  units as a measured one.
+- **Tokens are measured, cost is modelled.** A model missing from the price
+  table prices `None`, never zero, and a session containing one reports no
+  total rather than a partial one. A total that silently omits a model's spend
+  is worse than no total, because it looks like a total.
+
+Deliberately absent: any gate that regenerates the report at teardown.
+Teardown is the step that must never acquire new ways to refuse.
 
 ## Rules and gates
 

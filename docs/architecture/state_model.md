@@ -1,7 +1,12 @@
 # State model
 
-The four domains, their state machines, and the storage layout. This is the
+The five domains, their state machines, and the storage layout. This is the
 specification the engine is implemented against.
+
+Three of the five are genuine finite state machines. `memory` and `stats` are
+not — each is a store with invariants over it and operations that repair them
+— and they belong here for the same reason the machines do: what they hold
+drifts silently, and drift is undetectable without a script that checks it.
 
 ## Declarative FSM format
 
@@ -299,6 +304,60 @@ The index is a **generated artifact** (D-memory, per interview): regenerating
 it is a command, not an editing task. A hand-maintained index over hundreds of
 files drifts, and the drift is silent.
 
+## Domain: stats
+
+Not an FSM either. A store with invariants and repair operations, added by
+ADR-002.
+
+| Invariant | Check | Repair |
+|---|---|---|
+| Every record parses | Readable JSON with a known shape | report only |
+| Records match their source | Stored watermark equals the source's | `stats refresh` |
+| Nothing is silently lost | A record whose transcript is gone is archived | `stats archive` |
+| Every model is priced | No model outside the price table | report only |
+| The report matches the store | Fingerprint in the artifact equals the store's | `stats report --write` |
+
+### What a transition records
+
+Each recorded pipeline and session transition carries two fields beyond
+`{from, to, reason}`:
+
+- **`elapsed`** — seconds spent in the state just left.
+- **`usage`** — the cumulative token counts observed for that host session at
+  that moment: a **watermark**.
+
+Per-state duration is `elapsed` directly. Per-state spend is the difference
+between consecutive watermarks, with the machine's own starting watermark
+(`usage_at_start`) as the earlier reading for the first state.
+
+Neither is a clock time, so the privacy rule is satisfied by construction
+rather than by scrubbing. The anchor `elapsed` is measured against is
+*derived*, not stored — a pipeline's is `started` plus every `elapsed` since,
+and a session's is the heartbeat it already stamped — so no second timestamp
+was added to make this work.
+
+This is a better design than the timestamp it replaces and not only a
+compliant one. Attributing spend by comparing a response's timestamp against a
+transition's has a boundary problem: a response spanning a transition must be
+assigned to one side arbitrarily, and the arbitrariness is invisible in the
+output. A watermark has no boundary; a subtraction of two counts is exact.
+
+The cost is a **permanent asymmetry**. Every transition recorded before this
+existed has neither field and can never acquire one, because the information
+was not merely unstored — it was never observed. One entry missing `elapsed`
+makes the whole machine's breakdown unavailable rather than partial, and the
+report says "no breakdown available" explicitly. Never a zero, and never a
+blank: a blank invites the reader to conclude the work was free.
+
+### Storing what was measured, not when
+
+A stats record holds durations and a bare date and no timestamp of any kind.
+The host's transcript timestamps are read at the boundary, turned into a wall
+duration, an active duration and a date, and discarded. The cache key is a
+content fingerprint rather than a modification time, for the same reason: an
+mtime is a stored clock time, and it answers the wrong question anyway — the
+cache asks whether the source changed, not when.
+
 ## Storage layout
 
 ```
@@ -306,6 +365,9 @@ files drifts, and the drift is silent.
   registry.json           cross-session index; the only locked file
   sessions/<sid>.json     one file per session
   pipelines/<sid>.json    current + historical pipelines for a session
+  stats/<host-id>.json    one telemetry record per host session; derived and
+                          rebuildable, except where `stats archive` has
+                          promoted it to permanent
   locks/registry.lock     advisory lock file
 ```
 

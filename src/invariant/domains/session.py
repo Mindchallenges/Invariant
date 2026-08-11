@@ -22,6 +22,7 @@ from ..core import git
 from ..core.errors import StateError, TransitionError, UsageError
 from ..core.fsm import Machine
 from ..core.machines import load_session_machine
+from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore
 
 REGISTRY = "registry.json"
@@ -66,6 +67,10 @@ class Session:
     history: list[dict] = field(default_factory=list)
     overrides: list[dict] = field(default_factory=list)
     heartbeat: float = 0.0
+    #: The usage watermark at registration (ADR-002 D3). The earlier reading
+    #: the first state's spend is subtracted from; ``None`` where it could not
+    #: be observed, which the report renders as such rather than as zero.
+    usage_at_start: dict | None = None
 
     @property
     def is_stranded(self) -> bool:
@@ -94,10 +99,36 @@ class Session:
 
 
 class SessionDomain:
-    def __init__(self, manifest, store: JsonStore | None = None) -> None:
+    def __init__(
+        self,
+        manifest,
+        store: JsonStore | None = None,
+        watermarks: WatermarkSource | None = None,
+        clock=time.time,
+    ) -> None:
         self.manifest = manifest
         self.store = store or JsonStore(manifest.state_root)
         self.machine: Machine = load_session_machine(manifest)
+        #: Injected by the CLI (ADR-002 D2). ``None`` is normal: transitions
+        #: then record ``usage: None``, which the report reads as "not
+        #: observed" and never as "cost nothing".
+        self.watermarks = watermarks
+        self.clock = clock
+
+    def _watermark(self, host_session_id: str | None) -> dict | None:
+        """Read the watermark, or give up quietly.
+
+        A transition is the record that something happened. Letting a
+        telemetry read fail it would make measurement a reason for the engine
+        to refuse — the trade ADR-002 declines everywhere else too.
+        """
+        if self.watermarks is None or not host_session_id:
+            return None
+        try:
+            usage = self.watermarks.watermark(host_session_id)
+        except Exception:  # noqa: BLE001 - see the docstring
+            return None
+        return usage.to_dict() if isinstance(usage, Usage) else None
 
     # -- lookup --------------------------------------------------------
 
@@ -464,7 +495,8 @@ class SessionDomain:
             base=base,
             origin=str(git.toplevel(self.manifest.root) or self.manifest.root),
             host_session_id=host_session_id,
-            heartbeat=time.time(),
+            heartbeat=self.clock(),
+            usage_at_start=self._watermark(host_session_id),
         )
         self._save(session)
         self._register(session)
@@ -652,9 +684,22 @@ class SessionDomain:
                 session.overrides.append(
                     {"from": session.state, "to": target, "reason": reason or "forced"}
                 )
-        session.history.append({"from": session.state, "to": target, "reason": reason})
+        # ADR-002 D3. The anchor is the heartbeat, which this domain already
+        # stamped on every transition — so `elapsed` costs no new stored field
+        # and no new clock time, and the entry itself carries a duration and a
+        # pair of counters rather than a time.
+        now = self.clock()
+        session.history.append(
+            {
+                "from": session.state,
+                "to": target,
+                "reason": reason,
+                "elapsed": max(0.0, now - session.heartbeat) if session.heartbeat else None,
+                "usage": self._watermark(session.host_session_id),
+            }
+        )
         session.state = target
-        session.heartbeat = time.time()
+        session.heartbeat = now
         self._save(session)
         self._register(session)
 

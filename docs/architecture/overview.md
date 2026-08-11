@@ -13,6 +13,7 @@ code, and update it when a structural relationship changes.
 graph TD
     subgraph host["hosts/ — agent-host adapters"]
         CC[claude_code]
+        CCTEL[claude_code_telemetry]
     end
 
     subgraph cli["cli/ — entrypoint"]
@@ -27,13 +28,15 @@ graph TD
         ITEMS[items]
         MEMORY[memory]
         PRIVACY[privacy]
+        STATS[stats]
     end
 
-    subgraph domains["domains/ — the four state domains"]
+    subgraph domains["domains/ — the five state domains"]
         SESSION[session]
         PIPELINE[pipeline]
         WORKITEM[workitem]
         MEMDOMAIN[memorystore]
+        STATSDOMAIN[stats]
     end
 
     subgraph adapters["adapters/ — ecosystem knowledge"]
@@ -54,8 +57,10 @@ graph TD
     CLI --> PIPELINE
     CLI --> WORKITEM
     CLI --> MEMDOMAIN
+    CLI --> STATSDOMAIN
     CLI --> RULES
     CLI --> MANIFEST
+    CLI -. injects .-> CCTEL
 
     SESSION --> FSM
     PIPELINE --> FSM
@@ -64,6 +69,13 @@ graph TD
     PIPELINE --> STORE
     WORKITEM --> ITEMS
     MEMDOMAIN --> MEMORY
+    STATSDOMAIN --> STATS
+    STATSDOMAIN --> STORE
+    STATSDOMAIN --> SESSION
+    STATSDOMAIN --> PIPELINE
+    SESSION --> STATS
+    PIPELINE --> STATS
+    CCTEL -- implements SampleSource --> STATS
 
     FSM --> METH
     RULES --> PROF
@@ -76,8 +88,23 @@ graph TD
 
 **Dependency rule:** arrows point down and never back up. `core/` knows
 nothing about hosts, adapters, or the CLI. `adapters/` know their ecosystem
-and nothing about state. `hosts/` know their agent host and reach the engine
-only through the CLI. This is what makes the Claude Code binding replaceable.
+and nothing about state. `hosts/` know their agent host, implement the
+protocols `core/` defines, and reach the engine only through the CLI. This is
+what makes the Claude Code binding replaceable.
+
+The two dotted-and-labelled arrows around `stats` are the same rule applied to
+a case that could easily have inverted it (ADR-002 D2). Reading a host's
+transcripts is host knowledge, and the arithmetic over what is read is not —
+so `core/stats` declares a `SampleSource` protocol, `hosts/` implements it, and
+the CLI injects the implementation. Had the domain imported the reader
+directly, the arrow would have run `domains → hosts` and the binding would have
+stopped being replaceable. The precedent is `core/items`, which already defines
+a model with pluggable backends.
+
+`domains/stats → domains/session` and `→ domains/pipeline` are horizontal, not
+upward. The join from a host session to an invariant session is knowledge of
+*what a session is*, which this document reserves to a domain; putting it in
+the CLI would have traded a documentation edit for an architecture violation.
 
 ## Component responsibilities
 
@@ -92,6 +119,7 @@ only through the CLI. This is what makes the Claude Code binding replaceable.
 | `items` | The work-item model and the pluggable store backends that read and write it | Know an item's lifecycle — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text | Know which files matter |
+| `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 
 ### `domains/`
 
@@ -107,6 +135,11 @@ advance it. They are the only place where "what a session is" is encoded.
   them. Persisted through `core/items` into whichever backend the project uses.
 - **`memorystore`** — validation, dedup, and index regeneration over the
   memory directory. Not an FSM; a set of invariants plus repair operations.
+- **`stats`** — what a session took and what it cost. Not an FSM either, for
+  the same reason `memorystore` is not: there is no lifecycle to advance, but
+  there is a store with invariants over it and operations that repair them.
+  Owns the join from a host session to an invariant session, the rebuildable
+  raw store, and the rendered report. See ADR-002.
 
 ### `adapters/`
 
@@ -128,6 +161,19 @@ CLI. For Claude Code that means hook payload parsing, the hook JSON response
 shape (`permissionDecision`, `additionalContext`), agent and command file
 installation, and `settings.json` wiring. Nothing above `hosts/` is aware of
 hook schemas.
+
+`claude_code_telemetry` is a second, deliberately separate module for the same
+host. It is a different relationship: `claude_code` *drives* the host through
+hooks and installed assets, while this one *reads back* what the host already
+wrote down — its per-project JSONL transcripts. A reader has no business in a
+module about hook payload schemas, and the split keeps a change to one from
+touching the other.
+
+It is also the library's only dependency on another program's **undocumented**
+format, and that shapes the code: every field access tolerates absence, an
+unparseable record is skipped rather than fatal, and the file is a cache keyed
+on a content fingerprint. A format change degrades a report and never breaks a
+session.
 
 ## The two flows that matter
 
@@ -183,14 +229,26 @@ actually happened.
     invariant.yaml          the manifest — the only project-aware artifact
     invariant/
       state/                gitignored; per-session JSON + locked registry
+        stats/              one raw telemetry record per host session;
+                            REBUILDABLE from the host's transcripts, except
+                            where `stats archive` has promoted it
     hooks/                  thin shims that exec the CLI
     agents/                 \
     commands/                > managed host assets: library copies carry an
     skills/<name>/SKILL.md  /  in-frontmatter content hash; project-owned files
                                are checked for LOADABILITY but never for drift
   docs/                     architecture docs the docs-first gate reads
+    reports/                paths.reports — the rendered, committed telemetry
+                            report. Scrubbed: session names and bare dates,
+                            never a host identifier (ADR-002 D7)
 ```
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between
 concurrent sessions.
+
+The report store is the one place those two meet, which is why it is declared
+in the manifest rather than assumed: the raw records stay in the private state
+root and the *rendering* of them is committed, so what leaves the machine is
+decided by a renderer that can be read rather than by a directory somebody
+remembered to gitignore.

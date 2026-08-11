@@ -19,6 +19,7 @@ from ..core.errors import GateFailure, TransitionError, UsageError
 from ..core.machines import load_pipeline_machine
 from ..core.manifest import Level
 from ..core.rules import Evaluated, RuleContext, Verdict, evaluate, get_rule
+from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore
 
 
@@ -68,6 +69,12 @@ class Pipeline:
     overrides: list[dict] = field(default_factory=list)
     started: float = 0.0
     finished: float | None = None
+    #: The usage watermark at the moment this pipeline started (ADR-002 D3).
+    #: Per-state spend is the difference between consecutive watermarks, so the
+    #: FIRST state needs an earlier reading to subtract; without this it would
+    #: have a duration and no spend. ``None`` where the watermark could not be
+    #: observed, which is a fact the report renders rather than a zero.
+    usage_at_start: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,12 +84,58 @@ class Pipeline:
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in raw.items() if k in known})
 
+    def state_entered(self) -> float | None:
+        """When the current state began, derived rather than stored.
+
+        ``started`` plus every elapsed since. Deriving it is what keeps a
+        second clock time out of the record: the anchor is reconstructed from
+        the durations that are already there.
+
+        ``None`` once any entry lacks ``elapsed`` — a pipeline that ran before
+        D3 cannot have its anchor reconstructed, and guessing would attribute
+        every earlier state's time to whichever one happens to be current.
+        """
+        if not self.started:
+            return None
+        total = 0.0
+        for entry in self.history:
+            elapsed = entry.get("elapsed")
+            if elapsed is None:
+                return None
+            total += float(elapsed)
+        return self.started + total
+
 
 class PipelineDomain:
-    def __init__(self, manifest, store: JsonStore | None = None) -> None:
+    def __init__(
+        self,
+        manifest,
+        store: JsonStore | None = None,
+        watermarks: WatermarkSource | None = None,
+        clock=time.time,
+    ) -> None:
         self.manifest = manifest
         self.store = store or JsonStore(manifest.state_root)
         self.machine = load_pipeline_machine(manifest)
+        #: Injected by the CLI (ADR-002 D2). ``None`` here is normal and
+        #: harmless: transitions record ``usage: None`` and the report says so.
+        self.watermarks = watermarks
+        self.clock = clock
+
+    def _watermark(self, host_session_id: str | None) -> dict | None:
+        """Read the watermark, or give up quietly.
+
+        Telemetry may never be a reason a transition refuses. ADR-002 rejects
+        gating on the report for the same reason it rejects gating teardown:
+        the step that records what happened must not acquire new ways to fail.
+        """
+        if self.watermarks is None or not host_session_id:
+            return None
+        try:
+            usage = self.watermarks.watermark(host_session_id)
+        except Exception:  # noqa: BLE001 - see the docstring
+            return None
+        return usage.to_dict() if isinstance(usage, Usage) else None
 
     def _path(self, session_id: str) -> str:
         return f"pipelines/{session_id}.json"
@@ -110,7 +163,11 @@ class PipelineDomain:
     # -- lifecycle -----------------------------------------------------
 
     def start(
-        self, session_id: str, methodology: str | None = None, task: str = ""
+        self,
+        session_id: str,
+        methodology: str | None = None,
+        task: str = "",
+        host_session_id: str | None = None,
     ) -> Pipeline:
         existing = self.current(session_id)
         if existing and existing.state not in self.machine.terminal:
@@ -131,7 +188,8 @@ class PipelineDomain:
             methodology=self.machine.id,
             task=task,
             state=self.machine.initial,
-            started=time.time(),
+            started=self.clock(),
+            usage_at_start=self._watermark(host_session_id),
         )
         self._save(session_id, pipeline, archive=existing)
         return pipeline
@@ -278,12 +336,28 @@ class PipelineDomain:
                 }
             )
 
+        # ADR-002 D3. `elapsed` is derived from an anchor reconstructed out of
+        # the durations already recorded, and the watermark is a pair of
+        # counters — so per-state attribution costs no stored clock time, and
+        # spend has no boundary problem: it is a subtraction of two counts
+        # rather than an arbitrary assignment of a response to one side of a
+        # transition.
+        now = self.clock()
+        entered = pipeline.state_entered()
+        host_session_id = (session or {}).get("host_session_id")
         pipeline.history.append(
-            {"from": pipeline.state, "to": target, "reason": reason, "forced": bool(force)}
+            {
+                "from": pipeline.state,
+                "to": target,
+                "reason": reason,
+                "forced": bool(force),
+                "elapsed": None if entered is None else max(0.0, now - entered),
+                "usage": self._watermark(host_session_id),
+            }
         )
         pipeline.state = target
         if target in self.machine.terminal:
-            pipeline.finished = time.time()
+            pipeline.finished = now
         self._save(session_id, pipeline)
         return pipeline, verdicts
 

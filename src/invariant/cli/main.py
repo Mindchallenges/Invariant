@@ -24,6 +24,11 @@ from ..domains.session import SessionDomain
 
 EXIT_OK = 0
 
+#: Distinguishes "not resolved yet" from "resolved to nothing". A plain None
+#: default would re-run host detection on every access for a project whose
+#: host has no telemetry reader.
+_UNSET = object()
+
 
 # -- output helpers ----------------------------------------------------
 
@@ -89,14 +94,52 @@ class Context:
         self.host_session_id = host_session_id or os.environ.get(
             "INVARIANT_HOST_SESSION_ID"
         )
+        #: Resolved once and cached, because every transition reads a watermark
+        #: through it and rebuilding the reader per property access would
+        #: re-scan the transcript directory each time.
+        self._sample_source: object = _UNSET
+
+    @property
+    def sample_source(self):
+        """The concrete host reader, chosen here and nowhere else (ADR-002 D2).
+
+        This is what the protocol buys: ``core`` and ``domains`` know only
+        ``SampleSource``, and the one line that names a host lives in the CLI.
+        A host with no reader in this release resolves to ``None``, and every
+        command that *reads* the store keeps working — only ingest refuses,
+        and it says why.
+        """
+        if self._sample_source is _UNSET:
+            self._sample_source = None
+            if self.manifest.get("host.kind") == "claude_code":
+                from ..hosts.claude_code_telemetry import ClaudeCodeTranscripts
+
+                self._sample_source = ClaudeCodeTranscripts(origin=self.manifest.root)
+        return self._sample_source
+
+    @property
+    def watermarks(self):
+        """Injected into both FSM domains so their transitions carry one (D3).
+
+        Never a reason a transition can fail — see ``TranscriptWatermarks``.
+        """
+        from ..core.stats import TranscriptWatermarks
+
+        return TranscriptWatermarks(self.sample_source)
+
+    @property
+    def stats(self):
+        from ..domains.stats import StatsDomain
+
+        return StatsDomain(self.manifest, self.store, source=self.sample_source)
 
     @property
     def sessions(self) -> SessionDomain:
-        return SessionDomain(self.manifest, self.store)
+        return SessionDomain(self.manifest, self.store, watermarks=self.watermarks)
 
     @property
     def pipelines(self) -> PipelineDomain:
-        return PipelineDomain(self.manifest, self.store)
+        return PipelineDomain(self.manifest, self.store, watermarks=self.watermarks)
 
     @property
     def items(self):
@@ -842,7 +885,15 @@ def cmd_session_teardown(args) -> int:
 def cmd_pipeline_start(args) -> int:
     ctx = Context()
     session = ctx.require_session()
-    pipeline = ctx.pipelines.start(session.id, methodology=args.methodology, task=args.task or "")
+    pipeline = ctx.pipelines.start(
+        session.id,
+        methodology=args.methodology,
+        task=args.task or "",
+        # The baseline watermark every later per-state spend is subtracted
+        # from (ADR-002 D3). Without it the first state would have a duration
+        # and no spend, because there would be no earlier reading.
+        host_session_id=session.host_session_id,
+    )
     return emit(
         args,
         pipeline.to_dict(),
@@ -1039,6 +1090,73 @@ def cmd_memory_write(args) -> int:
     if ctx.manifest.get("memory.index_generated", True):
         ctx.memory.regenerate_index()
     return emit(args, {"path": str(path)}, f"wrote {path.name} and regenerated the index")
+
+
+# -- stats -------------------------------------------------------------
+
+
+def cmd_stats_refresh(args) -> int:
+    ctx = Context()
+    result = ctx.stats.refresh(force=args.force)
+    return emit(
+        args,
+        result,
+        f"{result['scanned']} host session(s): {result['rebuilt']} rebuilt, "
+        f"{result['unchanged']} unchanged",
+    )
+
+
+def cmd_stats_report(args) -> int:
+    ctx = Context()
+    stats = ctx.stats
+    text = stats.render()
+    if args.write:
+        path = stats.write_report()
+        return emit(
+            args,
+            {"path": str(path), "fingerprint": stats.fingerprint()},
+            f"wrote {path}",
+        )
+    return emit(args, {"report": text, "fingerprint": stats.fingerprint()}, text)
+
+
+def cmd_stats_show(args) -> int:
+    ctx = Context()
+    stats = ctx.stats
+    record = stats.resolve(args.session)
+    if record is None:
+        raise UsageError(
+            f"no stats record matches {args.session!r}; "
+            f"'invariant stats report' lists what is in the store"
+        )
+    return emit(args, record.to_dict(), stats.render_session(args.session))
+
+
+def cmd_stats_archive(args) -> int:
+    ctx = Context()
+    record = ctx.stats.archive(args.session)
+    return emit(
+        args,
+        record.to_dict(),
+        f"{record.label} is archived — it now survives the host pruning its "
+        f"transcripts, and state collection will not drop it",
+    )
+
+
+def cmd_stats_check(args) -> int:
+    ctx = Context()
+    report = ctx.stats.check()
+    text = "\n".join(f"  {p}" for p in report.problems()) or "  clean"
+    emit(
+        args,
+        {
+            "records": report.records,
+            "problems": report.problems(),
+            "clean": report.clean,
+        },
+        f"{report.records} record(s)\n{text}",
+    )
+    return EXIT_OK if report.clean else 1
 
 
 # -- rules, checks, privacy -------------------------------------------
@@ -1429,6 +1547,44 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--body")
     q.add_argument("--body-file")
     q.set_defaults(func=cmd_memory_write)
+
+    # stats
+    stats = sub.add_parser(
+        "stats", help="what sessions took and what they cost"
+    ).add_subparsers(dest="sub", required=True)
+
+    q = stats.add_parser(
+        "refresh", help="rebuild the raw store from the host's transcripts"
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="re-parse even where the source has not changed",
+    )
+    q.set_defaults(func=cmd_stats_refresh)
+
+    q = stats.add_parser("report", help="render the report")
+    q.add_argument(
+        "--write",
+        action="store_true",
+        help="write it to the manifest's paths.reports instead of stdout",
+    )
+    q.set_defaults(func=cmd_stats_report)
+
+    q = stats.add_parser("show", help="one session in full, with its breakdown")
+    q.add_argument("session", help="an invariant session name or id")
+    q.set_defaults(func=cmd_stats_show)
+
+    q = stats.add_parser(
+        "archive",
+        help="promote a record to permanent, so it outlives the host's retention",
+    )
+    q.add_argument("session", help="an invariant session name or id")
+    q.set_defaults(func=cmd_stats_archive)
+
+    stats.add_parser(
+        "check", help="staleness, unpriced models, and records that are the only copy"
+    ).set_defaults(func=cmd_stats_check)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

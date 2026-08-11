@@ -75,6 +75,13 @@ DEFAULTS: dict[str, Any] = {
         "docs": "docs/architecture",
         "memory": ".claude/memory",
         "memory_index": "MEMORY.md",
+        # Where `invariant stats report --write` puts its artifact (ADR-002
+        # D4). Declared here rather than appended to the CLI's write-scope
+        # invariant as one more exception: that invariant now reads "the state
+        # root and the stores the manifest declares", so the next feature that
+        # needs a writable location adds a key instead of widening a list. The
+        # second exception is always easier to justify than the first.
+        "reports": "docs/reports",
     },
     "commands": {
         "build": None,

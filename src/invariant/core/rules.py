@@ -1382,6 +1382,19 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
         if items_path:
             patterns.extend([str(items_path), f"{str(items_path).rstrip('/')}/**"])
 
+    # The report store, for the same reason and by the same mechanism (ADR-002
+    # D4). The write scope is "the state root and the stores the manifest
+    # declares", so a declared store is writable by construction rather than by
+    # being added to a list of exceptions — the alternative turns a crisp
+    # guarantee into an enumeration that grows on every feature.
+    #
+    # The report is a GENERATED artifact besides: a session that regenerates it
+    # is running a command, not authoring code, and blocking that would make
+    # the isolation rule refuse the one edit it has no review value over.
+    reports_path = ctx.manifest.get("paths.reports")
+    if reports_path:
+        patterns.extend([str(reports_path), f"{str(reports_path).rstrip('/')}/**"])
+
     if not patterns:
         return False
 
