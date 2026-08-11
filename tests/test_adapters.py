@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from invariant.adapters import available, defaults_for, detect, get_adapter
 from invariant.adapters.base import Adapter, Hazard, TestResult
 
@@ -142,6 +144,30 @@ class TestPythonAdapter:
 
     def test_coverage_parsing(self):
         raw = "src/app/core.py      120     12    90%"
+        assert self.adapter.parse_coverage(raw) == {"src/app/core.py": 90.0}
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_011 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_coverage_parsing_branch_table(self):
+        """Repro for BUG_011 — see docs/backlog/BUG_011.md.
+
+        `[tool.coverage.run] branch = true` makes coverage.py emit
+        `Name Stmts Miss Branch BrPart Cover Missing` — four numeric columns
+        before the percentage — instead of the two the parser's regex
+        requires. This is the real header/row shape `pytest --cov
+        --cov-report=term-missing` prints in this repository, which has had
+        `branch = true` since its first commit.
+        """
+        raw = (
+            "Name                     Stmts   Miss Branch BrPart  Cover   Missing\n"
+            "----------------------------------------------------------------------\n"
+            "src/app/core.py            120     12     18      3    90%   45-50\n"
+        )
         assert self.adapter.parse_coverage(raw) == {"src/app/core.py": 90.0}
 
 
