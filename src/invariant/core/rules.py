@@ -584,6 +584,19 @@ def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
     branch = str(ctx.session.get("branch") or "")
     if not branch:
         return Verdict.na("session owns no branch")
+    # The `"master"` fallback here and the `""` in `_changed_set` read the
+    # same field of the same record and answer differently, which looks like
+    # drift and is not. The two questions have opposite failure polarities.
+    # Here, a guessed base that is wrong costs a comparison against the wrong
+    # ref, and the verdict NAMES the base it used, so a wrong guess is on
+    # screen; guessing nothing would silently stop asking whether the work is
+    # stranded, which is the whole point of the rule. In `_changed_set` a
+    # guessed base would manufacture a touched set out of an unrelated
+    # branch's history and hand it to a gate as fact, where answering `None`
+    # leaves the declared set carrying the answer and, failing that, an
+    # explicit refusal. `Session.base` also defaults to `"master"` in the
+    # domain, so a record reaching either reader without one is a record
+    # about which nothing is known — the case for refusing, not for guessing.
     base = str(ctx.session.get("base") or "master")
 
     ahead = git.commits_ahead(_repo_root(ctx), branch, base)
@@ -817,8 +830,15 @@ def _docs_read_architecture(ctx: RuleContext) -> Verdict:
 )
 def _docs_updated(ctx: RuleContext) -> Verdict:
     docs_root = _docs_root(ctx)
-    changed = git.changed_files(ctx.cwd)
+    # This is an EXIT gate on the review state, so it runs when the work is
+    # already committed and `git diff` reports nothing. Reading the working
+    # tree alone made the one gate a methodology cannot opt out of return
+    # "nothing changed" on every real end-of-phase evaluation (BUG_012).
+    touched = _changed_set(ctx)
+    changed = touched.paths
     if not changed:
+        if not touched.answerable:
+            return _unestablished_changed_set(touched)
         return Verdict.na("nothing changed")
 
     root = _repo_root(ctx)
@@ -866,8 +886,16 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
 
     docs_root = _docs_root(ctx)
     root = _repo_root(ctx)
-    docs_changed = [p for p in git.changed_files(ctx.cwd) if _is_within(root / p, docs_root)]
+    # Same three sources as `docs.updated`, for the same reason: a doc change
+    # committed in this phase is invisible to the working tree by the time
+    # this gate is asked about it.
+    touched = _changed_set(ctx)
+    docs_changed = [p for p in touched.paths if _is_within(root / p, docs_root)]
     if not docs_changed:
+        # "No doc changed" is a real answer; "nobody could tell what changed"
+        # is not, and only the second may not be reported as a skip.
+        if not touched.answerable:
+            return _unestablished_changed_set(touched)
         return Verdict.na("no doc changed")
 
     markers = {"mermaid": "```mermaid", "plantuml": "@startuml"}
@@ -1004,20 +1032,13 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
     scope = str(ctx.manifest.get("methodology.gates.coverage_scope", "touched"))
     excluded: list[str] = []
     if scope == "touched":
-        # Three sources, because each one alone goes empty in a state the
-        # others survive. The working tree and index answer for work in
-        # progress and go empty on commit. The declared file set answers only
-        # for sessions that declare one, which is a habit a project acquires
-        # rather than has. The branch's own commits answer for exactly the
-        # state this gate runs in — after the commit — and are what makes the
-        # set non-empty when it matters most.
-        declared = set((ctx.session or {}).get("files") or [])
-        base = str((ctx.session or {}).get("base") or "")
-        committed = git.branch_files(ctx.cwd, base)
-        changed = {
-            _relative_to_any(path, roots)
-            for path in [*git.changed_files(ctx.cwd), *(committed or []), *declared]
-        }
+        # The union of the three sources that can know what changed. This
+        # gate is where that union was first worked out; it now lives in
+        # `_changed_set`, which the two docs-first gates read too, because
+        # keeping a second copy here is exactly how they came to be wrong
+        # while this one was right (BUG_012).
+        touched_set = _changed_set(ctx)
+        changed = {_relative_to_any(path, roots) for path in touched_set.paths}
         source_changed = {p for p in changed if not _looks_like_docs(p)}
 
         # An empty touched set used to fall through to the full measured set,
@@ -1030,13 +1051,13 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         # second because the first could not be established is the widest
         # possible reading of the narrowest possible evidence.
         if not source_changed:
-            if committed is None and not declared:
+            if not touched_set.answerable:
                 return Verdict.fail(
                     "the touched set could not be established",
                     detail=(
                         "Scope is 'touched', but the working tree is clean, no "
                         "file set was declared, and the branch's commits could "
-                        f"not be read{f' against base {base!r}' if base else ' — no base recorded'}. "
+                        f"not be read{f' against base {touched_set.base!r}' if touched_set.base else ' — no base recorded'}. "
                         "The gate will not answer a question it could not "
                         "scope: holding the whole project to the floor would "
                         "block on files nobody edited, and skipping the floor "
@@ -1323,6 +1344,92 @@ def _residue_matches_status(ctx: RuleContext) -> Verdict:
 
 
 # -- helpers -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ChangedSet:
+    """What this change touched, and whether that could be established at all.
+
+    ``answerable`` is the part that cannot be inferred from ``paths``. An
+    empty set means "nothing was touched" only when something was in a
+    position to say so; otherwise it means "nobody could tell", and the two
+    demand opposite handling. A caller reading the second as the first turns
+    an unanswerable query into an open gate — see ``git.branch_files``.
+    """
+
+    paths: tuple[Path, ...]
+    answerable: bool
+    base: str
+
+
+def _changed_set(ctx: RuleContext) -> _ChangedSet:
+    """Every path this change touched, from the three sources that can know.
+
+    Three, because each one alone goes empty in a state the others survive:
+
+    - the working tree and the index answer for work in progress, and a
+      commit empties both — so at an END-OF-PHASE gate, where the work is
+      committed by construction, this source alone always says "nothing";
+    - the branch's own commits answer for exactly that state, and answer
+      ``None`` when there is no base, an unknown ref, or an unreadable
+      repository;
+    - the session's DECLARED file set answers only for sessions that declare
+      one, which is a habit a project acquires rather than has — and is the
+      only carrier left when ``branch_files`` returns ``None``.
+
+    This union lived only inside ``coverage.meets_floor`` while
+    ``docs.updated`` and ``docs.diagrams_current`` read the working tree
+    alone, so the two docs-first gates went inert on every committed tree —
+    BUG_012. The insight was not missing, it was unpropagated; sharing one
+    implementation is what stops a fourth rule asking the question a fourth
+    way.
+
+    The base is read WITHOUT the ``or "master"`` fallback that
+    ``session.work_would_be_stranded`` applies to the same field, and that
+    difference is deliberate rather than an oversight — see the comment at
+    that rule.
+    """
+    declared = [Path(p) for p in (ctx.session or {}).get("files") or []]
+    base = str((ctx.session or {}).get("base") or "")
+    committed = git.branch_files(ctx.cwd, base)
+    seen: dict[str, Path] = {}
+    for path in [*git.changed_files(ctx.cwd), *(committed or []), *declared]:
+        seen[str(path)] = Path(path)
+    return _ChangedSet(
+        paths=tuple(sorted(seen.values(), key=str)),
+        # An empty union is a real answer only if some source was able to
+        # give one. Both legs that can fail have failed when the commits are
+        # unreadable AND nothing was declared; the working tree cannot be
+        # told apart from a clean one, so it never counts as an answer here.
+        answerable=committed is not None or bool(declared),
+        base=base,
+    )
+
+
+def _unestablished_changed_set(changed: _ChangedSet) -> Verdict:
+    """The verdict for "the question could not be asked".
+
+    Never a skip. A gate that reports an unanswerable query as "nothing to
+    check" is the defect BUG_012 records, reintroduced somewhere new.
+    """
+    return Verdict.fail(
+        "the changed set could not be established",
+        detail=(
+            "The working tree is clean, no file set was declared, and the "
+            "branch's commits could not be read"
+            + (
+                f" against base {changed.base!r}"
+                if changed.base
+                else " — no base recorded"
+            )
+            + ". An unanswered question is not a negative answer, and reading "
+            "it as one is how this gate comes to look green while inert."
+        ),
+        fixes=(
+            "invariant session files add <path>",
+            "or check the session's base branch is reachable",
+        ),
+    )
 
 
 def _repo_root(ctx: RuleContext) -> Path:

@@ -382,13 +382,6 @@ class TestDocsGatesOnACommittedTree:
         assert git.changed_files(wt) == []
         assert git.branch_files(wt, "master") == [Path("app.py")]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_012 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_docs_updated_reads_a_source_only_commit(self, ctx_factory):
         """The blocking gate must judge committed work, not decline to look."""
         wt = ctx_factory.wt
@@ -398,13 +391,6 @@ class TestDocsGatesOnACommittedTree:
         assert not result.verdict.skipped, result.verdict.message
         assert "source changed but no architecture doc did" in result.verdict.message
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_012 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_diagrams_current_reads_a_committed_doc_change(self, ctx_factory):
         wt = ctx_factory.wt
         (wt / "docs" / "architecture" / "overview.md").write_text(
@@ -419,13 +405,6 @@ class TestDocsGatesOnACommittedTree:
         assert not result.verdict.skipped, result.verdict.message
         assert "no diagram" in result.verdict.message
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_012 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_docs_updated_reads_the_declared_set_when_no_base_is_configured(
         self, ctx_factory
     ):
@@ -447,6 +426,142 @@ class TestDocsGatesOnACommittedTree:
         result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
         assert not result.verdict.skipped, result.verdict.message
         assert "source changed but no architecture doc did" in result.verdict.message
+
+
+class TestTheChangedSetIsAnsweredOrRefused:
+    """The other half of the BUG_012 repair: what an EMPTY set is allowed to mean.
+
+    Widening the input set fixes the committed-tree case, and on its own it
+    would leave a second inert path behind — the union is also empty when no
+    source could answer, and reporting that as "nothing changed" is the same
+    defect one step along. `coverage.meets_floor` already refuses there; these
+    assert the two docs gates now refuse in the same shape, and that the
+    refusal stays narrow enough not to swallow the genuine empty answer.
+    """
+
+    def clean_committed_repo(self, wt):
+        run(["git", "commit", "-q", "--allow-empty", "-m", "no file changes"], wt)
+
+    def test_docs_updated_refuses_an_unanswerable_set_rather_than_skipping(
+        self, ctx_factory
+    ):
+        """An unknown base makes `branch_files` answer `None`.
+
+        With the working tree clean and nothing declared, no source can say
+        what changed. `docs.updated` is `block`, and a skip there reads as a
+        pass — so the one honest verdict is a failure that says why.
+        """
+        wt = ctx_factory.wt
+        session = {"worktree": str(wt), "base": "no-such-base", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "changed set could not be established" in result.verdict.message
+        assert "no-such-base" in result.verdict.detail
+
+    def test_diagrams_current_refuses_an_unanswerable_set_too(self, ctx_factory):
+        wt = ctx_factory.wt
+        session = {"worktree": str(wt), "base": "no-such-base", "files": []}
+        result = only(
+            evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt, session=session))
+        )
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "changed set could not be established" in result.verdict.message
+
+    def test_a_missing_base_says_so_rather_than_naming_an_empty_one(self, ctx_factory):
+        wt = ctx_factory.wt
+        session = {"worktree": str(wt), "base": "", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert "no base recorded" in result.verdict.detail
+
+    def test_a_genuinely_empty_change_still_skips(self, ctx_factory):
+        """The refusal must not swallow the real "nothing changed".
+
+        Here the branch's commits ARE readable and report no paths, so the
+        empty set is an answer rather than an absence of one. Failing here
+        would block every gate evaluation that runs before any work.
+        """
+        wt = ctx_factory.wt
+        self.clean_committed_repo(wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert result.verdict.skipped and result.verdict.message == "nothing changed"
+
+    def test_a_source_only_commit_leaves_diagrams_current_with_nothing_to_say(
+        self, ctx_factory
+    ):
+        """`no doc changed` survives, because it is a real answer.
+
+        The changed set is non-empty and holds no doc. That is the case the
+        rule was written for, and it must stay a skip now that an empty set
+        can also mean "could not tell".
+        """
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "source only"], wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt, session=session))
+        )
+        assert result.verdict.skipped and "no doc changed" in result.verdict.message
+
+    def test_a_committed_doc_change_alongside_source_passes(self, ctx_factory):
+        """The positive committed case, which the repro does not cover.
+
+        A gate that only ever fails on committed work would be as useless as
+        one that only ever skips.
+        """
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (wt / "docs" / "architecture" / "overview.md").write_text(
+            "# Overview\n\n```mermaid\ngraph TD\n  A-->E\n```\n", encoding="utf-8"
+        )
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "source and doc together"], wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        ctx = ctx_factory(cwd=wt, session=session)
+        updated = only(evaluate(["docs.updated"], ctx))
+        assert updated.verdict.ok and not updated.verdict.skipped
+        diagrams = only(evaluate(["docs.diagrams_current"], ctx))
+        assert diagrams.verdict.ok and not diagrams.verdict.skipped
+
+    def test_the_declared_set_alone_answers_when_git_cannot(self, ctx_factory):
+        """The unset-base case, asserted on the helper rather than through a rule.
+
+        No session record with an absent base has ever been observed; the path
+        is reachable by construction, which is why it is constructed here.
+        """
+        from invariant.core.rules import _changed_set
+
+        wt = ctx_factory.wt
+        ctx = ctx_factory(
+            cwd=wt, session={"worktree": str(wt), "base": "", "files": ["app.py"]}
+        )
+        changed = _changed_set(ctx)
+        assert changed.answerable and changed.paths == (Path("app.py"),)
+
+    def test_the_three_sources_are_unioned_without_duplicates(self, ctx_factory):
+        """One path named by two sources is one path, not two.
+
+        Left duplicated, every count in every verdict built on this set reads
+        high, which is a small lie of exactly the kind these gates exist to
+        catch.
+        """
+        from invariant.core.rules import _changed_set
+
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "committed"], wt)
+        (wt / "later.py").write_text("y = 2\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        ctx = ctx_factory(
+            cwd=wt,
+            session={"worktree": str(wt), "base": "master", "files": ["app.py"]},
+        )
+        changed = _changed_set(ctx)
+        assert changed.paths == (Path("app.py"), Path("later.py"))
+        assert changed.base == "master" and changed.answerable
 
 
 # -- test + coverage rules ---------------------------------------------

@@ -213,6 +213,23 @@ Two details that are load-bearing rather than incidental:
   formatter pass makes `chore` useless and pushes people to `none`, which drops
   every gate. A narrower rule that gets used beats a broader one that gets
   bypassed.
+- **An exit gate is asked its question after the commit.** Anything evaluated
+  on leaving a state runs when that state's work is, by construction, already
+  committed, so a gate that asks "what changed" by reading the working tree
+  and the index alone sees nothing and returns *not applicable* — every time,
+  in exactly the state it was written for. Three sources answer between them:
+  the working tree and index (work in progress), the branch's own commits
+  (work already committed in this phase), and the session's declared file set
+  (the only one left when there is no base to diff against). All three, or the
+  gate is inert where it matters most. This is `core/rules._changed_set`, read
+  by `docs.updated`, `docs.diagrams_current` and `coverage.meets_floor`; it is
+  one function rather than three because it was three, and two of them were
+  wrong for as long as they existed (BUG_012).
+- **An empty answer and an unanswerable question are different verdicts.**
+  When no source could speak — the commits unreadable, nothing declared — the
+  set is empty for a reason that is not "nothing changed". Those gates fail
+  and say so instead of skipping, because a skip on a `block`-level gate reads
+  as a pass, and an unanswered question is not a negative answer.
 
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —

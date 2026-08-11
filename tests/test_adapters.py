@@ -146,13 +146,6 @@ class TestPythonAdapter:
         raw = "src/app/core.py      120     12    90%"
         assert self.adapter.parse_coverage(raw) == {"src/app/core.py": 90.0}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_011 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_coverage_parsing_branch_table(self):
         """Repro for BUG_011 — see docs/backlog/BUG_011.md.
 
@@ -169,6 +162,69 @@ class TestPythonAdapter:
             "src/app/core.py            120     12     18      3    90%   45-50\n"
         )
         assert self.adapter.parse_coverage(raw) == {"src/app/core.py": 90.0}
+
+    def test_a_whole_branch_table_is_read_row_by_row(self):
+        """The full artefact, not one hand-made row.
+
+        The `Missing` column carries line ranges and branch arrows, the rule
+        line is punctuation, and the last row is a TOTAL with no file name.
+        None of them is a measurement, and reading any of them as one puts a
+        number nobody measured into the durable pipeline record.
+        """
+        raw = (
+            "Name                                 Stmts   Miss Branch BrPart  Cover   Missing\n"
+            "------------------------------------------------------------------------------\n"
+            "src/invariant/adapters/python_.py       40      2     12      1    94%   55-56, 61->64\n"
+            "src/invariant/core/rules.py            820     31    240     18    95%   102, 330->exit\n"
+            "tests/conftest.py                       12      0      0      0   100%\n"
+            "------------------------------------------------------------------------------\n"
+            "TOTAL                                  872     33    252     19    95%\n"
+        )
+        assert self.adapter.parse_coverage(raw) == {
+            "src/invariant/adapters/python_.py": 94.0,
+            "src/invariant/core/rules.py": 95.0,
+            "tests/conftest.py": 100.0,
+        }
+
+    def test_a_fractional_percentage_keeps_its_fraction(self):
+        """`[tool.coverage.report] precision` adds decimals to every row.
+
+        Truncating to the integer part reads a file at 84.6% as 84 and blocks
+        against a floor it did not miss — the same class of coupling as the
+        column count, in the other direction.
+        """
+        raw = "src/app/core.py    120   12   18   3   84.62%   45-50\n"
+        assert self.adapter.parse_coverage(raw) == {"src/app/core.py": 84.62}
+
+    def test_a_row_with_no_percentage_borrows_none_from_the_next(self):
+        """A name and a percentage on different lines are not a measurement.
+
+        The pattern may not cross a newline, so a row coverage.py did not
+        finish cannot silently acquire the following row's number — which
+        would be an invented figure attributed to a real file.
+        """
+        raw = "src/app/core.py\nsrc/app/other.py   10   0   2   0   77%\n"
+        assert self.adapter.parse_coverage(raw) == {"src/app/other.py": 77.0}
+
+    def test_a_verbose_progress_line_is_not_a_measurement(self):
+        """`pytest -v` prints a percentage after a file name on every line.
+
+        It is progress through the run, not coverage of the file, and the
+        coverage command's raw output contains both. Reading it would put a
+        number nobody measured into the pipeline record, and it reads HIGH as
+        often as low — the direction `Hazard.can_overstate` says must never be
+        tolerated. A table row is a name followed by numeric cells; this is a
+        name followed by a test id.
+        """
+        raw = (
+            "tests/test_app.py::test_one PASSED                       [ 50%]\n"
+            "tests/test_app.py::test_two PASSED                       [100%]\n"
+        )
+        assert self.adapter.parse_coverage(raw) == {}
+
+    def test_prose_mentioning_a_module_is_not_a_measurement(self):
+        raw = "collected 4 items\nERROR collecting tests/test_app.py\n"
+        assert self.adapter.parse_coverage(raw) == {}
 
 
 class TestNodeAdapter:

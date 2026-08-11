@@ -179,6 +179,20 @@ that a green is not mistaken for proof. `parse_test_output` returning
 `passed=True` alongside a hazard flag is how the library says "this looks
 green, and here is the specific reason that might be a lie."
 
+`parse_coverage` has a trap of its own, and it is the quiet kind. A reporter's
+table layout belongs to the reporter, so a parser keyed to that layout breaks
+whenever the layout legitimately varies — and it breaks by returning `{}`,
+which is indistinguishable from "nobody has measured yet". The Python adapter
+required exactly two numeric columns, which is coverage.py's non-branch table;
+every project setting `branch = true` got four, matched nothing, and could
+never satisfy a coverage floor at all (BUG_011). The rule is therefore to
+anchor on what the adapter does own — the source extension — and to read a
+table ROW rather than a column count: the name, then whatever numeric cells
+this version emits, then the first percentage. Not "anything up to the first
+percentage", which reads `pytest -v`'s per-test progress line as a
+measurement; per `Hazard.can_overstate`, a reading that can come back HIGH is
+the one a parser must refuse.
+
 `carries_executable_code` is the other three-valued answer, and it is asked
 only to explain a coverage row that is **absent**. Reporters emit nothing for
 a file with no executable lines — a bare protocol, an enum of cases, a
