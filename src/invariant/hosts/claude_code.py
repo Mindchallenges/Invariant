@@ -783,7 +783,17 @@ class ClaudeCodeHost:
             return {}
 
         tool_input = payload.get("tool_input") or {}
-        session = ctx.current_session(strict=False)
+        # Attributed the same way an edit is: by the payload, whose `file_path`
+        # is absolute and does not depend on the directory the host happens to
+        # be standing in. `current_session` used to answer this, which is steps
+        # 2 and 4 of the documented order and skips step 3 — so a Read naming a
+        # file inside a session's worktree was NOT attributed to that session
+        # while several were live, even though the payload carried the answer
+        # and the recording below pulls that same key out to store it
+        # (BUG_010, narrow half). Agent dispatches carry no path, so they
+        # resolve exactly as before; routing both through one call is what
+        # keeps a second, divergent copy of the order from existing here.
+        session = ctx.session_for_payload(payload)
         if session is None:
             return {}
 

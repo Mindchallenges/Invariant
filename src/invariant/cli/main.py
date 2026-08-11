@@ -173,12 +173,16 @@ class Context:
         return session
 
     def session_for_payload(self, payload: dict):
-        """Who this tool call belongs to, using the call's own destination.
+        """Who this tool call belongs to, using the path the call itself names.
 
-        The path a write is aimed at is the strongest attribution signal a hook
+        The path a call is aimed at is the strongest attribution signal a hook
         ever gets: it is in the payload, it is absolute, and it does not depend
         on the working directory the host happens to be in or on an environment
-        variable a tool call cannot carry.
+        variable a tool call cannot carry. That is true of a *read* as much as
+        of a write, which is why post-tool-use recording resolves through here
+        too rather than by working directory alone (BUG_010). A call carrying
+        no path — an agent dispatch — simply falls through to the rest of the
+        order; it is one route with one precedence, not two.
 
         When that path identifies a session which has no host identifier
         recorded — every session registered before the identifier existed — the

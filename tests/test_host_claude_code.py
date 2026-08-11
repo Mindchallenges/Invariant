@@ -403,12 +403,24 @@ class FakeSessions:
 
 
 class FakeCtx:
+    """Deliberately answers only the question the host is supposed to ask.
+
+    There is no ``current_session`` here. Recording used to resolve by working
+    directory (BUG_010), and a fake that answers both routes with the same
+    session would let a regression to the weaker one pass every test in this
+    file. Asking the wrong question now raises.
+    """
+
     def __init__(self, host_session_id="host-1111"):
         self.pipelines = FakePipelines()
         self.sessions = FakeSessions()
         self.host_session_id = host_session_id
+        #: Every payload attribution was asked about, so a test can assert the
+        #: call's own path was in hand at the moment the owner was chosen.
+        self.asked: list[dict] = []
 
-    def current_session(self, strict=True):
+    def session_for_payload(self, payload):
+        self.asked.append(payload)
         return FakeSession()
 
     def rule_context(self, payload=None):  # pragma: no cover - unused here
@@ -485,9 +497,16 @@ class TestAgentInvocationIsRecorded:
     def test_an_unknown_event_is_ignored(self, host):
         assert host.handle("session-end", "{}", FakeCtx()) == {}
 
+    def test_the_owner_is_chosen_with_the_calls_own_path_in_hand(self, host):
+        """The payload reaches attribution, not just the recording below it."""
+        ctx = FakeCtx()
+        payload = {"tool_name": "Read", "tool_input": {"file_path": "/x/overview.md"}}
+        host._post_tool_use(payload, ctx)
+        assert ctx.asked == [payload]
+
     def test_recording_is_skipped_without_a_session(self, host):
         class NoSession(FakeCtx):
-            def current_session(self, strict=True):
+            def session_for_payload(self, payload):
                 return None
 
         ctx = NoSession()
@@ -584,10 +603,32 @@ class TestReadIsAttributedByItsPath:
         return {
             "project": tmp_path,
             "owner": owner.id,
+            "peer": peer.id,
             "worktree": worktree,
+            "peer_worktree": Path(sessions.get(peer.id).worktree),
             "doc": worktree / "docs" / "architecture" / "overview.md",
+            "shared_doc": tmp_path / "docs" / "architecture" / "overview.md",
+            "sessions": sessions,
             "pipelines": pipelines,
         }
+
+    def post(self, world, payload, cwd=None, host_session_id=None):
+        """Fire PostToolUse the way a host does — from wherever it is standing."""
+        from invariant.cli.main import Context
+
+        ClaudeCodeHost(world["project"])._post_tool_use(
+            payload,
+            Context(
+                cwd=cwd or world["project"],
+                host_session_id=(
+                    self.HOST_ID if host_session_id is None else host_session_id
+                ),
+            ),
+        )
+
+    def evidence(self, world, session_id, key):
+        pipeline = world["pipelines"].current(session_id)
+        return list(pipeline.evidence.get(key, [])) if pipeline else []
 
     def read_gate(self, world):
         """What `invariant pipeline gates` would report, run in the worktree."""
@@ -607,13 +648,6 @@ class TestReadIsAttributedByItsPath:
         assert len(results) == 1, "the gate under test did not evaluate"
         return results[0].verdict
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_010 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_BUG_010_a_read_inside_a_worktree_satisfies_that_sessions_docs_gate(
         self, two_live_sessions
     ):
@@ -632,6 +666,78 @@ class TestReadIsAttributedByItsPath:
 
         verdict = self.read_gate(world)
         assert verdict.ok, verdict.message
+
+    def test_the_host_identifier_still_outranks_the_path(self, two_live_sessions):
+        """Step 2 beats step 3, for reads as it already does for writes.
+
+        Who is acting beats where the bytes are, which is what keeps a session
+        reaching into a peer's worktree a *detectable* crossing rather than a
+        silent reattribution. Reading a peer's file is not evidence that the
+        peer did the reading.
+        """
+        world = two_live_sessions
+        world["sessions"].adopt_host_session(world["peer"], self.HOST_ID)
+        world["pipelines"].start(world["peer"], task="what beta is doing")
+
+        self.post(
+            world,
+            {"tool_name": "Read", "tool_input": {"file_path": str(world["doc"])}},
+        )
+
+        assert self.evidence(world, world["peer"], "docs_read") == [str(world["doc"])]
+        assert self.evidence(world, world["owner"], "docs_read") == []
+
+    def test_a_path_in_no_worktree_falls_through_rather_than_dropping(
+        self, two_live_sessions
+    ):
+        """An unmatched target is not an answer, and must not become a refusal.
+
+        The shared checkout's own docs belong to no session's worktree. Before
+        this fix that read resolved by working directory; it still must, or
+        closing the path route would have cost the routes that already worked.
+        """
+        world = two_live_sessions
+        self.post(
+            world,
+            {"tool_name": "Read", "tool_input": {"file_path": str(world["shared_doc"])}},
+            cwd=world["worktree"],
+            host_session_id=None,
+        )
+        assert self.evidence(world, world["owner"], "docs_read") == [
+            str(world["shared_doc"])
+        ]
+
+    def test_an_agent_dispatch_carries_no_path_and_resolves_as_before(
+        self, two_live_sessions
+    ):
+        """The narrow fix cannot reach the agent-role gates, and does not.
+
+        A `Task` payload holds `subagent_type`, `description` and `prompt` and
+        no path at all, so there is nothing for step 3 to match on: dispatch
+        still resolves by host identifier or working directory exactly as it
+        did. Recorded as a test so the wide half of BUG_010 cannot be mistaken
+        for closed.
+        """
+        world = two_live_sessions
+        dispatch = {
+            "tool_name": "Task",
+            "tool_input": {
+                "subagent_type": "feature-architect",
+                "description": "design the change",
+                "prompt": "...",
+            },
+        }
+
+        # From the shared checkout, with two sessions live and this host owning
+        # neither: nobody is identifiable, so nothing is recorded.
+        self.post(world, dispatch, host_session_id=None)
+        assert self.evidence(world, world["owner"], "agents_run") == []
+
+        # From inside the session's own worktree, the working directory answers.
+        self.post(world, dispatch, cwd=world["worktree"], host_session_id=None)
+        assert self.evidence(world, world["owner"], "agents_run") == [
+            "feature-architect"
+        ]
 
 
 class TestAutomaticBinding:

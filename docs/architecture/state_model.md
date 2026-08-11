@@ -148,7 +148,8 @@ Which session a tool call belongs to, most reliable first:
 
 1. An explicit `INVARIANT_SESSION_ID` / `--id`.
 2. The host's session identifier, when the caller supplies one.
-3. The session whose worktree contains **the file being written to**.
+3. The session whose worktree contains **the file the call names** — the
+   destination of a write, or the path a read was aimed at.
 4. The session whose worktree contains the working directory.
 5. The single session registered at or above the working directory.
 
@@ -175,6 +176,20 @@ When step 3 succeeds and the session has no host identifier recorded, the
 mapping is **learned**: the next call from that host session resolves by
 identifier alone, including calls that carry no path at all. Only step 3 may
 teach it. Learning from a weaker signal would bind the wrong pair permanently.
+Learning is reserved to a call that *wrote* — a read is evidence of where the
+reader was looking, not of who owns the worktree.
+
+**One order, every recorded call.** Enforcement resolved through this order and
+recording did not: a docs read and an agent dispatch used steps 2 and 4 only,
+so a `Read` naming a file inside a session's worktree was not attributed to
+that session while several were live — the payload carried the answer and the
+recording pulled the same key out one line later purely to store it (BUG_010,
+narrow half). Both now resolve here. A call carrying no path, which is every
+agent dispatch, simply finds nothing at step 3 and continues; that is the
+order working, not an exception to it. What this does **not** reach is a call
+whose path lies in a *different repository*: the state root is per-repository
+(see "Storage layout"), so a session in another project is not in the registry
+being searched at all. Attribution is within one project by construction.
 
 ## Domain: pipeline
 

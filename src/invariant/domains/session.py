@@ -169,7 +169,8 @@ class SessionDomain:
 
         1. An explicit ``INVARIANT_SESSION_ID``.
         2. The **host's** session identifier, when the caller supplies one.
-        3. The session whose worktree contains the **file being written to**.
+        3. The session whose worktree contains the **file the call names** —
+           written to, or read.
         4. The session whose worktree contains the working directory.
         5. The single session registered at or above the working directory.
 
@@ -184,7 +185,10 @@ class SessionDomain:
         none, so order 2 can be silently unavailable — and the documented
         remedy, ``INVARIANT_SESSION_ID``, is an environment variable that an
         Edit tool call has no way to carry. The destination path does not
-        depend on the caller's environment at all.
+        depend on the caller's environment at all. It is not only for edits:
+        recording a docs read resolves through the same order, because a read
+        names its path in the same payload key and for the same reason
+        (BUG_010).
 
         ``target`` ranks below the host identifier deliberately: who is writing
         beats where the bytes land, so a session writing into a peer's worktree
