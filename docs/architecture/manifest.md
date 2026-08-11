@@ -162,6 +162,7 @@ class Adapter:
     def parse_test_output(self, stdout: str, stderr: str, code: int) -> TestResult: ...
     def parse_coverage(self, raw: str) -> dict[str, float]: ...
     def source_files(self, changed: list[Path]) -> list[Path]: ...
+    def carries_executable_code(self, path: Path) -> bool | None: ...
     def hazards(self) -> list[Hazard]: ...
 ```
 
@@ -177,6 +178,18 @@ A hazard is not a rule. Rules gate transitions; hazards annotate results so
 that a green is not mistaken for proof. `parse_test_output` returning
 `passed=True` alongside a hazard flag is how the library says "this looks
 green, and here is the specific reason that might be a lie."
+
+`carries_executable_code` is the other three-valued answer, and it is asked
+only to explain a coverage row that is **absent**. Reporters emit nothing for
+a file with no executable lines — a bare protocol, an enum of cases, a
+typealias — and that silence is indistinguishable from a file the run never
+measured. `True` and `False` are claims; `None` means "cannot tell", and a
+caller deciding whether to *relax* must treat it as "do not relax", exactly as
+with `git.branch_files`. The generic adapter knows no language, so it always
+answers `None`. The two wrong answers are not symmetrical and an
+implementation must prefer the first: calling an inert file live costs a
+spurious block, which is visible and sends someone to look; calling a live
+file inert passes unmeasured code silently.
 
 ## Backends for work items
 

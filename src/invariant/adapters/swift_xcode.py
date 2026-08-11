@@ -112,6 +112,15 @@ class SwiftXcodeAdapter(Adapter):
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".swift"]
 
+    def carries_executable_code(self, path: Path) -> bool | None:
+        if path.suffix != ".swift":
+            return None
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
+        return _swift_carries_executable_code(text)
+
     def hazards(self) -> list[Hazard]:
         return [
             Hazard(
@@ -360,6 +369,150 @@ class SwiftXcodeAdapter(Adapter):
         ):
             out[match.group("file")] = float(match.group("pct"))
         return out
+
+
+# -- "does this file have anything to measure" -------------------------
+#
+# Only ever consulted to explain a coverage row that is ABSENT, so the whole
+# job is deciding between "nothing to measure" and "not measured". It reads
+# structure, not semantics: every brace block in the file is classified, and
+# the file is called inert only when every one of them is a shape that cannot
+# contain a statement. Anything unrecognised answers "has code" or "cannot
+# tell", never "inert" — see ``Adapter.carries_executable_code`` for why those
+# two mistakes are not interchangeable.
+
+#: Everything legal inside a protocol's accessor requirement. A block holding
+#: only these is `{ get }`, a promise about a member; a block holding anything
+#: else is `{ 44 }`, an implementation of one.
+_ACCESSOR_ONLY = {"get", "set", "async", "throws", "mutating", "nonmutating"}
+
+#: Block headers that cannot themselves introduce executable lines. Their
+#: MEMBERS still get classified — a `func` body nested in a protocol extension
+#: is its own block and is judged on its own header.
+_INERT_BLOCK_HEADER = re.compile(r"\b(protocol|enum)\b")
+
+#: A binding with an initialiser expression: `var limit: Int = 200`. It has no
+#: brace, so no block classifies it, and the expression is an executable line.
+#: `typealias X = Y` and `case a = "a"` are deliberately not matched.
+_INITIALISED_BINDING = re.compile(r"\b(?:var|let)\b[^\n=]*=(?!=)")
+
+#: Top-level lines that may remain once every block has been lifted out. A
+#: file whose residue is only these is declarations and nothing else.
+_TOP_LEVEL_RESIDUE = re.compile(
+    r"^\s*(?:@[\w.]+\s*(?:\([^)]*\))?\s*)*"
+    r"(?:import|typealias|protocol|enum|struct|class|actor|extension|"
+    r"final|public|internal|private|fileprivate|open|indirect)\b"
+)
+
+
+def _strip_comments_and_strings(text: str) -> str:
+    """Blank out anything whose contents are not code.
+
+    A `//` inside a string literal and a `"` inside a comment each break the
+    naive version of the other, so both are consumed in ONE left-to-right
+    pass — whichever opens first wins, which is what the compiler does.
+    Newlines are preserved so line-oriented checks still see the shape.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        two = text[i : i + 2]
+        if two == "//":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif two == "/*":
+            depth, i = 1, i + 2  # Swift nests block comments
+            while i < n and depth:
+                if text[i : i + 2] == "/*":
+                    depth, i = depth + 1, i + 2
+                elif text[i : i + 2] == "*/":
+                    depth, i = depth - 1, i + 2
+                else:
+                    if text[i] == "\n":
+                        out.append("\n")
+                    i += 1
+        elif ch == '"':
+            if text[i : i + 3] == '"""':
+                j = text.find('"""', i + 3)
+                chunk = text[i : n if j < 0 else j + 3]
+                out.append("\n" * chunk.count("\n"))
+                i = n if j < 0 else j + 3
+            else:
+                i += 1
+                while i < n and text[i] != '"':
+                    i += 2 if text[i] == "\\" else 1
+                i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _brace_blocks(text: str) -> list[tuple[str, str]]:
+    """Every `{...}` as (header, own content), innermost blocks removed.
+
+    The header is the text back to the previous statement boundary, which is
+    what says whether the block is a protocol body, an accessor requirement
+    or a function implementation.
+    """
+    blocks: list[tuple[str, str]] = []
+    stack: list[tuple[int, str]] = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            boundary = max(text.rfind(c, 0, i) for c in "{};\n")
+            stack.append((i, text[boundary + 1 : i]))
+        elif ch == "}" and stack:
+            start, header = stack.pop()
+            blocks.append((header, text[start + 1 : i]))
+    return blocks
+
+
+def _without_nested_blocks(content: str) -> str:
+    out, depth = [], 0
+    for ch in content:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def _swift_carries_executable_code(source: str) -> bool | None:
+    text = _strip_comments_and_strings(source)
+
+    # Two versions of the file exist and this reads neither of them whole.
+    # Answering from one branch would be a claim about code that may not be
+    # the code that compiled.
+    if re.search(r"^\s*#(if|elseif|else)\b", text, re.M):
+        return None
+
+    if _INITIALISED_BINDING.search(text):
+        return True
+
+    for header, content in _brace_blocks(text):
+        if _INERT_BLOCK_HEADER.search(header):
+            continue
+        own = _without_nested_blocks(content).strip()
+        if not own:
+            continue  # `{}` — a marker type's body holds nothing to run
+        # An accessor requirement NAMES its accessors. Requiring a keyword
+        # rather than accepting "no identifiers" is what tells `{ get }` from
+        # `{ 44 }`, whose implicit return has no identifier in it at all and
+        # which an emptiness test therefore waves through as a requirement.
+        names = set(re.findall(r"[A-Za-z_]\w*", own))
+        if names and names <= _ACCESSOR_ONLY:
+            continue
+        return True
+
+    residue = _without_nested_blocks(text)
+    for line in residue.splitlines():
+        if line.strip() and not _TOP_LEVEL_RESIDUE.match(line):
+            return None
+
+    return False
 
 
 #: A failing test CASE. xcodebuild names each one it runs, so counting the

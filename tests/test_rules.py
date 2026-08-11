@@ -1684,3 +1684,194 @@ class TestTheMethodologyMustActuallyRun:
         machine = load_session_machine(None)
         assert "pipeline.complete" in machine.state("reviewed").entry_gates
         assert "pipeline.complete" in machine.state("merged").entry_gates
+
+
+class TestFilesThatCannotHaveACoverageRow:
+    """Two reasons a row is missing, and only one of them is a problem.
+
+    The gate treated every absent row identically and blocked. That is right
+    for a file the run never measured, and unsatisfiable for a file that has
+    nothing to measure — a bare protocol, an enum of cases, a file the change
+    DELETED. No test can be written to clear it, so the gate stops being a
+    standard and becomes something to route around.
+
+    The distinction is only ever drawn in the direction of MORE evidence: an
+    adapter that cannot tell leaves the block exactly where it was.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared, ecosystems=("swift",)):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": list(ecosystems)},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def write(self, ctx_factory, relpath, body):
+        path = ctx_factory.wt / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    MEASURED = "Heap/Intake/FileBytesIngester.swift"
+    PROTOCOL = "Heap/Intake/IntakeDrainRunner.swift"
+    LIVE = "struct A { func f() { g() } }"
+
+    def measured_row(self, ctx_factory):
+        return {str(ctx_factory.wt / self.MEASURED): 100.0}
+
+    def test_a_declaration_only_file_no_longer_blocks(self, ctx_factory):
+        """The reported case: a bare protocol can never earn a row."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            self.PROTOCOL,
+            "protocol IntakeDrainRunner {\n"
+            "    func pumpNow(batchLimit: Int) async\n"
+            "    var currentPauseReason: String? { get async }\n"
+            "}\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PROTOCOL]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+
+    def test_the_excluded_file_is_named_rather_than_silently_dropped(self, ctx_factory):
+        """A pass that quietly narrowed its own scope is the vacuous green."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.PROTOCOL, "protocol P { func a() }\n")
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PROTOCOL]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "IntakeDrainRunner.swift" in (verdict.detail or "")
+
+    def test_a_file_with_code_and_no_row_still_blocks(self, ctx_factory):
+        """The guard. This is the case the gate exists for."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Unmeasured.swift",
+            "struct Unmeasured {\n    func work() { compute() }\n}\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Unmeasured.swift" in verdict.detail
+
+    def test_an_adapter_that_cannot_tell_leaves_the_block_in_place(self, ctx_factory):
+        """`None` is not a negative answer, and must not relax anything."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.PROTOCOL, "protocol P { func a() }\n")
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, self.PROTOCOL],
+            ecosystems=("generic",),  # knows no language, answers None
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+
+    def test_a_file_the_change_deleted_is_not_owed_coverage(self, ctx_factory):
+        """A renamed-away file has no lines left to cover.
+
+        The reported case renamed a 456-line runner. The old path stayed in
+        the branch diff, so the gate asked for coverage of a file that no
+        longer existed, and no run could ever answer.
+        """
+        gone = "Heap/Intake/OldRunner.swift"
+        self.write(ctx_factory, gone, "struct OldRunner { func f() { g() } }")
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "add both"], ctx_factory.wt)
+        (ctx_factory.wt / gone).unlink()
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "remove one"], ctx_factory.wt)
+
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, gone]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+
+    def test_a_file_still_present_is_not_treated_as_deleted(self, ctx_factory):
+        """The deletion check must read the diff, not the absence of a row."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Present.swift",
+            "struct Present {\n    func work() { compute() }\n}\n",
+        )
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "add both"], ctx_factory.wt)
+
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Present.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "Present.swift" in verdict.detail
+
+    def test_a_scope_emptied_by_exclusion_reports_itself_as_empty(self, ctx_factory):
+        """Nothing left to hold to the floor is N/A, not a pass.
+
+        A change that only edits a protocol leaves the touched scope with no
+        measurable file in it. Reporting "all 0 file(s) at or above 90%" would
+        be a green earned by the scope having emptied itself.
+        """
+        self.write(ctx_factory, self.PROTOCOL, "protocol P { func a() }\n")
+        ctx = self.ctx_for(ctx_factory, self.measured_row(ctx_factory), [self.PROTOCOL])
+        verdict = self.verdict(ctx)
+        assert verdict.ok and verdict.skipped
+        assert "IntakeDrainRunner.swift" in verdict.detail
+
+    def test_an_unanswerable_deletion_query_excuses_nothing(
+        self, ctx_factory, tmp_path
+    ):
+        """`None` from git is "cannot tell", which relaxes nothing.
+
+        A path that is merely absent is the shape of a misspelling as much as
+        of a deletion, so the excusal needs git to SAY the change removed it.
+        """
+        from invariant.core import git
+
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        assert git.deleted_files(outside, "master") is None
+
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Misspelt.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "Misspelt.swift" in verdict.detail

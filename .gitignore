@@ -17,3 +17,6 @@ htmlcov/
 # unstaged directory, and any peer running `git add -A` in this checkout
 # commits it wholesale.
 .claude/worktrees/
+
+# Shared gate build/receipt directory: agent-local, never committed.
+.build/

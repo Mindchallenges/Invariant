@@ -81,16 +81,28 @@ graph TD
     RULES --> PROF
     RULES --> PRIVACY
     RULES --> MANIFEST
+    RULES --> adapters
     MANIFEST --> adapters
     PIPELINE --> adapters
     CC --> AGENTS
 ```
 
 **Dependency rule:** arrows point down and never back up. `core/` knows
-nothing about hosts, adapters, or the CLI. `adapters/` know their ecosystem
-and nothing about state. `hosts/` know their agent host, implement the
-protocols `core/` defines, and reach the engine only through the CLI. This is
-what makes the Claude Code binding replaceable.
+nothing about hosts or the CLI. `adapters/` know their ecosystem and nothing
+about state. `hosts/` know their agent host, implement the protocols `core/`
+defines, and reach the engine only through the CLI. This is what makes the
+Claude Code binding replaceable.
+
+`core/ → adapters/` is downward and therefore allowed, and it is how a rule
+asks a question only an ecosystem can answer. `coverage.meets_floor` is the
+case that shows the shape: an absent coverage row means either "never
+measured" — the thing the gate exists to catch — or "nothing to measure",
+which a bare protocol or an enum of cases can never escape. Only something
+that knows the language can tell those apart, so the rule asks
+`Adapter.carries_executable_code`, and an adapter with no opinion answers
+`None`, which relaxes nothing. The rule keeps the policy; the adapter supplies
+the fact. (`MANIFEST → adapters`, for command and rule-level defaults, is the
+same arrow and predates it.)
 
 The two dotted-and-labelled arrows around `stats` are the same rule applied to
 a case that could easily have inverted it (ADR-002 D2). Reading a host's

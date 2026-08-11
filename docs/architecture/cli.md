@@ -89,6 +89,16 @@ invariant pipeline coverage
     non-zero. Whatever the first leg needs in its environment the second
     needs too: a `VAR=value cmd` prefix applies to that one command alone.
 
+    A changed file with no row in that evidence normally BLOCKS: an absent row
+    is what "never measured" looks like. Two absences are set aside instead,
+    each on positive evidence — a file git reports the change deleted, and a
+    file the ecosystem's adapter reports carries no executable lines. Neither
+    could ever earn a row, so demanding one is a gate no test can clear, and a
+    gate no test can clear is one people route around. Anything else,
+    including every "cannot tell", keeps blocking, and every file set aside is
+    NAMED in the verdict — a pass that quietly narrowed its own scope is the
+    vacuous green the gate exists to prevent.
+
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
     reports as skipped, carrying that reason, for the rest of the pipeline.

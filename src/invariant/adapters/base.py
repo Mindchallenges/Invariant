@@ -193,5 +193,27 @@ class Adapter:
         """Narrow a changed-file list to this ecosystem's source files."""
         return list(changed)
 
+    def carries_executable_code(self, path: Path) -> bool | None:
+        """Does this file contribute lines a coverage tool could measure?
+
+        Asked only to explain an ABSENT coverage row. Reporters emit nothing
+        for a file with no executable lines — a bare protocol, an enum of
+        cases, a typealias — and that silence is indistinguishable from a
+        file the run never measured. The two need opposite handling: the
+        first is vacuously fine, the second is the thing a coverage floor
+        exists to catch.
+
+        ``None`` means "cannot tell", and carries the same obligation as
+        :func:`git.branch_files`' ``None`` — a caller deciding whether to
+        RELAX must treat it as "do not relax". The generic adapter knows no
+        language, so it always answers ``None``.
+
+        The two wrong answers are not symmetrical, and an implementation
+        must prefer the first: claiming an inert file has code costs a
+        spurious block, which is visible and sends someone to look; claiming
+        a live file is inert passes unmeasured code silently.
+        """
+        return None
+
     def hazards(self) -> list[Hazard]:
         return []

@@ -145,6 +145,52 @@ def branch_files(cwd: Path, base: str) -> list[Path] | None:
     return [Path(p) for p in out.splitlines() if p]
 
 
+def deleted_files(cwd: Path, base: str = "") -> list[Path] | None:
+    """Paths this change REMOVED — working tree, index, and the branch's commits.
+
+    Positive evidence of a deletion, which is a different question from "the
+    file is not there". A path can be missing from disk because the change
+    deleted it, or because whoever named it spelled it wrong, and only git can
+    tell those apart. A caller that reads absence as deletion excuses the
+    typo too.
+
+    The commit leg is ``log``, not ``diff``: a path added and then removed on
+    the same branch is absent from both endpoints of ``base...HEAD``, so the
+    net diff never mentions it, while the commit that removed it still does.
+    The cost is that a path deleted and later restored also appears here — so
+    a caller must pair this with the file's actual absence, and the two
+    together are what make the answer sound.
+
+    Each leg is optional and contributes only what it can read: fewer legs
+    mean fewer paths reported, which relaxes nothing. ``None`` is reserved for
+    the case where no leg answered at all, and carries the same obligation as
+    :func:`branch_files`' ``None`` — a caller deciding whether to *relax* must
+    treat it as "do not relax".
+    """
+    found: set[str] = set()
+    answered = False
+    legs = [
+        ["diff", "--diff-filter=D", "--name-only"],
+        ["diff", "--cached", "--diff-filter=D", "--name-only"],
+    ]
+    if base:
+        legs.append(
+            [
+                "log", "--diff-filter=D", "--name-only",
+                "--pretty=format:", f"{base}..HEAD",
+            ]
+        )
+    for args in legs:
+        code, out, _ = _run(args, cwd)
+        if code != 0:
+            continue
+        answered = True
+        found.update(p for p in out.splitlines() if p.strip())
+    if not answered:
+        return None
+    return [Path(p) for p in sorted(found)]
+
+
 def unpushed_files(cwd: Path) -> list[Path] | None:
     """Paths touched by commits the upstream does not have yet.
 

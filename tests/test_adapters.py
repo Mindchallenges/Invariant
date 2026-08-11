@@ -612,3 +612,359 @@ class TestAdapterSelfCheck:
         monkeypatch.setattr(swift, "_tool_is_reachable", lambda tool, dd: dd is None)
         rows = get_adapter("swift").self_check()
         assert all(ok and detail == "via xcrun" for _, ok, detail in rows)
+
+
+class TestCarriesExecutableCode:
+    """Explaining an ABSENT coverage row, not predicting a present one.
+
+    A coverage reporter emits nothing at all for a file with no executable
+    lines — a bare protocol, an enum of cases, a typealias. That absence is
+    indistinguishable, to the gate, from a file that was never measured, and
+    the two need opposite handling: the first is vacuously fine, the second
+    is exactly what a coverage floor exists to catch.
+
+    So this answers one narrow question — "is this absence explained by the
+    file having no executable lines?" — and the safe direction is asymmetric.
+    Saying "has code" about an inert file costs a spurious block, which is
+    visible and sends someone to look. Saying "no code" about a live file
+    passes unmeasured code silently. Every uncertain case must therefore
+    answer True or None, never False.
+    """
+
+    def setup_method(self):
+        self.adapter = get_adapter("swift_xcode")
+
+    def write(self, tmp_path, name, body):
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    # -- the shapes that genuinely cannot be measured -------------------
+
+    def test_a_bare_protocol_carries_no_executable_code(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "IntakeDrainRunner.swift",
+            """
+            import Foundation
+
+            protocol IntakeDrainRunner: AnyObject {
+                func pumpNow(batchLimit: Int) async
+                func pauseForLibrarySwitchAndAwaitIdle() async
+                var currentPauseReason: IntakePauseReason? { get async }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_an_enum_of_bare_cases_carries_no_executable_code(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "IntakePauseReason.swift",
+            """
+            import Foundation
+
+            enum IntakePauseReason: String, Equatable, Sendable {
+                case librarySwitch
+                case userPaused
+                case cellular
+            }
+
+            typealias PhotosImportPauseReason = IntakePauseReason
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_raw_value_enum_is_still_inert(self, tmp_path):
+        """Raw values are compile-time constants, not executable lines."""
+        path = self.write(
+            tmp_path,
+            "Kind.swift",
+            """
+            enum Kind: String {
+                case photo = "photo"
+                case video = "video"
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_comment_mentioning_func_does_not_count(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "Seam.swift",
+            """
+            //  The drain's `func pumpNow()` body { lives elsewhere }.
+            protocol Seam {
+                func pumpNow() async
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    # -- everything else must NOT be called inert -----------------------
+
+    def test_a_function_body_carries_executable_code(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "Runner.swift",
+            """
+            struct Runner {
+                func pumpNow() { print("go") }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_computed_property_with_statements_carries_code(self, tmp_path):
+        """`{ get }` is a requirement; `{ 1 }` is an implementation."""
+        path = self.write(
+            tmp_path,
+            "Sizes.swift",
+            """
+            enum Sizes {
+                var thumbnail: Int { 44 }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_stored_property_initialiser_carries_code(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "Defaults.swift",
+            """
+            struct Defaults {
+                var limit: Int = 200
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_property_observer_carries_code(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "Observed.swift",
+            """
+            struct Observed {
+                var count: Int {
+                    didSet { recompute() }
+                }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_protocol_extension_with_a_default_body_carries_code(self, tmp_path):
+        """The shape most likely to be mistaken for a bare protocol."""
+        path = self.write(
+            tmp_path,
+            "SeamDefaults.swift",
+            """
+            protocol Seam {
+                func pumpNow() async
+            }
+
+            extension Seam {
+                func pumpNow() async { await drain() }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_conditional_compilation_block_is_not_claimed_inert(self, tmp_path):
+        """Two versions of the file exist; this reads only one of them."""
+        path = self.write(
+            tmp_path,
+            "Forwarder.swift",
+            """
+            #if DEBUG
+            protocol Seam { func a() }
+            #else
+            protocol Seam { func b() }
+            #endif
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is not False
+
+    def test_a_nested_block_comment_hides_what_looks_like_code(self, tmp_path):
+        """Swift nests `/* */`, so the first `*/` does not end the comment."""
+        path = self.write(
+            tmp_path,
+            "Commented.swift",
+            """
+            /* the old shape:
+               /* func pumpNow() { drain() } */
+               kept for reference */
+            protocol Seam {
+                func pumpNow() async
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_multiline_string_is_not_read_as_code(self, tmp_path):
+        """Braces and slashes inside a `\"\"\"` literal are text, not syntax."""
+        path = self.write(
+            tmp_path,
+            "Fixture.swift",
+            '''
+            enum Fixture: String {
+                case payload = """
+                    { "note": "// not a comment", "closing": "}" }
+                    """
+            }
+            ''',
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_marker_type_with_an_empty_body_is_inert(self, tmp_path):
+        """`{}` is a block, and there is nothing inside it to run."""
+        path = self.write(
+            tmp_path,
+            "Marker.swift",
+            """
+            protocol Marker {}
+
+            struct IntakeToken: Marker {}
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_an_unrecognised_top_level_shape_is_unknown_not_inert(self, tmp_path):
+        """A residue this reader cannot classify answers None, never False.
+
+        Top-level statements are the case that made this matter: a `main.swift`
+        runs its own body, and a reader that shrugged "no blocks, therefore no
+        code" would excuse the file from the floor entirely.
+        """
+        path = self.write(tmp_path, "main.swift", 'ingest(from: "inbox")\n')
+        assert self.adapter.carries_executable_code(path) is None
+
+    def test_an_unreadable_file_is_unknown_rather_than_inert(self, tmp_path):
+        assert self.adapter.carries_executable_code(tmp_path / "gone.swift") is None
+
+    def test_a_non_swift_file_is_not_this_adapters_question(self, tmp_path):
+        path = self.write(tmp_path, "notes.md", "# not swift")
+        assert self.adapter.carries_executable_code(path) is None
+
+    def test_the_generic_adapter_never_claims_to_know(self, tmp_path):
+        path = tmp_path / "a.swift"
+        path.write_text("protocol P {}", encoding="utf-8")
+        assert Adapter().carries_executable_code(path) is None
+
+
+class TestResultBundleCounts:
+    """The run's own record of itself, and every way reading it can fail.
+
+    This reader exists because the console parser counts assertions where a
+    reader wants CASES. Every failure below returns None rather than a
+    number, so the caller falls back to the parser it was built to replace —
+    a missing count is recoverable, a wrong one is not.
+    """
+
+    def fake_run(self, monkeypatch, *responses):
+        """Answer each `subprocess.run` with the next scripted response.
+
+        A response is an exception to raise, or (returncode, stdout).
+        """
+        import subprocess
+
+        class Completed:
+            def __init__(self, returncode, stdout):
+                self.returncode, self.stdout, self.stderr = returncode, stdout, ""
+
+        pending = list(responses)
+        calls: list[dict] = []
+
+        def run(argv, **kwargs):
+            calls.append({"argv": argv, "env": kwargs.get("env") or {}})
+            response = pending.pop(0) if pending else (1, "")
+            if isinstance(response, Exception):
+                raise response
+            return Completed(*response)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        return calls
+
+    def bundle(self, tmp_path):
+        path = tmp_path / "run.xcresult"
+        path.mkdir()
+        return path
+
+    def adapter(self, monkeypatch, developer_dir=None):
+        import invariant.adapters.swift_xcode as swift
+
+        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        monkeypatch.setattr(swift, "_newest_developer_dir", lambda: developer_dir)
+        return get_adapter("swift")
+
+    PAYLOAD = (
+        '{"totalTestCount": 42, "failedTests": 2, "skippedTests": 1, '
+        '"result": "Failure", "devicesAndConfigurations": '
+        '[{"device": {"deviceName": "iPhone 16", "deviceId": "ABC-123"}}]}'
+    )
+
+    def test_the_counts_are_read_in_test_cases(self, tmp_path, monkeypatch):
+        self.fake_run(monkeypatch, (0, self.PAYLOAD))
+        counts = self.adapter(monkeypatch).result_bundle_counts(self.bundle(tmp_path))
+        assert counts == {
+            "total": 42,
+            "failed": 2,
+            "skipped": 1,
+            "result": "Failure",
+            "device": "iPhone 16 (ABC-123)",
+        }
+
+    def test_a_bundle_that_is_not_there_is_not_asked_about(self, tmp_path, monkeypatch):
+        calls = self.fake_run(monkeypatch, (0, self.PAYLOAD))
+        adapter = self.adapter(monkeypatch)
+        assert adapter.result_bundle_counts(tmp_path / "absent.xcresult") is None
+        assert adapter.result_bundle_counts(None) is None
+        assert calls == []
+
+    def test_an_unreachable_tool_is_retried_against_an_installed_xcode(
+        self, tmp_path, monkeypatch
+    ):
+        """The fallback that made this reader work at all.
+
+        A machine whose xcode-select points at CommandLineTools cannot find
+        xcresulttool through xcrun, and the reader fell silently back to the
+        console parser on every run.
+        """
+        calls = self.fake_run(monkeypatch, (72, ""), (0, self.PAYLOAD))
+        adapter = self.adapter(monkeypatch, developer_dir=Path("/X/Developer"))
+        counts = adapter.result_bundle_counts(self.bundle(tmp_path))
+        assert counts["total"] == 42
+        assert calls[0]["env"].get("DEVELOPER_DIR") is None
+        assert calls[1]["env"]["DEVELOPER_DIR"] == "/X/Developer"
+
+    def test_a_tool_that_cannot_be_run_at_all_yields_no_counts(
+        self, tmp_path, monkeypatch
+    ):
+        self.fake_run(monkeypatch, OSError("no xcrun"), OSError("no xcrun"))
+        adapter = self.adapter(monkeypatch, developer_dir=Path("/X/Developer"))
+        assert adapter.result_bundle_counts(self.bundle(tmp_path)) is None
+
+    def test_output_that_is_not_json_yields_no_counts(self, tmp_path, monkeypatch):
+        self.fake_run(monkeypatch, (0, "xcresulttool: unrecognised subcommand"))
+        adapter = self.adapter(monkeypatch)
+        assert adapter.result_bundle_counts(self.bundle(tmp_path)) is None
+
+    def test_json_without_a_total_is_refused_rather_than_read_as_zero(
+        self, tmp_path, monkeypatch
+    ):
+        """A shape this reader does not recognise is not a run of no tests."""
+        self.fake_run(monkeypatch, (0, '{"result": "Success"}'))
+        adapter = self.adapter(monkeypatch)
+        assert adapter.result_bundle_counts(self.bundle(tmp_path)) is None
+
+    def test_a_run_with_no_device_recorded_still_reports_its_counts(
+        self, tmp_path, monkeypatch
+    ):
+        self.fake_run(
+            monkeypatch,
+            (0, '{"totalTestCount": 3, "devicesAndConfigurations": [{"device": {}}]}'),
+        )
+        counts = self.adapter(monkeypatch).result_bundle_counts(self.bundle(tmp_path))
+        assert counts["total"] == 3 and counts["device"] is None

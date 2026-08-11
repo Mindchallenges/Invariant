@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from ..adapters import Adapter, get_adapter
 from . import git
 from .errors import InvariantError
 from .machines import load_pipeline_machine, load_session_machine
@@ -64,8 +65,8 @@ class Verdict:
     skipped: bool = False
 
     @classmethod
-    def clean(cls, message: str = "") -> "Verdict":
-        return cls(ok=True, message=message)
+    def clean(cls, message: str = "", detail: str = "") -> "Verdict":
+        return cls(ok=True, message=message, detail=detail)
 
     @classmethod
     def fail(
@@ -74,8 +75,8 @@ class Verdict:
         return cls(ok=False, message=message, detail=detail, fixes=tuple(fixes))
 
     @classmethod
-    def na(cls, message: str = "not applicable here") -> "Verdict":
-        return cls(ok=True, message=message, skipped=True)
+    def na(cls, message: str = "not applicable here", detail: str = "") -> "Verdict":
+        return cls(ok=True, message=message, detail=detail, skipped=True)
 
 
 @dataclass(frozen=True)
@@ -1001,6 +1002,7 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
     coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
 
     scope = str(ctx.manifest.get("methodology.gates.coverage_scope", "touched"))
+    excluded: list[str] = []
     if scope == "touched":
         # Three sources, because each one alone goes empty in a state the
         # others survive. The working tree and index answer for work in
@@ -1059,7 +1061,17 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
             else:
                 unmatched.append(wanted)
 
-        if not touched:
+        # An absent row has two causes and they are not the same fact. A file
+        # the run never measured is exactly what this gate exists to catch. A
+        # file with nothing to measure — a bare protocol, an enum of cases, a
+        # file this change DELETED — can never earn a row, so demanding one is
+        # a gate no test can clear, and a gate no test can clear is one people
+        # route around. Only the second is set aside, only on positive
+        # evidence, and every file set aside is NAMED below.
+        excluded, unmatched = _explain_absent_rows(ctx, unmatched, roots)
+        set_aside = _excluded_detail(excluded)
+
+        if not touched and unmatched:
             return Verdict.fail(
                 "coverage was measured, but none of it covers the changed files",
                 detail=(
@@ -1068,6 +1080,7 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                     f"path-spelling mismatch between the coverage reporter "
                     f"and git. Reporting this as a pass would be the gate "
                     f"approving a measurement of something else."
+                    + (f"  {set_aside}" if set_aside else "")
                 ),
                 fixes=("check the coverage command covers the changed target",),
             )
@@ -1086,11 +1099,19 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                     "path spellings still disagree. The gate cannot answer "
                     "for a file it did not find, and answering anyway for "
                     "the rest would report a pass it has not established."
+                    + (f"  {set_aside}" if set_aside else "")
                 ),
                 fixes=(
                     "check these files are in the coverage target",
                     "or drop them from the session file set if they are not code",
                 ),
+            )
+
+        if not touched:
+            return Verdict.na(
+                "every touched source file has nothing a coverage run could "
+                "measure",
+                detail=set_aside,
             )
         coverage = touched
 
@@ -1129,10 +1150,17 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         )
     suffix = ("  (" + "; ".join(caveats) + ")") if caveats else ""
 
+    # Whatever the floor decides, the gate reports what it declined to hold to
+    # the floor. A pass that quietly narrowed its own scope is the vacuous
+    # green this gate exists to prevent, and the narrowing is only reviewable
+    # if it is written down where the verdict is read.
+    aside = _excluded_detail(excluded)
+
     below = {f: pct for f, pct in coverage.items() if float(pct) < floor}
     if not below:
         return Verdict.clean(
-            f"all {len(coverage)} file(s) at or above {floor:g}%{suffix}"
+            f"all {len(coverage)} file(s) at or above {floor:g}%{suffix}",
+            detail=aside,
         )
     listed = ", ".join(f"{f} {pct:g}%" for f, pct in sorted(below.items())[:6])
     return Verdict.fail(
@@ -1140,7 +1168,8 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         detail=listed
         + ". Coverage is a floor, not proof — repairing an inert test can lower "
         "it while making the suite more honest, so read a drop before acting "
-        "on it.",
+        "on it."
+        + (f"  {aside}" if aside else ""),
         fixes=("add tests for the uncovered branches",),
     )
 
@@ -1424,6 +1453,94 @@ def _coverage_roots(ctx: RuleContext) -> list[Path]:
     roots.append(_repo_root(ctx))
     roots.append(ctx.manifest.root)
     return roots
+
+
+def _explain_absent_rows(
+    ctx: RuleContext, missing: list[str], roots: list[Path]
+) -> tuple[list[str], list[str]]:
+    """Split "no row could exist" from "no row was produced".
+
+    Returns ``(excluded, unexplained)``. Only the first is set aside, and only
+    where something positively says so: git reporting the path deleted, or an
+    adapter reporting the file carries no executable lines. Everything else —
+    including every "cannot tell" — stays in the second list and keeps
+    blocking, because the two mistakes are not symmetrical. Calling a live
+    file inert passes unmeasured code silently; calling an inert file live
+    costs a spurious block, which is visible and sends someone to look.
+    """
+    if not missing:
+        return [], []
+
+    # Deletions are read from the SESSION's worktree when it records one, for
+    # the same reason `_coverage_roots` prefers it: the commits that removed
+    # the file are on the session's branch, and the rule itself may well be
+    # running from the main checkout, where that branch is not checked out.
+    base = str((ctx.session or {}).get("base") or "")
+    deleted = git.deleted_files(_session_worktree(ctx) or ctx.cwd, base) or []
+    deleted_forms = [_relative_to_any(path, roots) for path in deleted]
+    adapters = _ecosystem_adapters(ctx)
+
+    excluded: list[str] = []
+    unexplained: list[str] = []
+    for rel in missing:
+        found = _first_existing(rel, roots)
+        if found is None:
+            # Absence alone proves nothing — a misspelt path is absent too.
+            # Git has to say the change removed it.
+            if any(_same_file(rel, form) for form in deleted_forms):
+                excluded.append(f"{rel} (deleted by this change)")
+            else:
+                unexplained.append(rel)
+            continue
+        if _carries_executable_code(adapters, found) is False:
+            excluded.append(f"{rel} (no executable lines to measure)")
+        else:
+            unexplained.append(rel)
+    return excluded, unexplained
+
+
+def _excluded_detail(excluded: list[str]) -> str:
+    if not excluded:
+        return ""
+    return (
+        "Not held to the floor, because no coverage run could produce a row "
+        "for them: " + "; ".join(excluded) + "."
+    )
+
+
+def _session_worktree(ctx: RuleContext) -> Path | None:
+    recorded = (ctx.session or {}).get("worktree")
+    if not recorded:
+        return None
+    path = Path(recorded)
+    return path if path.exists() else None
+
+
+def _first_existing(rel: str, roots: Iterable[Path]) -> Path | None:
+    """The file named by a project-relative path, under whichever root has it."""
+    for root in roots:
+        candidate = Path(root) / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _ecosystem_adapters(ctx: RuleContext) -> list[Adapter]:
+    return [get_adapter(eco) for eco in ctx.manifest.ecosystems]
+
+
+def _carries_executable_code(adapters: list[Adapter], path: Path) -> bool | None:
+    """The first adapter with an opinion answers; ``None`` if none has one.
+
+    Adapters stack, and one that does not know a language returns ``None`` for
+    it rather than a wrong answer — so asking them in the manifest's order and
+    taking the first real answer is what makes a mixed-ecosystem project work.
+    """
+    for adapter in adapters:
+        answer = adapter.carries_executable_code(path)
+        if answer is not None:
+            return answer
+    return None
 
 
 #: A real `git push`, not the words "git push" occurring in a command. The
