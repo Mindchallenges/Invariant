@@ -13,7 +13,7 @@ from invariant.core.items import (
 )
 from invariant.core.manifest import MANIFEST_RELPATH, Manifest
 from invariant.domains.pipeline import PipelineDomain, describe_run, summarise
-from invariant.domains.session import SessionDomain
+from invariant.domains.session import Session, SessionDomain
 from invariant.domains.workitem import WorkItemDomain
 
 
@@ -822,6 +822,111 @@ class TestTeardownRemovesTheBranch:
         session = domain.start("never-isolated")
         with pytest.raises(TransitionError):
             domain.teardown(session.id)
+
+
+class TestTeardownAndALiveHostBinding:
+    """Teardown's preconditions ask git, and never ask who is standing there."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_009 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_teardown_does_not_consult_a_live_host_binding(self, m):
+        """Repro for BUG_009 — see docs/backlog/BUG_009.md.
+
+        The reported symptom is a WEDGED host session, which is environment
+        state and not a return value: the host's own worktree isolation then
+        refuses every shell call and orders the caller back into a directory
+        that no longer exists, and the repair commands sit behind that same
+        refusal. That deadlock is not expressible here and this test does not
+        attempt it. What is expressible is the missing precondition underneath
+        it, which is what `docs/architecture/state_model.md` "Host binding"
+        makes checkable: `SessionEnd` marks the binding spent, so a session
+        carrying a `host_session_id` with `host_ended` still False is a
+        binding that is, by the documented model, LIVE.
+
+        The entry's contract: "Removing a directory another system holds a
+        live reference to should not be a silent success."
+
+        Deliberately NOT asserting the suspected cause's shape, and
+        deliberately NOT asserting any particular reaction. Whether teardown
+        should REFUSE or merely WARN is an open design decision, and a test
+        that hardcoded one would foreclose the other. So this pins only that
+        teardown never CONSULTS the binding at all, by measuring reads of the
+        two binding fields that happen while the worktree is still on disk —
+        that is, in time to be a precondition.
+
+        The ordering discriminator is load-bearing rather than decorative.
+        Teardown does read `host_session_id` afterwards, twice for the
+        transition's telemetry watermark and once more when the record is
+        serialised, so a naive "was it read at all" spy reports a consultation
+        that never happened. Reads after the directory is already gone cannot
+        be a precondition on removing it.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("host-occupied")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        # Land the branch on the base so the safe `git branch -d` accepts it:
+        # an unmerged branch is refused by a precondition that DOES exist, and
+        # that refusal would mask the absence of this one.
+        subprocess.run(
+            ["git", "merge", "--ff-only", session.branch],
+            cwd=str(m.root), check=True, capture_output=True,
+        )
+        domain.adopt_host_session(session.id, "host-0000-1111-2222")
+        session = domain.get(session.id)
+        session.state = "merged"  # teardown is only legal from `merged`
+        domain._save(session)
+
+        session = domain.get(session.id)
+        assert session.host_session_id == "host-0000-1111-2222"
+        assert session.host_ended is False, "SessionEnd never fired: the binding is live"
+        worktree = Path(session.worktree)
+        assert worktree.is_dir()
+
+        # Record every read of the binding, tagged with whether the directory
+        # still existed at that moment. `require()` rebuilds the Session from
+        # the store, so the spy has to sit on the class, not on this instance.
+        reads: list[tuple[str, bool]] = []
+        unspied = Session.__getattribute__
+
+        def spy(self, name):
+            if name in {"host_session_id", "host_ended"}:
+                try:
+                    reads.append((name, worktree.exists()))
+                except OSError:
+                    reads.append((name, False))
+            return unspied(self, name)
+
+        Session.__getattribute__ = spy
+        try:
+            refusal = None
+            try:
+                domain.teardown(session.id)
+            except StateError as exc:
+                refusal = str(exc)
+        finally:
+            Session.__getattribute__ = unspied
+
+        consulted = [name for name, still_there in reads if still_there]
+        destroyed = not worktree.exists()
+
+        # One condition, satisfiable by either fix. A refusal leaves the
+        # worktree standing and passes on `destroyed`; a warning removes it but
+        # has to read the binding first and passes on `consulted`. Today
+        # neither holds: the directory is gone and nothing ever asked.
+        assert not (destroyed and not consulted), (
+            "teardown removed the worktree of a session whose host binding is "
+            f"still live, without ever consulting it. Reads of the binding "
+            f"while the directory still existed: {consulted}; reads after it "
+            f"was already gone (telemetry and serialisation, too late to be a "
+            f"precondition): {[n for n, s in reads if not s]}. Refusal raised: "
+            f"{refusal!r}."
+        )
 
 
 
