@@ -344,6 +344,111 @@ class TestDocsRules:
         assert only(evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt))).verdict.ok
 
 
+class TestDocsGatesOnACommittedTree:
+    """Repro for BUG_012 — see docs/backlog/BUG_012.md.
+
+    Every test above dirties the working tree or the index, which is the state
+    work is in *while it happens*. `docs.updated` is an exit gate on the review
+    state (`docs/architecture/state_model.md` line 43), so it runs at the end of
+    a phase, when the work is committed by construction and `git diff` reports
+    nothing. Both rules read `git.changed_files` alone and bail on the empty
+    set, so the gate the engine cannot be opted out of returns N/A — which is
+    indistinguishable from a pass in the gate listing.
+
+    `coverage.meets_floor` already survives this state by unioning three
+    sources; `TestCoverageRule.test_committed_work_is_still_in_scope` is the
+    same fixture shape asserted against the rule that gets it right.
+    """
+
+    def commit_source_only(self, wt):
+        """A source change that lives ONLY in the branch's commits."""
+        (wt / "app.py").write_text("def go():\n    return 1\n", encoding="utf-8")
+        run(["git", "add", "app.py"], wt)
+        run(["git", "commit", "-qm", "add a module and no doc"], wt)
+
+    def test_the_fixture_leaves_a_genuinely_committed_tree(self, ctx_factory):
+        """Guard for the two repros below, and deliberately not xfail.
+
+        A strict xfail counts a failure in setup as the expected failure, so a
+        repro that quietly dirtied the tree would report red for the wrong
+        reason and prove nothing. This asserts the precondition separately: the
+        working tree and index are empty, and the change is visible only
+        through the branch's commits.
+        """
+        from invariant.core import git
+
+        wt = ctx_factory.wt
+        self.commit_source_only(wt)
+        assert git.changed_files(wt) == []
+        assert git.branch_files(wt, "master") == [Path("app.py")]
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_012 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_docs_updated_reads_a_source_only_commit(self, ctx_factory):
+        """The blocking gate must judge committed work, not decline to look."""
+        wt = ctx_factory.wt
+        self.commit_source_only(wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert not result.verdict.skipped, result.verdict.message
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_012 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_diagrams_current_reads_a_committed_doc_change(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text(
+            "# Prose only\n", encoding="utf-8"
+        )
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "drop the diagram"], wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt, session=session))
+        )
+        assert not result.verdict.skipped, result.verdict.message
+        assert "no diagram" in result.verdict.message
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_012 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_docs_updated_reads_the_declared_set_when_no_base_is_configured(
+        self, ctx_factory
+    ):
+        """The declared file set is not belt-and-braces; it is the last carrier.
+
+        `git.branch_files` returns `None` on an empty base before it attempts a
+        ref at all (`src/invariant/core/git.py:137-138`), and the two readers of
+        that field disagree about the fallback — `rules.py:586` reads `master`,
+        `rules.py:1013` reads `""`. With the base absent and the work committed,
+        the session's declared set is the only thing still holding an answer, so
+        a two-source repair leaves this red.
+        """
+        from invariant.core import git
+
+        wt = ctx_factory.wt
+        self.commit_source_only(wt)
+        session = {"worktree": str(wt), "base": "", "files": ["app.py"]}
+        assert git.branch_files(wt, "") is None
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert not result.verdict.skipped, result.verdict.message
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+
 # -- test + coverage rules ---------------------------------------------
 
 
