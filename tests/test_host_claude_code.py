@@ -497,6 +497,142 @@ class TestAgentInvocationIsRecorded:
         assert ctx.pipelines.agents == []
 
 
+class TestReadIsAttributedByItsPath:
+    """Repro for BUG_010, narrow half — see the work-item entry.
+
+    The suite above proves the recording *happens*; it cannot prove the
+    recording lands on the right session, because its ``FakeCtx`` answers
+    ``current_session`` with the same session no matter what was asked. This
+    class therefore builds real repositories, real worktrees and a real
+    ``Context``: the defect lives in attribution, so a harness that stubs
+    attribution out cannot see it.
+
+    An edit is attributed by its destination path — step 3 of the order in
+    ``docs/architecture/state_model.md``, "Attribution" — which survives the
+    host resetting its working directory. A Read carries the same absolute
+    ``file_path`` in the same payload key, and the host pulls that key out a
+    few lines further down purely to record it, but resolves the owner without
+    it. With more than one session live and the hook firing from the shared
+    checkout, the path is the only signal that names an owner, and it is the
+    one signal not consulted.
+    """
+
+    HOST_ID = "host-standing-elsewhere"
+
+    @pytest.fixture
+    def two_live_sessions(self, tmp_path, monkeypatch):
+        """A project with two isolated sessions, one of them mid-design.
+
+        Two, because one is not the case attribution exists for: with a single
+        session the working directory still resolves to it by origin, and the
+        read is recorded by luck rather than by evidence. The documented
+        rationale for path attribution is the several-sessions case, where
+        "every one of them looks identical from the shared checkout".
+        """
+        import subprocess
+
+        from invariant.cli.main import Context
+        from invariant.core.manifest import MANIFEST_RELPATH
+        from invariant.domains.pipeline import PipelineDomain
+        from invariant.domains.session import SessionDomain
+
+        # Resolution consults the environment first. A developer running this
+        # suite with a session exported would otherwise get a pass that proves
+        # only that the override works.
+        monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+
+        def git(*args):
+            subprocess.run(
+                ["git", *args], cwd=str(tmp_path), check=True, capture_output=True, text=True
+            )
+
+        (tmp_path / MANIFEST_RELPATH).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo"},
+                    "session": {"worktree_dir": ".claude/worktrees"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "architecture").mkdir(parents=True)
+        (tmp_path / "docs" / "architecture" / "overview.md").write_text(
+            "# Overview\n\n```mermaid\ngraph TD\n  A-->B\n```\n", encoding="utf-8"
+        )
+        git("init", "-q", "-b", "master")
+        # Deliberately not address-shaped: this repository's own privacy gate
+        # blocks on anything that parses as an email, synthetic or not.
+        git("config", "user.email", "tester")
+        git("config", "user.name", "Test")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+        ctx = Context(cwd=tmp_path, host_session_id=self.HOST_ID)
+        sessions = SessionDomain(ctx.manifest, ctx.store)
+        pipelines = PipelineDomain(ctx.manifest, ctx.store)
+
+        owner = sessions.start("alpha")
+        sessions.isolate(owner.id, execute=True)
+        peer = sessions.start("beta")
+        sessions.isolate(peer.id, execute=True)
+        pipelines.start(owner.id, task="the change alpha is designing")
+
+        worktree = Path(sessions.get(owner.id).worktree)
+        return {
+            "project": tmp_path,
+            "owner": owner.id,
+            "worktree": worktree,
+            "doc": worktree / "docs" / "architecture" / "overview.md",
+            "pipelines": pipelines,
+        }
+
+    def read_gate(self, world):
+        """What `invariant pipeline gates` would report, run in the worktree."""
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import RuleContext, evaluate
+
+        worktree = world["worktree"]
+        rule_ctx = RuleContext(
+            manifest=Manifest.load(worktree),
+            cwd=worktree,
+            session={"id": world["owner"]},
+            pipeline=world["pipelines"].current(world["owner"]).to_dict(),
+            payload={},
+            extra={},
+        )
+        results = evaluate(["docs.read_architecture"], rule_ctx)
+        assert len(results) == 1, "the gate under test did not evaluate"
+        return results[0].verdict
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_010 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_BUG_010_a_read_inside_a_worktree_satisfies_that_sessions_docs_gate(
+        self, two_live_sessions
+    ):
+        from invariant.cli.main import Context
+
+        world = two_live_sessions
+        assert world["doc"].is_file(), "the doc to be read is not in the worktree"
+        assert not self.read_gate(world).ok, "the gate was already satisfied; nothing to prove"
+
+        # The hook fires from the shared checkout, which is where a host runs
+        # it, and names an absolute path inside one session's worktree.
+        ClaudeCodeHost(world["project"])._post_tool_use(
+            {"tool_name": "Read", "tool_input": {"file_path": str(world["doc"])}},
+            Context(cwd=world["project"], host_session_id=self.HOST_ID),
+        )
+
+        verdict = self.read_gate(world)
+        assert verdict.ok, verdict.message
+
 
 class TestAutomaticBinding:
     """`session start` runs through Bash, which carries no hook payload.
