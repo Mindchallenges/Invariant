@@ -892,3 +892,134 @@ class TestAForcedRebindDoesNotCrossTwoHostSessionsUsageCounters:
             f"{self.CROSSED} tokens, which is host session B's cumulative "
             "total minus host session A's watermark — two unrelated counters"
         )
+
+
+
+class TestAFrozenTranscriptDoesNotRenderAsZeroSpend:
+    """Repro for BUG_016 F1 — see docs/backlog/BUG_016.md.
+
+    The entry records this sub-finding's REACHABILITY as CANNOT-VERIFY and asks
+    that it be settled before a line is changed. It is settled, and the answer
+    is REACHABLE — by a plainer mechanism than the host-side transcript rotation
+    the entry hypothesised. Two watermark reads return equal values whenever no
+    billed assistant record is appended between them, which is what happens
+    whenever two `invariant` invocations are chained in one shell command: both
+    processes read the same bytes. No freezing and no rotation is required.
+
+    What that produces is a `Usage()` whose every field is zero rather than
+    `None`, and ADR-002 D3 is explicit that an unobservable spend is "the same
+    `None`, rendered as 'no breakdown' rather than a zero", because "a blank
+    invites the reader to conclude the work was free" — which a rendered zero
+    invites more strongly than a blank does.
+    """
+
+    class Frozen:
+        """A findable transcript that is not growing: every read is the same.
+
+        Deliberately NOT returning `None` — `None` is the path that already
+        renders correctly, and conflating the two is the whole defect.
+        """
+
+        def __init__(self, reading: Usage) -> None:
+            self.reading = reading
+            self.reads = 0
+
+        def watermark(self, host_session_id):
+            self.reads += 1
+            return self.reading
+
+    class Moving:
+        """The control: a transcript that grows between reads."""
+
+        def __init__(self) -> None:
+            self.readings = [Usage(input=100), Usage(input=250), Usage(input=400)]
+
+        def watermark(self, host_session_id):
+            return self.readings.pop(0) if self.readings else None
+
+    def wired(self, m, watermarks):
+        session = SessionDomain(m).start("a-task", host_session_id=HOST_A)
+        pipelines = PipelineDomain(m, watermarks=watermarks)
+        pipelines.start(session.id, task="t", host_session_id=HOST_A)
+        for target in ("red", "green"):
+            pipelines.advance(
+                session.id,
+                target,
+                force=True,
+                reason="gates are not the subject",
+                session=session.to_dict(),
+            )
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+        return stats, stats.render_session("a-task")
+
+    def spend(self, text, state):
+        """The spend field of one rendered row, and only that field.
+
+        Asserting on the whole rendering would be a trap: `"0 tokens" not in
+        text` is satisfied by neither of the two things it looks like it says,
+        because `150 tokens` contains it as a substring.
+        """
+        for line in text.splitlines():
+            if line.strip().startswith(f"{state} "):
+                return line.split(" tokens")[0].split()[-1]
+        raise AssertionError(f"no rendered row for state {state!r} in:\n{text}")
+
+    def test_the_frozen_transcript_is_findable_and_every_transition_recorded_it(
+        self, m
+    ):
+        """The precondition, and the reason this is not the already-correct
+        `None` path: the watermark source ANSWERS on every read, the baseline
+        and both transitions carry one, and the breakdown below is therefore a
+        rendered measurement rather than an absence."""
+        frozen = self.Frozen(Usage(input=1200, output=300))
+        stats, _ = self.wired(m, frozen)
+
+        assert frozen.reads == 3, "one baseline read and one per transition"
+        states = stats.get(HOST_A).states
+        assert states is not None, "a breakdown was produced, not declined"
+        assert all(entry["usage"] is not None for entry in states), (
+            "every state carries a usage reading, so nothing here is the "
+            "unobservable-watermark path"
+        )
+
+    def test_a_growing_transcript_still_renders_a_real_spend(self, m):
+        """Falsifiability control: the assertion below is satisfiable in this
+        harness rather than unconditional. With a transcript that moves, the
+        same rows render measured numbers."""
+        _, text = self.wired(m, self.Moving())
+        assert self.spend(text, "designing") == "150"
+        assert self.spend(text, "red") == "150"
+
+    def test_no_watermark_at_all_renders_the_form_a_fix_must_produce(self, m):
+        """The other control, and the outcome this defect should reach: where
+        the watermark cannot be observed the row already renders `unknown`
+        rather than a zero. The fix makes the frozen case render this way too,
+        and this row must stay green throughout — it is the behaviour the fix
+        extends, not one it may weaken."""
+        _, text = self.wired(m, None)
+        assert self.spend(text, "designing") == "unknown"
+        assert self.spend(text, "red") == "unknown"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_016 F1 is live — delete this marker with the fix; the "
+            "assertion below must then pass unchanged"
+        ),
+    )
+    def test_a_state_whose_watermark_did_not_move_is_not_rendered_as_zero(self, m):
+        """Every state a frozen transcript spans is rendered as a hard `0`,
+        formatted identically to a state that genuinely cost nothing and
+        carrying no note that would let a reader tell the two apart."""
+        _, text = self.wired(m, self.Frozen(Usage(input=1200, output=300)))
+
+        assert self.spend(text, "designing") != "0", (
+            "a state whose watermark could not be observed to move renders as "
+            "a measured `0 tokens`, which reads as 'this work was free' rather "
+            "than as 'this spend was not observed' — the failure mode ADR-002 "
+            "D3 names, and the opposite of the `unknown` every other "
+            "unobservable path renders"
+        )

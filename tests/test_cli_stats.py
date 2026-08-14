@@ -209,3 +209,73 @@ class TestConfigShowsTheNewKey:
     def test_the_report_store_is_in_the_resolved_configuration(self, wired, capsys):
         assert run("config", "show", "--json") == 0
         assert payload(capsys)["config"]["paths"]["reports"] == "docs/reports"
+
+
+class TestStatsCheckDoesNotPrintAHostSessionIdentifier:
+    """Repro for BUG_016 F2 — see docs/backlog/BUG_016.md.
+
+    `domains/stats.py` declines to name un-ingested sessions with the reasoning
+    "Naming them would mean printing host session identifiers, and terminal
+    output gets pasted into commits". Thirty lines above, in the same function,
+    the unreadable-record branch interpolates a raw `host_session_id` into a
+    message that reaches the same terminal.
+
+    This is deliberately NOT filed as an ADR-002 D7 breach and is not asserted
+    as one: D7 scopes to the COMMITTED report, which is clean and has its own
+    scanner test above. What is asserted here is that one hygiene rule is
+    applied to both branches of the one function that states it.
+    """
+
+    def record(self, project):
+        return project / ".git" / "invariant" / "state" / "stats" / f"{HOST_A}.json"
+
+    def test_the_unreadable_branch_is_reached_and_says_what_to_do(
+        self, wired, capsys
+    ):
+        """Precondition: the corruption lands on the real stored record, the
+        unreadable branch fires, and its advice reaches the terminal. Without
+        this the assertion below could pass by printing nothing at all."""
+        run("stats", "refresh")
+        assert self.record(wired).is_file()
+        self.record(wired).write_text("{]", encoding="utf-8")
+
+        assert run("stats", "check") == 1
+        text = out(capsys)
+        assert "could not be read" in text
+        assert "stats refresh --force" in text
+
+    def test_the_un_ingested_branch_prints_a_count_and_no_identifier(
+        self, wired, capsys
+    ):
+        """Falsifiability control, and the form the fix must produce: the other
+        branch of the same function reports the same class of problem, gives
+        the same single-command repair, and names nobody. It stays green
+        throughout — this entry proposes extending it, never weakening it."""
+        assert run("stats", "check") == 1
+        text = out(capsys)
+        assert "have not been ingested" in text
+        assert HOST_A not in text
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_016 F2 is live — delete this marker with the fix; the "
+            "assertion below must then pass unchanged"
+        ),
+    )
+    def test_the_unreadable_record_message_does_not_name_the_host_session(
+        self, wired, capsys
+    ):
+        """The message printed for an unreadable record leads with the raw host
+        session identifier, which is the one thing the branch below it refuses
+        to print for exactly the reason that applies here too."""
+        run("stats", "refresh")
+        self.record(wired).write_text("{]", encoding="utf-8")
+        run("stats", "check")
+
+        assert HOST_A not in out(capsys), (
+            "'invariant stats check' prints a raw host session identifier to "
+            "the terminal, while the same function's un-ingested branch "
+            "deliberately counts rather than names for the stated reason that "
+            "terminal output gets pasted into commits"
+        )
