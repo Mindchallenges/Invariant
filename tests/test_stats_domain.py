@@ -742,3 +742,153 @@ class TestStoreRoundTrip:
         (m.state_root / "stats" / f"{HOST_A}.json").write_text("{]", encoding="utf-8")
         assert stats.records() == []
         assert any("could not be read" in p for p in stats.check().problems())
+
+
+class TestAForcedRebindDoesNotCrossTwoHostSessionsUsageCounters:
+    """Repro for BUG_014 — see docs/backlog/BUG_014.md.
+
+    ADR-002 D3 and `state_model.md` both rest per-state spend on one claim:
+    "a subtraction of two counts is exact". That holds only while both counts
+    come from the same transcript. `session adopt --force` moves the binding
+    and leaves `usage_at_start` and the already-recorded history watermarks
+    counted against the old host session, so the state spanning the rebind is
+    a reading of B's cumulative total minus a reading of A's.
+
+    What is asserted is the figure a reader sees in the per-state table, NOT
+    `usage_at_start` being left unchanged — that is the cause, and asserting
+    it would prove the plumbing rather than the misreporting. D8's principle
+    is what is at stake: a number arrived at by crossing two counters must not
+    wear the same units, and the same formatting, as a measured one.
+
+    The direction matters and is the whole point of the entry. Both cases are
+    exercised below: B lower than A trips the existing backwards-watermark
+    guard and is suppressed, which is correct and stays that way; B higher
+    produces a well-behaved positive delta that is rendered as a measurement.
+    """
+
+    #: Two unrelated transcripts. B's cumulative total is far the higher, so
+    #: the crossing survives the monotonicity guard.
+    A_AT_START = 1_000
+    A_AT_TRANSITION = 1_200
+    B_AT_REBIND = 50_000
+    B_AT_TRANSITION = 50_300
+
+    #: 50_300 - 1_200, rendered. B's whole prior history, wearing the units of
+    #: what the `red` state spent.
+    CROSSED = "49.1k"
+
+    def wired(self, m, b_at_rebind, b_at_transition):
+        """A session force-rebound from host A to host B mid-pipeline.
+
+        Driven through the real domain calls — `adopt_host_session(force=True)`
+        and `advance` — so that a change to either path is felt here rather
+        than being simulated away by a hand-written history.
+        """
+
+        class Watermarks:
+            """Cumulative counters, one per transcript, as a real source is."""
+
+            def __init__(self):
+                self.totals = {}
+
+            def watermark(self, host_session_id):
+                return Usage(input=self.totals[host_session_id])
+
+        marks = Watermarks()
+        marks.totals = {HOST_A: self.A_AT_START, HOST_B: b_at_rebind}
+        sessions = SessionDomain(m, watermarks=marks)
+        # A fixed clock: `elapsed` must be present for a breakdown to exist at
+        # all, and a real one would make the rendered durations a flake.
+        pipelines = PipelineDomain(m, watermarks=marks, clock=lambda: 100.0)
+
+        session = sessions.start("a-task", host_session_id=HOST_A)
+        pipelines.start(session.id, task="t", host_session_id=HOST_A)
+
+        # One transition wholly inside A's binding: both readings are A's.
+        marks.totals[HOST_A] = self.A_AT_TRANSITION
+        pipelines.advance(
+            session.id,
+            "red",
+            force=True,
+            reason="fixture",
+            session=sessions.require(session.id).to_dict(),
+        )
+
+        rebound = sessions.adopt_host_session(session.id, HOST_B, force=True)
+
+        # One transition after the rebind: this reading is B's, and the one it
+        # will be subtracted from is still A's.
+        marks.totals[HOST_B] = b_at_transition
+        pipelines.advance(
+            session.id,
+            "green",
+            force=True,
+            reason="fixture",
+            session=sessions.require(session.id).to_dict(),
+        )
+
+        source = FakeSource()
+        source.put(HOST_A, [sample(usage=Usage(input=self.A_AT_TRANSITION))])
+        source.put(
+            HOST_B,
+            [
+                sample(
+                    host=HOST_B,
+                    ts=1_780_000_100.0,
+                    usage=Usage(input=b_at_transition),
+                )
+            ],
+        )
+        stats = domain(m, source)
+        stats.refresh()
+        return rebound, stats.render_session("a-task")
+
+    def row(self, text, state):
+        """The rendered per-state line for one state, as a reader reads it."""
+        for line in text.splitlines():
+            if line.strip().startswith(state):
+                return line
+        raise AssertionError(f"no per-state row for {state!r} in:\n{text}")
+
+    def test_the_rebind_happened_and_the_counters_are_incommensurable(self, m):
+        """The precondition, so a later reader cannot mistake the repro for a
+        fixture that was never valid: the binding really moved, and B's
+        transcript really does carry the higher cumulative total."""
+        rebound, _ = self.wired(m, self.B_AT_REBIND, self.B_AT_TRANSITION)
+        assert rebound.host_session_id == HOST_B
+        assert self.B_AT_TRANSITION > self.A_AT_TRANSITION
+
+    def test_a_state_inside_one_binding_is_attributed_normally(self, m):
+        """The arithmetic is sound where both readings are the same counter's,
+        so the row below fails for the crossing and not for the harness."""
+        _, text = self.wired(m, self.B_AT_REBIND, self.B_AT_TRANSITION)
+        assert "200 tokens" in self.row(text, "designing")
+
+    def test_the_lower_direction_is_caught_by_the_existing_guard(self, m):
+        """The other half of the asymmetry, and the control for the repro
+        below: with B's total the LOWER of the two the same crossing violates
+        monotonicity visibly, the guard declines to attribute it, and this
+        harness renders the declined form. That is the outcome the higher
+        direction must also reach, and it stays green throughout — the guard
+        is correct and no fix may weaken it."""
+        _, text = self.wired(m, 400, 700)
+        assert "unknown tokens" in self.row(text, "red")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_014 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_the_state_spanning_the_rebind_is_not_rendered_as_a_measurement(self, m):
+        """The state either side of the rebind is reported as having spent
+        B's entire prior transcript, formatted exactly like the measured row
+        above it and carrying no note that would let a reader tell."""
+        _, text = self.wired(m, self.B_AT_REBIND, self.B_AT_TRANSITION)
+
+        assert self.CROSSED not in self.row(text, "red"), (
+            "the state spanning the rebind is rendered as a measured spend of "
+            f"{self.CROSSED} tokens, which is host session B's cumulative "
+            "total minus host session A's watermark — two unrelated counters"
+        )
