@@ -586,6 +586,8 @@ class SessionDomain:
         session_id: str,
         remove_worktree: bool = True,
         remove_branch: bool = True,
+        cwd: Path | str | None = None,
+        force: bool = False,
     ) -> Session:
         """End the session: worktree gone, branch gone, registry entry gone.
 
@@ -595,12 +597,67 @@ class SessionDomain:
         the work is merged, so a branch that will not delete is evidence the
         merge did not do what it appeared to. Forcing it would destroy the only
         copy of that work and report success.
+
+        The third precondition is not a git question, and it is the one that
+        was missing (BUG_009): git will happily remove a directory another
+        system is standing in. When an agent host is standing in it the result
+        is not an inconvenience — that host's own worktree isolation refuses
+        every subsequent shell call and orders the caller back into the path
+        just deleted, and the commands that would repair it sit behind that
+        same refusal. The deadlock is self-sealing, which is why this refuses
+        rather than warns: nobody scrolls past a wedged session back into a
+        working one.
+
+        The check is a **conjunction**, and dropping either half breaks it in
+        a different direction:
+
+        * **The binding is live** — ``host_session_id`` set and ``host_ended``
+          false, which is what `docs/architecture/state_model.md` "Host
+          binding" defines as live, ``SessionEnd`` being what marks it spent.
+          Alone this is far too broad: a session torn down the documented way
+          is bound to the very host session running the teardown, so every
+          healthy ending carries a live binding.
+        * **The worktree is occupied** — the caller is standing inside it.
+          Alone this is too broad the other way: with the binding already
+          spent, a stranded shell recovers with one ``cd``. Occupancy is
+          measured from the caller's own working directory because that is the
+          only evidence available; the binding is a scalar with no notion of
+          where its host stands (BUG_010), so a *different* host wedged in this
+          worktree remains invisible here.
         """
         session = self.require(session_id)
+
+        # Read BEFORE anything is removed, which is the entire point. Teardown
+        # reads the binding afterwards too — for the transition's telemetry
+        # watermark, and again when the record is serialised — and neither of
+        # those is in time to be a precondition on the removal.
+        bound_to = session.host_session_id
+        binding_is_spent = session.host_ended
+        binding_is_live = bool(bound_to) and not binding_is_spent
+
+        if (
+            remove_worktree
+            and not force
+            and binding_is_live
+            and session.worktree
+            and _contains(Path(session.worktree), _resolved(cwd))
+        ):
+            raise UsageError(self._occupied_worktree_message(session))
+
+        # Run git from the MAIN checkout, not from wherever the manifest was
+        # loaded. Those are the same directory in the ordinary case and are
+        # not when teardown is invoked from inside the session's own worktree:
+        # `git worktree remove` then deletes the directory the *next* git call
+        # is standing in, and that call fails with an unrelated ENOENT after
+        # the removal has already happened — worktree gone, branch alive, no
+        # transition recorded. Reachable deliberately through ``force``, so it
+        # has to be correct there rather than merely refused everywhere else.
+        repo = str(git.main_checkout(self.manifest.root) or self.manifest.root)
+
         if remove_worktree and session.worktree and Path(session.worktree).exists():
             proc = subprocess.run(
                 ["git", "worktree", "remove", session.worktree],
-                cwd=str(self.manifest.root),
+                cwd=repo,
                 capture_output=True,
                 text=True,
             )
@@ -612,7 +669,7 @@ class SessionDomain:
         if remove_branch and session.branch:
             proc = subprocess.run(
                 ["git", "branch", "-d", session.branch],
-                cwd=str(self.manifest.root),
+                cwd=repo,
                 capture_output=True,
                 text=True,
             )
@@ -627,6 +684,38 @@ class SessionDomain:
         self._advance(session, "torn_down", reason="teardown")
         self._deregister(session.id)
         return session
+
+    def _occupied_worktree_message(self, session: Session) -> str:
+        """How to get out of the way, spelled as commands.
+
+        A caller who hits this cannot read the source from inside the deadlock
+        it is describing, and by the time the deadlock exists it cannot run
+        anything at all. So the message carries the way out rather than a
+        diagnosis of what went wrong.
+        """
+        elsewhere = (
+            git.main_checkout(self.manifest.root)
+            or session.origin
+            or "<the main checkout>"
+        )
+        return (
+            f"session {session.id} is bound to a LIVE host session, and this "
+            f"command is running inside the worktree it would remove:\n"
+            f"  {session.worktree}\n"
+            f"Removing it would strand that host in a directory that no longer "
+            f"exists. Its own worktree isolation then refuses every shell call "
+            f"and orders the caller back into the removed path, and the "
+            f"commands that would repair that sit behind the same refusal — "
+            f"there is no in-band recovery, which is why this is refused "
+            f"rather than warned about.\n"
+            f"  Step out of it first, then tear down:\n"
+            f"    cd {elsewhere} && invariant session teardown --id "
+            f"{session.id}\n"
+            f"  The binding is spent once the host session ends (SessionEnd); "
+            f"a spent binding, or none at all, tears down from anywhere.\n"
+            f"  Deliberately, knowing the host has already moved elsewhere: "
+            f"add --force."
+        )
 
     # -- maintenance ---------------------------------------------------
 
@@ -784,6 +873,24 @@ def _branch_names(root: Path) -> list[str]:
     if proc.returncode != 0:
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _resolved(cwd: Path | str | None) -> Path:
+    """The caller's location, defaulting to where this process is standing.
+
+    Defaulted rather than required so that every existing caller keeps
+    working, and resolved here so that a symlinked path and the real one are
+    the same directory — which is what a host handing over ``/tmp`` on macOS
+    actually passes.
+    """
+    try:
+        return Path(cwd or Path.cwd()).resolve()
+    except OSError:
+        # The working directory has already been removed. Nothing can be
+        # inside a path that cannot be named, and refusing to tear down
+        # because the location is unreadable would block the cleanup that
+        # follows exactly this situation.
+        return Path("/")
 
 
 def _contains(root: Path, candidate: Path) -> bool:

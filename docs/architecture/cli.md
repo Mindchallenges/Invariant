@@ -113,8 +113,22 @@ invariant session reap [--dry-run]
     Abandon sessions whose worktree AND branch are both gone. A missing
     worktree alone is not enough: its branch may still hold unmerged commits.
 
-invariant session teardown [--keep-worktree] [--keep-branch]            Verify pushed, remove the worktree,
-                                      deregister.
+invariant session teardown [--keep-worktree] [--keep-branch] [--force]
+    Remove the worktree, delete the branch, deregister.
+
+    REFUSED when the session's host binding is still live AND this command is
+    running inside the worktree it would remove. Removing an occupied worktree
+    wedges its host: the host's own isolation then refuses every shell call and
+    orders the caller back into the deleted path, and the repair commands sit
+    behind that same refusal, so there is no in-band recovery. The refusal
+    names the way out — step to the main checkout and run it from there. A
+    binding spent by SessionEnd, or none at all, tears down from anywhere.
+    --force is for the case where the operator knows the host has moved.
+
+    Run it from the MAIN CHECKOUT. That is the documented route, it is what
+    the refusal asks for, and git's own calls run from there too — removing
+    the worktree a later git call is standing in fails after the removal has
+    already happened.
 invariant session list                All registered sessions on this machine.
 ```
 

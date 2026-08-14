@@ -873,6 +873,12 @@ def cmd_session_teardown(args) -> int:
         session.id,
         remove_worktree=not args.keep_worktree,
         remove_branch=not args.keep_branch,
+        # Where the caller is standing, which is the evidence the occupancy
+        # precondition is built from (BUG_009). Passed rather than left to
+        # default so that the domain reads the *caller's* directory and never
+        # this process's, and so that the check is testable without a chdir.
+        cwd=ctx.cwd,
+        force=args.force,
     )
     removed = []
     if not args.keep_worktree and session.worktree:
@@ -1464,6 +1470,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--id")
     q.add_argument("--keep-worktree", action="store_true")
     q.add_argument("--keep-branch", action="store_true")
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="remove a worktree you are standing in, knowing the host has moved",
+    )
     q.set_defaults(func=cmd_session_teardown)
 
     # pipeline

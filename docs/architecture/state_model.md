@@ -142,6 +142,38 @@ prevent. `invariant session reap` abandons a stranded session only once its
 branch is gone too — a worktree can be removed while its branch still holds
 recoverable commits, so the narrow condition is the safe one.
 
+#### Teardown will not remove the ground under the caller
+
+Teardown's other two preconditions are git questions — a clean tree, and a
+safe `git branch -d`. Neither asks whether anything *outside* git is standing
+in the directory, and git will remove one that is occupied (BUG_009). When the
+occupant is an agent host the result is not an inconvenience: that host's own
+worktree isolation refuses every subsequent shell call and orders the caller
+back into the path just deleted, and the commands that would repair it sit
+behind the same refusal. The deadlock is self-sealing, so this is a **refusal**
+rather than a warning — there is no in-band recovery to scroll past it into.
+
+The precondition is a conjunction, and each half is what keeps the other
+honest:
+
+| Half | Alone it would | Why it is measurable |
+|---|---|---|
+| The binding is **live** — `host_session_id` set, `host_ended` false | refuse every healthy teardown: a session ending the documented way is bound to the very host session running the teardown, and `SessionEnd` has not fired because that host is still alive | it is the model above, read from the record before anything is removed |
+| The worktree is **occupied** — the caller is standing inside it | refuse a cleanup that only costs one `cd`, because with the binding already spent there is nobody left to strand | the caller's own working directory, which under a 1:1 binding identifies that session's host |
+
+Occupancy is measured from the **caller's** working directory because that is
+the only evidence there is. The binding is a scalar with no notion of where
+its host stands (BUG_010), so a *different* host wedged in this worktree stays
+invisible; closing that needs the binding to record a location, not a wider
+predicate here. `--force` remains for the deliberate case, in the same shape
+as every other override in this domain.
+
+The reads must happen **before** the removal, which is a real constraint
+rather than a stylistic one: teardown reads `host_session_id` afterwards
+anyway — twice for the transition's telemetry watermark, once when the record
+is serialised — and a check satisfied by those reads would be a precondition
+that ran after the thing it was guarding.
+
 ### Attribution
 
 Which session a tool call belongs to, most reliable first:

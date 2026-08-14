@@ -857,6 +857,79 @@ class TestPublishingIsOptInThroughTheCli:
         assert "worktree" in text and branch in text
 
 
+class TestTeardownWillNotRemoveTheGroundUnderTheCaller:
+    """BUG_009, through the surface that actually got somebody wedged.
+
+    The domain owns the precondition, but it is only reachable if the CLI
+    hands it the caller's working directory — and the CLI is where the
+    original defect was left unclosed one layer up.
+    """
+
+    def merged_session(self, project, capsys, monkeypatch):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        # A live binding: a host session that has started and not ended, which
+        # is what every session driven by an agent host carries.
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-cli-0000-1111")
+        run("session", "start", "wedge", "--json")
+        sid = payload(capsys)["session"]["id"]
+        run("session", "isolate", "--execute", "--id", sid)
+        run("session", "list", "--json")
+        entry = payload(capsys)["sessions"][0]
+        subprocess.run(
+            ["git", "merge", "--ff-only", entry["branch"]],
+            cwd=project, check=True, capture_output=True,
+        )
+        for state in ("working", "reviewed", "merged"):
+            run("session", "transition", state, "--id", sid, "--force",
+                "--reason", "test fixture")
+        return sid, Path(entry["worktree"])
+
+    def test_it_is_refused_from_inside_the_worktree(self, project, capsys, monkeypatch):
+        sid, worktree = self.merged_session(project, capsys, monkeypatch)
+        monkeypatch.chdir(worktree)
+
+        assert run("session", "teardown", "--id", sid) != 0
+        assert worktree.is_dir()
+        message = capsys.readouterr().err
+        assert "invariant session teardown" in message
+        assert "--force" in message
+
+    def test_force_carries_it_through(self, project, capsys, monkeypatch):
+        sid, worktree = self.merged_session(project, capsys, monkeypatch)
+        monkeypatch.chdir(worktree)
+
+        assert run("session", "teardown", "--id", sid, "--force") == 0
+        assert not worktree.exists()
+
+    def test_the_documented_route_from_the_main_checkout_still_works(
+        self, project, capsys, monkeypatch
+    ):
+        """The regression that a liveness-only refusal would have caused."""
+        sid, worktree = self.merged_session(project, capsys, monkeypatch)
+        assert Path.cwd() == project
+
+        assert run("session", "teardown", "--id", sid) == 0
+        assert not worktree.exists()
+
+    def test_keeping_both_removes_nothing_and_says_so(
+        self, project, capsys, monkeypatch
+    ):
+        """A teardown that removed nothing must not report a removal.
+
+        Both flags together, because git refuses to delete a branch a live
+        worktree still has checked out — keeping only the worktree fails on
+        that unrelated refusal instead.
+        """
+        sid, worktree = self.merged_session(project, capsys, monkeypatch)
+
+        assert run(
+            "session", "teardown", "--id", sid, "--keep-worktree", "--keep-branch"
+        ) == 0
+        assert worktree.is_dir()
+        assert "removed" not in out(capsys).splitlines()[-1]
+
+
 class TestMergeIsGatedBeforeItRuns:
     """A validation that runs after the irreversible step is a report.
 

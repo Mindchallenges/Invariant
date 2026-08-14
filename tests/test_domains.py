@@ -741,48 +741,60 @@ class TestAttributionByEditTarget:
 
 
 
+def branch_names(m) -> set[str]:
+    """The branches that exist in the project's main checkout."""
+    out = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=str(m.root), capture_output=True, text=True,
+    ).stdout
+    return set(out.split())
+
+
+def merged_session(m, *, name="feature", host_session_id=None, host_ended=False):
+    """An isolated session whose branch is already on the base.
+
+    Teardown is only legal from ``merged`` and its safe branch delete refuses
+    an unmerged branch, so both are arranged here: a case about a *different*
+    precondition must not be masked by one of these two.
+    """
+    domain = SessionDomain(m)
+    session = domain.start(name)
+    domain.isolate(session.id, execute=True)
+    session = domain.get(session.id)
+    subprocess.run(
+        ["git", "merge", "--ff-only", session.branch],
+        cwd=str(m.root), check=True, capture_output=True,
+    )
+    # Set rather than adopted: `adopt_host_session` is one-to-one and would
+    # refuse the second session in a test that wants two, and `host_ended` is
+    # not reachable through it at all.
+    session.host_session_id = host_session_id
+    session.host_ended = host_ended
+    # The transitions themselves are covered elsewhere, and driving them here
+    # would test them twice while obscuring what these cases are about.
+    session.state = "merged"
+    domain._save(session)
+    return domain, session
+
+
 class TestTeardownRemovesTheBranch:
     """A session ends by leaving nothing behind but the merged work."""
 
-    def merged_session(self, m):
-        domain = SessionDomain(m)
-        session = domain.start("feature")
-        domain.isolate(session.id, execute=True)
-        session = domain.get(session.id)
-        # Land the branch on the base so a safe delete will accept it.
-        subprocess.run(
-            ["git", "merge", "--ff-only", session.branch],
-            cwd=str(m.root), check=True, capture_output=True,
-        )
-        # Teardown is only legal from `merged`; the transitions themselves are
-        # covered elsewhere, and driving them here would test them twice while
-        # obscuring what these cases are actually about.
-        session.state = "merged"
-        domain._save(session)
-        return domain, session
-
-    def branches(self, m):
-        out = subprocess.run(
-            ["git", "branch", "--format=%(refname:short)"],
-            cwd=str(m.root), capture_output=True, text=True,
-        ).stdout
-        return set(out.split())
-
     def test_the_branch_is_gone_afterwards(self, m):
-        domain, session = self.merged_session(m)
-        assert session.branch in self.branches(m)
+        domain, session = merged_session(m)
+        assert session.branch in branch_names(m)
         domain.teardown(session.id)
-        assert session.branch not in self.branches(m)
+        assert session.branch not in branch_names(m)
 
     def test_the_worktree_is_gone_afterwards(self, m):
-        domain, session = self.merged_session(m)
+        domain, session = merged_session(m)
         domain.teardown(session.id)
         assert not Path(session.worktree).exists()
 
     def test_keep_branch_leaves_it(self, m):
-        domain, session = self.merged_session(m)
+        domain, session = merged_session(m)
         domain.teardown(session.id, remove_branch=False)
-        assert session.branch in self.branches(m)
+        assert session.branch in branch_names(m)
 
     def test_an_unmerged_branch_is_refused_rather_than_forced(self, m):
         """The refusal is the signal, not an obstacle to route around.
@@ -809,7 +821,7 @@ class TestTeardownRemovesTheBranch:
 
         with pytest.raises(StateError, match="not merged"):
             domain.teardown(session.id)
-        assert session.branch in self.branches(m)
+        assert session.branch in branch_names(m)
 
     def test_a_session_that_never_isolated_cannot_be_torn_down(self, m):
         """It has nothing to tear down; the honest ending is `abandoned`.
@@ -825,15 +837,24 @@ class TestTeardownRemovesTheBranch:
 
 
 class TestTeardownAndALiveHostBinding:
-    """Teardown's preconditions ask git, and never ask who is standing there."""
+    """Teardown's preconditions used to ask git and never who was standing there.
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_009 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
+    BUG_009. The binding is now read before anything is removed, and removing
+    an *occupied* worktree — one the caller is standing in — while the binding
+    that would be stranded is still live is refused outright.
+
+    The refusal is a conjunction, and both halves are load-bearing:
+
+    * **The binding is live.** A spent binding (`SessionEnd` fired) or none at
+      all leaves nobody to wedge; a caller in a deleted directory then recovers
+      with a `cd`, which is an inconvenience rather than a deadlock.
+    * **The caller is standing in it.** This is the only evidence of occupancy
+      the library has — the binding is a scalar with no notion of where its
+      host stands (BUG_010) — and without this half the check refuses every
+      healthy teardown, because a session torn down normally is bound to the
+      live host session that is doing the tearing down.
+    """
+
     def test_teardown_does_not_consult_a_live_host_binding(self, m):
         """Repro for BUG_009 — see docs/backlog/BUG_009.md.
 
@@ -928,6 +949,169 @@ class TestTeardownAndALiveHostBinding:
             f"{refusal!r}."
         )
 
+    # -- the wedge itself: occupied, and the binding still live -------------
+
+    def test_removing_an_occupied_worktree_is_refused(self, m):
+        """The one case with no in-band recovery, so it is a refusal.
+
+        Standing in the directory *is* the occupancy evidence: under the 1:1
+        binding, a caller inside a session's worktree whose binding is live is
+        that session's host.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        worktree = Path(session.worktree)
+
+        with pytest.raises(UsageError, match="worktree it would remove"):
+            domain.teardown(session.id, cwd=worktree)
+
+        # Nothing was removed and nothing was recorded: a refusal that had
+        # already deleted half of what it refused would be the phantom-session
+        # class arrived at from the other end.
+        assert worktree.is_dir()
+        assert session.branch in branch_names(m)
+        assert domain.get(session.id).state == "merged"
+
+    def test_the_refusal_names_the_step_that_clears_it(self, m):
+        """A refusal nobody can act on costs the same wedged session.
+
+        The caller cannot read the code from inside the deadlock it is warning
+        about, so the message carries the way out rather than a diagnosis.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError) as exc:
+            domain.teardown(session.id, cwd=Path(session.worktree))
+        message = str(exc.value)
+
+        assert session.id in message
+        assert session.worktree in message
+        # The step out, spelled as a command rather than described.
+        assert f"invariant session teardown --id {session.id}" in message
+        assert f"cd {m.root}" in message
+        # And the deliberate override, for a caller who knows better.
+        assert "--force" in message
+
+    def test_a_deeper_directory_inside_the_worktree_counts_as_standing_in_it(self, m):
+        """Occupancy is the subtree, not the one path.
+
+        A caller is normally several directories down inside the worktree, and
+        removing it strands them exactly as thoroughly as removing the root.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        deeper = Path(session.worktree) / "docs" / "architecture"
+        assert deeper.is_dir()
+        with pytest.raises(UsageError, match="worktree it would remove"):
+            domain.teardown(session.id, cwd=deeper)
+
+    # -- the companion negatives: everything else must still end cleanly ----
+
+    def test_a_live_binding_tears_down_from_the_main_checkout(self, m):
+        """The NORMAL ending, and the case a liveness-only check would break.
+
+        A session torn down the documented way is bound to the very host
+        session running the teardown, and `SessionEnd` has not fired because
+        that host is still alive. So a live binding cannot on its own be the
+        refusal's trigger: it is the resting state of every healthy teardown.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+
+        domain.teardown(session.id, cwd=m.root)
+
+        assert not Path(session.worktree).exists()
+        assert session.branch not in branch_names(m)
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_a_spent_binding_tears_down_from_inside_the_worktree(self, m):
+        """`SessionEnd` fired: there is no host left to strand.
+
+        The caller's own shell is left in a deleted directory, which one `cd`
+        undoes. That is not the deadlock this refusal exists for, and refusing
+        it would block the cleanup of exactly the sessions most likely to need
+        it.
+        """
+        domain, session = merged_session(
+            m, host_session_id="host-aaaa-1111", host_ended=True
+        )
+        domain.teardown(session.id, cwd=Path(session.worktree))
+        assert not Path(session.worktree).exists()
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_an_unbound_session_tears_down_from_inside_the_worktree(self, m):
+        """No binding at all — a session registered by hand, or before hooks."""
+        domain, session = merged_session(m)
+        assert session.host_session_id is None
+        domain.teardown(session.id, cwd=Path(session.worktree))
+        assert not Path(session.worktree).exists()
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_keeping_the_worktree_is_never_refused(self, m):
+        """The refusal guards a removal; `--keep-worktree` performs none.
+
+        The branch is kept too, because git will not delete one that a live
+        worktree still has checked out — an existing refusal that would mask
+        the absence of this one.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        domain.teardown(
+            session.id,
+            remove_worktree=False,
+            remove_branch=False,
+            cwd=Path(session.worktree),
+        )
+        assert Path(session.worktree).is_dir()
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_force_tears_down_an_occupied_worktree(self, m):
+        """The deliberate case: the operator knows the host has already moved.
+
+        Same shape as every other override here — a refusal that cannot be
+        overridden at all gets routed around outside the tool.
+
+        Asserted to completion rather than to the removal, because forcing is
+        the only way to reach the case where git's own working directory is
+        the directory being removed: the branch delete used to run from inside
+        it and fail with an unrelated ENOENT, leaving the worktree gone, the
+        branch alive and no transition recorded.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        domain.teardown(session.id, cwd=Path(session.worktree), force=True)
+        assert not Path(session.worktree).exists()
+        assert session.branch not in branch_names(m)
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_an_unreadable_working_directory_does_not_block_the_cleanup(
+        self, m, monkeypatch
+    ):
+        """The aftermath of the wedge must not be locked behind the guard.
+
+        A shell whose directory has already been deleted cannot answer where
+        it is standing. Nothing can be inside a path that cannot be named, and
+        failing closed here would refuse the teardown of exactly the sessions
+        that got into this state.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+
+        def gone():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(Path, "cwd", staticmethod(gone))
+
+        domain.teardown(session.id)
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_a_sibling_worktree_is_not_the_one_being_removed(self, m):
+        """Standing in *a* worktree is not standing in *this* one.
+
+        Concurrent sessions are the normal case, and a peer tearing down its
+        own finished session from inside its own live worktree touches nothing
+        the caller is standing in.
+        """
+        domain, session = merged_session(m, name="doomed", host_session_id="host-a")
+        _, neighbour = merged_session(m, name="bystander", host_session_id="host-b")
+
+        domain.teardown(session.id, cwd=Path(neighbour.worktree))
+
+        assert not Path(session.worktree).exists()
+        assert Path(neighbour.worktree).is_dir()
 
 
 class TestHostBindingIsOneToOne:
