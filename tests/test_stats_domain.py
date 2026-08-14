@@ -573,6 +573,124 @@ class TestRenderingASessionInFull:
         assert state["elapsed"] == 20.0
 
 
+class TestTheNoBreakdownLineDoesNotFabricateAHistory:
+    """Repro for BUG_013 — see docs/backlog/BUG_013.md.
+
+    `cli.md` reserves the "no breakdown available" sentence for "a session
+    recorded before per-state attribution existed", and `state_model.md` ties
+    it to the permanent asymmetry of transitions "recorded before this
+    existed". A pipeline that started after the instrumentation landed and has
+    simply not transitioned yet is not in that class: it carries a
+    `usage_at_start` baseline and an empty history, which is "nothing to
+    attribute yet", not "never observed".
+
+    What is asserted is the rendered sentence a reader sees, NOT the internal
+    `states is None` flag that produces it — `None` is a legitimate answer for
+    both cases, and the entry's expected behaviour explicitly allows both to
+    render as no-breakdown. The defect is the fabricated cause attached to it.
+    """
+
+    def wired(self, m):
+        """A session whose only pipeline was started and never transitioned."""
+
+        class Watermarks:
+            def watermark(self, host_session_id):
+                return Usage(input=100)
+
+        session = SessionDomain(m).start("a-task", host_session_id=HOST_A)
+        pipelines = PipelineDomain(m, watermarks=Watermarks())
+        pipelines.start(session.id, task="t", host_session_id=HOST_A)
+        return session, pipelines
+
+    def test_the_pipeline_is_post_instrumentation_with_an_empty_history(self, m):
+        """The precondition, so a later reader cannot mistake the repro for a
+        pre-instrumentation fixture that was never valid."""
+        session, pipelines = self.wired(m)
+        pipeline = pipelines.require(session.id)
+        assert pipeline.history == []
+        assert pipeline.usage_at_start == Usage(input=100).to_dict()
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_013 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_a_never_transitioned_pipeline_is_not_called_pre_instrumentation(self, m):
+        self.wired(m)
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+
+        text = stats.render_session("a-task")
+
+        assert "recorded before per-state attribution" not in text, (
+            "the report claims a pre-instrumentation cause for a pipeline "
+            "recorded after the instrumentation landed"
+        )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "BUG_013 is live — delete this marker with the fix; the assertion "
+            "below must then pass unchanged"
+        ),
+    )
+    def test_a_freshly_started_second_pipeline_is_not_called_pre_instrumentation(
+        self, m
+    ):
+        """The second surface, same root: one finished pipeline plus one just
+        started sets the partial flag, and the partial sentence names the same
+        fabricated cause."""
+        session = SessionDomain(m).start("a-task", host_session_id=HOST_A)
+        pipelines = PipelineDomain(m)
+        pipelines.store.write(
+            f"pipelines/{session.id}.json",
+            {
+                # Started after the instrumentation landed, not transitioned yet.
+                "current": {
+                    "session_id": session.id,
+                    "methodology": "tdd",
+                    "state": "designing",
+                    "history": [],
+                    "usage_at_start": Usage(input=300).to_dict(),
+                },
+                # Fully attributed, so the rows above the sentence are real.
+                "completed": [
+                    {
+                        "session_id": session.id,
+                        "methodology": "tdd",
+                        "state": "committed",
+                        "history": [
+                            {
+                                "from": "designing",
+                                "to": "red",
+                                "reason": None,
+                                "elapsed": 10.0,
+                                "usage": Usage(input=200).to_dict(),
+                            }
+                        ],
+                        "usage_at_start": Usage(input=100).to_dict(),
+                    }
+                ],
+            },
+        )
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+
+        text = stats.render_session("a-task")
+
+        assert "predate per-state attribution" not in text, (
+            "the report says some pipelines predate the instrumentation when "
+            "the only unattributed one was started after it and has not "
+            "transitioned yet"
+        )
+
+
 class TestFaultTolerance:
     def test_a_source_that_raises_while_checking_degrades_the_check(self, m):
         class Exploding:
