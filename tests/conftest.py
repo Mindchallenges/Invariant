@@ -13,6 +13,20 @@ import yaml
 from invariant.core.manifest import MANIFEST_RELPATH, Manifest
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_host_project_dir(monkeypatch):
+    """Hooks resolve their manifest from CLAUDE_PROJECT_DIR when set (AUD-04).
+
+    This suite itself runs inside an agent host, so the variable is set — and
+    points at the library's own repository. Left in place it would make every
+    hook test resolve the real project's manifest instead of the synthetic one
+    the test built, which is the exact cross-project misattribution the
+    resolution order exists to prevent. Tests that need the variable set it
+    explicitly.
+    """
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+
 def write_manifest(root: Path, body: dict) -> Path:
     path = root / MANIFEST_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -73,6 +73,27 @@ PATTERNS: dict[str, Pattern[str]] = {
     ),
 }
 
+#: The patterns a scanner runs when nobody chose — the ONE authoritative
+#: default set. ``PrivacyScanner()`` and the manifest default both read this
+#: name, because they used to disagree: a bare construction enabled all seven
+#: patterns while the manifest path enabled six, so which gate a text faced
+#: depended on which code path built the scanner (AUD-15).
+#:
+#: ``device_ids`` is implemented and deliberately NOT here. Its 40-hex arm
+#: matches every full git commit hash and its UUID arm matches tooling
+#: identifiers that documents cite routinely, so as a default it flags the
+#: ordinary contents of a changelog — and a noisy privacy gate is one that
+#: gets disabled wholesale rather than tuned. A project whose documents could
+#: leak simulator or hardware identifiers opts in via ``privacy.patterns``.
+DEFAULT_PATTERNS: tuple[str, ...] = (
+    "home_paths",
+    "emails",
+    "ip_addresses",
+    "tokens",
+    "clock_times",
+    "links",
+)
+
 #: Substrings whose presence on a line makes a clock-time match a false alarm.
 #: Durations, versions, and ratios all look like times without being one.
 _TIME_FALSE_ALARM = re.compile(
@@ -100,7 +121,7 @@ class PrivacyScanner:
         extra: Iterable[str] = (),
         allow: Iterable[str] = (),
     ) -> None:
-        names = list(patterns) if patterns is not None else list(PATTERNS)
+        names = list(patterns) if patterns is not None else list(DEFAULT_PATTERNS)
         unknown = [n for n in names if n not in PATTERNS]
         if unknown:
             raise ValueError(

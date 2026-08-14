@@ -296,6 +296,25 @@ class TestPipelineCommands:
         run("--json", "pipeline", "start", "--methodology", "chore")
         assert payload(capsys)["methodology"] == "chore"
 
+    def test_methodology_override_does_not_wedge_the_pipeline(
+        self, project, capsys, monkeypatch
+    ):
+        """AUD-02: the override was honored by `start` and by nothing after it.
+
+        Every later invocation loaded the manifest-default machine and asked it
+        about a state it does not have, which errored `status`, `gates` and
+        `advance` — and, through the hook's fail-open path, turned all
+        enforcement off for the host session.
+        """
+        self.setup_pipeline(project, monkeypatch)
+        run("pipeline", "start", "--methodology", "chore")
+        assert run("pipeline", "status") == 0
+        assert run("pipeline", "gates") == 0
+        capsys.readouterr()
+        run("--json", "pipeline", "status")
+        assert payload(capsys)["state"] == "doing"
+        assert run("pipeline", "advance", "reviewing") == 0
+
 
 class TestItemCommands:
     def setup_project(self, project):
@@ -399,11 +418,49 @@ class TestHookBridge:
         assert decision["permissionDecision"] == "deny"
         assert "session" in decision["permissionDecisionReason"]
 
-    def test_hook_is_silent_without_a_manifest(self, tmp_path, capsys, monkeypatch):
+    def test_hook_without_a_manifest_reports_degraded_not_silence(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """AUD-04, second half: `{}` here read as "the gate passed".
+
+        A shim only exists where `init` installed it, so a hook that finds no
+        manifest is misconfigured, not innocent — and until this change it
+        returned an empty verdict with no degraded marker, which is enforcement
+        silently off. It must still exit zero and must not deny (a missing
+        manifest may never wedge the host), but the response has to say that
+        nothing was checked.
+        """
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr("sys.stdin", _Stdin("{}"))
         assert run("hook", "pre-tool-use") == 0
-        assert payload(capsys) == {}
+        response = payload(capsys)
+        assert response.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
+        assert response.get("invariantDegraded")
+        assert "enforcement is OFF" in json.dumps(response)
+
+    def test_hook_resolves_the_manifest_from_the_project_dir(
+        self, project, capsys, monkeypatch
+    ):
+        """AUD-04: a hook firing with cwd outside the project must still enforce.
+
+        The host guarantees CLAUDE_PROJECT_DIR to its hooks; the process
+        working directory it does not. Resolving from cwd alone meant a hook
+        run anywhere else found no manifest and silently disabled every gate.
+        """
+        run("init", "--ecosystem", "python")
+        commit_all(project, "adopt")
+        elsewhere = project.parent / "elsewhere"
+        elsewhere.mkdir(exist_ok=True)
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        payload_in = json.dumps(
+            {"tool_name": "Write",
+             "tool_input": {"file_path": str(project / "app.py"), "content": "x"}}
+        )
+        monkeypatch.setattr("sys.stdin", _Stdin(payload_in))
+        assert run("hook", "pre-tool-use") == 0
+        decision = payload(capsys)["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
 
     def test_malformed_payload_does_not_crash(self, project, capsys, monkeypatch):
         run("init", "--ecosystem", "python")
@@ -815,10 +872,20 @@ class TestPublishingIsOptInThroughTheCli:
         commit_all(project, "adopt")
 
     def test_push_is_refused_and_names_the_setting(self, project, capsys):
+        """The refusal is the machine's own gate, not a hardcoded ``if``.
+
+        `pushed`'s entry gates carried `session.push_enabled` and the command
+        never read them — the policy lived twice, once in the machine and once
+        in the CLI, and only the copy the machine did not own ever ran
+        (AUD-05). The gate's verdict carries the same remedies the hardcoded
+        message did.
+        """
         self.project_with(project, push=False)
         run("session", "start", "x")
-        assert run("session", "push") == 2
-        message = capsys.readouterr().err
+        assert run("session", "push") == 1
+        captured = capsys.readouterr()
+        message = captured.err + captured.out
+        assert "session.push_enabled" in message
         assert "not part of this project's session lifecycle" in message
         assert "session.push: true" in message
         assert "invariant session teardown" in message
@@ -839,7 +906,8 @@ class TestPublishingIsOptInThroughTheCli:
         run("session", "start", "x")
         # Refused by the barrier now (not merged), not by the setting.
         assert run("session", "push") != 0
-        assert "session lifecycle" not in capsys.readouterr().err
+        captured = capsys.readouterr()
+        assert "session lifecycle" not in captured.err + captured.out
 
     def test_teardown_reports_what_it_removed(self, project, capsys):
         self.project_with(project, push=False)
@@ -1028,6 +1096,46 @@ class TestSessionReviewExists:
         sid = payload(capsys)["session"]["id"]
         assert run("session", "review", "--id", sid) != 0
         assert "not legal" in capsys.readouterr().err
+
+
+class TestGenericTransitionEvaluatesGates:
+    """AUD-05: `session transition reviewed` then `merged` used to walk the
+    lifecycle with zero gates, because only `session review` and `session
+    merge` read the machine's gate lists. The gates now live in `_advance`,
+    which every route passes through."""
+
+    def strict_working_session(self, project, capsys):
+        assert run("init", "--name", "demo") == 0
+        manifest = project / ".claude" / "invariant.yaml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "\nenforcement:\n  profile: strict\n",
+            encoding="utf-8",
+        )
+        commit_all(project, "adopt")
+        run("session", "start", "x", "--json")
+        sid = payload(capsys)["session"]["id"]
+        run("session", "isolate", "--execute", "--id", sid)
+        run("session", "transition", "working", "--id", sid)
+        return sid
+
+    def test_the_transition_is_refused_by_a_blocking_gate(self, project, capsys):
+        sid = self.strict_working_session(project, capsys)
+        assert run("session", "transition", "reviewed", "--id", sid) == 1
+        captured = capsys.readouterr()
+        assert "pipeline.complete" in captured.err + captured.out
+        run("session", "status", "--id", sid, "--json")
+        assert payload(capsys)["session"]["state"] == "working"
+
+    def test_force_still_works_and_records_the_override(self, project, capsys):
+        sid = self.strict_working_session(project, capsys)
+        assert run(
+            "session", "transition", "reviewed", "--id", sid,
+            "--force", "--reason", "fixture",
+        ) == 0
+        run("session", "status", "--id", sid, "--json")
+        overrides = payload(capsys)["session"]["overrides"]
+        assert overrides and "pipeline.complete" in overrides[-1]["gates"]
 
 
 class TestItemVocabularyCheck:

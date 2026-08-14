@@ -68,14 +68,27 @@ invariant session start <name> [--task <slug>]
 invariant session isolate            Print the worktree and branch to create,
                                      or create them with --execute.
 invariant session status [--json]
-invariant session transition <state> [--reason <text>]
+invariant session transition <state> [--reason <text>] [--force]
+    The generic edge-walker. The machine's entry and exit gates for the edge
+    are evaluated inside the domain, so this route is exactly as gated as
+    `session review` / `session merge` (AUD-05 — it used to carry no gates at
+    all). --force records an override naming the gates it went past.
 invariant session files add <path>...    Declare this session's file set.
-invariant session review              Run the review gates.
+invariant session review              Evaluate the review gates and advance to
+                                      `reviewed`. The gate list is the
+                                      machine's, evaluated by the same domain
+                                      code as every other transition.
 invariant session merge               Validate the merge is being run from the
-                                      right checkout, then perform it.
-invariant session push                Publish the base branch. Refused unless
-                                      session.push is enabled (it is off by
-                                      default); the barrier then allows one.
+                                      right checkout, then perform it. The
+                                      `merged` entry gates are evaluated
+                                      BEFORE git runs — a refusal after the
+                                      irreversible step would be a report,
+                                      not a gate.
+invariant session push                Publish the base branch. `pushed`'s
+                                      entry gates — session.push_enabled
+                                      (off by default) and the one-push
+                                      barrier — are read from the machine and
+                                      evaluated before the push runs.
 invariant pipeline coverage
     Run commands.coverage, parse it with the adapter, and record per-file
     numbers as pipeline evidence. This is what coverage.meets_floor reads.
@@ -136,6 +149,11 @@ invariant session list                All registered sessions on this machine.
 
 ```
 invariant pipeline start [--methodology <id>] [--task <text>]
+    --methodology overrides the manifest's methodology for THIS pipeline —
+    a chore in a TDD project is the motivating case. The choice is recorded
+    on the pipeline and every later command resolves the machine from that
+    record, so neither the override nor a mid-pipeline manifest edit can
+    swap a running pipeline's gate set (AUD-02/03).
 invariant pipeline status [--json]
 invariant pipeline advance <state> [--force]
     Validates the transition against the FSM and runs the gates. --force
@@ -255,7 +273,18 @@ invariant state gc [--older-than <days>]
 invariant hook <event>
     Read the host's payload on stdin, evaluate the rules bound to <event>, and
     write the host's expected response on stdout. Events for Claude Code:
-    session-start, user-prompt-submit, pre-tool-use, post-tool-use, session-end.
+    session-start, user-prompt-submit, pre-tool-use, post-tool-use, stop,
+    session-end.
+
+    The governing manifest is resolved from CLAUDE_PROJECT_DIR when the host
+    supplies it, falling back to the working directory. The host guarantees
+    that variable to its hooks; the process cwd it does not, and resolving
+    from cwd alone meant a hook firing anywhere else found no manifest and
+    silently disabled every gate (AUD-04). When no manifest is found at all
+    the response still exits zero and never denies — a missing manifest must
+    not wedge the host — but it carries the degraded marker
+    (`invariantDegraded`) and says enforcement is off, instead of an empty
+    verdict that read as a pass.
 
 invariant context
     Print the state projection a host would inject: current state, legal

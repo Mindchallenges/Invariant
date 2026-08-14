@@ -257,6 +257,67 @@ class TestMergeTarget:
         assert only(evaluate(["session.ff_merge_target"], ctx)).verdict.ok
 
 
+class TestAGitFailureIsNotAnAnswer:
+    """AUD-07: two helpers reported "could not ask git" as a clean pass.
+
+    `staged_files` answered `[]` — read by its caller as "0 staged file(s),
+    all declared" — and `in_linked_worktree` answered `False` — read as
+    "running from the main checkout" — on an unreadable repository. The
+    codebase's own convention (`branch_files`, `unpushed_files`,
+    `deleted_files`) is that an unanswerable question returns `None` and no
+    caller may relax on it.
+    """
+
+    def test_staged_files_abstains_outside_a_repository(self, tmp_path):
+        from invariant.core import git
+
+        assert git.staged_files(tmp_path) is None
+
+    def test_in_linked_worktree_abstains_outside_a_repository(self, tmp_path):
+        from invariant.core import git
+
+        assert git.in_linked_worktree(tmp_path) is None
+
+    def test_both_still_answer_inside_a_repository(self, ctx_factory):
+        from invariant.core import git
+
+        assert git.staged_files(ctx_factory.main) == []
+        assert git.in_linked_worktree(ctx_factory.main) is False
+        assert git.in_linked_worktree(ctx_factory.wt) is True
+
+    def test_an_unreadable_staged_set_fails_the_file_gate(self, ctx_factory, tmp_path):
+        norepo = tmp_path / "norepo"
+        norepo.mkdir()
+        ctx = ctx_factory(
+            cwd=norepo,
+            session={"state": "working", "files": ["mine.py"]},
+            payload=bash_payload("git commit -m x"),
+        )
+        result = only(evaluate(["session.own_file_set_only"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "staged" in result.verdict.message
+
+    def test_an_unanswerable_worktree_question_fails_the_merge_gate(
+        self, ctx_factory, tmp_path
+    ):
+        """The gate guarding the self-merge whose failure mode is 'both
+        commands exit zero' must not pass on 'git itself could not answer'."""
+        norepo = tmp_path / "norepo2"
+        norepo.mkdir()
+        ctx = ctx_factory(cwd=norepo, extra={"merging": True})
+        result = only(evaluate(["session.ff_merge_target"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_the_bash_merge_path_fails_the_same_way(self, ctx_factory, tmp_path):
+        norepo = tmp_path / "norepo3"
+        norepo.mkdir()
+        ctx = ctx_factory(
+            cwd=norepo, payload=bash_payload("git merge --ff-only session/x")
+        )
+        result = only(evaluate(["session.ff_merge_target"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+
 class TestFileSet:
     def test_stray_staged_file_is_reported(self, ctx_factory):
         wt = ctx_factory.wt
@@ -741,6 +802,183 @@ class TestPrivacyRule:
     def test_source_files_are_out_of_scope_by_default(self, ctx_factory):
         ctx = ctx_factory(payload=edit_payload(ctx_factory.main / "app.py", "EMAIL='a@b.com'"))
         assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+def multiedit_payload(path, *new_strings):
+    return {
+        "tool_name": "MultiEdit",
+        "tool_input": {
+            "file_path": str(path),
+            "edits": [{"old_string": "x", "new_string": s} for s in new_strings],
+        },
+    }
+
+
+class TestPrivacyPayloadShapes:
+    """AUD-06: MultiEdit and NotebookEdit are EDIT_TOOLS, and their payloads
+    were never scanned — the same data that blocks a Write passed through a
+    MultiEdit untouched."""
+
+    def test_a_multiedit_leak_is_caught(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=multiedit_payload(doc, "mail a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_every_edit_in_a_multiedit_is_scanned(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(
+            payload=multiedit_payload(doc, "clean", "mail a.person@example.com")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_clean_multiedit_passes_rather_than_skips(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=multiedit_payload(doc, "nothing sensitive"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_notebookedit_leak_is_caught(self, ctx_factory):
+        nb = ctx_factory.main / "docs" / "architecture" / "walkthrough.ipynb"
+        ctx = ctx_factory(
+            payload={
+                "tool_name": "NotebookEdit",
+                "tool_input": {
+                    "notebook_path": str(nb),
+                    "new_source": "mail a.person@example.com",
+                },
+            }
+        )
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+
+class TestCommitMessageForms:
+    """AUD-09: only exact ``-m`` forms were scanned — ``git commit -am`` and
+    ``-F <file>`` carried a message past the gate unread."""
+
+    def test_dash_am_is_scanned(self, ctx_factory):
+        ctx = ctx_factory(
+            payload=bash_payload("git commit -am 'mail a.person@example.com'")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_longer_cluster_ending_in_m_is_scanned(self, ctx_factory):
+        ctx = ctx_factory(
+            payload=bash_payload("git commit -sam 'mail a.person@example.com'")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_dash_capital_f_scans_the_file(self, ctx_factory):
+        msg = ctx_factory.main / "commit-message.txt"
+        msg.write_text("mail a.person@example.com\n", encoding="utf-8")
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git commit -F {msg}")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_relative_dash_f_path_resolves_against_cwd(self, ctx_factory):
+        (ctx_factory.main / "msg.txt").write_text(
+            "mail a.person@example.com\n", encoding="utf-8"
+        )
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload("git commit -F msg.txt")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_an_unreadable_message_file_fails_closed(self, ctx_factory):
+        """The codebase convention: an unanswerable question is not a pass."""
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=bash_payload("git commit -F does-not-exist.txt"),
+        )
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "could not" in result.verdict.message
+
+    def test_a_stdin_message_fails_closed(self, ctx_factory):
+        """``-F -`` reads stdin, which a hook can never see."""
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload("git commit -F -"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_clean_message_file_passes(self, ctx_factory):
+        msg = ctx_factory.main / "clean.txt"
+        msg.write_text("nothing sensitive\n", encoding="utf-8")
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git commit -F {msg}")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+
+class TestPrivacyScopeCoversTheSecondCopies:
+    """AUD-15: the scope prefixes came from paths.docs and paths.memory only.
+
+    The memory index is a concentrate of exactly the text the memory scope
+    protects, and the committed telemetry report is the one rendering of the
+    raw stats store that leaves the machine — both were unscanned.
+    """
+
+    def test_the_memory_index_is_in_scope(self, ctx_factory):
+        target = ctx_factory.main / "MEMORY.md"
+        ctx = ctx_factory(payload=edit_payload(target, "mail a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_the_reports_store_is_in_scope_by_default(self, ctx_factory):
+        target = ctx_factory.main / "docs" / "reports" / "telemetry.md"
+        ctx = ctx_factory(payload=edit_payload(target, "mail a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_a_literal_prefix_widens_the_scope(self, ctx_factory):
+        """A scope entry that is not a keyword is a project-relative prefix.
+
+        This is how a project whose ``paths.docs`` names one subtree declares
+        that a wider one — ``docs/`` including its audits — is still a place
+        where a leak becomes permanent.
+        """
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["docs/"]}})
+        target = ctx_factory.main / "docs" / "audits" / "audit.md"
+        ctx = ctx_factory(payload=edit_payload(target, "mail a.person@example.com"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_literal_prefix_does_not_reach_outside_itself(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["docs/"]}})
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "app.py", "mail a@b.com")
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestNamedAfterIsolating:
+    """AUD-14: the one non-memory rule with no known-positive failing fixture.
+
+    Structural until AUD-05: no code path evaluated it. Its own ``registered →
+    not applicable`` branch was the second layer of deadness — an entry gate
+    runs while the record still reads the PREVIOUS state, so abstaining on
+    ``registered`` made the gate unable to fire on the only edge it guards.
+    """
+
+    def test_a_branch_derived_name_fails_at_the_isolation_gate(self, ctx_factory):
+        # State is `registered` because that is what the record says while the
+        # entry gate to `isolated` is being evaluated.
+        ctx = ctx_factory(session={"state": "registered", "name": "session/deadbeef"})
+        result = only(evaluate(["session.named_after_isolating"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_an_unnamed_record_fails(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "isolated", "name": ""})
+        assert not only(evaluate(["session.named_after_isolating"], ctx)).verdict.ok
+
+    def test_a_task_derived_name_passes(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "registered", "name": "fix-the-widget"})
+        assert only(evaluate(["session.named_after_isolating"], ctx)).verdict.ok
+
+    def test_no_session_still_abstains(self, ctx_factory):
+        assert only(
+            evaluate(["session.named_after_isolating"], ctx_factory())
+        ).verdict.skipped
 
 
 # -- work-item rules ---------------------------------------------------
@@ -1861,6 +2099,46 @@ class TestClosingTheSessionIsGated:
         assert found == load_session_machine(ctx_factory().manifest).terminal
         assert "torn_down" in found
 
+    def test_an_unloadable_machine_fails_rather_than_going_silent(self, tmp_path):
+        """AUD-08: a configuration error must FAIL the gate, not step aside.
+
+        With the pipeline machine unloadable, the terminal set came back empty,
+        "committed" was not in it, and the rule skipped as "work is still in
+        flight" — the closeout gate silently off on a mistyped manifest.
+        `bug` is a shipped machine of the wrong KIND, so it passes manifest
+        validation and still cannot be loaded as a pipeline.
+        """
+        from invariant.core.manifest import Manifest
+
+        write_manifest(
+            tmp_path,
+            {"version": 1, "project": {"name": "demo"},
+             "methodology": {"pipeline": "bug"}},
+        )
+        ctx = RuleContext(
+            manifest=Manifest.load(tmp_path),
+            cwd=tmp_path,
+            session={"state": "working", "branch": "session/x", "base": "master"},
+            pipeline={"state": "committed"},
+        )
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_the_persisted_methodology_answers_not_the_manifest(self, ctx_factory):
+        """A pipeline is pinned to the machine it started under (AUD-02/03).
+
+        Under `none` the single state `working` IS terminal, so this work is
+        done and stranded. Reading the manifest's `tdd` instead called it
+        in-flight and went silent.
+        """
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "working", "methodology": "none"},
+        )
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "commit(s)" in verdict.message
+
 
 class TestTheMethodologyMustActuallyRun:
     """`pipeline.started_before_edit` proved a pipeline exists, never that it moved.
@@ -1907,6 +2185,44 @@ class TestTheMethodologyMustActuallyRun:
         ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "red"})
         verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
         assert any("green" in fix for fix in verdict.fixes)
+
+    def test_an_unloadable_machine_fails_the_gate_not_skips_it(self, tmp_path):
+        """AUD-08: "the gate that makes every other pipeline gate mandatory"
+        yielded a non-blocking skip on a mistyped `methodology.pipeline`.
+
+        A configuration error is not a reason to step aside — a skip on a
+        block-level gate reads as a pass. `bug` is shipped but of kind `item`,
+        so it survives manifest validation and still cannot load as a pipeline.
+        """
+        from invariant.core.manifest import Manifest
+
+        write_manifest(
+            tmp_path,
+            {"version": 1, "project": {"name": "demo"},
+             "methodology": {"pipeline": "bug"}},
+        )
+        ctx = RuleContext(
+            manifest=Manifest.load(tmp_path),
+            cwd=tmp_path,
+            session={"state": "working"},
+            pipeline={"state": "red"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_the_pipelines_own_methodology_is_what_completes_it(self, ctx_factory):
+        """A `none` pipeline parked in `working` is complete — by ITS machine.
+
+        Judging it by the manifest's `tdd` instead reported a finished
+        methodology as unfinished, which is the AUD-02 pin read from the other
+        side.
+        """
+        ctx = ctx_factory(
+            session={"state": "working"},
+            pipeline={"state": "working", "methodology": "none"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
 
     def test_it_guards_both_the_reviewable_step_and_the_irreversible_one(self):
         """A gate only on `reviewed` guards nothing once the work moves on.

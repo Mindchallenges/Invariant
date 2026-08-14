@@ -101,6 +101,45 @@ inside that branch's own worktree merges it into itself and the follow-up push
 pushes an unchanged target. Both commands exit zero. The failure is invisible
 without a check, which is exactly the class of problem this library exists for.
 
+Both it and `session.own_file_set_only` ask git a question, and "git could not
+answer" is not an answer: the underlying helpers (`in_linked_worktree`,
+`staged_files`) return `None` on an unreadable repository and the rules FAIL on
+it, in the same do-not-relax convention as `branch_files` and `unpushed_files`.
+They used to default to `False`/`[]`, which read as "running from the main
+checkout" and "0 staged file(s), all declared" — a clean pass exactly when
+nothing had been checked (AUD-07).
+
+**The machine's gates hold on every route.** `SessionDomain._advance` — the
+one function every session transition passes through, whether it was reached
+by `session review`, `session merge`, `session isolate`, or the generic
+`session transition` — evaluates the exit gates of the state being left and
+the entry gates of the state being entered, exactly as `PipelineDomain.advance`
+always has. The gates used to be read by two hardcoded CLI call sites only, so
+`session transition reviewed` then `merged` walked the lifecycle with zero
+gates, `session.named_after_isolating` was a gate no code path evaluated, and
+`session.push_enabled` lived a second life as a hardcoded `if` inside the push
+command (AUD-05). Three consequences of the one-route design:
+
+- **An entry gate runs while the record still reads the previous state.** A
+  rule attached as an entry gate must not abstain on the source state —
+  `session.named_after_isolating` abstained on `registered` and so could never
+  fire on the only edge it guards (AUD-14).
+- **A forced transition past a blocking gate records the override** — which
+  gates were forced, and why — on the session record, next to the structural
+  overrides. Silent is not an option the API has.
+- **Commands with an irreversible step ask first.** `session merge` and
+  `session push` evaluate the same gate list through `SessionDomain.
+  pending_gates` *before* touching git, because refusing the transition after
+  the merge or push has run would leave git and the record disagreeing. The
+  pre-flight and the transition read one list from the machine, so they cannot
+  drift.
+
+The rules that also fire from the pre-tool-use hook on raw git commands
+(`session.ff_merge_target`, `session.push_barrier`) are told which question
+they are being asked: a transition *entering* `merged` or `pushed` carries the
+`merging` / `pushing` context, so those gates judge the machine transition
+rather than parsing an empty command string and abstaining.
+
 ### Host binding
 
 A host session and an invariant session are **1:1**. The binding is what makes
@@ -227,6 +266,19 @@ being searched at all. Attribution is within one project by construction.
 
 One task's progress through the configured methodology. Scoped to a session;
 a session runs pipelines one at a time.
+
+The methodology is **pinned to the pipeline at `start`**: the record carries
+the machine id, and every later operation — `status`, `gates`, `advance`, and
+the rules that read the record (`pipeline.complete`,
+`session.work_would_be_stranded`) — resolves the machine from the record,
+falling back to the manifest only for records that predate the pin. This is
+what makes `pipeline start --methodology <id>` safe (the override used to
+live only in the memory of the `start` call, wedging every later invocation —
+AUD-02) and what makes the gate set un-swappable by a mid-pipeline edit to
+`methodology.pipeline`, which is an isolation-exempt manifest line (AUD-03).
+A pinned machine that can no longer be loaded fails the gates that need it
+rather than skipping; the one permitted escape is `pipeline start`, which
+archives the unusable record rather than discarding it.
 
 Shipped methodologies:
 

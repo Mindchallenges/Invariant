@@ -67,6 +67,8 @@ graph TD
     WORKITEM --> FSM
     SESSION --> STORE
     PIPELINE --> STORE
+    SESSION --> RULES
+    PIPELINE --> RULES
     WORKITEM --> ITEMS
     MEMDOMAIN --> MEMORY
     STATSDOMAIN --> STATS
@@ -83,9 +85,20 @@ graph TD
     RULES --> MANIFEST
     RULES --> adapters
     MANIFEST --> adapters
+    MANIFEST --> PRIVACY
     PIPELINE --> adapters
     CC --> AGENTS
 ```
+
+The two `domains → core/rules` arrows are how a state machine's gates get
+evaluated: a gate names a rule id, and the domain that owns the transition asks
+the registry for the verdicts. `PipelineDomain.advance` has worked this way
+from the start; `SessionDomain._advance` joined it when AUD-05 found the
+session machine's gates were read by two hardcoded CLI call sites instead of by
+the one function every transition passes through. `MANIFEST → PRIVACY` carries
+exactly one name — `DEFAULT_PATTERNS`, the single authoritative default
+pattern set — so the manifest's default and a bare `PrivacyScanner()` cannot
+drift apart (AUD-15).
 
 **Dependency rule:** arrows point down and never back up. `core/` knows
 nothing about hosts or the CLI. `adapters/` know their ecosystem and nothing

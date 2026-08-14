@@ -64,16 +64,26 @@ NORMALISED_PAYLOAD_KEYS = (
 ABANDONED = "abandoned"
 
 
-def _terminal_states(loader, manifest) -> frozenset[str]:
+def _terminal_states(loader, manifest, machine_id: str | None = None) -> frozenset[str] | None:
     """A machine's terminal states, read from the machine itself.
 
     Copying the list into this module would let the two drift, and the copy
     would be the one nobody updates when a machine gains a state.
+
+    ``None`` means the machine could not be loaded — a configuration error,
+    not an empty answer. This used to return ``frozenset()``, which callers
+    read as "no state is terminal": every state looked mid-flight, and the
+    rules asking went silent exactly when the configuration was broken
+    (AUD-08). A caller must fail on ``None``, not relax.
+
+    ``machine_id`` pins the load to a specific machine where the caller has
+    one recorded — a pipeline's persisted methodology (AUD-02/03).
     """
     try:
-        return loader(manifest).terminal
+        machine = loader(manifest, machine_id) if machine_id else loader(manifest)
+        return machine.terminal
     except InvariantError:
-        return frozenset()
+        return None
 
 
 # -- result types ------------------------------------------------------
@@ -481,6 +491,24 @@ def _push_enabled(ctx: RuleContext) -> Verdict:
     )
 
 
+def _unanswerable_worktree_question(ctx: RuleContext) -> Verdict:
+    """Git could not say whether this is a linked worktree. Do not relax.
+
+    This gate guards the self-merge whose failure mode is "both commands exit
+    zero", so answering "could not ask git" as "running from the main
+    checkout" — which is what the old ``False`` default did — was a clean pass
+    on an unreadable repository (AUD-07).
+    """
+    return Verdict.fail(
+        "cannot tell whether this directory is a linked worktree",
+        detail=f"git could not answer from {ctx.cwd}. The merge this gate "
+        "guards fails silently — merging a branch from inside its own "
+        "worktree merges it into itself and both commands exit zero — so an "
+        "unanswered question here is not a pass.",
+        fixes=("run it from the main checkout of the repository",),
+    )
+
+
 @rule(
     "session.ff_merge_target",
     summary="A fast-forward merge must be run from the main checkout.",
@@ -490,7 +518,10 @@ def _ff_merge_target(ctx: RuleContext) -> Verdict:
     # The session-merge command: landing this branch on the base, which must
     # happen from the main checkout. Unchanged.
     if ctx.extra.get("merging"):
-        if not git.in_linked_worktree(ctx.cwd):
+        linked = git.in_linked_worktree(ctx.cwd)
+        if linked is None:
+            return _unanswerable_worktree_question(ctx)
+        if not linked:
             return Verdict.clean("running from the main checkout")
         return Verdict.fail(
             "this merge is being run from inside a linked worktree",
@@ -505,7 +536,10 @@ def _ff_merge_target(ctx: RuleContext) -> Verdict:
     target = _merge_target(command)
     if target is None:
         return Verdict.na()
-    if not git.in_linked_worktree(ctx.cwd):
+    linked = git.in_linked_worktree(ctx.cwd)
+    if linked is None:
+        return _unanswerable_worktree_question(ctx)
+    if not linked:
         return Verdict.clean("running from the main checkout")
 
     # The trap is merging a branch INTO ITSELF, which is what happens when the
@@ -543,7 +577,19 @@ def _own_file_set_only(ctx: RuleContext) -> Verdict:
     declared = {str(p) for p in ctx.session.get("files", [])}
     if not declared:
         return Verdict.na("this session has declared no file set")
-    staged = {str(p) for p in git.staged_files(ctx.cwd)}
+    listed = git.staged_files(ctx.cwd)
+    if listed is None:
+        # "Could not ask git" is not "nothing is staged". The old `[]` default
+        # reported exactly that — "0 staged file(s), all declared" — on an
+        # unreadable repository (AUD-07).
+        return Verdict.fail(
+            "cannot read the staged set for this commit",
+            detail=f"git could not answer from {ctx.cwd}, so whether this "
+            "commit stays inside the session's declared file set is unknown — "
+            "and an unanswered question is not a pass.",
+            fixes=("run the commit from inside the session's worktree",),
+        )
+    staged = {str(p) for p in listed}
     stray = sorted(staged - declared)
     if not stray:
         return Verdict.clean(f"{len(staged)} staged file(s), all declared")
@@ -561,10 +607,14 @@ def _own_file_set_only(ctx: RuleContext) -> Verdict:
     events=(),
 )
 def _named_after_isolating(ctx: RuleContext) -> Verdict:
+    # No abstain on `registered`, deliberately. This is the entry gate of
+    # `isolated`, and an entry gate runs while the record still reads the
+    # PREVIOUS state — so abstaining on `registered` made the gate unable to
+    # fire on the only edge it guards, a second layer of deadness on top of
+    # AUD-05's "no code path evaluates it" (AUD-14). A registered session
+    # already carries its name, so the question is answerable there.
     if ctx.session is None:
         return Verdict.na("no session")
-    if ctx.session.get("state") == "registered":
-        return Verdict.na("not isolated yet")
     name = str(ctx.session.get("name") or "")
     if name and not name.startswith("session/"):
         return Verdict.clean(f"named {name!r}")
@@ -573,6 +623,23 @@ def _named_after_isolating(ctx: RuleContext) -> Verdict:
         detail="Several sessions on one machine are indistinguishable in a "
         "list when they are all named after their identifier.",
         fixes=("invariant session start <task-name>",),
+    )
+
+
+def _machine_unloadable_failure(which: str) -> Verdict:
+    """A gate whose machine cannot be loaded fails; it does not step aside.
+
+    A configuration error is exactly when a gate's answer matters most, and a
+    skip on a gate a project holds at ``block`` reads as a pass (AUD-08).
+    """
+    return Verdict.fail(
+        f"the {which} machine could not be loaded, so this gate cannot answer",
+        detail="An unanswerable question is not a negative answer. Until the "
+        "configuration loads, nothing is verifying this invariant.",
+        fixes=(
+            "invariant doctor",
+            "check methodology.pipeline and methodology.extra_machines in the manifest",
+        ),
     )
 
 
@@ -608,16 +675,31 @@ def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
         return Verdict.na("no session")
 
     state = str(ctx.session.get("state") or "")
-    if state in _terminal_states(load_session_machine, ctx.manifest):
+    session_terminal = _terminal_states(load_session_machine, ctx.manifest)
+    if session_terminal is None:
+        return _machine_unloadable_failure("session")
+    if state in session_terminal:
         return Verdict.na(f"session is {state}")
 
     # "The work is done" is a claim the pipeline makes, not one inferred from
     # the diff. Inferring it would guess, and would guess wrong on the session
-    # that is mid-refactor with three commits down.
+    # that is mid-refactor with three commits down. The machine judging that
+    # claim is the one recorded ON the pipeline at start, not whatever the
+    # manifest names today (AUD-02/03).
     pipeline_state = str((ctx.pipeline or {}).get("state") or "")
     if pipeline_state == ABANDONED:
         return Verdict.na("pipeline abandoned — nothing is being claimed as done")
-    if pipeline_state not in _terminal_states(load_pipeline_machine, ctx.manifest):
+    pipeline_terminal = _terminal_states(
+        load_pipeline_machine,
+        ctx.manifest,
+        str((ctx.pipeline or {}).get("methodology") or "") or None,
+    )
+    if pipeline_terminal is None:
+        # A skip here was the old behavior — "work is still in flight" on a
+        # machine that could not even be loaded — which switched the closeout
+        # gate off on a mistyped manifest (AUD-08).
+        return _machine_unloadable_failure("pipeline")
+    if pipeline_state not in pipeline_terminal:
         return Verdict.na(
             f"pipeline is {pipeline_state or 'not started'} — work is still in flight"
         )
@@ -752,9 +834,24 @@ def _pipeline_complete(ctx: RuleContext) -> Verdict:
         )
 
     try:
-        machine = load_pipeline_machine(ctx.manifest)
+        # The machine recorded on the pipeline at start, falling back to the
+        # manifest for records that predate the pin (AUD-02/03).
+        machine = load_pipeline_machine(
+            ctx.manifest, str(ctx.pipeline.get("methodology") or "") or None
+        )
     except InvariantError as exc:
-        return Verdict.na(f"pipeline machine unreadable: {exc}")
+        # This used to skip, non-blocking — the gate whose own docstring calls
+        # it "the gate that makes every other pipeline gate mandatory" stepped
+        # aside on a mistyped `methodology.pipeline` (AUD-08).
+        return Verdict.fail(
+            f"the pipeline machine could not be loaded: {exc}",
+            detail="Whether this methodology ran to its end cannot be judged "
+            "without its machine, and an unanswerable question is not a pass.",
+            fixes=(
+                "invariant doctor",
+                "check methodology.pipeline and methodology.extra_machines in the manifest",
+            ),
+        )
 
     if state in machine.terminal:
         return Verdict.clean(f"pipeline reached {state!r}")
@@ -1258,15 +1355,27 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
 
     if ctx.is_edit:
         target = ctx.target_path
-        content = ctx.tool_input.get("content") or ctx.tool_input.get("new_string")
+        content = _edit_content(ctx.tool_input)
         if target is not None and content and _in_privacy_scope(ctx, target, scope):
             scanned.append(str(target))
-            findings.extend(scanner.scan_text(str(content), path=target))
+            findings.extend(scanner.scan_text(content, path=target))
 
     if "commit_messages" in scope:
         message = ctx.extra.get("commit_message")
+        problem = None
         if not message and ctx.tool_name == "Bash":
-            message = _extract_commit_message(str(ctx.tool_input.get("command", "")))
+            message, problem = _extract_commit_message(
+                str(ctx.tool_input.get("command", "")), cwd=ctx.cwd
+            )
+        if problem:
+            # Fail closed, per the do-not-relax convention every other
+            # unanswerable question here follows (AUD-07/08): a message this
+            # gate is configured to scan and cannot read is not a clean one.
+            return Verdict.fail(
+                "the commit message could not be scanned",
+                detail=problem,
+                fixes=("write the message inline with -m '<message>'",),
+            )
         if message:
             scanned.append("commit message")
             findings.extend(scanner.scan_text(message))
@@ -1879,6 +1988,44 @@ def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:
     return forms or [str(absolute)]
 
 
+def _edit_content(tool_input: Mapping[str, Any]) -> str:
+    """Everything an edit tool is about to write, whatever its payload shape.
+
+    Each of the four ``EDIT_TOOLS`` spells its outgoing text differently:
+    ``Write`` uses ``content``, ``Edit`` uses ``new_string``, ``NotebookEdit``
+    uses ``new_source``, and ``MultiEdit`` carries a LIST of edits each with
+    its own ``new_string``. Only the first two were read, so the same personal
+    data that blocked a ``Write`` passed through a ``MultiEdit`` untouched —
+    while the isolation rules fired on all four, which made the gap invisible
+    (AUD-06).
+    """
+    pieces = [
+        tool_input.get("content"),
+        tool_input.get("new_string"),
+        tool_input.get("new_source"),
+    ]
+    edits = tool_input.get("edits")
+    if isinstance(edits, list):
+        pieces.extend(
+            e.get("new_string") for e in edits if isinstance(e, Mapping)
+        )
+    return "\n".join(str(p) for p in pieces if p)
+
+
+#: Scope entries with a meaning of their own; everything else in
+#: ``privacy.scope`` is a project-relative path prefix (AUD-15).
+_PRIVACY_SCOPE_KEYWORDS = {"all", "docs", "memory", "reports", "commit_messages"}
+
+#: What each keyword resolves through. ``memory`` carries the generated index
+#: too: the index is a concentrate of exactly the text the memory scope
+#: protects, and it was the unscanned second copy (AUD-15).
+_PRIVACY_SCOPE_PATHS = {
+    "docs": ("paths.docs",),
+    "memory": ("paths.memory", "paths.memory_index"),
+    "reports": ("paths.reports",),
+}
+
+
 def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
     """Whether this path is one the privacy gate is configured to scan.
 
@@ -1892,11 +2039,16 @@ def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
         return True
 
     scoped_prefixes: list[str] = []
-    for key in ("docs", "memory"):
-        if key in scope:
-            configured = ctx.manifest.get(f"paths.{key}")
+    for key in scope:
+        for manifest_key in _PRIVACY_SCOPE_PATHS.get(key, ()):
+            configured = ctx.manifest.get(manifest_key)
             if configured:
                 scoped_prefixes.append(str(Path(configured)))
+        if key not in _PRIVACY_SCOPE_KEYWORDS:
+            # A literal project-relative prefix. This is how a project widens
+            # scope beyond what paths.* names — e.g. all of ``docs/`` when
+            # paths.docs points at one subtree of it (AUD-15).
+            scoped_prefixes.append(str(Path(key)))
 
     if not scoped_prefixes:
         return False
@@ -1927,19 +2079,60 @@ def _rel(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _extract_commit_message(command: str) -> str:
-    """Pull the message out of a ``git commit -m`` invocation."""
+#: A short-option cluster whose LAST letter takes a value — git's own rule for
+#: combining flags, which is why ``-am <msg>`` means ``-a -m <msg>``. Matching
+#: only the exact ``-m`` token let ``-am`` (the most common combined spelling)
+#: carry a message past the scan unread (AUD-09).
+_COMMIT_MESSAGE_CLUSTER = re.compile(r"-[a-zA-Z]*m$")
+_COMMIT_FILE_CLUSTER = re.compile(r"-[a-zA-Z]*F$")
+
+
+def _extract_commit_message(command: str, cwd: Path | None = None) -> tuple[str, str | None]:
+    """The message a ``git commit`` invocation carries, or why it is unreadable.
+
+    Returns ``(message, problem)``. ``problem`` is set when the command names
+    a message this scan cannot read — a ``-F`` file that is absent at hook
+    time, or ``-F -`` (stdin, which a hook never sees). The caller fails
+    closed on it: the scan's whole subject exists and could not be looked at,
+    and an unanswered question is not a pass (AUD-09).
+    """
     import shlex
 
     if "git" not in command or "commit" not in command:
-        return ""
+        return "", None
     try:
         tokens = shlex.split(command)
     except ValueError:
-        return ""
+        return "", None
     for index, token in enumerate(tokens):
-        if token in {"-m", "--message"} and index + 1 < len(tokens):
-            return tokens[index + 1]
+        following = tokens[index + 1] if index + 1 < len(tokens) else ""
+        if token == "--message" or _COMMIT_MESSAGE_CLUSTER.fullmatch(token):
+            return following, None
         if token.startswith("--message="):
-            return token.split("=", 1)[1]
-    return ""
+            return token.split("=", 1)[1], None
+        if token == "--file" or _COMMIT_FILE_CLUSTER.fullmatch(token):
+            return _read_commit_message_file(following, cwd)
+        if token.startswith("--file="):
+            return _read_commit_message_file(token.split("=", 1)[1], cwd)
+    return "", None
+
+
+def _read_commit_message_file(name: str, cwd: Path | None) -> tuple[str, str | None]:
+    """A ``git commit -F`` message, read the way git itself would."""
+    if not name:
+        return "", "-F names no file"
+    if name == "-":
+        return "", (
+            "-F - reads the message from stdin, which a hook cannot see. "
+            "The message would land in history unscanned."
+        )
+    path = Path(name)
+    if not path.is_absolute():
+        path = Path(cwd or Path.cwd()) / path
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except (OSError, UnicodeDecodeError):
+        return "", (
+            f"-F names {name!r}, which could not be read at scan time. The "
+            "message would land in history unscanned."
+        )

@@ -99,9 +99,17 @@ class Context:
         required: bool = True,
         session_id: str | None = None,
         host_session_id: str | None = None,
+        manifest_start: Path | None = None,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
-        self.manifest = Manifest.load(self.cwd, required=required)
+        #: ``manifest_start`` separates "which project governs this call" from
+        #: "where is this process standing". Hooks pass the host's project
+        #: directory here (AUD-04): the host guarantees that to its hooks,
+        #: while the process working directory can be anywhere — and resolving
+        #: the manifest from a cwd outside the project used to silently disable
+        #: every gate. ``cwd`` stays honest for the rules that ask git about
+        #: the directory the call actually runs in.
+        self.manifest = Manifest.load(manifest_start or self.cwd, required=required)
         self.store = JsonStore(self.manifest.state_root)
         #: An explicit --id, carried rather than exported. Writing it into
         #: os.environ would work and would also outlive the command, silently
@@ -665,7 +673,17 @@ def cmd_session_status(args) -> int:
 def cmd_session_transition(args) -> int:
     ctx = Context()
     session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
-    updated = ctx.sessions.transition(session.id, args.state, reason=args.reason, force=args.force)
+    try:
+        updated = ctx.sessions.transition(
+            session.id, args.state, reason=args.reason, force=args.force, cwd=ctx.cwd
+        )
+    except GateFailure as exc:
+        # The domain evaluates the machine's gates on EVERY route (AUD-05);
+        # this command's job is only to show the verdicts it was refused on.
+        report_verdicts(exc.verdicts, args)
+        if getattr(args, "json", False):
+            print(json.dumps({"advanced": False, "gates": verdicts_payload(exc.verdicts)}, indent=2))
+        raise
     return emit(args, updated.to_dict(), f"session {updated.id} -> {updated.state}")
 
 
@@ -735,6 +753,11 @@ def cmd_session_review(args) -> int:
     people to run it. A doc-promised check that was never written is the exact
     thing this library exists to make impossible, so it is written rather than
     deleted from the docs.
+
+    The gates themselves live in the domain's ``_advance`` now, where every
+    route — including the generic ``session transition`` — runs them. This
+    command used to carry its own copy of the gate list, which is exactly how
+    the generic path came to have none (AUD-05).
     """
     ctx = Context()
     session = ctx.sessions.require(args.id) if args.id else ctx.require_session()
@@ -747,23 +770,20 @@ def cmd_session_review(args) -> int:
             f"from there.\n  Legal from {session.state!r}: {legal}"
         )
 
-    gates = machine.state("reviewed").entry_gates + machine.state(
-        session.state
-    ).exit_gates
-    verdicts = evaluate(list(dict.fromkeys(gates)), ctx.rule_context())
-    blocking = [v for v in verdicts if v.blocks]
-    if blocking and not args.force:
-        report_verdicts(verdicts, args)
-        raise GateFailure("the review gates refused this session", verdicts=verdicts)
-
-    ctx.sessions.transition(
-        session.id, "reviewed", reason=args.reason or "review gates evaluated",
-        force=args.force,
-    )
+    try:
+        ctx.sessions.transition(
+            session.id, "reviewed", reason=args.reason or "review gates evaluated",
+            force=args.force, cwd=ctx.cwd,
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        raise GateFailure(
+            "the review gates refused this session", verdicts=exc.verdicts
+        ) from None
     return emit(
         args,
-        {"session": session.id, "verdicts": verdicts_payload(verdicts)},
-        f"session {session.id} reviewed ({len(verdicts)} gate(s) evaluated)",
+        {"session": session.id},
+        f"session {session.id} reviewed",
     )
 
 
@@ -803,13 +823,12 @@ def cmd_session_merge(args) -> int:
     # git through a subprocess rather than a tool call, so the pre-tool-use
     # hook never sees it either — between the two, the irreversible step was
     # the least guarded one in the lifecycle.
-    machine = ctx.sessions.machine
-    gates = list(
-        dict.fromkeys(
-            machine.state("merged").entry_gates + machine.state(session.state).exit_gates
-        )
-    )
-    verdicts = evaluate(gates, ctx.rule_context())
+    #
+    # The list comes from the domain (`pending_gates`), not from a copy here:
+    # the transition after the merge evaluates the same list inside
+    # `_advance`, so what is asked before the irreversible step and what the
+    # machine holds every other route to cannot drift apart (AUD-05).
+    verdicts = ctx.sessions.pending_gates(session, "merged", cwd=ctx.cwd)
     blocking = [v for v in verdicts if v.blocks]
     if blocking and not args.force:
         report_verdicts(verdicts, args)
@@ -841,7 +860,13 @@ def cmd_session_merge(args) -> int:
             f"merge that reported success — verify with 'git branch --contains'"
         )
 
-    ctx.sessions.transition(session.id, "merged", reason="ff-merge verified")
+    # Force travels through: the pre-flight above was forced past these same
+    # gates, and the domain records the override rather than re-refusing a
+    # merge that has already happened.
+    ctx.sessions.transition(
+        session.id, "merged", reason="ff-merge verified", force=args.force,
+        cwd=ctx.cwd,
+    )
     return emit(
         args,
         {"steps": performed, "verified": True},
@@ -854,25 +879,28 @@ def cmd_session_push(args) -> int:
 
     ctx = Context()
     session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
-    if not ctx.manifest.get("session.push", False):
-        # Refused outright rather than gated. With publishing off, the barrier
-        # abstains by design, so consulting it would report no objection to a
-        # command the project does not want run at all.
-        raise UsageError(
-            "publishing is not part of this project's session lifecycle "
-            "(session.push is off).\n"
-            "  A session ends at the merge: 'invariant session teardown'.\n"
-            "  Every worktree already sees the merged work — they share one "
-            "object database.\n"
-            "  To make publishing a session step, set session.push: true."
-        )
-    verdicts = evaluate(
-        ["session.push_barrier"], ctx.rule_context(extra={"pushing": True})
-    )
+
+    # `pushed`'s entry gates, read from the machine. `session.push_enabled`
+    # used to be duplicated here as a hardcoded `if`, so the policy lived
+    # twice and only the copy the machine did not own ever ran (AUD-05).
+    # Evaluated BEFORE the push, because a push is a remote event: refusing
+    # the transition after it would leave the remote changed and the record
+    # not. The gates first, then the structural check — the policy verdict
+    # ("publishing is not a session step here") is the useful refusal, and
+    # the barrier already refuses any state the edge would.
+    verdicts = ctx.sessions.pending_gates(session, "pushed", cwd=ctx.cwd)
     blocking = [v for v in verdicts if v.blocks]
     if blocking and not args.force:
         report_verdicts(verdicts, args)
-        raise GateFailure("the push barrier refused this push", verdicts=verdicts)
+        raise GateFailure("the push gates refused this push", verdicts=verdicts)
+
+    if not ctx.sessions.machine.can(session.state, "pushed") and not args.force:
+        legal = ", ".join(ctx.sessions.machine.next_states(session.state)) or "(none)"
+        raise UsageError(
+            f"session {session.id} is {session.state!r}; a push is not legal "
+            f"from there, and nothing has been pushed.\n"
+            f"  Legal from {session.state!r}: {legal}"
+        )
 
     proc = subprocess.run(
         ["git", "push", args.remote, session.base],
@@ -882,7 +910,7 @@ def cmd_session_push(args) -> int:
     )
     if proc.returncode != 0:
         raise UsageError(f"push failed: {proc.stderr.strip()}")
-    ctx.sessions.record_push(session.id)
+    ctx.sessions.record_push(session.id, cwd=ctx.cwd, force=args.force)
     return emit(args, {"pushed": True}, f"pushed {session.base} to {args.remote}")
 
 
@@ -968,7 +996,7 @@ def cmd_pipeline_status(args) -> int:
     pipeline = ctx.pipelines.current(session.id)
     if pipeline is None:
         return emit(args, {"pipeline": None}, "no pipeline is running")
-    machine = ctx.pipelines.machine
+    machine = ctx.pipelines.machine_for(pipeline)
     text = [
         f"pipeline {pipeline.methodology}  task: {pipeline.task or '(unnamed)'}",
         f"  state   {pipeline.state}",
@@ -1269,13 +1297,30 @@ def cmd_hook(args) -> int:
         host_session_id = (json.loads(raw) or {}).get("session_id")
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
+    # The manifest is resolved from the project the HOST is working in, not
+    # from wherever this process happens to be standing (AUD-04). The host
+    # guarantees CLAUDE_PROJECT_DIR to its hooks; the working directory it
+    # does not, and a hook firing with cwd outside the project used to find
+    # no manifest and return an empty verdict — every gate silently off, with
+    # evidence recording into whichever repository the cwd resolved to.
+    manifest_start: Path | None = None
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir and Manifest.find_root(Path(project_dir)):
+        manifest_start = Path(project_dir)
     try:
-        ctx = Context(required=True, host_session_id=host_session_id)
-    except InvariantError:
-        # A repository without a manifest is not this hook's business. Staying
-        # silent is correct; failing would break every tool call in a project
-        # that merely has the shims installed.
-        print(json.dumps({}))
+        ctx = Context(
+            required=True,
+            host_session_id=host_session_id,
+            manifest_start=manifest_start,
+        )
+    except InvariantError as exc:
+        # No manifest found anywhere. A shim only exists where `init` put it,
+        # so this is a misconfiguration, not an ungoverned repository — but a
+        # hook must still exit zero with valid JSON, because a pre-tool-use
+        # hook that fails is a *deny* and a missing manifest must never wedge
+        # the host. What it may not do is stay silent: an empty verdict here
+        # read as "the gate passed", and enforcement was off with no marker.
+        print(json.dumps(_hook_degraded(args.event, exc)))
         return EXIT_OK
     host = ClaudeCodeHost(ctx.manifest.root)
     try:

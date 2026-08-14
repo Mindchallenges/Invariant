@@ -19,13 +19,25 @@ from pathlib import Path
 from typing import Any
 
 from ..core import git
-from ..core.errors import StateError, TransitionError, UsageError
+from ..core.errors import GateFailure, StateError, TransitionError, UsageError
 from ..core.fsm import Machine
 from ..core.machines import load_session_machine
+from ..core.rules import Evaluated, RuleContext, evaluate
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore
 
 REGISTRY = "registry.json"
+
+#: Context a gate needs to know which question it is being asked, derived from
+#: the state being ENTERED. ``session.ff_merge_target`` and
+#: ``session.push_barrier`` serve double duty — they also fire from the
+#: pre-tool-use hook on raw ``git merge`` / ``git push`` commands — so without
+#: these flags they would read an empty command string on a machine
+#: transition and abstain, which is exactly the inertness AUD-05 describes.
+_GATE_EXTRA_BY_TARGET: dict[str, dict[str, Any]] = {
+    "merged": {"merging": True},
+    "pushed": {"pushing": True},
+}
 
 
 @dataclass(frozen=True)
@@ -588,9 +600,10 @@ class SessionDomain:
         target: str,
         reason: str | None = None,
         force: bool = False,
+        cwd: Path | None = None,
     ) -> Session:
         session = self.require(session_id)
-        self._advance(session, target, reason=reason, force=force)
+        self._advance(session, target, reason=reason, force=force, cwd=cwd)
         return session
 
     def add_files(self, session_id: str, paths: list[str]) -> Session:
@@ -601,10 +614,22 @@ class SessionDomain:
         self._save(session)
         return session
 
-    def record_push(self, session_id: str) -> Session:
+    def record_push(
+        self,
+        session_id: str,
+        cwd: Path | None = None,
+        force: bool = False,
+        reason: str | None = None,
+    ) -> Session:
         session = self.require(session_id)
+        # Advance FIRST, then count. `pushed`'s entry gates include the push
+        # barrier, and incrementing before evaluating would make the very push
+        # being recorded read as a second one.
+        self._advance(session, "pushed", reason=reason or "push recorded",
+                      force=force, cwd=cwd)
         session.push_count += 1
-        self._advance(session, "pushed", reason="push recorded")
+        self._save(session)
+        self._register(session)
         return session
 
     def teardown(
@@ -787,22 +812,101 @@ class SessionDomain:
 
     # -- internals -----------------------------------------------------
 
+    def _pipeline_record(self, session_id: str) -> dict | None:
+        """The session's current pipeline, read for gate evaluation.
+
+        Read from the shared store rather than through ``PipelineDomain`` —
+        the gates want the record, not the operations, and constructing the
+        sibling domain here would couple their lifecycles for one dict.
+        """
+        raw = self.store.read(f"pipelines/{session_id}.json", {})
+        current = raw.get("current") if isinstance(raw, dict) else None
+        return current if isinstance(current, dict) else None
+
+    def pending_gates(
+        self,
+        session: Session,
+        target: str,
+        cwd: Path | None = None,
+        extra: dict | None = None,
+    ) -> list[Evaluated]:
+        """The machine's gates for ``state -> target``, evaluated, no advance.
+
+        Exit gates of the state being left plus entry gates of the one being
+        entered — the same shape as ``PipelineDomain.gates_for``. Public so
+        that a command with an irreversible step (`session merge`, `session
+        push`) can ask BEFORE running it; the transition afterwards evaluates
+        the same list, so the two cannot drift apart.
+        """
+        # A state the machine does not know has no readable gate list. That is
+        # the forced-recovery case — a hand-repaired or legacy record — and
+        # the structural check has already refused it or been deliberately
+        # forced past; failing HERE would wedge the one route out (AUD-01's
+        # class of harm). The known side's gates still run.
+        gate_ids: list[str] = []
+        for state_id, which in ((session.state, "exit_gates"), (target, "entry_gates")):
+            try:
+                declared = getattr(self.machine.state(state_id), which)
+            except UsageError:
+                continue
+            gate_ids += [g for g in declared if g not in gate_ids]
+        if not gate_ids:
+            return []
+        merged_extra = dict(_GATE_EXTRA_BY_TARGET.get(target, {}))
+        merged_extra.update(extra or {})
+        ctx = RuleContext(
+            manifest=self.manifest,
+            cwd=Path(cwd or Path.cwd()),
+            session=session.to_dict(),
+            pipeline=self._pipeline_record(session.id),
+            extra=merged_extra,
+        )
+        return evaluate(gate_ids, ctx)
+
     def _advance(
         self,
         session: Session,
         target: str,
         reason: str | None = None,
         force: bool = False,
-    ) -> None:
+        cwd: Path | None = None,
+        extra: dict | None = None,
+    ) -> list[Evaluated]:
+        structural_override = False
         if session.state != target:
             try:
                 self.machine.require_edge(session.state, target)
             except TransitionError:
                 if not force:
                     raise
-                session.overrides.append(
-                    {"from": session.state, "to": target, "reason": reason or "forced"}
-                )
+                structural_override = True
+
+        # The machine's own gates, on EVERY route. They used to be read by
+        # exactly two hardcoded call sites (`session review`, `session
+        # merge`), so the generic `session transition` walked the lifecycle
+        # with zero gates and `session.named_after_isolating` was evaluated by
+        # no code path at all (AUD-05). ``PipelineDomain.advance`` has always
+        # done it this way; this is the same shape.
+        verdicts = self.pending_gates(session, target, cwd=cwd, extra=extra)
+        blocking = [v for v in verdicts if v.blocks]
+        if blocking and not force:
+            raise GateFailure(
+                f"{len(blocking)} gate(s) block {session.state!r} -> {target!r}",
+                verdicts=verdicts,
+            )
+
+        if force and (blocking or structural_override):
+            # Recorded, never silent: an override that leaves no trace is
+            # indistinguishable from the gate never having run.
+            session.overrides.append(
+                {
+                    "from": session.state,
+                    "to": target,
+                    "reason": reason or "forced",
+                    "structural": structural_override,
+                    "gates": [v.rule_id for v in blocking],
+                }
+            )
         # ADR-002 D3. The anchor is the heartbeat, which this domain already
         # stamped on every transition — so `elapsed` costs no new stored field
         # and no new clock time, and the entry itself carries a duration and a
@@ -823,6 +927,7 @@ class SessionDomain:
         session.heartbeat = now
         self._save(session)
         self._register(session)
+        return verdicts
 
     def _save(self, session: Session) -> None:
         self.store.ensure_root()

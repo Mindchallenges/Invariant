@@ -19,7 +19,10 @@ description: >
 
   Note what is NOT relaxed: privacy still blocks, and the docs still have to be
   read before the change and updated by it. A record that leaks a clock time or
-  a device id is exactly as bad in prose as in code.
+  a home path is exactly as bad in prose as in code. (Device ids are an OPT-IN
+  pattern, not part of the default set this gate runs: their hex shapes collide
+  with git commit hashes, which documentation cites routinely — see
+  DEFAULT_PATTERNS in core/privacy.)
 
 initial: drafting
 terminal: [committed, abandoned]

@@ -226,6 +226,101 @@ class TestSessionDomain:
         assert domain.get(session.id).state == "isolated"
 
 
+class TestSessionGatesOnTheGenericTransitionPath:
+    """AUD-05: ``_advance`` validated only the edge.
+
+    The entry and exit gates in ``session.yaml`` were read by exactly two
+    hardcoded call sites (``session review``, ``session merge``), so the
+    generic ``session transition`` walked the whole lifecycle with zero gates
+    — and ``session.named_after_isolating`` was a gate no code path evaluated
+    at all (AUD-14). Every route now runs through the machine's gates inside
+    ``_advance``, the same way ``PipelineDomain.advance`` always has.
+    """
+
+    def strict_project(self, tmp_path):
+        return git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "enforcement": {"profile": "strict"},
+            },
+        )
+
+    def test_entry_gates_gate_the_generic_transition(self, tmp_path):
+        """The known positive: legal edge, no pipeline, must not advance."""
+        m = self.strict_project(tmp_path)
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.isolate(session.id, execute=True)
+        domain.transition(session.id, "working")
+
+        with pytest.raises(GateFailure) as exc:
+            domain.transition(session.id, "reviewed")
+        assert any(
+            v.rule_id == "pipeline.complete" and v.blocks for v in exc.value.verdicts
+        )
+        assert domain.get(session.id).state == "working"
+
+    def test_a_forced_transition_records_the_gate_override(self, tmp_path):
+        m = self.strict_project(tmp_path)
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.isolate(session.id, execute=True)
+        domain.transition(session.id, "working")
+
+        domain.transition(session.id, "reviewed", reason="fixture", force=True)
+        updated = domain.get(session.id)
+        assert updated.state == "reviewed"
+        override = updated.overrides[-1]
+        assert "pipeline.complete" in override.get("gates", [])
+        assert override["reason"] == "fixture"
+
+    def test_a_session_named_after_its_branch_is_refused_isolation(self, tmp_path):
+        """``session.named_after_isolating`` is live, with a failing input.
+
+        The record is written the way earlier tooling wrote it — named after
+        its branch rather than its task — which ``start`` itself can no longer
+        produce. The gate exists for exactly these records, and until AUD-05
+        no code path ever evaluated it (AUD-14).
+        """
+        m = self.strict_project(tmp_path)
+        domain = SessionDomain(m)
+        session = domain.start("placeholder")
+        session.name = "session/deadbeef"
+        domain._save(session)
+
+        with pytest.raises(GateFailure) as exc:
+            domain.transition(session.id, "isolated")
+        assert any(
+            v.rule_id == "session.named_after_isolating" and v.blocks
+            for v in exc.value.verdicts
+        )
+        assert domain.get(session.id).state == "registered"
+
+    def test_push_enabled_is_read_from_the_machine(self, m):
+        """`pushed`'s entry gate holds on the generic path, not only in the CLI.
+
+        The standard profile blocks on ``session.push_enabled`` and this
+        project has publishing off, so walking ``transition pushed`` by hand
+        must refuse — it used to succeed, because the setting lived in a
+        hardcoded ``if`` inside ``cmd_session_push`` that the generic
+        transition never passed through (AUD-05).
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        session.state = "merged"
+        domain._save(session)
+
+        with pytest.raises(GateFailure) as exc:
+            domain.transition(session.id, "pushed")
+        assert any(
+            v.rule_id == "session.push_enabled" and v.blocks
+            for v in exc.value.verdicts
+        )
+        assert domain.get(session.id).state == "merged"
+
+
 # -- pipeline ----------------------------------------------------------
 
 
@@ -346,6 +441,104 @@ class TestPipelineDomain:
         sessions = SessionDomain(m)
         session = sessions.start("x")
         PipelineDomain(m).record_docs_read(session.id, "anything.md")  # no raise
+
+
+class TestTheMethodologyIsPinnedToThePipeline:
+    """`pipeline start --methodology` must not wedge the pipeline it starts.
+
+    The override was persisted in the record and then ignored: every later
+    domain instance loaded the manifest-default machine and asked it about a
+    state it does not have, which wedged `status`, `gates` and `advance` — and,
+    through the hook's fail-open path, turned all enforcement off (AUD-02).
+    Pinning the machine to the RECORD also closes AUD-03: editing
+    `methodology.pipeline` mid-pipeline no longer swaps the running pipeline's
+    gate set, because the record answers, not the manifest.
+    """
+
+    def start_chore(self, m):
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        PipelineDomain(m).start(session.id, methodology="chore", task="t")
+        return session
+
+    def test_an_override_survives_a_reload(self, m):
+        """The known positive: every one of these raised before the fix.
+
+        The manifest is RE-loaded, as every later CLI invocation loads it —
+        the old in-memory swap survived only within the process that ran
+        `start`, which is exactly why the wedge escaped the domain tests.
+        """
+        session = self.start_chore(m)
+        fresh = PipelineDomain(Manifest.load(m.root))
+        pipeline = fresh.current(session.id)
+        assert pipeline.state == "doing"
+        fresh.evaluate_gates(session.id, cwd=m.root)  # must not raise
+        advanced, _ = fresh.advance(session.id, "reviewing", cwd=m.root)
+        assert advanced.state == "reviewing"
+
+    def test_machine_for_resolves_the_persisted_methodology(self, m):
+        session = self.start_chore(m)
+        fresh = PipelineDomain(Manifest.load(m.root))
+        assert fresh.machine_for(fresh.current(session.id)).id == "chore"
+
+    def test_the_override_does_not_rewrite_the_shared_manifest(self, m):
+        """The old in-memory swap mutated the manifest object it was handed."""
+        self.start_chore(m)
+        assert m.get("methodology.pipeline") == "tdd"
+
+    def test_a_running_override_pipeline_still_refuses_a_second(self, m):
+        session = self.start_chore(m)
+        with pytest.raises(UsageError, match="already running"):
+            PipelineDomain(Manifest.load(m.root)).start(session.id)
+
+    def test_editing_the_manifest_mid_pipeline_does_not_swap_the_gate_set(self, m):
+        """AUD-03: one exempt manifest line must not silently retune the gates."""
+        sessions = SessionDomain(m)
+        session = sessions.start("y")
+        PipelineDomain(m).start(session.id, task="t")  # records tdd
+
+        path = m.root / MANIFEST_RELPATH
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body.setdefault("methodology", {})["pipeline"] = "docs"
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+
+        fresh = PipelineDomain(Manifest.load(m.root))
+        pipeline = fresh.current(session.id)
+        assert fresh.machine_for(pipeline).id == "tdd"
+        verdicts = fresh.evaluate_gates(session.id, target="red", cwd=m.root)
+        assert "docs.read_architecture" in {v.rule_id for v in verdicts}
+
+    def test_a_pipeline_whose_machine_is_gone_can_be_replaced(self, tmp_path):
+        """Losing the machine file must not wedge `start` forever.
+
+        Every other operation on such a pipeline honestly refuses (the machine
+        is unloadable), so starting a fresh pipeline — which archives the old
+        record rather than discarding it — is the one route out.
+        """
+        machine_dir = tmp_path / "proj" / "machines"
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"extra_machines": ["machines"]},
+            },
+        )
+        machine_dir.mkdir()
+        (machine_dir / "local.yaml").write_text(
+            "id: local\nkind: pipeline\ninitial: first\nterminal: [done]\n"
+            "states:\n  first:\n    next: [done]\n  done: {}\n",
+            encoding="utf-8",
+        )
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        PipelineDomain(m).start(session.id, methodology="local")
+        (machine_dir / "local.yaml").unlink()
+
+        fresh = PipelineDomain(m)
+        replacement = fresh.start(session.id, task="recovered")
+        assert replacement.methodology == "tdd"
+        assert fresh.history(session.id)[-1]["methodology"] == "local"
 
 
 class TestSummarise:

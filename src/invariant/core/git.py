@@ -47,16 +47,23 @@ def toplevel(cwd: Path) -> Path | None:
     return Path(out) if code == 0 and out else None
 
 
-def in_linked_worktree(cwd: Path) -> bool:
-    """True when ``cwd`` is a linked worktree rather than the main checkout.
+def in_linked_worktree(cwd: Path) -> bool | None:
+    """Whether ``cwd`` is a linked worktree rather than the main checkout.
 
     In a linked worktree the per-worktree git dir differs from the common one;
     in the main checkout they are the same path.
+
+    ``None`` means the question could not be answered — git absent, or not a
+    repository. It carries the same obligation as :func:`branch_files`'
+    ``None``: a caller deciding whether to *relax* must treat it as "do not
+    relax". This used to answer ``False``, which the merge gate read as
+    "running from the main checkout" — a clean pass on an unreadable
+    repository (AUD-07).
     """
     code_a, git_dir, _ = _run(["rev-parse", "--absolute-git-dir"], cwd)
     code_b, common, _ = _run(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
     if code_a != 0 or code_b != 0 or not git_dir or not common:
-        return False
+        return None
     return Path(git_dir).resolve() != Path(common).resolve()
 
 
@@ -101,9 +108,16 @@ def worktrees(cwd: Path) -> list[Worktree]:
     return result
 
 
-def staged_files(cwd: Path) -> list[Path]:
+def staged_files(cwd: Path) -> list[Path] | None:
+    """Paths currently staged, or ``None`` when git could not say.
+
+    An empty list is a real answer — nothing is staged. ``None`` is the
+    absence of one, and a caller deciding whether to *relax* must treat it as
+    "do not relax": this used to answer ``[]`` on a git failure, which the
+    file-set gate read as "0 staged file(s), all declared" (AUD-07).
+    """
     code, out, _ = _run(["diff", "--cached", "--name-only"], cwd)
-    return [Path(p) for p in out.splitlines() if p] if code == 0 else []
+    return [Path(p) for p in out.splitlines() if p] if code == 0 else None
 
 
 def changed_files(cwd: Path, since: str | None = None) -> list[Path]:

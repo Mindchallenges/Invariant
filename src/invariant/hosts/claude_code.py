@@ -929,13 +929,19 @@ def build_context(ctx, greeting: bool = False) -> str:
             "--task \"...\"' before editing"
         )
     else:
-        pmachine = ctx.pipelines.machine
         lines.append(
             f"  pipeline {pipeline.methodology}: {pipeline.state}"
             + (f"  (task: {pipeline.task})" if pipeline.task else "")
         )
-        nxt = pmachine.next_states(pipeline.state)
-        lines.append(f"  may advance to: {', '.join(nxt) or '(terminal)'}")
+        try:
+            # The machine the pipeline was started under, not the manifest
+            # default — a `--methodology` override wedged this line before
+            # the machine was pinned to the record (AUD-02).
+            nxt = ctx.pipelines.machine_for(pipeline).next_states(pipeline.state)
+        except InvariantError as exc:
+            lines.append(f"  machine unloadable: {exc}")
+        else:
+            lines.append(f"  may advance to: {', '.join(nxt) or '(terminal)'}")
 
         try:
             verdicts = ctx.pipelines.evaluate_gates(

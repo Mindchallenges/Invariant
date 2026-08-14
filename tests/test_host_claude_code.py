@@ -53,6 +53,17 @@ def host(tmp_path):
 
 @pytest.fixture
 def installed(host):
+    # A real installed project always has a manifest — `init` writes it before
+    # it installs the shims. It matters to the liveness probes: a shim that
+    # finds the CLI but no manifest now answers with the DEGRADED marker
+    # (AUD-04) rather than a silent `{}`, so a manifest-less fixture would
+    # make a healthy install read as broken.
+    manifest = host.root / ".claude" / "invariant.yaml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        yaml.safe_dump({"version": 1, "project": {"name": "demo"}}),
+        encoding="utf-8",
+    )
     host.install()
     return host
 
@@ -871,8 +882,12 @@ class TestHooksActuallyRun:
         return ok, detail
 
     def test_healthy_shims_pass(self, installed):
-        """The shipped shims fall back to echoing {} when invariant is absent,
-        which is correct behaviour and must not read as broken."""
+        """A healthy install — shims, CLI, manifest — must not read as broken.
+
+        (When the CLI binary is absent the shims fall back to echoing {},
+        which is also healthy; the fixture's manifest matters because a shim
+        that finds the CLI but no manifest is a real misconfiguration and now
+        reports itself degraded, AUD-04.)"""
         ok, detail = self.run_check(installed)
         assert ok, detail
 

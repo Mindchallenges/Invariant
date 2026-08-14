@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import get_adapter
-from ..core.errors import GateFailure, TransitionError, UsageError
+from ..core.errors import GateFailure, InvariantError, TransitionError, UsageError
+from ..core.fsm import Machine
 from ..core.machines import load_pipeline_machine
 from ..core.manifest import Level
 from ..core.rules import Evaluated, RuleContext, Verdict, evaluate, get_rule
@@ -122,6 +123,11 @@ class PipelineDomain:
     ) -> None:
         self.manifest = manifest
         self.store = store or JsonStore(manifest.state_root)
+        #: The manifest-default machine — the one a NEW pipeline starts under.
+        #: A running pipeline is judged by :meth:`machine_for` instead: the
+        #: methodology is pinned to the record at ``start``, so neither a
+        #: ``--methodology`` override (AUD-02) nor a mid-pipeline manifest edit
+        #: (AUD-03) can swap the gate set out from under a pipeline in flight.
         self.machine = load_pipeline_machine(manifest)
         #: Injected by the CLI (ADR-002 D2). ``None`` here is normal and
         #: harmless: transitions record ``usage: None`` and the report says so.
@@ -155,6 +161,22 @@ class PipelineDomain:
     def _path(self, session_id: str) -> str:
         return f"pipelines/{session_id}.json"
 
+    def machine_for(self, pipeline: Pipeline) -> Machine:
+        """The machine this pipeline runs under — read from the RECORD.
+
+        ``pipeline start --methodology`` used to swap the machine in memory
+        only, so the very next invocation loaded the manifest default and asked
+        it about a state it does not have. That wedged ``status``, ``gates``
+        and ``advance``, and — through the hook's fail-open path — turned all
+        enforcement off (AUD-02). Reading the persisted methodology also means
+        editing ``methodology.pipeline`` mid-pipeline cannot silently swap a
+        running pipeline's gate set (AUD-03); the change applies from the next
+        ``start``.
+        """
+        if not pipeline.methodology or pipeline.methodology == self.machine.id:
+            return self.machine
+        return load_pipeline_machine(self.manifest, pipeline.methodology)
+
     # -- lookup --------------------------------------------------------
 
     def current(self, session_id: str) -> Pipeline | None:
@@ -185,25 +207,40 @@ class PipelineDomain:
         host_session_id: str | None = None,
     ) -> Pipeline:
         existing = self.current(session_id)
-        if existing and existing.state not in self.machine.terminal:
-            raise UsageError(
-                f"a pipeline is already running in state {existing.state!r}; "
-                f"finish or abandon it first"
-            )
-        if methodology and methodology != self.manifest.get("methodology.pipeline"):
-            # An explicit override for this one task, without editing the
-            # manifest — a chore in a TDD project is the motivating case.
-            from ..core.machines import load_pipeline_machine as _load
+        if existing:
+            try:
+                terminal = self.machine_for(existing).terminal
+            except InvariantError:
+                # The recorded machine no longer loads — a deleted project
+                # machine file, say. Every other operation on that pipeline
+                # honestly refuses, so starting a fresh one, which ARCHIVES
+                # the old record rather than discarding it, is the one route
+                # out that loses nothing.
+                terminal = None
+            if terminal is not None and existing.state not in terminal:
+                raise UsageError(
+                    f"a pipeline is already running in state {existing.state!r}; "
+                    f"finish or abandon it first"
+                )
 
-            self.manifest.data["methodology"]["pipeline"] = methodology
-            self.machine = _load(self.manifest)
+        # An explicit override for this one task, without editing the manifest
+        # — a chore in a TDD project is the motivating case. Resolved here and
+        # PERSISTED on the record; nothing is swapped in memory, because the
+        # in-memory swap died with this call and wedged every later one
+        # (AUD-02), and mutating the shared manifest object was itself an
+        # unobserved gate-set change (AUD-03).
+        machine = (
+            load_pipeline_machine(self.manifest, methodology)
+            if methodology
+            else self.machine
+        )
 
         baseline, baseline_host = self._reading(host_session_id)
         pipeline = Pipeline(
             session_id=session_id,
-            methodology=self.machine.id,
+            methodology=machine.id,
             task=task,
-            state=self.machine.initial,
+            state=machine.initial,
             started=self.clock(),
             usage_at_start=baseline,
             usage_at_start_host=baseline_host,
@@ -213,11 +250,18 @@ class PipelineDomain:
 
     # -- gates ---------------------------------------------------------
 
-    def gates_for(self, source: str, target: str | None) -> list[str]:
-        """Exit gates of the state being left, plus entry gates of the one entered."""
-        gates = list(self.machine.state(source).exit_gates) if source else []
+    def gates_for(
+        self, source: str, target: str | None, machine: Machine | None = None
+    ) -> list[str]:
+        """Exit gates of the state being left, plus entry gates of the one entered.
+
+        ``machine`` is the machine the states belong to — for a running
+        pipeline, :meth:`machine_for`'s answer, not the manifest default.
+        """
+        machine = machine or self.machine
+        gates = list(machine.state(source).exit_gates) if source else []
         if target:
-            gates += [g for g in self.machine.state(target).entry_gates if g not in gates]
+            gates += [g for g in machine.state(target).entry_gates if g not in gates]
         return gates
 
     def evaluate_gates(
@@ -228,7 +272,7 @@ class PipelineDomain:
         cwd: Path | None = None,
     ) -> list[Evaluated]:
         pipeline = self.require(session_id)
-        gate_ids = self.gates_for(pipeline.state, target)
+        gate_ids = self.gates_for(pipeline.state, target, self.machine_for(pipeline))
         ctx = RuleContext(
             manifest=self.manifest,
             cwd=Path(cwd or Path.cwd()),
@@ -317,11 +361,12 @@ class PipelineDomain:
         cwd: Path | None = None,
     ) -> tuple[Pipeline, list[Evaluated]]:
         pipeline = self.require(session_id)
+        machine = self.machine_for(pipeline)
 
         structural_override = False
         if pipeline.state != target:
             try:
-                self.machine.require_edge(pipeline.state, target)
+                machine.require_edge(pipeline.state, target)
             except TransitionError:
                 if not force:
                     raise
@@ -375,7 +420,7 @@ class PipelineDomain:
             }
         )
         pipeline.state = target
-        if target in self.machine.terminal:
+        if target in machine.terminal:
             pipeline.finished = now
         self._save(session_id, pipeline)
         return pipeline, verdicts

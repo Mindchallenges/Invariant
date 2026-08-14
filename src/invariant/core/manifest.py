@@ -26,6 +26,7 @@ from typing import Any, Iterator, Mapping
 import yaml
 
 from .errors import ManifestError
+from .privacy import DEFAULT_PATTERNS
 
 MANIFEST_RELPATH = Path(".claude") / "invariant.yaml"
 
@@ -167,17 +168,19 @@ DEFAULTS: dict[str, Any] = {
     "memory": {"managed": True, "index_generated": True},
     "privacy": {
         "enabled": True,
-        "patterns": [
-            "home_paths",
-            "emails",
-            "ip_addresses",
-            "tokens",
-            "clock_times",
-            "links",
-        ],
+        # One authoritative default set, owned by core/privacy. A second copy
+        # here is how a bare PrivacyScanner() and the manifest path came to
+        # enable different patterns (AUD-15).
+        "patterns": list(DEFAULT_PATTERNS),
         "extra": [],
         "allow": [],
-        "scope": ["docs", "memory", "commit_messages"],
+        # Keywords resolve through paths.*: docs -> paths.docs, memory ->
+        # paths.memory AND paths.memory_index (the index is a concentrate of
+        # exactly the text the memory scope protects), reports ->
+        # paths.reports (the one rendering of the stats store that leaves the
+        # machine). Any other entry is a project-relative path prefix, which
+        # is how a project widens scope beyond what paths.* names (AUD-15).
+        "scope": ["docs", "memory", "reports", "commit_messages"],
     },
     "agents": {
         "library": [
@@ -321,6 +324,18 @@ class Manifest:
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
+        # A mistyped methodology used to surface only when a machine load
+        # happened to run — and several gates skipped, silently and
+        # non-blocking, exactly then (AUD-08). Existence is checked here, at
+        # load, where a configuration error belongs; whether the file parses
+        # as a machine of the right kind is still the loader's question.
+        methodology = str(self.data["methodology"]["pipeline"] or "tdd")
+        from .machines import find_machine_file
+
+        try:
+            find_machine_file(methodology, self)
+        except ManifestError as exc:
+            raise ManifestError(f"methodology.pipeline: {exc}") from exc
 
     # -- access --------------------------------------------------------
 

@@ -72,10 +72,16 @@ memory:
 
 privacy:
   enabled: true
+  # The default set is DEFAULT_PATTERNS in core/privacy — the ONE authoritative
+  # list, shared with a bare PrivacyScanner() so the two construction paths
+  # cannot disagree (AUD-15). `device_ids` is implemented but opt-in: its hex
+  # shapes collide with git commit hashes, which documents cite routinely.
   patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
   extra: []                    # project-specific regexes
   allow: []                    # literal strings exempted
-  scope: [docs, memory, commit_messages]
+  # Keywords resolve through paths.*; any other entry is a project-relative
+  # path prefix. See "Privacy scope" below.
+  scope: [docs, memory, reports, commit_messages]
 
 agents:
   library: [feature-architect, compliance-reviewer, backlog-curator, bug-reproducer]
@@ -101,6 +107,33 @@ The consequence to be aware of: `paths.reports` defaults to `docs/reports`, so
 a project that already keeps hand-written prose at that path would find it
 exempt from isolation. Point the key somewhere else if so — the exemption
 follows the declaration, which is the whole point.
+
+### Privacy scope
+
+`privacy.scope` is a list of two kinds of entry:
+
+- **Keywords**, which resolve through `paths.*` so the scope follows the
+  declaration: `docs` → `paths.docs`; `memory` → `paths.memory` **and**
+  `paths.memory_index` (the generated index is a concentrate of exactly the
+  text the memory scope protects, and was the unscanned second copy —
+  AUD-15); `reports` → `paths.reports` (the one rendering of the raw stats
+  store that leaves the machine); `commit_messages`, which scans `git commit`
+  messages in every spelling git accepts — `-m`, `--message[=]`, combined
+  clusters like `-am`, and `-F <file>` by reading the file. A message the
+  gate is configured to scan and cannot read (`-F` on an absent file, `-F -`
+  from stdin) FAILS rather than passing unread, in the same do-not-relax
+  convention as the git helpers (AUD-09); `all`, which scans everything.
+- **Literal project-relative path prefixes** — any entry that is not a
+  keyword. This is how a project widens scope beyond what `paths.*` names:
+  a repository whose `paths.docs` is `docs/architecture` can declare `docs/`
+  so its audits and ADRs — committed prose where a leak is just as permanent —
+  are scanned too (AUD-15). This library's own manifest does exactly that.
+
+The gate reads every payload shape the edit tools produce: `content`
+(Write), `new_string` (Edit), `edits[].new_string` (MultiEdit) and
+`new_source` (NotebookEdit). The last two were unscanned while the isolation
+rules fired on all four tools, so the same data that blocked a `Write` passed
+through a `MultiEdit` untouched (AUD-06).
 
 ### Where worktrees live
 
@@ -134,6 +167,25 @@ Every key has a default. A minimal usable manifest is three lines:
 version: 1
 project: { name: example, ecosystems: [python] }
 ```
+
+## Validation
+
+`Manifest.validate()` runs on every load and refuses, with a named reason: an
+unsupported `version`, an unparseable enforcement level, a non-list
+`privacy.scope`, an unknown `items.backend`, and — because several gates used
+to skip, silently and non-blocking, exactly when this was mistyped (AUD-08) —
+a `methodology.pipeline` that names no shipped or `extra_machines` machine.
+Existence is checked at load; whether the file parses as a machine of the
+right *kind* is still the loader's question, and a machine that exists but
+cannot load as a pipeline now **fails** the gates that need it
+(`pipeline.complete`, `session.work_would_be_stranded`) rather than being
+stepped past.
+
+One consequence worth naming: editing `methodology.pipeline` mid-pipeline does
+**not** retune the pipeline already running. The methodology is recorded on
+the pipeline at `start` and the machine is resolved from that record ever
+after, so the manifest edit takes effect from the next `pipeline start`
+(AUD-02/AUD-03).
 
 ## Resolution order
 

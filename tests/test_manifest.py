@@ -178,6 +178,28 @@ class TestValidation:
         with pytest.raises(ManifestError, match="privacy.scope must be a list"):
             Manifest.load(tmp_path)
 
+    def test_unknown_methodology_is_a_validation_error(self, tmp_path):
+        """AUD-08: a mistyped `methodology.pipeline` used to surface only when
+        a machine load happened to run — and several gates skipped, silently
+        and non-blocking, exactly then. The manifest is where a configuration
+        error belongs, loudly, at load."""
+        write_manifest(tmp_path, {"methodology": {"pipeline": "tdd-typo"}})
+        with pytest.raises(ManifestError, match="methodology.pipeline"):
+            Manifest.load(tmp_path)
+
+    def test_a_project_local_methodology_validates(self, tmp_path):
+        (tmp_path / "machines").mkdir()
+        (tmp_path / "machines" / "local.yaml").write_text(
+            "id: local\nkind: pipeline\ninitial: a\nterminal: [b]\n"
+            "states:\n  a:\n    next: [b]\n  b: {}\n",
+            encoding="utf-8",
+        )
+        write_manifest(
+            tmp_path,
+            {"methodology": {"pipeline": "local", "extra_machines": ["machines"]}},
+        )
+        assert Manifest.load(tmp_path).get("methodology.pipeline") == "local"
+
 
 class TestCommandTemplates:
     def test_static_vars_substitute(self, tmp_path):

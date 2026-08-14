@@ -46,7 +46,9 @@ class TestDetection:
             assert "tokens" in patterns(self.scanner.scan_text(sample)), sample
 
     def test_uuid_and_mac_are_device_ids(self):
-        found = self.scanner.scan_text(
+        # Opt-in: device_ids is implemented but outside the default set — its
+        # 40-hex arm matches every full git commit hash (see DEFAULT_PATTERNS).
+        found = PrivacyScanner(patterns=["device_ids"]).scan_text(
             "id 123e4567-e89b-12d3-a456-426614174000 mac a1:b2:c3:d4:e5:f6"
         )
         assert "device_ids" in patterns(found)
@@ -117,6 +119,29 @@ class TestConfiguration:
         scanner = PrivacyScanner.from_manifest(m)
         assert scanner.names == ["emails"]
         assert scanner.scan_text("ok@x.com") == []
+
+
+class TestDefaultPatternSet:
+    """AUD-15: a bare ``PrivacyScanner()`` enabled all seven patterns while
+    the manifest path enabled six — two construction paths that disagreed.
+    One authoritative default set, spelled once."""
+
+    def test_bare_construction_matches_the_manifest_default(self):
+        from invariant.core.manifest import DEFAULTS
+        from invariant.core.privacy import DEFAULT_PATTERNS
+
+        assert PrivacyScanner().names == list(DEFAULT_PATTERNS)
+        assert list(DEFAULTS["privacy"]["patterns"]) == list(DEFAULT_PATTERNS)
+
+    def test_device_ids_is_implemented_and_opt_in(self):
+        from invariant.core.privacy import DEFAULT_PATTERNS, PATTERNS
+
+        assert "device_ids" in PATTERNS
+        assert "device_ids" not in DEFAULT_PATTERNS
+        found = PrivacyScanner(patterns=["device_ids"]).scan_text(
+            "booted 123e4567-e89b-12d3-a456-426614174000"
+        )
+        assert patterns(found) == {"device_ids"}
 
 
 class TestFileScanning:

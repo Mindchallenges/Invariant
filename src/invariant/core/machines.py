@@ -72,9 +72,16 @@ def load_machine(machine_id: str, manifest=None) -> Machine:
     return Machine.load(find_machine_file(machine_id, manifest))
 
 
-def load_pipeline_machine(manifest) -> Machine:
-    """The configured methodology, with the docs-first gates attached."""
-    machine_id = manifest.get("methodology.pipeline") or "tdd"
+def load_pipeline_machine(manifest, machine_id: str | None = None) -> Machine:
+    """A pipeline machine with the docs-first gates attached.
+
+    ``machine_id`` names the machine explicitly — a RUNNING pipeline is pinned
+    to the methodology recorded on it at ``start``, not to whatever the
+    manifest says today (AUD-02/AUD-03). Without it, the manifest's configured
+    methodology is the answer, which is right for everything that has no
+    pipeline record to read.
+    """
+    machine_id = machine_id or manifest.get("methodology.pipeline") or "tdd"
     machine = load_machine(machine_id, manifest)
     if machine.kind != "pipeline":
         raise ManifestError(

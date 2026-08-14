@@ -75,11 +75,27 @@ commands:
   # is worse than one that is absent, because its silence reads as a pass.
   # `uv run` resolves it from the dev group, where uv.lock pins the version.
   lint: uv run ruff check .
+  # Same failure, same fix, for the suite itself: the adapter's bare `pytest`
+  # is not on PATH here, so `pipeline test` recorded exit 127 — command-not-
+  # found rendered as a red suite — and the test gates were reading noise
+  # (the 2026-08 audit's AUD-40 names the stranded copy of this repair).
+  test: uv run pytest
+  test_one: uv run pytest {selector}
+  coverage: uv run pytest --cov --cov-report=term-missing
 
 privacy:
   enabled: true
   patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
-  scope: [docs, memory, commit_messages]
+  # `docs` resolves through paths.docs, which here names only docs/architecture
+  # — but everything under docs/ is committed prose where a leak becomes
+  # permanent, audits and ADRs included (the 2026-08 audit itself sat outside
+  # the scanned tree, AUD-15). The trailing-slash entry is a literal
+  # project-relative prefix, which is the engine's way of widening scope
+  # beyond what paths.* names. `memory` also carries the generated index
+  # (MEMORY.md) and `reports` carries paths.reports; both are covered by the
+  # entries below (`docs/` subsumes docs/reports — `reports` is kept explicit
+  # so the intent survives a docs reorganisation).
+  scope: [docs, memory, reports, commit_messages, "docs/"]
 
 memory:
   managed: false
