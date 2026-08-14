@@ -68,6 +68,14 @@ session:
   # A session here does not publish; see ADR-001 D18.
   push: false
 
+commands:
+  # The python adapter defaults this to a bare `ruff check .`, which needs ruff
+  # on PATH. It is not, so the gate could not run at all and five sessions in a
+  # row recorded "lint NOT RUN" and moved on — a control nobody could execute
+  # is worse than one that is absent, because its silence reads as a pass.
+  # `uv run` resolves it from the dev group, where uv.lock pins the version.
+  lint: uv run ruff check .
+
 privacy:
   enabled: true
   patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]

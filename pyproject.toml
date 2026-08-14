@@ -22,7 +22,10 @@ packages = ["src/invariant"]
 include = ["src/invariant", "docs", "tests", "README.md"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+# ruff is declared here rather than left to `uvx` so the lint gate is
+# reproducible: uv.lock pins the version, and a floating one would move the
+# baseline under the gate without anyone changing a line of source.
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.16"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

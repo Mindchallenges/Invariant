@@ -179,6 +179,25 @@ that a green is not mistaken for proof. `parse_test_output` returning
 `passed=True` alongside a hazard flag is how the library says "this looks
 green, and here is the specific reason that might be a lie."
 
+`default_commands` has a quieter failure, and it is the one that costs most
+because nothing reports it. A default names a tool; it does not guarantee the
+tool is installed. The Python adapter defaults `lint` to a bare `ruff check .`,
+which needs `ruff` on PATH — where it is absent the command does not fail the
+check, it fails to *spawn*, and "the linter could not run" is indistinguishable
+in a report from "the linter found nothing". Five consecutive sessions in this
+repository recorded lint as NOT RUN and moved on before one of them tried an
+invocation that resolved. The node adapter's `npm run lint` has the same shape:
+it assumes a script the project may never have defined.
+
+The rule is the one `parse_coverage` states from the other direction — a
+reading that can come back clean for the wrong reason is the one to refuse. A
+project overrides the default with an invocation that resolves through a
+declared, locked dependency rather than through whatever happens to be on PATH;
+pinning is part of the fix, because an unpinned linter moves the finding
+baseline without a change to a line of source. An unrunnable gate is worse than
+an absent one: an absent gate is visibly absent, while an unrunnable one reads
+as a pass.
+
 `parse_coverage` has a trap of its own, and it is the quiet kind. A reporter's
 table layout belongs to the reporter, so a parser keyed to that layout breaks
 whenever the layout legitimately varies — and it breaks by returning `{}`,
