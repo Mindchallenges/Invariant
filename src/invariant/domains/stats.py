@@ -36,7 +36,9 @@ from pathlib import Path
 from ..core.errors import StateError, UsageError
 from ..core.stats import (
     COST_FLOOR_LABEL,
-    NO_BREAKDOWN,
+    DECLINED_NO_PIPELINE,
+    DECLINED_NOT_YET,
+    DECLINED_PRE_INSTRUMENTATION,
     RATES_AS_OF,
     SampleSource,
     SessionStats,
@@ -48,6 +50,7 @@ from ..core.stats import (
     format_cost,
     format_duration,
     format_tokens,
+    no_breakdown_sentence,
 )
 from ..core.store import JsonStore
 
@@ -80,6 +83,12 @@ class StatRecord:
     #: others could not, so the breakdown below is real but does not add up to
     #: the total. Rendered rather than hidden.
     states_partial: bool = False
+    #: Why there is no breakdown, when there is none: a code from ``core/stats``
+    #: rather than a sentence, so a change of wording does not need a rebuild.
+    #: ``None`` on a record written before the distinction existed, which reads
+    #: as the pre-instrumentation case — the one the original sentence was
+    #: written for (BUG_013).
+    states_reason: str | None = None
 
     @property
     def label(self) -> str:
@@ -95,6 +104,7 @@ class StatRecord:
             "session_name": self.session_name,
             "states": self.states,
             "states_partial": self.states_partial,
+            "states_reason": self.states_reason,
             "stats": self.stats.to_dict(),
         }
 
@@ -109,7 +119,29 @@ class StatRecord:
             session_name=raw.get("session_name"),
             states=raw.get("states"),
             states_partial=bool(raw.get("states_partial")),
+            states_reason=raw.get("states_reason") or None,
         )
+
+
+@dataclass
+class Attribution:
+    """What a session's pipelines support, and — when they support nothing —
+    why not.
+
+    The reason is carried rather than re-derived downstream. It is only
+    knowable here, where the pipelines are in hand; by the time the renderer
+    has a record it holds one ``None`` that used to stand for three different
+    facts and would have to guess between them (BUG_013).
+    """
+
+    #: Rows, an empty list (nothing has been left yet), or ``None`` (never
+    #: observed). The three are what ``core.stats.breakdown`` distinguishes.
+    spends: list[StateSpend] | None = None
+    #: Some pipelines attributed and others not, so the rows are real and do
+    #: not add up to the total.
+    partial: bool = False
+    #: A ``DECLINED_*`` code when there are no rows, ``""`` when there are.
+    declined: str = ""
 
 
 @dataclass
@@ -278,19 +310,33 @@ class StatsDomain:
             record.session_name = None
             record.states = None
             record.states_partial = False
+            # No invariant session to ask, so nothing is known about when this
+            # host session ran — including whether it predates the
+            # instrumentation. The oldest sentence is the honest one here.
+            record.states_reason = DECLINED_PRE_INSTRUMENTATION
             return
         record.session_id = session.id
         record.session_name = session.name
-        spends, partial = self._breakdown(session.id)
-        record.states = None if spends is None else [_spend_dict(s) for s in spends]
-        record.states_partial = partial
+        attribution = self._breakdown(session.id)
+        record.states = (
+            None
+            if attribution.spends is None
+            else [_spend_dict(s) for s in attribution.spends]
+        )
+        record.states_partial = attribution.partial
+        record.states_reason = attribution.declined or None
 
-    def _breakdown(self, session_id: str) -> tuple[list[StateSpend] | None, bool]:
+    def _breakdown(self, session_id: str) -> Attribution:
         """Per-state durations and spend across this session's pipelines.
 
         A session runs pipelines in sequence, so the states are summed across
         them. A pipeline predating D3 contributes nothing and sets the partial
         flag: reporting its states as zero would claim they were free.
+
+        A pipeline that has merely not transitioned yet is a different thing
+        and is counted as attributed — it contributes no rows because it has
+        left no state, and nothing about it is missing (BUG_013). Only a
+        genuinely unobserved one makes the rows fail to add up.
         """
         raw: list[dict] = []
         current = self.pipelines.current(session_id)
@@ -298,21 +344,22 @@ class StatsDomain:
             raw.append(current.to_dict())
         raw.extend(self.pipelines.history(session_id))
         if not raw:
-            return None, False
+            return Attribution(declined=DECLINED_NO_PIPELINE)
 
         merged: dict[str, StateSpend] = {}
         order: list[str] = []
-        attributed = 0
+        unobserved = 0
         for pipeline in raw:
             spends = breakdown(
                 pipeline.get("history") or [],
                 Usage.from_dict(pipeline.get("usage_at_start"))
                 if pipeline.get("usage_at_start")
                 else None,
+                pipeline.get("usage_at_start_host"),
             )
             if spends is None:
+                unobserved += 1
                 continue
-            attributed += 1
             for spend in spends:
                 if spend.state not in merged:
                     merged[spend.state] = StateSpend(state=spend.state, elapsed=0.0)
@@ -320,15 +367,29 @@ class StatsDomain:
                 target = merged[spend.state]
                 target.elapsed = (target.elapsed or 0.0) + (spend.elapsed or 0.0)
                 if spend.usage is None:
-                    target.note = "some transitions carried no watermark"
+                    # The note comes from the layer that knows WHY, and is only
+                    # replaced by the generic one when there is no why: the
+                    # merge used to overwrite it unconditionally, so a watermark
+                    # that went backwards reached the reader as a watermark that
+                    # was missing (BUG_016's sixth finding).
+                    target.note = spend.note or "some transitions carried no watermark"
                 elif target.usage is None:
                     target.usage = spend.usage
                 else:
                     target.usage = target.usage + spend.usage
 
-        if not attributed:
-            return None, False
-        return [merged[name] for name in order], attributed < len(raw)
+        if not order:
+            # Nothing to show either way. Which sentence that gets depends on
+            # whether anything was lost or nothing has happened yet.
+            return Attribution(
+                spends=None if unobserved else [],
+                declined=(
+                    DECLINED_PRE_INSTRUMENTATION if unobserved else DECLINED_NOT_YET
+                ),
+            )
+        return Attribution(
+            spends=[merged[name] for name in order], partial=bool(unobserved)
+        )
 
     # -- repair operations ---------------------------------------------
 
@@ -369,16 +430,26 @@ class StatsDomain:
         report = StatsReport()
 
         stored: dict[str, StatRecord] = {}
+        unreadable = 0
         for host_session_id in self.store.list_ids(STORE_DIR):
             record = self.get(host_session_id)
             if record is None:
-                report.unreadable.append(
-                    f"{host_session_id}: the record could not be read; "
-                    f"'invariant stats refresh --force' rebuilds it"
-                )
+                unreadable += 1
                 continue
             stored[host_session_id] = record
         report.records = len(stored)
+
+        # Counted rather than named, for the same reason the un-ingested branch
+        # below counts rather than names: the identifier is a host session id,
+        # terminal output gets pasted into commits, and the repair is the same
+        # single command whichever record is unreadable. A record with no
+        # session joined to it has no name to print instead, so there is
+        # nothing to say here but how many.
+        if unreadable:
+            report.unreadable.append(
+                f"{unreadable} record(s) could not be read; "
+                f"'invariant stats refresh --force' rebuilds them"
+            )
 
         current = {}
         if self.source is not None:
@@ -411,10 +482,8 @@ class StatsDomain:
                     "session therefore reports no total at all"
                 )
 
-        # Counted rather than listed. Naming them would mean printing host
-        # session identifiers, and terminal output gets pasted into commits —
-        # the count is the actionable part anyway, since the repair is the same
-        # single command whichever ones are missing.
+        # Counted rather than listed, by the same rule as the unreadable branch
+        # above: these are host session identifiers and nothing else.
         missing = sum(1 for h in current if h not in stored)
         if missing:
             report.unrecorded.append(
@@ -608,10 +677,12 @@ class StatsDomain:
             "",
         ]
 
-        if record.states is None:
-            # D3's asymmetry, stated rather than left blank. A blank invites
-            # the reader to conclude the work was free.
-            lines.append(f"  {NO_BREAKDOWN}")
+        if not record.states:
+            # D3's asymmetry, stated rather than left blank — and stated for
+            # the reason it actually applies. A blank invites the reader to
+            # conclude the work was free; a wrong cause invites them to stop
+            # asking, which is worse (BUG_013).
+            lines.append(f"  {no_breakdown_sentence(record.states_reason)}")
         else:
             lines.append("  per state:")
             for entry in record.states:

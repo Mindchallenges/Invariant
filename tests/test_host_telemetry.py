@@ -10,6 +10,8 @@ actually meet the day the format moves.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -56,6 +58,29 @@ def host_home(tmp_path, monkeypatch):
 
 def project_dir(home: Path, origin: Path) -> Path:
     return home / "projects" / str(origin.resolve()).replace("/", "-")
+
+
+def _git(*args, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+def _repo(path: Path) -> Path:
+    """A real repository, because the thing under test asks a real git."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", cwd=path)
+    # Git takes any string here, and an address-shaped one would be a personal
+    # data pattern in a committed file — this project scans its own tests.
+    _git("config", "user.email", "invariant-tests", cwd=path)
+    _git("config", "user.name", "invariant-tests", cwd=path)
+    (path / "README.md").write_text("t\n", encoding="utf-8")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-qm", "first", cwd=path)
+    return path
+
+
+def _worktree(repo: Path, path: Path) -> Path:
+    _git("worktree", "add", "-q", "-b", path.name, str(path), cwd=repo)
+    return path
 
 
 class TestProtocolConformance:
@@ -281,11 +306,6 @@ class TestDiscovery:
         refs = ClaudeCodeTranscripts(origin=origin).sessions()
         assert [r.host_session_id for r in refs] == ["hs-alpha"]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_015 is live — startswith() has no boundary check; "
-        "delete this marker with the fix",
-    )
     def test_BUG_015_a_sibling_whose_name_extends_the_origins_is_excluded_but_the_worktree_stays_in(
         self, host_home, tmp_path
     ):
@@ -304,6 +324,100 @@ class TestDiscovery:
         selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
 
         assert selected == {"hs-origin", "hs-worktree"}
+
+    def test_a_real_subdirectory_of_the_project_is_still_in_scope(
+        self, host_home, tmp_path
+    ):
+        """Running the host from a directory inside the project is ordinary,
+        and its slug extends the origin's exactly as a sibling's does. What
+        tells them apart is that this one is really there, so the filesystem is
+        asked rather than the name."""
+        origin = tmp_path / "app"
+        inner = origin / "sub-dir"
+        inner.mkdir(parents=True)
+        write_jsonl(project_dir(host_home, origin) / "hs-origin.jsonl", [assistant()])
+        write_jsonl(project_dir(host_home, inner) / "hs-inner.jsonl", [assistant()])
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+        assert selected == {"hs-origin", "hs-inner"}
+
+    def test_a_sibling_that_exists_on_disk_is_still_excluded(
+        self, host_home, tmp_path
+    ):
+        """The other half of the previous test: a sibling is not admitted just
+        because something of that name is on disk next door."""
+        origin = tmp_path / "app"
+        sibling = tmp_path / "app-v2"
+        origin.mkdir()
+        sibling.mkdir()
+        write_jsonl(project_dir(host_home, origin) / "hs-origin.jsonl", [assistant()])
+        write_jsonl(project_dir(host_home, sibling) / "hs-sibling.jsonl", [assistant()])
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+        assert selected == {"hs-origin"}
+
+    def test_a_worktree_the_host_named_with_its_own_mangling_stays_in(
+        self, host_home, tmp_path
+    ):
+        """The host writes `/.claude` as `--claude`, not as `-.claude`, and the
+        directory is gone by the time the report is rendered — teardown removed
+        it. Neither the name nor the filesystem is the one this project's own
+        transcripts arrive under, so both spellings are recognised."""
+        origin = tmp_path / "app"
+        write_jsonl(project_dir(host_home, origin) / "hs-origin.jsonl", [assistant()])
+        torn_down = (
+            host_home
+            / "projects"
+            / (str(origin.resolve()).replace("/", "-") + "--claude-worktrees-wt-1")
+        )
+        write_jsonl(torn_down / "hs-worktree.jsonl", [assistant()])
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+        assert selected == {"hs-origin", "hs-worktree"}
+
+    def test_a_worktree_beside_the_repository_is_attributed_to_the_project(
+        self, host_home, tmp_path
+    ):
+        """`isolation_plan` places a session worktree beside the repository by
+        default, so its mangled name extends the origin's with no path boundary
+        — the same shape as the sibling project above, and not distinguishable
+        from it by any reading of the name. Git is asked, and git knows."""
+        origin = tmp_path / "app"
+        worktree = tmp_path / "app-wt-1"
+        stranger = tmp_path / "app-v2"
+        _repo(origin)
+        _worktree(origin, worktree)
+        stranger.mkdir()
+
+        for path, stem in (
+            (origin, "hs-origin"),
+            (worktree, "hs-worktree"),
+            (stranger, "hs-stranger"),
+        ):
+            write_jsonl(project_dir(host_home, path) / f"{stem}.jsonl", [assistant()])
+
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+        assert selected == {"hs-origin", "hs-worktree"}
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root reads a directory whatever its mode, so there is nothing to refuse",
+    )
+    def test_an_unreadable_directory_narrows_the_scan_and_never_raises(
+        self, host_home, tmp_path
+    ):
+        """Deciding whether an extension is really below the origin asks the
+        filesystem, and the filesystem is entitled to refuse. An unreadable
+        directory leaves a project out of the report — it never reaches the
+        caller as an exception."""
+        origin = tmp_path / "app"
+        inner = origin / "sub"
+        inner.mkdir(parents=True)
+        write_jsonl(project_dir(host_home, origin) / "hs-origin.jsonl", [assistant()])
+        write_jsonl(project_dir(host_home, inner) / "hs-inner.jsonl", [assistant()])
+        origin.chmod(0o000)
+        try:
+            selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+        finally:
+            origin.chmod(0o755)
+        assert selected == {"hs-origin"}
 
     def test_with_no_origin_every_project_is_in_scope(self, host_home, tmp_path):
         write_jsonl(project_dir(host_home, tmp_path / "a") / "hs-a.jsonl", [assistant()])

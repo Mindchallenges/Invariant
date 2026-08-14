@@ -256,13 +256,6 @@ class TestStatsCheckDoesNotPrintAHostSessionIdentifier:
         assert "have not been ingested" in text
         assert HOST_A not in text
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_016 F2 is live — delete this marker with the fix; the "
-            "assertion below must then pass unchanged"
-        ),
-    )
     def test_the_unreadable_record_message_does_not_name_the_host_session(
         self, wired, capsys
     ):

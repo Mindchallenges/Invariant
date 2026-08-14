@@ -104,8 +104,9 @@ that knows the language can tell those apart, so the rule asks
 the fact. (`MANIFEST → adapters`, for command and rule-level defaults, is the
 same arrow and predates it.)
 
-The two dotted-and-labelled arrows around `stats` are the same rule applied to
-a case that could easily have inverted it (ADR-002 D2). Reading a host's
+The two labelled arrows around `stats` — `CLI -. injects .-> CCTEL`, dotted,
+and `CCTEL -- implements SampleSource --> STATS`, solid — are the same rule
+applied to a case that could easily have inverted it (ADR-002 D2). Reading a host's
 transcripts is host knowledge, and the arithmetic over what is read is not —
 so `core/stats` declares a `SampleSource` protocol, `hosts/` implements it, and
 the CLI injects the implementation. Had the domain imported the reader
@@ -186,6 +187,15 @@ format, and that shapes the code: every field access tolerates absence, an
 unparseable record is skipped rather than fatal, and the file is a cache keyed
 on a content fingerprint. A format change degrades a report and never breaks a
 session.
+
+Narrowing those transcripts to one project is where that format bites hardest.
+The host names a project directory after the path it ran in, with separators
+replaced — a **lossy** mangling, in which `<root>/app/v2` and `<root>/app-v2`
+are one string. A worktree of the project must be counted and an unrelated
+sibling checkout must not, so the reader resolves the ambiguity with evidence
+rather than with the name: the filesystem for paths below the project, and
+`core/git` for the worktrees placed beside it. Both are downward reads for a
+fact only they hold, the same shape as `core/ → adapters/` above.
 
 ## The two flows that matter
 

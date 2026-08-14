@@ -190,10 +190,14 @@ invariant stats report [--write]
     contract needs an anchor.
 
 invariant stats show <session>
-    One session in full, including its per-state breakdown. A session recorded
-    before per-state attribution existed says "no breakdown available"
-    explicitly. Never a zero and never a blank: a blank invites the reader to
-    conclude the work was free.
+    One session in full, including its per-state breakdown. A session with no
+    breakdown says so explicitly and says WHY: recorded before per-state
+    attribution existed, or no pipeline state left yet, or no pipeline at all.
+    Never a zero and never a blank: a blank invites the reader to conclude the
+    work was free, and a cause that is not the real one invites them to stop
+    asking. A state whose two watermarks cannot be subtracted — the counter
+    changed under a rebind, the reading went backwards, or it did not move —
+    renders as unattributable, with the reason, and never as a figure.
 
 invariant stats archive <session>
     Promote a record to permanent. The raw store is a cache only while the
@@ -204,6 +208,9 @@ invariant stats check
     Staleness against the source, host sessions not yet ingested, records that
     are now the only copy and are not archived, models missing from the price
     table, and whether the rendered report matches the store. Exit 1 on any.
+    Problems are named by the invariant session's name or counted, never by a
+    host session identifier: this output gets pasted into commits, and the
+    repair is the same single command whichever record is affected.
 ```
 
 Two properties of the output are not stylistic:

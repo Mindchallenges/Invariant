@@ -70,7 +70,16 @@ class Session:
     #: The usage watermark at registration (ADR-002 D3). The earlier reading
     #: the first state's spend is subtracted from; ``None`` where it could not
     #: be observed, which the report renders as such rather than as zero.
+    #:
+    #: Written and not yet read: the session-side breakdown is forward-looking,
+    #: kept in step with the pipeline's rather than removed, and recorded as
+    #: such in ADR-002's Consequences (BUG_016 F4).
     usage_at_start: dict | None = None
+    #: The host session that baseline was counted against, so a later reader
+    #: can tell whether it is commensurable with the readings that follow it.
+    #: A rebind moves the binding and leaves this pointing at the old counter,
+    #: which is exactly what makes the crossing visible instead of plausible.
+    usage_at_start_host: str | None = None
 
     @property
     def is_stranded(self) -> bool:
@@ -115,20 +124,28 @@ class SessionDomain:
         self.watermarks = watermarks
         self.clock = clock
 
-    def _watermark(self, host_session_id: str | None) -> dict | None:
-        """Read the watermark, or give up quietly.
+    def _reading(self, host_session_id: str | None) -> tuple[dict | None, str | None]:
+        """Read the watermark and the counter it came from, or give up quietly.
 
         A transition is the record that something happened. Letting a
         telemetry read fail it would make measurement a reason for the engine
         to refuse — the trade ADR-002 declines everywhere else too.
+
+        The host session travels with the reading for the reason
+        ``domains/pipeline`` records it too: a cumulative count is
+        commensurable only with another taken from the same transcript, and
+        :meth:`adopt_host_session` can move the binding underneath a session
+        that has already recorded some.
         """
         if self.watermarks is None or not host_session_id:
-            return None
+            return None, None
         try:
             usage = self.watermarks.watermark(host_session_id)
         except Exception:  # noqa: BLE001 - see the docstring
-            return None
-        return usage.to_dict() if isinstance(usage, Usage) else None
+            return None, None
+        if not isinstance(usage, Usage):
+            return None, None
+        return usage.to_dict(), host_session_id
 
     # -- lookup --------------------------------------------------------
 
@@ -366,6 +383,13 @@ class SessionDomain:
         changes hands keeps its pipeline, its evidence and its declared file
         set, so the new owner would inherit work it never did — and the old
         owner would keep editing a session that no longer answers to it.
+
+        What a forced rebind deliberately does **not** do is touch the usage
+        watermarks already recorded. They were counted against the outgoing
+        host session's transcript and re-baselining them would invent readings
+        nobody took. Each is stored with the counter it came from, so the one
+        state that spans the rebind is declined by ``core/stats`` and named as
+        unattributable instead of rendering as a measured spend (BUG_014).
         """
         session = self.require(session_id)
 
@@ -493,6 +517,7 @@ class SessionDomain:
             if self.get(session_id) is not None:
                 session_id = uuid.uuid4().hex[:8]
 
+        baseline, baseline_host = self._reading(host_session_id)
         session = Session(
             id=session_id,
             name=_slug(name),
@@ -500,7 +525,8 @@ class SessionDomain:
             origin=str(git.toplevel(self.manifest.root) or self.manifest.root),
             host_session_id=host_session_id,
             heartbeat=self.clock(),
-            usage_at_start=self._watermark(host_session_id),
+            usage_at_start=baseline,
+            usage_at_start_host=baseline_host,
         )
         self._save(session)
         self._register(session)
@@ -782,13 +808,15 @@ class SessionDomain:
         # and no new clock time, and the entry itself carries a duration and a
         # pair of counters rather than a time.
         now = self.clock()
+        usage, usage_host = self._reading(session.host_session_id)
         session.history.append(
             {
                 "from": session.state,
                 "to": target,
                 "reason": reason,
                 "elapsed": max(0.0, now - session.heartbeat) if session.heartbeat else None,
-                "usage": self._watermark(session.host_session_id),
+                "usage": usage,
+                "usage_host": usage_host,
             }
         )
         session.state = target

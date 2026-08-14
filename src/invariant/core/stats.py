@@ -68,6 +68,41 @@ COST_FLOOR_LABEL = "excludes subagent spend"
 #: invites the reader to conclude the work was free (D3).
 NO_BREAKDOWN = "no breakdown available — recorded before per-state attribution"
 
+#: A pipeline that started *after* the instrumentation landed and has not left
+#: its first state yet. It has a baseline and an empty history: nothing was
+#: lost, there is simply nothing to subtract yet. Saying it predates the
+#: instrumentation would be a fabricated history (BUG_013), which is the
+#: failure D3 exists to prevent, arrived at through D3's own sentence.
+NO_BREAKDOWN_YET = (
+    "no breakdown available yet — no pipeline state has been left, "
+    "so there is nothing to attribute"
+)
+
+#: A session that has never started a pipeline. Same rule: what is missing is
+#: the pipeline, not the measurement.
+NO_BREAKDOWN_NO_PIPELINE = "no breakdown available — this session has not run a pipeline"
+
+#: Why a breakdown was declined, as a code rather than a sentence: the record
+#: is rebuildable but a stored sentence would still outlive a change of wording,
+#: and the reader is owed the *reason*, which is the thing that differs.
+DECLINED_PRE_INSTRUMENTATION = "pre_instrumentation"
+DECLINED_NOT_YET = "not_yet"
+DECLINED_NO_PIPELINE = "no_pipeline"
+
+NO_BREAKDOWN_SENTENCES: Mapping[str, str] = {
+    DECLINED_PRE_INSTRUMENTATION: NO_BREAKDOWN,
+    DECLINED_NOT_YET: NO_BREAKDOWN_YET,
+    DECLINED_NO_PIPELINE: NO_BREAKDOWN_NO_PIPELINE,
+}
+
+#: Attached to a state whose spend two readings cannot describe. Each names
+#: what was seen rather than what it might mean, and none of them is a number:
+#: the whole point of D3's asymmetry is that an unattributable spend renders as
+#: unattributable and never as a plausible figure.
+SPEND_NOTE_BACKWARDS = "usage watermark went backwards; spend not attributable"
+SPEND_NOTE_REBOUND = "the host session changed here; spend not attributable"
+SPEND_NOTE_UNMOVED = "usage watermark did not move; spend not observed"
+
 
 @dataclass(frozen=True)
 class Rate:
@@ -519,50 +554,104 @@ class StateSpend:
 
 
 def breakdown(
-    history: Sequence[Mapping], baseline: Usage | None = None
+    history: Sequence[Mapping],
+    baseline: Usage | None = None,
+    baseline_host: str | None = None,
 ) -> list[StateSpend] | None:
     """Per-state durations and spend, or ``None`` when there is no breakdown.
 
-    ``None`` — not an empty list — is the answer for a history recorded before
-    D3, because "we did not measure this" and "this measured zero" are
-    different facts and the report renders them differently. One entry missing
-    ``elapsed`` poisons the whole breakdown rather than producing a partial one
-    with an invisible hole in it.
+    Three answers, and telling them apart is load-bearing:
 
-    ``baseline`` is the watermark at the moment the machine started. Without
-    it the first state has a duration and no spend, which is correct: there is
-    no earlier reading to subtract.
+    * a **list** — every state that has been left, attributed as far as the
+      readings allow;
+    * an **empty list** — a machine that has not left a state yet. There is
+      nothing to attribute and nothing was lost;
+    * ``None`` — a history recorded before D3, where the information was never
+      observed and no later work can supply it. One entry missing ``elapsed``
+      poisons the whole breakdown rather than producing a partial one with an
+      invisible hole in it.
+
+    The empty list used to be a ``None`` as well, which made the report state a
+    pre-instrumentation cause for every pipeline that had merely just started
+    (BUG_013). "We did not measure this", "this measured zero" and "there is
+    nothing to measure yet" are three facts, and the caller renders each
+    differently.
+
+    ``baseline`` is the watermark at the moment the machine started, and
+    ``baseline_host`` the host session it was counted against. Without a
+    baseline the first state has a duration and no spend, which is correct:
+    there is no earlier reading to subtract.
     """
-    if not history:
-        return None
     if any(entry.get("elapsed") is None for entry in history):
         return None
 
     spends: list[StateSpend] = []
     previous = baseline
+    previous_host = baseline_host
     for entry in history:
         raw = entry.get("usage")
         current = Usage.from_dict(raw) if isinstance(raw, Mapping) else None
+        current_host = entry.get("usage_host") or None
         spend = StateSpend(
             state=str(entry.get("from") or "?"),
             elapsed=float(entry["elapsed"]),
         )
         if current is not None and previous is not None:
-            delta = current - previous
-            if delta.is_negative:
-                # Two readings that cannot describe one monotonic run. Clamping
-                # would hand the reader a small plausible number instead of a
-                # visible anomaly.
-                spend.note = "usage watermark went backwards; spend not attributable"
-            else:
-                spend.usage = delta
+            spend.note = _incommensurable(
+                previous, previous_host, current, current_host
+            )
+            if not spend.note:
+                spend.usage = current - previous
         spends.append(spend)
         if current is not None:
-            previous = current
+            previous, previous_host = current, current_host
     return spends
 
 
+def _incommensurable(
+    previous: Usage,
+    previous_host: str | None,
+    current: Usage,
+    current_host: str | None,
+) -> str:
+    """Why these two readings cannot be subtracted, or ``""`` when they can.
+
+    Each case ends the same way — no ``usage``, a note naming what was seen —
+    because a spend that cannot be measured must not render as a number. The
+    order is by what the readings prove, strongest first: a counter that
+    changed identity makes the sign of the difference meaningless, so it is
+    asked before the sign is.
+    """
+    if previous_host and current_host and previous_host != current_host:
+        # Two cumulative counters against two different transcripts. The
+        # subtraction is well-formed and measures nothing, and where the new
+        # counter is the higher it looks exactly like a measurement (BUG_014).
+        return SPEND_NOTE_REBOUND
+    delta = current - previous
+    if delta.is_negative:
+        # Two readings that cannot describe one monotonic run. Clamping would
+        # hand the reader a small plausible number instead of a visible anomaly.
+        return SPEND_NOTE_BACKWARDS
+    if delta.total_tokens == 0:
+        # Nothing was appended to the transcript between the two readings —
+        # which is the ordinary case for a subagent's whole run, since its loop
+        # is never written to the parent's transcript. A zero here would read
+        # as "this work was free", the conclusion D3 exists to prevent.
+        return SPEND_NOTE_UNMOVED
+    return ""
+
+
 # -- rendering helpers -------------------------------------------------
+
+
+def no_breakdown_sentence(reason: str | None) -> str:
+    """What to print instead of a breakdown, for the reason there is none.
+
+    An unknown or absent reason falls back to :data:`NO_BREAKDOWN`. That is
+    what a record written before this distinction existed carries, and its
+    sessions really are the ones the original sentence was written for.
+    """
+    return NO_BREAKDOWN_SENTENCES.get(reason or "", NO_BREAKDOWN)
 
 
 def format_duration(seconds: float | None) -> str:

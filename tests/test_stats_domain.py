@@ -13,8 +13,12 @@ from invariant.core.errors import UsageError
 from invariant.core.privacy import PATTERNS, PrivacyScanner
 from invariant.core.stats import (
     COST_FLOOR_LABEL,
+    DECLINED_NO_PIPELINE,
+    DECLINED_PRE_INSTRUMENTATION,
     NO_BREAKDOWN,
+    NO_BREAKDOWN_NO_PIPELINE,
     RATES_AS_OF,
+    SPEND_NOTE_BACKWARDS,
     Sample,
     SourceRef,
     Usage,
@@ -212,7 +216,10 @@ class TestPerStateAttribution:
         source.put(HOST_A, [sample()])
         stats = domain(m, source)
         stats.refresh()
-        assert stats.get(HOST_A).states is None
+        record = stats.get(HOST_A)
+        assert record.states is None
+        assert record.states_reason == DECLINED_PRE_INSTRUMENTATION
+        assert NO_BREAKDOWN in stats.render_session("a-task")
 
     def test_a_session_with_no_pipeline_at_all_reports_no_breakdown(self, m):
         self.wired(m)
@@ -221,6 +228,33 @@ class TestPerStateAttribution:
         stats = domain(m, source)
         stats.refresh()
         assert stats.get(HOST_A).states is None
+
+    def test_a_session_with_no_pipeline_says_that_and_not_that_it_is_old(self, m):
+        """The third fact behind the one `None`, and the one the repro for
+        BUG_013 deliberately left to whoever fixed it: a session that has never
+        started a pipeline has nothing to attribute for a reason that has
+        nothing to do with when it ran."""
+        self.wired(m)
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+
+        record = stats.get(HOST_A)
+        text = stats.render_session("a-task")
+        assert record.states_reason == DECLINED_NO_PIPELINE
+        assert NO_BREAKDOWN_NO_PIPELINE in text
+        assert "recorded before per-state attribution" not in text
+
+    def test_the_reason_there_is_no_breakdown_survives_the_store(self, m):
+        """It is read back out of the record rather than re-derived, so it has
+        to be written down."""
+        self.wired(m)
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+        assert domain(m, source).get(HOST_A).states_reason == DECLINED_NO_PIPELINE
 
 
 class TestArchiving:
@@ -503,6 +537,47 @@ class TestRenderingASessionInFull:
         assert "unknown" in text
         assert "0 tokens" not in text
 
+    def test_the_reason_a_state_was_declined_reaches_the_reader(self, m):
+        """The sixth finding from the BUG_016 triage. `core/stats` names why it
+        declined a state and the merge here used to build a fresh spend and
+        overwrite that note with "some transitions carried no watermark" — so
+        the reader was told a reading was missing when the code had in fact
+        detected two readings that cannot describe one run.
+
+        A single pipeline with one backwards step is enough; no second pipeline
+        is needed for the merge to run."""
+
+        class Backwards:
+            def __init__(self):
+                self.readings = [Usage(input=100), Usage(input=400), Usage(input=250)]
+
+            def watermark(self, host_session_id):
+                return self.readings.pop(0) if self.readings else None
+
+        self.wired(m, Backwards())
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+
+        [row] = [
+            line
+            for line in stats.render_session("a-task").splitlines()
+            if line.strip().startswith("red ")
+        ]
+        assert SPEND_NOTE_BACKWARDS in row
+        assert "carried no watermark" not in row
+
+    def test_a_state_that_did_carry_no_watermark_still_says_so(self, m):
+        """The other half: where there really was no reading, the generic note
+        is the accurate one and stays."""
+        self.wired(m)
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+        assert "carried no watermark" in stats.render_session("a-task")
+
     def test_a_partial_breakdown_says_the_rows_do_not_add_up(self, m):
         """One pipeline attributed and one not: reporting the second as zero
         would claim its states were free."""
@@ -610,13 +685,6 @@ class TestTheNoBreakdownLineDoesNotFabricateAHistory:
         assert pipeline.history == []
         assert pipeline.usage_at_start == Usage(input=100).to_dict()
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_013 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_a_never_transitioned_pipeline_is_not_called_pre_instrumentation(self, m):
         self.wired(m)
         source = FakeSource()
@@ -631,13 +699,6 @@ class TestTheNoBreakdownLineDoesNotFabricateAHistory:
             "recorded after the instrumentation landed"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_013 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_a_freshly_started_second_pipeline_is_not_called_pre_instrumentation(
         self, m
     ):
@@ -742,6 +803,22 @@ class TestStoreRoundTrip:
         (m.state_root / "stats" / f"{HOST_A}.json").write_text("{]", encoding="utf-8")
         assert stats.records() == []
         assert any("could not be read" in p for p in stats.check().problems())
+
+    def test_an_unreadable_record_is_counted_and_never_named(self, m):
+        """BUG_016 F2. The un-ingested branch of this same method counts rather
+        than names, on the stated grounds that terminal output gets pasted into
+        commits. The same rule, one branch up."""
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        source.put(HOST_B, [sample(host=HOST_B)])
+        stats = domain(m, source)
+        stats.refresh()
+        for host in (HOST_A, HOST_B):
+            (m.state_root / "stats" / f"{host}.json").write_text("{]", encoding="utf-8")
+
+        problems = stats.check().problems()
+        assert any("2 record(s) could not be read" in p for p in problems)
+        assert not any(HOST_A in p or HOST_B in p for p in problems)
 
 
 class TestAForcedRebindDoesNotCrossTwoHostSessionsUsageCounters:
@@ -874,13 +951,6 @@ class TestAForcedRebindDoesNotCrossTwoHostSessionsUsageCounters:
         _, text = self.wired(m, 400, 700)
         assert "unknown tokens" in self.row(text, "red")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_014 is live — delete this marker with the fix; the assertion "
-            "below must then pass unchanged"
-        ),
-    )
     def test_the_state_spanning_the_rebind_is_not_rendered_as_a_measurement(self, m):
         """The state either side of the rebind is reported as having spent
         B's entire prior transcript, formatted exactly like the measured row
@@ -971,19 +1041,26 @@ class TestAFrozenTranscriptDoesNotRenderAsZeroSpend:
         self, m
     ):
         """The precondition, and the reason this is not the already-correct
-        `None` path: the watermark source ANSWERS on every read, the baseline
-        and both transitions carry one, and the breakdown below is therefore a
-        rendered measurement rather than an absence."""
+        `None` path: the watermark source ANSWERS on every read, and the
+        baseline and both transitions each recorded one.
+
+        Asserted on what was RECORDED rather than on what was derived from it.
+        The derived form is the subject of the repro below — a state whose two
+        readings were both taken and cannot be subtracted into a spend is
+        exactly what the fix produces — so pinning it here would pin the defect
+        as the precondition for its own repro."""
         frozen = self.Frozen(Usage(input=1200, output=300))
         stats, _ = self.wired(m, frozen)
 
         assert frozen.reads == 3, "one baseline read and one per transition"
-        states = stats.get(HOST_A).states
-        assert states is not None, "a breakdown was produced, not declined"
-        assert all(entry["usage"] is not None for entry in states), (
-            "every state carries a usage reading, so nothing here is the "
+        record = stats.get(HOST_A)
+        pipeline = PipelineDomain(m).require(record.session_id)
+        assert pipeline.usage_at_start is not None
+        assert all(entry["usage"] is not None for entry in pipeline.history), (
+            "every transition recorded a watermark, so nothing here is the "
             "unobservable-watermark path"
         )
+        assert record.states is not None, "a breakdown was produced, not declined"
 
     def test_a_growing_transcript_still_renders_a_real_spend(self, m):
         """Falsifiability control: the assertion below is satisfiable in this
@@ -1003,13 +1080,6 @@ class TestAFrozenTranscriptDoesNotRenderAsZeroSpend:
         assert self.spend(text, "designing") == "unknown"
         assert self.spend(text, "red") == "unknown"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG_016 F1 is live — delete this marker with the fix; the "
-            "assertion below must then pass unchanged"
-        ),
-    )
     def test_a_state_whose_watermark_did_not_move_is_not_rendered_as_zero(self, m):
         """Every state a frozen transcript spans is rendered as a hard `0`,
         formatted identically to a state that genuinely cost nothing and

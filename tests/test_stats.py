@@ -12,9 +12,16 @@ import random
 import pytest
 
 from invariant.core.stats import (
+    DECLINED_NO_PIPELINE,
+    DECLINED_NOT_YET,
+    DECLINED_PRE_INSTRUMENTATION,
     NO_BREAKDOWN,
+    NO_BREAKDOWN_NO_PIPELINE,
+    NO_BREAKDOWN_YET,
     PRICES,
     RATES_AS_OF,
+    SPEND_NOTE_REBOUND,
+    SPEND_NOTE_UNMOVED,
     AgentLaunches,
     Sample,
     SessionStats,
@@ -27,6 +34,7 @@ from invariant.core.stats import (
     fold,
     format_cost,
     format_duration,
+    no_breakdown_sentence,
 )
 
 
@@ -260,8 +268,15 @@ class TestBreakdown:
         ]
         assert breakdown(history) is None
 
-    def test_empty_history_yields_no_breakdown(self):
-        assert breakdown([]) is None
+    def test_an_empty_history_is_nothing_yet_and_not_nothing_observed(self):
+        """An empty list and a `None` are different answers on purpose. A
+        machine that has not left a state yet has nothing to attribute and has
+        lost nothing; one recorded before D3 had its measurements never taken.
+        Returning `None` for both is what made the report state a
+        pre-instrumentation cause for every freshly started pipeline
+        (BUG_013)."""
+        assert breakdown([]) == []
+        assert breakdown([{"from": "designing", "to": "red"}]) is None
 
     def test_elapsed_attributes_to_the_state_that_was_left(self):
         history = [
@@ -310,6 +325,70 @@ class TestBreakdown:
         spends = breakdown(history)
         assert [s.elapsed for s in spends] == [5.0, 6.0]
         assert all(s.usage is None for s in spends)
+
+    def test_two_readings_from_different_host_sessions_are_not_subtracted(self):
+        """BUG_014. Each watermark records the counter it came from, so a
+        rebind mid-pipeline is visible in the data rather than inferred from
+        the sign of a difference that happens to come out positive."""
+        history = [
+            {
+                "from": "designing",
+                "to": "red",
+                "elapsed": 1.0,
+                "usage": Usage(input=1_200).to_dict(),
+                "usage_host": "hs-a",
+            },
+            {
+                "from": "red",
+                "to": "green",
+                "elapsed": 1.0,
+                "usage": Usage(input=50_300).to_dict(),
+                "usage_host": "hs-b",
+            },
+        ]
+        spends = breakdown(history, baseline=Usage(input=1_000), baseline_host="hs-a")
+        assert spends[0].usage == Usage(input=200), "wholly inside one counter"
+        assert spends[1].usage is None
+        assert spends[1].note == SPEND_NOTE_REBOUND
+
+    def test_the_baseline_carries_its_counter_too(self):
+        """The first state's earlier reading is the machine's own baseline, and
+        it can be the one that belongs to the other transcript."""
+        history = [
+            {
+                "from": "designing",
+                "to": "red",
+                "elapsed": 1.0,
+                "usage": Usage(input=50_300).to_dict(),
+                "usage_host": "hs-b",
+            }
+        ]
+        spends = breakdown(history, baseline=Usage(input=1_000), baseline_host="hs-a")
+        assert spends[0].usage is None and spends[0].note == SPEND_NOTE_REBOUND
+
+    def test_a_reading_with_no_counter_recorded_is_still_subtracted(self):
+        """Every transition recorded before the counter was written down has
+        none, and a fact that is simply absent may not be read as a mismatch —
+        that would turn every pre-existing record into an anomaly."""
+        history = [
+            {"from": "a", "to": "b", "elapsed": 1.0, "usage": Usage(input=250).to_dict()},
+            {"from": "b", "to": "c", "elapsed": 1.0, "usage": Usage(input=400).to_dict()},
+        ]
+        spends = breakdown(history, baseline=Usage(input=100))
+        assert [s.usage for s in spends] == [Usage(input=150), Usage(input=150)]
+
+    def test_a_watermark_that_did_not_move_is_not_a_zero_spend(self):
+        """BUG_016 F1. Two equal readings mean nothing was written to the
+        transcript in between — which is what a whole subagent run looks like
+        from the parent's side — not that the state was free."""
+        history = [
+            {"from": "a", "to": "b", "elapsed": 1.0, "usage": Usage(input=400).to_dict()},
+            {"from": "b", "to": "c", "elapsed": 1.0, "usage": Usage(input=400).to_dict()},
+        ]
+        spends = breakdown(history, baseline=Usage(input=100))
+        assert spends[0].usage == Usage(input=300)
+        assert spends[1].usage is None
+        assert spends[1].note == SPEND_NOTE_UNMOVED
 
     def test_a_spend_prices_like_any_other_usage(self):
         spend = StateSpend(state="red", elapsed=1.0, usage=Usage(input=1_000_000))
@@ -382,3 +461,25 @@ class TestMarkers:
     def test_the_no_breakdown_marker_is_neither_a_zero_nor_a_blank(self):
         assert NO_BREAKDOWN.strip()
         assert "0" not in NO_BREAKDOWN
+
+    def test_every_reason_for_no_breakdown_says_which_reason_it_is(self):
+        """One sentence per fact. The three used to share one, and the shared
+        one asserted a history the other two do not have (BUG_013)."""
+        sentences = {
+            no_breakdown_sentence(DECLINED_PRE_INSTRUMENTATION),
+            no_breakdown_sentence(DECLINED_NOT_YET),
+            no_breakdown_sentence(DECLINED_NO_PIPELINE),
+        }
+        assert sentences == {NO_BREAKDOWN, NO_BREAKDOWN_YET, NO_BREAKDOWN_NO_PIPELINE}
+        assert all(s.strip() and "0" not in s for s in sentences)
+
+    def test_only_the_pre_instrumentation_sentence_claims_a_history(self):
+        for sentence in (NO_BREAKDOWN_YET, NO_BREAKDOWN_NO_PIPELINE):
+            assert "predate" not in sentence
+            assert "recorded before" not in sentence
+
+    def test_an_unrecorded_reason_falls_back_to_the_oldest_sentence(self):
+        """A record written before the distinction existed carries no reason,
+        and its sessions really are the ones that sentence was written for."""
+        assert no_breakdown_sentence(None) == NO_BREAKDOWN
+        assert no_breakdown_sentence("something-a-later-release-added") == NO_BREAKDOWN

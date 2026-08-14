@@ -75,6 +75,12 @@ class Pipeline:
     #: have a duration and no spend. ``None`` where the watermark could not be
     #: observed, which is a fact the report renders rather than a zero.
     usage_at_start: dict | None = None
+    #: The host session that baseline was counted against. A cumulative count
+    #: is only commensurable with another taken from the same transcript, and
+    #: the binding can move under a forced rebind — so the counter's identity
+    #: is recorded with the reading rather than assumed from the session's
+    #: binding at the time the report is rendered.
+    usage_at_start_host: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -122,20 +128,29 @@ class PipelineDomain:
         self.watermarks = watermarks
         self.clock = clock
 
-    def _watermark(self, host_session_id: str | None) -> dict | None:
-        """Read the watermark, or give up quietly.
+    def _reading(self, host_session_id: str | None) -> tuple[dict | None, str | None]:
+        """Read the watermark and the counter it came from, or give up quietly.
 
         Telemetry may never be a reason a transition refuses. ADR-002 rejects
         gating on the report for the same reason it rejects gating teardown:
         the step that records what happened must not acquire new ways to fail.
+
+        The reading and the host session travel together because a cumulative
+        count means nothing without the transcript it was counted against. A
+        forced rebind moves the binding mid-pipeline, and without the second
+        half of this pair the difference between the readings either side is
+        well-formed, meaningless, and indistinguishable from a measurement
+        (BUG_014).
         """
         if self.watermarks is None or not host_session_id:
-            return None
+            return None, None
         try:
             usage = self.watermarks.watermark(host_session_id)
         except Exception:  # noqa: BLE001 - see the docstring
-            return None
-        return usage.to_dict() if isinstance(usage, Usage) else None
+            return None, None
+        if not isinstance(usage, Usage):
+            return None, None
+        return usage.to_dict(), host_session_id
 
     def _path(self, session_id: str) -> str:
         return f"pipelines/{session_id}.json"
@@ -183,13 +198,15 @@ class PipelineDomain:
             self.manifest.data["methodology"]["pipeline"] = methodology
             self.machine = _load(self.manifest)
 
+        baseline, baseline_host = self._reading(host_session_id)
         pipeline = Pipeline(
             session_id=session_id,
             methodology=self.machine.id,
             task=task,
             state=self.machine.initial,
             started=self.clock(),
-            usage_at_start=self._watermark(host_session_id),
+            usage_at_start=baseline,
+            usage_at_start_host=baseline_host,
         )
         self._save(session_id, pipeline, archive=existing)
         return pipeline
@@ -345,6 +362,7 @@ class PipelineDomain:
         now = self.clock()
         entered = pipeline.state_entered()
         host_session_id = (session or {}).get("host_session_id")
+        usage, usage_host = self._reading(host_session_id)
         pipeline.history.append(
             {
                 "from": pipeline.state,
@@ -352,7 +370,8 @@ class PipelineDomain:
                 "reason": reason,
                 "forced": bool(force),
                 "elapsed": None if entered is None else max(0.0, now - entered),
-                "usage": self._watermark(host_session_id),
+                "usage": usage,
+                "usage_host": usage_host,
             }
         )
         pipeline.state = target

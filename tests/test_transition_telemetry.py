@@ -79,6 +79,10 @@ class TestPipelineRecordsElapsed:
         ]
 
     def test_no_transition_record_carries_a_timestamp(self, m):
+        """A whitelist rather than an absence check, so a field added to the
+        record has to be looked at rather than merely not called `timestamp`.
+        `usage_host` names the counter `usage` was read from and is no more a
+        time than `usage` is."""
         domain = PipelineDomain(m, clock=Clock(1000.0, 1060.0))
         domain.start("s1", task="t")
         pipeline, _ = advance(domain, "s1", "red")
@@ -89,6 +93,7 @@ class TestPipelineRecordsElapsed:
             "forced",
             "elapsed",
             "usage",
+            "usage_host",
         }
 
     def test_a_pipeline_started_before_this_existed_reports_no_elapsed(self, m):
@@ -168,6 +173,29 @@ class TestPipelineRecordsAWatermark:
         advance(domain, "s1", "red", session={"host_session_id": "hs-xyz"})
         assert watermarks.asked[-1] == "hs-xyz"
 
+    def test_a_watermark_records_the_counter_it_was_read_from(self, m):
+        """A cumulative count is only commensurable with another taken from the
+        same transcript, and `session adopt --force` can move the binding
+        between two transitions of one pipeline. The counter's identity is
+        recorded with the reading rather than assumed from whatever the session
+        is bound to when the report is rendered (BUG_014)."""
+        domain = PipelineDomain(
+            m, watermarks=FrozenWatermarks(Usage(input=1), Usage(input=2))
+        )
+        pipeline = domain.start("s1", task="t", host_session_id="hs-a")
+        assert pipeline.usage_at_start_host == "hs-a"
+        pipeline, _ = advance(domain, "s1", "red", session={"host_session_id": "hs-b"})
+        assert pipeline.history[-1]["usage_host"] == "hs-b"
+
+    def test_a_reading_that_could_not_be_taken_names_no_counter(self, m):
+        """The pair is written together or not at all: a counter beside no
+        reading is a fact about nothing."""
+        domain = PipelineDomain(m, watermarks=FrozenWatermarks(None))
+        pipeline = domain.start("s1", task="t", host_session_id="hs-a")
+        assert pipeline.usage_at_start is None and pipeline.usage_at_start_host is None
+        pipeline, _ = advance(domain, "s1", "red", session={"host_session_id": "hs-a"})
+        assert pipeline.history[-1]["usage_host"] is None
+
 
 class TestSessionRecordsElapsed:
     def test_a_transition_records_the_seconds_spent_in_the_state_it_left(self, m):
@@ -186,6 +214,7 @@ class TestSessionRecordsElapsed:
             "reason",
             "elapsed",
             "usage",
+            "usage_host",
         }
 
     def test_a_session_records_its_baseline_watermark_at_registration(self, m):
@@ -200,6 +229,19 @@ class TestSessionRecordsElapsed:
         session = domain.start("a-task", host_session_id="hs-1")
         domain.transition(session.id, "abandoned", reason="done")
         assert domain.get(session.id).history[-1]["usage"]["output"] == 19
+
+    def test_a_session_watermark_records_its_counter_as_a_pipeline_does(self, m):
+        """The session machine has no consumer for its breakdown yet (ADR-002's
+        Consequences records it as forward-looking), and it records the counter
+        anyway — a future reader inherits the commensurability guard rather than
+        the bug it was written for."""
+        domain = SessionDomain(
+            m, watermarks=FrozenWatermarks(Usage(output=7), Usage(output=19))
+        )
+        session = domain.start("a-task", host_session_id="hs-1")
+        assert session.usage_at_start_host == "hs-1"
+        domain.transition(session.id, "abandoned", reason="done")
+        assert domain.get(session.id).history[-1]["usage_host"] == "hs-1"
 
     def test_a_watermark_source_that_raises_never_fails_a_session_transition(self, m):
         class Exploding:

@@ -38,6 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
+from ..core import git
 from ..core.stats import Sample, SourceRef, Usage
 
 #: Where the host keeps its per-project transcripts. Overridable so a test can
@@ -50,6 +51,12 @@ CLAUDE_HOME_ENV = "CLAUDE_CONFIG_DIR"
 #: session unpriceable, which is the correct handling of an *unknown* model and
 #: the wrong handling of one known to be free.
 SYNTHETIC_MODEL = "<synthetic>"
+
+#: What the host puts in place of a path separator when it names a project
+#: directory after the path it was run from. The mangling is **lossy** — it is
+#: also what the host puts in place of a leading dot — which is the whole
+#: difficulty in :func:`_under_origin` below.
+PATH_MARK = "-"
 
 
 def claude_home() -> Path:
@@ -200,20 +207,83 @@ def _watermark(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolves_under(base: Path, parts: list[str]) -> bool:
+    """Do ``parts`` name a directory that really exists under ``base``?
+
+    The mangling joins path segments with a character that may also appear
+    *inside* a segment, so ``a-b`` is either one directory or two and the name
+    cannot say which. The filesystem can, so this walks it, trying every way of
+    re-joining the leading segments before descending into the match.
+
+    ``Path.is_dir`` answers ``False`` rather than raising for a path it cannot
+    stat, so a directory this process may not read narrows the scan instead of
+    reaching the caller — which is the rule the whole module is written to.
+    """
+    if not parts:
+        return True
+    for cut in range(1, len(parts) + 1):
+        child = base / PATH_MARK.join(parts[:cut])
+        if child.is_dir() and _resolves_under(child, parts[cut:]):
+            return True
+    return False
+
+
+def _under_origin(name: str, prefix: str, origin: Path) -> bool:
+    """Is this project directory the origin's own, or one below it?
+
+    A *worktree* of the project lives at a path under the origin, so its
+    mangled name extends the origin's and it belongs to the project. A
+    *sibling checkout* whose directory name merely starts with the origin's
+    extends it in exactly the same way and does not: ``<root>/app/v2`` and
+    ``<root>/app-v2`` mangle to one string. No reading of the name alone can
+    tell them apart (BUG_015), so two other things are asked, in the order of
+    what they prove:
+
+    * **the filesystem** — an extension that names a directory really present
+      under the origin is a path under the origin;
+    * **the host's own convention** — a hidden directory. ``.claude`` is where
+      this library puts session worktrees, and a worktree is *removed at
+      teardown*, so its transcript outlives the directory it was recorded in.
+      Absence from disk proves nothing about that case, which is why it is not
+      left to the check above.
+
+    Anything else is a different project. That is the deliberate direction:
+    counting a sibling's spend inflates this project's totals with no signal
+    in the output at all, while a session left out is a session the report
+    never claims to have measured.
+    """
+    if name == prefix:
+        return True
+    if not name.startswith(prefix + PATH_MARK):
+        return False
+    remainder = name[len(prefix) + len(PATH_MARK):]
+    # `/.claude` mangles to `-.claude` here and to `--claude` in the host's own
+    # naming; both say the same thing, that the next segment is hidden.
+    if remainder.startswith((".", PATH_MARK)):
+        return True
+    return _resolves_under(origin, remainder.split(PATH_MARK))
+
+
 class ClaudeCodeTranscripts:
     """``core.stats.SampleSource`` over the host's per-project transcripts.
 
     ``origin`` narrows the scan to one project tree. The host names a project
     directory after its path with separators replaced, and a session worktree
-    is a different directory and therefore a different project — so narrowing
-    by *prefix* rather than by exact name is what keeps a project's own
-    worktrees attributed to it instead of scattered across entries nobody
-    thinks to look in.
+    is a different directory and therefore a different project — so the scan
+    keeps the project's worktrees as well as the project itself, which is what
+    keeps their sessions attributed to it instead of scattered across entries
+    nobody thinks to look in.
+
+    Which directories those are is the whole difficulty, and it is answered in
+    two places: :meth:`roots`, for the worktrees git knows about, and
+    :func:`_under_origin`, for the paths below a root. Neither is as simple as
+    it looks, because the host's naming is lossy.
     """
 
     def __init__(self, origin: Path | None = None, home: Path | None = None) -> None:
         self.origin = Path(origin) if origin is not None else None
         self._home = Path(home) if home is not None else None
+        self._roots: list[tuple[str, Path]] | None = None
 
     @property
     def home(self) -> Path:
@@ -221,11 +291,39 @@ class ClaudeCodeTranscripts:
 
     # -- discovery -----------------------------------------------------
 
+    def roots(self) -> list[tuple[str, Path]]:
+        """Every path whose sessions belong to this project, and its slug.
+
+        The origin, plus — when the origin is the repository's main checkout —
+        the repository's own linked worktrees. A worktree placed *beside* the
+        repository is `isolation_plan`'s default, and its mangled name extends
+        the origin's without a path boundary, which makes it lexically
+        identical to the unrelated sibling checkout BUG_015 is about. Git is
+        the only thing that can tell those two apart, so it is asked, once per
+        instance and never per transcript.
+
+        Deliberately asked only from the main checkout. What a *worktree's* own
+        report should contain — its own sessions, or the whole project's — is a
+        separate open question about the other direction of this narrowing, and
+        answering it here by accident would settle it without deciding it.
+        """
+        if self._roots is None:
+            self._roots = []
+            if self.origin is not None:
+                origin = self.origin.resolve()
+                self._roots.append((str(origin).replace("/", PATH_MARK), origin))
+                if git.main_checkout(origin) == origin:
+                    for worktree in git.worktrees(origin):
+                        path = worktree.path.resolve()
+                        if path != origin:
+                            self._roots.append(
+                                (str(path).replace("/", PATH_MARK), path)
+                            )
+        return self._roots
+
     def paths(self) -> list[Path]:
         root = self.home / "projects"
-        prefix = None
-        if self.origin is not None:
-            prefix = str(self.origin.resolve()).replace("/", "-")
+        roots = self.roots()
         found: list[Path] = []
         try:
             projects = sorted(root.iterdir())
@@ -234,7 +332,9 @@ class ClaudeCodeTranscripts:
         for project in projects:
             if not project.is_dir():
                 continue
-            if prefix is not None and not project.name.startswith(prefix):
+            if roots and not any(
+                _under_origin(project.name, prefix, path) for prefix, path in roots
+            ):
                 continue
             try:
                 found.extend(sorted(project.glob("*.jsonl")))

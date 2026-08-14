@@ -128,6 +128,37 @@ every other watermark, taken one extra time; the failure mode is the same
 `None`, rendered as "no breakdown" rather than a zero, never a reason the
 `start` call itself can fail.
 
+**A watermark is commensurable only with another from the same counter, so
+each is stored with the counter it came from.** "The difference between
+consecutive watermarks" silently assumes both readings count the same
+transcript. That holds while the binding is stable and `adopt_host_session`
+exists precisely to move it: a forced rebind mid-pipeline leaves the earlier
+readings counted against the outgoing host session, and the difference across
+the boundary is well-formed and measures nothing. Where the new transcript's
+cumulative total is the higher, it is also *positive*, which is worse than
+wrong — it wears the units and the formatting of a measurement. So every
+reading is recorded beside the host session it was read from (`usage_host`,
+`usage_at_start_host`), and the one state that spans a rebind is declined and
+named rather than subtracted. Re-baselining instead was rejected: it would
+overwrite readings that were honestly taken with readings nobody took.
+
+The same rule settles what an *unmoved* watermark means. Two equal readings
+say only that nothing was appended to the transcript in between, which is
+what an entire subagent run looks like from the parent's side — the launch and
+the result are recorded and the loop between them never is. A zero there would
+say the work was free, so an unchanged watermark is declined like any other
+unobservable spend. This is the same argument as the paragraph above, applied
+to a difference of nothing rather than a difference of the wrong two things.
+
+**"No breakdown" is three different facts and says which one it is.** A
+machine that was never instrumented, one that has not left its first state
+yet, and a session that has not run a pipeline at all all have nothing to
+attribute, and only the first of them lost anything. Reporting the
+pre-instrumentation cause for all three states a history that did not happen —
+the failure this decision exists to prevent, reached through the sentence it
+installed to prevent it. Each case carries its own reason from the layer that
+knows it, and the original wording is kept for the case it was written for.
+
 The rejected alternative was a separate append-only transitions log, which
 leaves `history` untouched at the price of two records of the same fact — a
 single-source-of-truth violation from the moment they disagree.
@@ -215,6 +246,25 @@ total.
 - Reported cost understates real cost by an unknown margin for as long as
   subagent spend is unrecorded. This is a known gap, not a defect to be fixed
   in this work.
+- The baseline is commensurable with the deltas only while the binding is
+  stable. A session registered while unbound has no baseline and can never
+  acquire one — the reading it needed was the one true at registration — and a
+  rebound session's earlier readings belong to a closed counter. Neither is
+  repairable after the fact; both are *detectable*, which is why the counter
+  is stored with the reading and why the affected state renders as
+  unattributable rather than as a number.
+- **The session machine's own telemetry is forward-looking.** `Session`
+  records `usage_at_start` and stamps every transition with `elapsed` and a
+  watermark, and nothing reads them: the rendered breakdown is built from the
+  session's *pipelines*. This is recorded as a decision rather than left to be
+  rediscovered. The fields stay, in step with the pipeline's — a session-level
+  breakdown is a plausible next reader, the readings cannot be taken
+  retrospectively if they were not taken at the time, and keeping the two
+  machines identical means that reader inherits the commensurability guard
+  above rather than the defect it was written for. The Notes below record the
+  opposite defect — a field nothing could ever populate — and the distinction
+  is exactly that: this one is populated with something real and correct, and
+  waiting for a consumer.
 
 ## Alternatives considered
 

@@ -383,16 +383,30 @@ ADR-002.
 
 ### What a transition records
 
-Each recorded pipeline and session transition carries two fields beyond
+Each recorded pipeline and session transition carries three fields beyond
 `{from, to, reason}`:
 
 - **`elapsed`** — seconds spent in the state just left.
 - **`usage`** — the cumulative token counts observed for that host session at
   that moment: a **watermark**.
+- **`usage_host`** — the host session that watermark was counted against. The
+  machine's baseline carries the same pair (`usage_at_start`,
+  `usage_at_start_host`).
 
 Per-state duration is `elapsed` directly. Per-state spend is the difference
 between consecutive watermarks, with the machine's own starting watermark
 (`usage_at_start`) as the earlier reading for the first state.
+
+A difference is only taken between two readings of the **same** counter. A
+forced rebind moves the binding mid-run, so the readings either side of it
+count two different transcripts; subtracting them is well-formed and measures
+nothing, and where the new transcript's total is the higher it comes out
+positive and looks exactly like a measurement. Recording which counter each
+reading came from is what makes that visible rather than plausible. Two
+*equal* readings are declined for the same reason in the other direction: they
+say nothing was written to the transcript in between, which is what a whole
+subagent run looks like from the parent's side, and never that the state was
+free.
 
 Neither is a clock time, so the privacy rule is satisfied by construction
 rather than by scrubbing. The anchor `elapsed` is measured against is
@@ -412,6 +426,13 @@ was not merely unstored — it was never observed. One entry missing `elapsed`
 makes the whole machine's breakdown unavailable rather than partial, and the
 report says "no breakdown available" explicitly. Never a zero, and never a
 blank: a blank invites the reader to conclude the work was free.
+
+That sentence is reserved for that case. A machine that has not left a state
+yet, and a session that has never started a pipeline, also have no breakdown —
+and neither of them lost anything, so neither is told it predates the
+instrumentation. The report says which of the three it is, because a stated
+wrong cause is harder to catch than an absence: the reader has been given a
+reason and stops looking for one.
 
 ### Storing what was measured, not when
 
