@@ -281,6 +281,30 @@ class TestDiscovery:
         refs = ClaudeCodeTranscripts(origin=origin).sessions()
         assert [r.host_session_id for r in refs] == ["hs-alpha"]
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_015 is live — startswith() has no boundary check; "
+        "delete this marker with the fix",
+    )
+    def test_BUG_015_a_sibling_whose_name_extends_the_origins_is_excluded_but_the_worktree_stays_in(
+        self, host_home, tmp_path
+    ):
+        """A sibling checkout whose directory name merely EXTENDS the origin's
+        (no separator between them) must not be swept in, even though a real
+        worktree — whose slug also extends the origin's, but after the path
+        separator — legitimately must be. Pins both sides so a fix that
+        satisfies one by breaking the other still fails this test."""
+        origin = tmp_path / "app"
+        worktree = origin / ".claude" / "worktrees" / "wt-1"
+        sibling = tmp_path / "app-v2"
+        write_jsonl(project_dir(host_home, origin) / "hs-origin.jsonl", [assistant()])
+        write_jsonl(project_dir(host_home, worktree) / "hs-worktree.jsonl", [assistant()])
+        write_jsonl(project_dir(host_home, sibling) / "hs-sibling.jsonl", [assistant()])
+
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+
+        assert selected == {"hs-origin", "hs-worktree"}
+
     def test_with_no_origin_every_project_is_in_scope(self, host_home, tmp_path):
         write_jsonl(project_dir(host_home, tmp_path / "a") / "hs-a.jsonl", [assistant()])
         write_jsonl(project_dir(host_home, tmp_path / "b") / "hs-b.jsonl", [assistant()])
