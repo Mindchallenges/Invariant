@@ -5,6 +5,7 @@ human debugging a wedged state calls it. Anything untested here is untested
 everywhere it matters.
 """
 
+import argparse
 import json
 import subprocess
 import sys
@@ -12,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from invariant.cli.main import main
+from invariant.cli.main import main, report_verdicts, worth_reporting
+from invariant.core.manifest import Level
+from invariant.core.rules import Evaluated, Verdict
 
 
 @pytest.fixture
@@ -1248,3 +1251,205 @@ class TestAskingIsNotOwning(EditHookHarness):
         )
         self.hook("post-tool-use", stolen)
         assert self.owner_of(project, "alpha", capsys) == "host-real"
+
+
+# -- BUG_020: a block-level N/A must reach the reader -------------------
+
+
+class TestSkippedGateVisibility:
+    """A gate that did not apply is not a gate that passed.
+
+    `pipeline advance` dropped every skipped verdict unless `--verbose`, so a
+    BLOCKING gate going inert was indistinguishable from one that passed. That
+    is how BUG_012's inert docs gates survived: the tool's own output was, by
+    construction, incapable of saying a gate it was told to enforce never ran.
+    """
+
+    def evaluated(self, level, rule_id="docs.updated"):
+        return Evaluated(
+            rule_id=rule_id, level=level, verdict=Verdict.na("nothing to check")
+        )
+
+    def report(self, verdicts, capsys, verbose=False):
+        report_verdicts(verdicts, argparse.Namespace(json=False, verbose=verbose))
+        return capsys.readouterr().err
+
+    def test_a_skipped_blocking_gate_is_reported_without_verbose(self, capsys):
+        err = self.report([self.evaluated(Level.BLOCK)], capsys)
+        assert "docs.updated" in err
+
+    def test_a_skipped_warning_gate_stays_behind_verbose(self, capsys):
+        assert self.report([self.evaluated(Level.WARN, "privacy.clean")], capsys) == ""
+
+    def test_verbose_still_shows_a_skipped_warning_gate(self, capsys):
+        err = self.report(
+            [self.evaluated(Level.WARN, "privacy.clean")], capsys, verbose=True
+        )
+        assert "privacy.clean" in err
+
+    def test_a_skipped_blocking_gate_is_not_mistaken_for_a_pass(self, capsys):
+        err = self.report([self.evaluated(Level.BLOCK)], capsys)
+        assert "[ok]" not in err
+
+    def test_the_level_of_a_skipped_gate_reaches_the_reader(self):
+        assert "BLOCK" in self.evaluated(Level.BLOCK).render()
+        assert "BLOCK" not in self.evaluated(Level.WARN).render()
+
+    def test_a_skipped_off_gate_stays_behind_verbose(self, capsys):
+        assert self.report([self.evaluated(Level.OFF, "x.y")], capsys) == ""
+
+
+class TestAssetsCommands:
+    """`assets list` and `assets install`, which had no tests at all.
+
+    They are the repair path for a host that cannot load an agent file, and the
+    only place ownership is reported — a project's own file is not drift and
+    must never be named as such. Both distinctions are invisible to every other
+    command, so nothing else would catch them regressing.
+    """
+
+    def initialised(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        capsys.readouterr()
+        return project
+
+    def rows(self, capsys):
+        return payload(capsys)["assets"]
+
+    def test_installed_assets_are_listed_with_their_kind_and_owner(
+        self, project, capsys
+    ):
+        self.initialised(project, capsys)
+        assert run("assets", "list", "--json") == 0
+        rows = self.rows(capsys)
+        assert rows, "init installed no assets"
+        assert {r["kind"] for r in rows} <= {"agent", "command", "skill"}
+        assert all(r["owner"] == "library" for r in rows)
+
+    def test_a_library_asset_reports_itself_loadable(self, project, capsys):
+        self.initialised(project, capsys)
+        run("assets", "list", "--json")
+        assert all(r["status"] == "loadable" for r in self.rows(capsys))
+
+    def test_the_kind_filter_narrows_the_listing(self, project, capsys):
+        """`init` installs agents and no other kind here, so the filter is
+        pinned by what it EXCLUDES rather than by a count: a project-owned
+        command must not appear in an agent-filtered listing."""
+        self.initialised(project, capsys)
+        commands = project / ".claude" / "commands"
+        commands.mkdir(parents=True, exist_ok=True)
+        (commands / "mine.md").write_text("body\n", encoding="utf-8")
+
+        run("assets", "list", "--json")
+        every = {r["name"] for r in self.rows(capsys)}
+        assert "mine" in every
+
+        run("assets", "list", "--kind", "agent", "--json")
+        agents = self.rows(capsys)
+        assert agents and all(r["kind"] == "agent" for r in agents)
+        assert "mine" not in {r["name"] for r in agents}
+        assert len(agents) < len(every)
+
+    def test_a_project_owned_file_is_reported_as_the_projects_not_as_drift(
+        self, project, capsys
+    ):
+        """The distinction the command exists for. A file the project wrote is
+        not a library copy that drifted, and calling it drift invites someone
+        to 'repair' it by overwriting work nobody asked to lose."""
+        self.initialised(project, capsys)
+        mine = project / ".claude" / "agents" / "mine.md"
+        mine.write_text("---\nname: mine\ndescription: d\n---\n\nbody\n", encoding="utf-8")
+
+        run("assets", "list", "--json")
+        owners = {r["name"]: r["owner"] for r in self.rows(capsys)}
+        assert owners["mine"] == "project"
+
+    def test_an_unloadable_asset_is_named_with_its_problem(self, project, capsys):
+        """Loadability and currency are separate checks, and this is the one
+        that answers "will the host read this at all"."""
+        self.initialised(project, capsys)
+        broken = project / ".claude" / "agents" / "broken.md"
+        broken.write_text("no frontmatter here at all\n", encoding="utf-8")
+
+        run("assets", "list", "--json")
+        statuses = {r["name"]: r["status"] for r in self.rows(capsys)}
+        assert statuses["broken"].startswith("UNLOADABLE — ")
+
+    def test_listing_an_uninitialised_project_says_none_rather_than_failing(
+        self, project, capsys
+    ):
+        run("init", "--ecosystem", "python")
+        for kind in ("agents", "commands", "skills"):
+            target = project / ".claude" / kind
+            if target.is_dir():
+                for child in sorted(target.rglob("*")):
+                    if child.is_file():
+                        child.unlink()
+        capsys.readouterr()
+        assert run("assets", "list") == 0
+        assert "(none installed)" in out(capsys)
+
+    def test_install_reinstalls_the_library_assets(self, project, capsys):
+        self.initialised(project, capsys)
+        agents = project / ".claude" / "agents"
+        removed = min(agents.glob("*.md"))
+        removed.unlink()
+
+        assert run("assets", "install", "--json") == 0
+        assert payload(capsys)["installed"]
+        assert removed.is_file()
+
+    def test_install_reports_loadable_when_nothing_is_broken(self, project, capsys):
+        self.initialised(project, capsys)
+        assert run("assets", "install", "--json") == 0
+        assert payload(capsys)["loadable"] is True
+
+    def test_a_dry_run_changes_nothing(self, project, capsys):
+        self.initialised(project, capsys)
+        agents = project / ".claude" / "agents"
+        removed = min(agents.glob("*.md"))
+        removed.unlink()
+
+        assert run("assets", "install", "--dry-run", "--json") == 0
+        assert payload(capsys)["dry_run"] is True
+        assert not removed.is_file(), "a dry run reinstalled an asset"
+
+    def test_install_narrowed_to_one_kind(self, project, capsys):
+        self.initialised(project, capsys)
+        assert run("assets", "install", "--kind", "agent", "--json") == 0
+        installed = payload(capsys)["installed"]
+        assert installed and all("agent" in str(i) for i in installed)
+
+
+class TestCheckReportsTheSameWayAdvanceDoes:
+    """`check` kept its own copy of the skipped-verdict filter, and it drifted.
+
+    The copy read `args.verbose` directly while the `check` subparser defines
+    no such flag, so the command raised `AttributeError` on every invocation —
+    a whole CLI command down, and invisible because nothing exercised it. That
+    is the second-copy failure this codebase already names elsewhere: "keeping
+    a second copy here is exactly how they came to be wrong while this one was
+    right". Both paths now share one predicate.
+    """
+
+    def test_check_runs_at_all(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        capsys.readouterr()
+        assert run("check") in (0, 1)
+
+    def test_check_honours_the_same_skip_rule_as_report_verdicts(self):
+        """A blocking skip is reported; an advisory skip waits for --verbose."""
+        blocking = Evaluated("a", Level.BLOCK, Verdict.na("nothing here"))
+        advisory = Evaluated("b", Level.WARN, Verdict.na("nothing here"))
+        assert worth_reporting(blocking, verbose=False)
+        assert not worth_reporting(advisory, verbose=False)
+        assert worth_reporting(advisory, verbose=True)
+
+    def test_a_pass_is_quiet_unless_verbose(self):
+        passed = Evaluated("c", Level.BLOCK, Verdict.clean("all good"))
+        assert not worth_reporting(passed, verbose=False)
+        assert worth_reporting(passed, verbose=True)
+
+    def test_a_failure_is_always_reported(self):
+        for level in (Level.BLOCK, Level.WARN):
+            assert worth_reporting(Evaluated("d", level, Verdict.fail("nope")), verbose=False)

@@ -8,6 +8,7 @@ from invariant.core.rules import (
     _coverage_roots,
     _relative_to_any,
     _same_file,
+    NORMALISED_PAYLOAD_KEYS,
     RuleContext,
     Verdict,
     all_rules,
@@ -1518,7 +1519,21 @@ class TestVerdictRendering:
         assert "BLOCK" not in line
 
     def test_a_skip_says_skip(self):
-        assert self.evaluated(Verdict.na("not applicable")).render().startswith("[skip]")
+        """Still "skip" and never "ok" — a gate that did not apply has not
+        vouched for anything. The level now rides along on a BLOCKING skip
+        (BUG_020): "an advisory gate did not apply" and "a gate this project
+        enforces did not apply" are not the same news, and the marker was the
+        only place that distinction could reach a reader."""
+        assert (
+            self.evaluated(Verdict.na("not applicable"), Level.WARN)
+            .render()
+            .startswith("[skip]")
+        )
+        assert (
+            self.evaluated(Verdict.na("not applicable"))
+            .render()
+            .startswith("[skip:BLOCK]")
+        )
 
     def test_a_blocking_failure_still_leads_with_block(self):
         """On a failure the level IS the news — it decides whether work stops."""
@@ -2095,3 +2110,166 @@ class TestFilesThatCannotHaveACoverageRow:
         verdict = self.verdict(ctx)
         assert not verdict.ok
         assert "Misspelt.swift" in verdict.detail
+
+
+class TestTheReportersScopeIsNotDemandedOfFilesOutsideIt:
+    """Repro for BUG_019 — see the backlog entry.
+
+    A Python session that touches its own test files was handed a
+    `coverage.meets_floor` verdict no work could satisfy: `source_files` counts
+    every `.py` as source, so `tests/test_x.py` enters the touched set, while
+    `[tool.coverage.run] source = ["src/..."]` means the reporter is DEFINED
+    never to emit a row for it. Three correct behaviours meeting badly, and the
+    result is the shape BUG_002 was filed against — a blocking gate trained
+    around rather than met.
+
+    The resolution keeps the number's meaning rather than widening what is
+    measured: the adapter supplies the reporter's configured scope and the rule
+    stops demanding rows for files outside it. Files set aside are NAMED, as
+    every other excusal in this gate is.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    SRC = "src/app/mod.py"
+    TEST = "tests/test_mod.py"
+    LIVE = "def f():\n    return g()\n"
+
+    def wire(self, ctx_factory, pyproject='[tool.coverage.run]\nsource = ["src/app"]\n'):
+        for rel in (self.SRC, self.TEST):
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+        (ctx_factory.wt / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        return {str(ctx_factory.wt / self.SRC): 100.0}
+
+    def test_a_touched_test_file_outside_the_reporters_scope_does_not_block(
+        self, ctx_factory
+    ):
+        """The reported case, and the whole of it."""
+        measured = self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.SRC, self.TEST]))
+        assert verdict.ok, verdict.message
+
+    def test_the_file_set_aside_is_named(self, ctx_factory):
+        """A gate that narrows its own scope silently is the vacuous green."""
+        measured = self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.SRC, self.TEST]))
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_a_source_file_inside_the_scope_with_no_row_still_blocks(
+        self, ctx_factory
+    ):
+        """The guard, and the reason this is a narrowing rather than a silencing.
+
+        A file the reporter IS scoped to measure, with no row, is exactly what
+        the gate exists to catch, and must survive the fix untouched.
+        """
+        measured = self.wire(ctx_factory)
+        other = ctx_factory.wt / "src/app/unmeasured.py"
+        other.write_text(self.LIVE, encoding="utf-8")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, measured, [self.SRC, "src/app/unmeasured.py"])
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "unmeasured.py" in verdict.detail
+
+    def test_an_unreadable_scope_leaves_the_block_in_place(self, ctx_factory):
+        """`None` from the adapter is "cannot tell", which relaxes nothing.
+
+        Without a resolvable `source`, the touched test file keeps blocking —
+        the pre-fix behaviour, retained wherever the fact is unavailable.
+        """
+        measured = self.wire(ctx_factory, pyproject='[project]\nname = "x"\n')
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.SRC, self.TEST]))
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "test_mod.py" in verdict.detail
+
+    def test_a_scope_emptied_by_the_narrowing_is_not_a_pass(self, ctx_factory):
+        """A change touching ONLY test files has nothing left to hold to the
+        floor. That is N/A — reporting "all 0 file(s) at or above 90%" would be
+        a green earned by the scope emptying itself."""
+        measured = self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.TEST]))
+        assert verdict.ok and verdict.skipped
+        assert "test_mod.py" in (verdict.detail or "")
+
+
+class TestTheNormalisedPayloadContract:
+    """BUG_022 — the dependency rule the code no longer kept.
+
+    `overview.md` stated "Nothing above `hosts/` is aware of hook schemas"
+    while two sites above `hosts/` read payload keys, and BUG_010's fix
+    (faa4de0) had come to DEPEND on that departure — the path a call names is
+    what attributes its evidence to the right project. A reader enforcing the
+    documented rule would have read the fix as a layering violation.
+
+    The rule now names the keys instead of denying them. This pins the list, so
+    widening the seam again is a deliberate edit to a stated contract rather
+    than a quiet import.
+    """
+
+    def test_the_contract_names_exactly_the_keys_the_engine_reads(self):
+        assert set(NORMALISED_PAYLOAD_KEYS) == {
+            "tool_name",
+            "tool_input",
+            "tool_input.file_path",
+            "tool_input.notebook_path",
+            "stop_hook_active",
+        }
+
+    def test_the_rule_context_reads_the_declared_top_level_keys(self, ctx_factory):
+        ctx = ctx_factory(
+            payload={
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/x.py"},
+            }
+        )
+        assert ctx.tool_name == "Edit"
+        assert ctx.tool_input == {"file_path": "/tmp/x.py"}
+        assert ctx.target_path == Path("/tmp/x.py")
+
+    def test_the_notebook_spelling_of_the_target_is_declared_too(self, ctx_factory):
+        """`target_path` is derived from either spelling, so both are part of
+        what a host must normalise — a host filling only one leaves the
+        attribution BUG_010 fixed working for some tool calls and not others."""
+        ctx = ctx_factory(
+            payload={"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/tmp/n.ipynb"}}
+        )
+        assert ctx.target_path == Path("/tmp/n.ipynb")
+
+    def test_the_documented_rule_is_the_one_the_overview_states(self):
+        """The doc and the constant are the two halves BUG_022 found apart."""
+        overview = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "architecture"
+            / "overview.md"
+        ).read_text(encoding="utf-8")
+        assert "NORMALISED_PAYLOAD_KEYS" in overview
+        assert "Nothing above `hosts/` is aware of hook schemas." not in overview

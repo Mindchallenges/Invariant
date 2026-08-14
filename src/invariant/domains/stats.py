@@ -39,6 +39,7 @@ from ..core.stats import (
     DECLINED_NO_PIPELINE,
     DECLINED_NOT_YET,
     DECLINED_PRE_INSTRUMENTATION,
+    DECLINED_UNJOINED,
     RATES_AS_OF,
     SampleSource,
     SessionStats,
@@ -312,8 +313,12 @@ class StatsDomain:
             record.states_partial = False
             # No invariant session to ask, so nothing is known about when this
             # host session ran — including whether it predates the
-            # instrumentation. The oldest sentence is the honest one here.
-            record.states_reason = DECLINED_PRE_INSTRUMENTATION
+            # instrumentation. That is a reason to name no cause at all, not a
+            # reason to reach for the oldest one: "the cause is unknown" does
+            # not make any particular candidate true, and this record holds
+            # nothing that separates "ran before the instrumentation" from
+            # "ran after, and was simply never joined" (BUG_024).
+            record.states_reason = DECLINED_UNJOINED
             return
         record.session_id = session.id
         record.session_name = session.name

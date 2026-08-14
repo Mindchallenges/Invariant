@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import tomllib
+
 from .base import Adapter, Hazard, TestResult
 
 
@@ -27,6 +29,43 @@ class PythonAdapter(Adapter):
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".py"]
+
+    def measured_scope(self, root: Path) -> list[Path] | None:
+        """``[tool.coverage.run] source``, resolved to directories.
+
+        Only ``pyproject.toml`` is read. coverage.py also accepts ``.coveragerc``
+        and ``setup.cfg``, and a project using one of those gets ``None`` —
+        "cannot tell" — which relaxes nothing and leaves the pre-existing
+        behaviour exactly as it was. Guessing at a config file this adapter has
+        not read would be the understating direction, which is the one that
+        excuses a real file.
+
+        Every bail below is that same choice. A ``source`` entry that is not a
+        directory in this checkout may be an installed package name — coverage
+        accepts both spellings — and resolving it would be a guess. A
+        ``source_pkgs`` alongside WIDENS the true scope past the directories
+        named here, so reporting only these would understate it.
+        """
+        config = root / "pyproject.toml"
+        try:
+            data = tomllib.loads(config.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # ValueError covers tomllib.TOMLDecodeError. An unreadable or
+            # unparseable config is a thing not known, not a scope of nothing.
+            return None
+        run = data.get("tool", {}).get("coverage", {}).get("run", {})
+        if not isinstance(run, dict) or run.get("source_pkgs"):
+            return None
+        declared = run.get("source")
+        if not isinstance(declared, list) or not declared:
+            return None
+        resolved: list[Path] = []
+        for entry in declared:
+            candidate = root / str(entry)
+            if not candidate.is_dir():
+                return None
+            resolved.append(candidate)
+        return resolved
 
     def hazards(self) -> list[Hazard]:
         return [
@@ -101,7 +140,7 @@ class PythonAdapter(Adapter):
         for match in re.finditer(
             r"^\s*(?P<file>[\w./+-]+\.py)(?:\s+\d+)*\s+(?P<pct>\d+(?:\.\d+)?)%",
             raw,
-            re.M,
+            re.MULTILINE,
         ):
             out[match.group("file")] = float(match.group("pct"))
         return out

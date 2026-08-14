@@ -227,6 +227,78 @@ class TestPythonAdapter:
         assert self.adapter.parse_coverage(raw) == {}
 
 
+class TestPythonMeasuredScope:
+    """BUG_019 — the fact the coverage rule had no way to learn.
+
+    `source_files` counts every `.py` as source, so a session touching its own
+    tests puts them in the touched set; `[tool.coverage.run] source` means the
+    reporter is DEFINED never to measure them. The gate then demands a row that
+    no amount of work can produce. The rule keeps the policy, so what is added
+    here is only the fact: which paths this project's reporter is scoped to.
+
+    Every "cannot tell" answers `None`, which relaxes nothing — the same
+    obligation `carries_executable_code` carries, for the same reason: calling
+    a measured file unmeasured passes unmeasured code silently.
+    """
+
+    def setup_method(self):
+        self.adapter = get_adapter("python")
+
+    def project(self, tmp_path, body, dirs=("src/app",)):
+        for rel in dirs:
+            (tmp_path / rel).mkdir(parents=True, exist_ok=True)
+        (tmp_path / "pyproject.toml").write_text(body, encoding="utf-8")
+        return tmp_path
+
+    def test_a_configured_source_directory_is_the_scope(self, tmp_path):
+        root = self.project(
+            tmp_path, '[tool.coverage.run]\nsource = ["src/app"]\n'
+        )
+        assert self.adapter.measured_scope(root) == [root / "src/app"]
+
+    def test_several_configured_directories_are_all_in_scope(self, tmp_path):
+        root = self.project(
+            tmp_path,
+            '[tool.coverage.run]\nsource = ["src/app", "src/lib"]\n',
+            dirs=("src/app", "src/lib"),
+        )
+        assert self.adapter.measured_scope(root) == [
+            root / "src/app",
+            root / "src/lib",
+        ]
+
+    def test_no_pyproject_means_cannot_tell(self, tmp_path):
+        assert self.adapter.measured_scope(tmp_path) is None
+
+    def test_no_coverage_config_means_cannot_tell(self, tmp_path):
+        root = self.project(tmp_path, '[project]\nname = "x"\n')
+        assert self.adapter.measured_scope(root) is None
+
+    def test_an_unparseable_pyproject_means_cannot_tell(self, tmp_path):
+        root = self.project(tmp_path, "this is not toml [[[\n")
+        assert self.adapter.measured_scope(root) is None
+
+    def test_a_bare_package_name_means_cannot_tell(self, tmp_path):
+        """`source = ["app"]` may name an installed package rather than a
+        directory in this checkout. Resolving it would be a guess, and the
+        wrong guess narrows the scope and excuses a real file."""
+        root = self.project(tmp_path, '[tool.coverage.run]\nsource = ["app"]\n')
+        assert self.adapter.measured_scope(root) is None
+
+    def test_source_pkgs_alongside_source_means_cannot_tell(self, tmp_path):
+        """`source_pkgs` WIDENS the real scope beyond the directories named in
+        `source`. Reporting only the latter would understate it, and an
+        understated scope is the direction that excuses an unmeasured file."""
+        root = self.project(
+            tmp_path,
+            '[tool.coverage.run]\nsource = ["src/app"]\nsource_pkgs = ["other"]\n',
+        )
+        assert self.adapter.measured_scope(root) is None
+
+    def test_the_base_adapter_cannot_tell(self, tmp_path):
+        assert get_adapter("generic").measured_scope(tmp_path) is None
+
+
 class TestNodeAdapter:
     def setup_method(self):
         self.adapter = get_adapter("node")

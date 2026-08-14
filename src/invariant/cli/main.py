@@ -41,15 +41,35 @@ def emit(args, payload: dict, text: str = "") -> int:
     return EXIT_OK
 
 
+def worth_reporting(verdict, verbose: bool) -> bool:
+    """Does this verdict earn a line on the default (non-verbose) output?
+
+    One predicate, because there were two and they drifted. `cmd_check` kept
+    its own inline copy which read `args.verbose` directly — and the `check`
+    subparser defines no such flag, so the command raised on every invocation
+    until this was pulled out. The rule now lives in one place for the same
+    reason `_changed_set` does: a second copy is how the two come to disagree
+    while each looks right on its own.
+    """
+    if verdict.verdict.skipped:
+        # A BLOCKING gate going inapplicable is reported on the default path:
+        # the project declared it must hold, and the reader is owed the fact
+        # that it did not run rather than a silence that reads exactly like a
+        # pass (BUG_020). Advisory skips stay behind --verbose, where they
+        # were, because there is nothing to act on.
+        return verdict.skipped_blocking or verbose
+    if verdict.verdict.ok:
+        return verbose
+    return True
+
+
 def report_verdicts(verdicts, args) -> None:
     if getattr(args, "json", False):
         return
+    verbose = getattr(args, "verbose", False)
     for verdict in verdicts:
-        if verdict.verdict.skipped and not getattr(args, "verbose", False):
-            continue
-        if verdict.verdict.ok and not getattr(args, "verbose", False):
-            continue
-        print(verdict.render(), file=sys.stderr)
+        if worth_reporting(verdict, verbose):
+            print(verdict.render(), file=sys.stderr)
 
 
 def verdicts_payload(verdicts) -> list[dict]:
@@ -1188,8 +1208,10 @@ def cmd_check(args) -> int:
     ctx = Context()
     rule_ids = args.rules or [spec.id for spec in all_rules()]
     verdicts = evaluate(rule_ids, ctx.rule_context())
-    failures = [v for v in verdicts if not v.verdict.ok and not v.verdict.skipped]
-    text = "\n".join(v.render() for v in verdicts if not v.verdict.skipped or args.verbose)
+    verbose = getattr(args, "verbose", False)
+    text = "\n".join(
+        v.render() for v in verdicts if worth_reporting(v, verbose)
+    )
     emit(args, {"verdicts": verdicts_payload(verdicts)}, text or "  nothing to report")
     return 1 if any(v.blocks for v in verdicts) else EXIT_OK
 

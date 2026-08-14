@@ -82,17 +82,37 @@ NO_BREAKDOWN_YET = (
 #: the pipeline, not the measurement.
 NO_BREAKDOWN_NO_PIPELINE = "no breakdown available — this session has not run a pipeline"
 
+#: A record no invariant session is joined to. Nothing is known about when its
+#: host session ran — which is a reason to say nothing, not a licence to name
+#: the pre-instrumentation cause. That the cause is unknown does not make one
+#: candidate cause true, and the record holds nothing that could tell "ran
+#: before the instrumentation" from "ran after, and was never joined" (BUG_024).
+NO_BREAKDOWN_UNJOINED = (
+    "no breakdown available — no invariant session is joined to this record, "
+    "so nothing can be said about its states"
+)
+
+#: A record carrying no reason at all. ``states_reason`` landed with BUG_013's
+#: fix, well AFTER the D3 instrumentation, so its absence dates a record
+#: relative to the wrong event: such a record may have been written either side
+#: of the instrumentation. What is entailed is only that the reason is missing.
+NO_BREAKDOWN_UNKNOWN = (
+    "no breakdown available — the reason it is missing was not recorded"
+)
+
 #: Why a breakdown was declined, as a code rather than a sentence: the record
 #: is rebuildable but a stored sentence would still outlive a change of wording,
 #: and the reader is owed the *reason*, which is the thing that differs.
 DECLINED_PRE_INSTRUMENTATION = "pre_instrumentation"
 DECLINED_NOT_YET = "not_yet"
 DECLINED_NO_PIPELINE = "no_pipeline"
+DECLINED_UNJOINED = "unjoined"
 
 NO_BREAKDOWN_SENTENCES: Mapping[str, str] = {
     DECLINED_PRE_INSTRUMENTATION: NO_BREAKDOWN,
     DECLINED_NOT_YET: NO_BREAKDOWN_YET,
     DECLINED_NO_PIPELINE: NO_BREAKDOWN_NO_PIPELINE,
+    DECLINED_UNJOINED: NO_BREAKDOWN_UNJOINED,
 }
 
 #: Attached to a state whose spend two readings cannot describe. Each names
@@ -647,11 +667,15 @@ def _incommensurable(
 def no_breakdown_sentence(reason: str | None) -> str:
     """What to print instead of a breakdown, for the reason there is none.
 
-    An unknown or absent reason falls back to :data:`NO_BREAKDOWN`. That is
-    what a record written before this distinction existed carries, and its
-    sessions really are the ones the original sentence was written for.
+    An unknown or absent reason falls back to :data:`NO_BREAKDOWN_UNKNOWN`,
+    which claims only that the reason is missing. It used to fall back to the
+    pre-instrumentation sentence on the reasoning that a record with no reason
+    predates the distinction — but the distinction landed after the
+    instrumentation it names, so the inference ran backwards (BUG_024). The
+    pre-instrumentation sentence is now reachable only from its own code, which
+    is set only where an unobserved pipeline was actually seen.
     """
-    return NO_BREAKDOWN_SENTENCES.get(reason or "", NO_BREAKDOWN)
+    return NO_BREAKDOWN_SENTENCES.get(reason or "", NO_BREAKDOWN_UNKNOWN)
 
 
 def format_duration(seconds: float | None) -> str:

@@ -396,6 +396,91 @@ class TestDiscovery:
         selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
         assert selected == {"hs-origin", "hs-worktree"}
 
+    def test_BUG_017_a_worktree_origin_sees_the_whole_projects_transcripts(
+        self, host_home, tmp_path
+    ):
+        """Repro for BUG_017 — the OTHER direction of BUG_015's narrowing.
+
+        Every test above narrows from the MAIN CHECKOUT, which is the only case
+        that ever worked. Narrowed from inside a session worktree — the way the
+        methodology MANDATES a session run — `roots()` asked git for the
+        repository's worktrees only when the origin WAS the main checkout, so
+        the origin stayed the worktree, whose mangled name is LONGER than the
+        parent's. The parent's transcript directory then failed the
+        `startswith` narrowing and nothing above the worktree was visible: zero
+        transcripts, and therefore no spend watermark on any transition, for
+        every session run the prescribed way.
+
+        Resolved by resolving the origin up to the repository's main checkout
+        before narrowing: a worktree session's report is the project's.
+        """
+        origin = tmp_path / "app"
+        worktree = tmp_path / "app-wt-1"
+        _repo(origin)
+        _worktree(origin, worktree)
+
+        for path, stem in ((origin, "hs-origin"), (worktree, "hs-worktree")):
+            write_jsonl(project_dir(host_home, path) / f"{stem}.jsonl", [assistant()])
+
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=worktree).paths()}
+        assert selected == {"hs-origin", "hs-worktree"}
+
+    def test_BUG_017_a_worktree_origin_still_excludes_a_sibling_checkout(
+        self, host_home, tmp_path
+    ):
+        """BUG_015 must stay red from the new direction too.
+
+        The entry warns that an equality-based fix to BUG_015 would have
+        DEEPENED this one; the converse also has to hold — widening the
+        worktree's view to the project must not widen it to the neighbours.
+        """
+        origin = tmp_path / "app"
+        worktree = tmp_path / "app-wt-1"
+        sibling = tmp_path / "app-v2"
+        _repo(origin)
+        _worktree(origin, worktree)
+        sibling.mkdir()
+
+        for path, stem in (
+            (origin, "hs-origin"),
+            (worktree, "hs-worktree"),
+            (sibling, "hs-sibling"),
+        ):
+            write_jsonl(project_dir(host_home, path) / f"{stem}.jsonl", [assistant()])
+
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=worktree).paths()}
+        assert selected == {"hs-origin", "hs-worktree"}
+
+    def test_BUG_017_a_hidden_worktree_origin_sees_the_project(
+        self, host_home, tmp_path
+    ):
+        """The other placement: a worktree under the hidden worktrees
+        directory, which is where `session isolate` puts one in this project."""
+        origin = tmp_path / "app"
+        worktree = origin / ".claude" / "worktrees" / "app-wt-2"
+        _repo(origin)
+        _worktree(origin, worktree)
+
+        for path, stem in ((origin, "hs-origin"), (worktree, "hs-worktree")):
+            write_jsonl(project_dir(host_home, path) / f"{stem}.jsonl", [assistant()])
+
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=worktree).paths()}
+        assert selected == {"hs-origin", "hs-worktree"}
+
+    def test_BUG_017_a_non_repository_origin_is_still_narrowed_to_itself(
+        self, host_home, tmp_path
+    ):
+        """Resolving upward asks git, and git is entitled to say nothing. A
+        directory that is not a repository keeps the pre-fix behaviour rather
+        than widening to everything."""
+        origin = tmp_path / "plain"
+        origin.mkdir()
+        other = tmp_path / "elsewhere"
+        write_jsonl(project_dir(host_home, origin) / "hs-origin.jsonl", [assistant()])
+        write_jsonl(project_dir(host_home, other) / "hs-other.jsonl", [assistant()])
+        selected = {p.stem for p in ClaudeCodeTranscripts(origin=origin).paths()}
+        assert selected == {"hs-origin"}
+
     @pytest.mark.skipif(
         hasattr(os, "geteuid") and os.geteuid() == 0,
         reason="root reads a directory whatever its mode, so there is nothing to refuse",

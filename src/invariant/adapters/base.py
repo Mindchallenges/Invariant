@@ -215,5 +215,30 @@ class Adapter:
         """
         return None
 
+    def measured_scope(self, root: Path) -> list[Path] | None:
+        """Which directories this project's coverage reporter is scoped to.
+
+        The second fact a coverage floor needs and cannot derive. A file may
+        have no row for a reason that has nothing to do with the file: the
+        reporter was CONFIGURED never to look at it. A Python project setting
+        ``[tool.coverage.run] source`` to its package directory can never
+        produce a row for a test file, so demanding one is a gate no work can
+        clear — which is how an enforced gate becomes a gate people route
+        around with ``--force`` (BUG_019).
+
+        Returns absolute directories, or ``None`` for "cannot tell". ``None``
+        carries the same obligation as :meth:`carries_executable_code`'s: a
+        caller deciding whether to RELAX must treat it as "do not relax".
+
+        The two wrong answers are again asymmetrical, and the asymmetry points
+        the other way here, because this answer is used to SHRINK what is
+        demanded. An overstated scope costs a spurious block; an understated
+        one excuses a file the reporter really does measure, and passes
+        unmeasured code silently. So an implementation that cannot resolve
+        every configured entry must answer ``None`` rather than the part of
+        the scope it managed to work out.
+        """
+        return None
+
     def hazards(self) -> list[Hazard]:
         return []

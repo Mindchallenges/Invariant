@@ -29,6 +29,32 @@ from .privacy import PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
+#: The normalised hook-payload keys layers above ``hosts/`` are permitted to
+#: read. This is the whole contract, and it lives here because ``hosts/``
+#: implement the protocols ``core/`` defines.
+#:
+#: ``overview.md`` used to state a stronger rule — "Nothing above ``hosts/`` is
+#: aware of hook schemas" — which the code had already departed from, and which
+#: BUG_010's fix then came to DEPEND on departing from: attributing a hook's
+#: evidence to the right project needs the path the call itself names, and that
+#: is in the payload. A rule the codebase does not keep is worse than a weaker
+#: one it does, because a reader enforcing it would "correct" the working fix
+#: by reverting it (BUG_022).
+#:
+#: So the seam is drawn where the code actually holds it: hosts own the hook
+#: PROTOCOL — wire format, response shape, settings wiring — and hand upward a
+#: dict spelled in these keys. Nothing above reads anything else, and a host
+#: adapter for a different agent host has an explicit normalisation obligation
+#: rather than an implied one. Widening this tuple is a decision about the
+#: layer contract, not a convenience.
+NORMALISED_PAYLOAD_KEYS = (
+    "tool_name",
+    "tool_input",
+    "tool_input.file_path",
+    "tool_input.notebook_path",
+    "stop_hook_active",
+)
+
 #: The terminal state that means "gave up", as opposed to "finished".
 #:
 #: Every shipped machine spells it this way. It is named rather than derived
@@ -109,6 +135,18 @@ class Evaluated:
             and not self.verdict.skipped
         )
 
+    @property
+    def skipped_blocking(self) -> bool:
+        """A gate the project chose to ENFORCE did not run.
+
+        `Verdict.skipped` is a property of the rule's reasoning and carries no
+        level, so on its own it cannot separate "an advisory gate did not
+        apply" from "a gate this project blocks on did not apply". Only the
+        second is worth a reader's attention on the default path, and the
+        delivery layer is the one that owns that distinction.
+        """
+        return self.level is Level.BLOCK and self.verdict.skipped
+
     def render(self) -> str:
         """One line per verdict, led by what HAPPENED.
 
@@ -120,7 +158,10 @@ class Evaluated:
         failure, where it is the part that decides whether work stops.
         """
         if self.verdict.skipped:
-            marker = "skip"
+            # The level rides along on a blocking skip for the same reason it
+            # leads on a failure: it is the part that tells the reader whether
+            # something they rely on just stopped applying.
+            marker = "skip:BLOCK" if self.skipped_blocking else "skip"
         elif self.verdict.ok:
             marker = "ok"
         else:
@@ -1590,8 +1631,8 @@ def _explain_absent_rows(
     excluded: list[str] = []
     unexplained: list[str] = []
     for rel in missing:
-        found = _first_existing(rel, roots)
-        if found is None:
+        located = _first_existing(rel, roots)
+        if located is None:
             # Absence alone proves nothing — a misspelt path is absent too.
             # Git has to say the change removed it.
             if any(_same_file(rel, form) for form in deleted_forms):
@@ -1599,11 +1640,49 @@ def _explain_absent_rows(
             else:
                 unexplained.append(rel)
             continue
-        if _carries_executable_code(adapters, found) is False:
+        root, found = located
+        # Asked before the per-file question because it answers a different
+        # one: not "has this file anything to measure" but "was the reporter
+        # ever pointed at it". A test file answers YES to the first and NO to
+        # the second, which is why the first alone could not settle BUG_019 —
+        # and why overriding `carries_executable_code` to say a test file has
+        # no code would have been a lie told to relax a gate.
+        if _outside_measured_scope(adapters, root, found):
+            excluded.append(f"{rel} (outside the coverage reporter's configured scope)")
+        elif _carries_executable_code(adapters, found) is False:
             excluded.append(f"{rel} (no executable lines to measure)")
         else:
             unexplained.append(rel)
     return excluded, unexplained
+
+
+def _outside_measured_scope(adapters: list[Adapter], root: Path, path: Path) -> bool:
+    """Is this file one the project's coverage reporter is never pointed at?
+
+    Only ``True`` on a positive answer from an adapter that could resolve the
+    whole scope. Every "cannot tell" — no adapter with an opinion, an
+    unresolvable config — returns ``False`` and leaves the demand standing,
+    because this answer is used to SHRINK what the gate asks for.
+
+    The scope is asked of the root the file was actually found under. Roots
+    come from `_coverage_roots`, which may list a session worktree and the main
+    checkout, and a file is only outside a scope that was computed where the
+    file lives.
+    """
+    for adapter in adapters:
+        scope = adapter.measured_scope(root)
+        if scope is None:
+            continue
+        return not any(_is_within(path, directory) for directory in scope)
+    return False
+
+
+def _is_within(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _excluded_detail(excluded: list[str]) -> str:
@@ -1623,12 +1702,18 @@ def _session_worktree(ctx: RuleContext) -> Path | None:
     return path if path.exists() else None
 
 
-def _first_existing(rel: str, roots: Iterable[Path]) -> Path | None:
-    """The file named by a project-relative path, under whichever root has it."""
+def _first_existing(rel: str, roots: Iterable[Path]) -> tuple[Path, Path] | None:
+    """The file named by a project-relative path, and the root that has it.
+
+    The root is returned alongside because a caller asking an adapter about the
+    file may need to ask it about the file's PROJECT too, and the roots are
+    not interchangeable: a session worktree and the main checkout can hold
+    different configurations of the same repository.
+    """
     for root in roots:
         candidate = Path(root) / rel
         if candidate.is_file():
-            return candidate
+            return Path(root), candidate
     return None
 
 

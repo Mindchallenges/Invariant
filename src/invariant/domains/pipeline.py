@@ -721,6 +721,12 @@ def summarise(verdicts: list[Evaluated]) -> str:
         parts.append(f"{len(warned)} warning")
     if skipped:
         # Reported separately from passes on purpose: a gate that did not
-        # apply has not vouched for anything.
-        parts.append(f"{len(skipped)} not applicable")
+        # apply has not vouched for anything. The blocking ones are named
+        # within that count because "an advisory gate did not apply" and "a
+        # gate this project enforces did not apply" are not the same news.
+        inert_blocking = [v for v in skipped if v.skipped_blocking]
+        note = f"{len(skipped)} not applicable"
+        if inert_blocking:
+            note += f" ({len(inert_blocking)} blocking)"
+        parts.append(note)
     return ", ".join(parts)

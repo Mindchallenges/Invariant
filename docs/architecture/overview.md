@@ -104,6 +104,28 @@ that knows the language can tell those apart, so the rule asks
 the fact. (`MANIFEST → adapters`, for command and rule-level defaults, is the
 same arrow and predates it.)
 
+An absent row has a *third* cause, and it is about the project rather than the
+file: the reporter was configured never to look there. A Python project setting
+`[tool.coverage.run] source` to its package directory can never produce a row
+for a test file, so a session touching its own tests was handed a demand no
+work could satisfy (BUG_019). That is the same seam and the same shape —
+`Adapter.measured_scope` supplies the reporter's configured directories, `None`
+means "cannot tell" and relaxes nothing, and `coverage.meets_floor` keeps the
+policy of what to do about it.
+
+The two questions must stay separate. A test file *does* carry executable code,
+so answering `carries_executable_code` with `False` to relax the gate would be
+a lie told to a rule — the exact failure the base `None` exists to prevent.
+What is true of a test file is that nothing was ever pointed at it, which is a
+different fact and now has its own question.
+
+Note that `measured_scope`'s asymmetry runs the *opposite* way to
+`carries_executable_code`'s, because its answer is used to shrink what the gate
+demands rather than to explain one file. Overstating the scope costs a spurious
+block, which is visible; understating it excuses a file the reporter really
+does measure. So an adapter that cannot resolve every configured entry must
+answer `None` rather than the part of the scope it worked out.
+
 The two labelled arrows around `stats` — `CLI -. injects .-> CCTEL`, dotted,
 and `CCTEL -- implements SampleSource --> STATS`, solid — are the same rule
 applied to a case that could easily have inverted it (ADR-002 D2). Reading a host's
@@ -158,9 +180,10 @@ advance it. They are the only place where "what a session is" is encoded.
 
 An adapter supplies ecosystem knowledge the manifest should not have to spell
 out: how to build, how to test a single unit, how to read a coverage number,
-how to tell a real failure from a tooling failure. Adapters are selected in the
-manifest and may be stacked; `generic` is the always-present fallback that
-executes literal commands from the manifest and parses nothing.
+what that coverage run was even pointed at, how to tell a real failure from a
+tooling failure. Adapters are selected in the manifest and may be stacked;
+`generic` is the always-present fallback that executes literal commands from
+the manifest and parses nothing.
 
 The `swift_xcode` adapter exists first because the originating project needs
 it, and because it carries the most instructive ecosystem traps — a build tool
@@ -172,8 +195,26 @@ argument whose convenient form resolves to the wrong thing.
 A host adapter translates between an agent host's extension points and the
 CLI. For Claude Code that means hook payload parsing, the hook JSON response
 shape (`permissionDecision`, `additionalContext`), agent and command file
-installation, and `settings.json` wiring. Nothing above `hosts/` is aware of
-hook schemas.
+installation, and `settings.json` wiring.
+
+`hosts/` own hook *transport* — payload parsing, response shape, settings
+wiring. A normalised payload dict travels upward, and `cli/` and `core/rules`
+read documented keys from it; no layer above `hosts/` knows the hook
+*protocol*. The keys are the contract, and they are listed in exactly one
+place — `core.rules.NORMALISED_PAYLOAD_KEYS` — so that this document and the
+host adapters cannot drift apart about what a host owes the engine.
+
+This rule replaces a stronger one, "Nothing above `hosts/` is aware of hook
+schemas", which the code had already departed from. `Context.session_for_payload`
+reads `tool_input.file_path` and `RuleContext` reads `tool_name`, `tool_input`
+and `target_path`; all are above `hosts/`. The departure was deliberate and a
+shipped fix depends on it — BUG_010's fix (faa4de0) attributes a hook's
+evidence to the right project *by the path the call itself names*, which is
+only available from the payload. Leaving the old sentence standing meant the
+authoritative map stated a rule a reader enforcing it would have used to
+"correct" a working fix by reverting it (BUG_022). What a host adapter owes is
+now an explicit normalisation obligation rather than an implied one, which is
+what a second agent host would need in order to be written at all.
 
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through
@@ -196,6 +237,27 @@ sibling checkout must not, so the reader resolves the ambiguity with evidence
 rather than with the name: the filesystem for paths below the project, and
 `core/git` for the worktrees placed beside it. Both are downward reads for a
 fact only they hold, the same shape as `core/ → adapters/` above.
+
+**The narrowing runs in both directions, and the origin is resolved upward
+first.** A session worktree is a *place the project is being worked on*, not a
+project, so its report is the project's: `ClaudeCodeTranscripts.roots()`
+resolves the origin up to the repository's main checkout before narrowing.
+Without that, an origin inside a worktree narrowed to the worktree — whose
+mangled name is *longer* than the parent's — so the parent's transcripts failed
+the prefix test and nothing above the worktree was visible at all. Since the
+methodology mandates that a session run isolated, per-state attribution had
+effectively never functioned under the only workflow the library permits
+(BUG_017). Resolving upward hands the narrowing the main checkout's prefix,
+which is the input the main-checkout case always got, so a sibling checkout
+stays excluded by the same evidence (BUG_015).
+
+One asymmetry survives deliberately. A torn-down worktree placed by the default
+sibling convention (`<root>-wt-<id>`) loses its attribution permanently: the
+path is gone, git no longer lists it, and its single-dash name is not the
+hidden-directory spelling the naming heuristic recognises. A torn-down worktree
+under the hidden worktrees directory stays attributed. That is evidence-honest
+rather than a second defect — the alternative is admitting a name no evidence
+supports, which is how BUG_015 happened.
 
 ## The two flows that matter
 

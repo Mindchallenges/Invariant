@@ -15,8 +15,11 @@ from invariant.core.stats import (
     COST_FLOOR_LABEL,
     DECLINED_NO_PIPELINE,
     DECLINED_PRE_INSTRUMENTATION,
+    DECLINED_UNJOINED,
     NO_BREAKDOWN,
     NO_BREAKDOWN_NO_PIPELINE,
+    NO_BREAKDOWN_UNJOINED,
+    NO_BREAKDOWN_UNKNOWN,
     RATES_AS_OF,
     SPEND_NOTE_BACKWARDS,
     Sample,
@@ -427,11 +430,13 @@ class TestTheRenderedReport:
         assert "claude-from-the-future" in text
 
     def test_a_session_with_no_breakdown_says_so_explicitly(self, m):
+        """No invariant session is joined here, so the sentence is the
+        unjoined one rather than the pre-instrumentation one (BUG_024)."""
         source = FakeSource()
         source.put(HOST_A, [sample()])
         stats = domain(m, source)
         stats.refresh()
-        assert NO_BREAKDOWN in stats.render_session(HOST_A)
+        assert NO_BREAKDOWN_UNJOINED in stats.render_session(HOST_A)
 
     def test_the_agents_view_reports_launches_and_never_cost(self, m):
         source = FakeSource()
@@ -698,6 +703,52 @@ class TestTheNoBreakdownLineDoesNotFabricateAHistory:
             "the report claims a pre-instrumentation cause for a pipeline "
             "recorded after the instrumentation landed"
         )
+
+
+class TestTheUnjoinedRecordDoesNotFabricateAHistory:
+    """Repro for BUG_024 — the sliver BUG_013's fix deliberately left behind.
+
+    A stats record with no invariant session joined to it was given the
+    pre-instrumentation sentence on the ground that nothing is known about
+    when that host session ran. That reasoning establishes only that the cause
+    is UNKNOWN; it does not license naming one. After a7ebbdc this was the
+    last place the renderer printed a cause it had no evidence for, which made
+    it the lone exception to the standard BUG_013 established.
+    """
+
+    def test_an_unjoined_record_is_not_called_pre_instrumentation(self, m):
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+
+        record = stats.get(HOST_A)
+        text = stats.render_session(HOST_A)
+
+        assert record.session_id is None
+        assert record.states_reason == DECLINED_UNJOINED
+        assert "recorded before per-state attribution" not in text, (
+            "the report names a pre-instrumentation cause for a record whose "
+            "host session it never joined, so it cannot know when it ran"
+        )
+        assert NO_BREAKDOWN_UNJOINED in text
+
+    def test_a_record_predating_states_reason_claims_no_cause(self, m):
+        """The second half of the entry. `states_reason` landed with BUG_013's
+        fix, AFTER the D3 instrumentation, so its absence dates a record
+        relative to the wrong event and entails nothing about attribution."""
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+
+        record = stats.get(HOST_A)
+        record.states_reason = None
+        stats._save(record)
+
+        text = stats.render_session(HOST_A)
+        assert "recorded before per-state attribution" not in text
+        assert NO_BREAKDOWN_UNKNOWN in text
 
     def test_a_freshly_started_second_pipeline_is_not_called_pre_instrumentation(
         self, m

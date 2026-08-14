@@ -294,31 +294,47 @@ class ClaudeCodeTranscripts:
     def roots(self) -> list[tuple[str, Path]]:
         """Every path whose sessions belong to this project, and its slug.
 
-        The origin, plus — when the origin is the repository's main checkout —
-        the repository's own linked worktrees. A worktree placed *beside* the
-        repository is `isolation_plan`'s default, and its mangled name extends
-        the origin's without a path boundary, which makes it lexically
-        identical to the unrelated sibling checkout BUG_015 is about. Git is
-        the only thing that can tell those two apart, so it is asked, once per
-        instance and never per transcript.
+        The repository's main checkout, plus its own linked worktrees. A
+        worktree placed *beside* the repository is `isolation_plan`'s default,
+        and its mangled name extends the origin's without a path boundary,
+        which makes it lexically identical to the unrelated sibling checkout
+        BUG_015 is about. Git is the only thing that can tell those two apart,
+        so it is asked, once per instance and never per transcript.
 
-        Deliberately asked only from the main checkout. What a *worktree's* own
-        report should contain — its own sessions, or the whole project's — is a
-        separate open question about the other direction of this narrowing, and
-        answering it here by accident would settle it without deciding it.
+        **The origin is resolved UPWARD to the main checkout first.** This used
+        to be asked only when the origin already WAS the main checkout, leaving
+        the open question of what a worktree's own report should contain
+        deliberately unanswered — but the default answer that fell out of not
+        deciding was the wrong one, and silently so. From inside a worktree the
+        origin is the worktree, whose mangled name is LONGER than the parent
+        project's, so the parent's transcript directory failed the narrowing in
+        :func:`_under_origin` and nothing above the worktree was visible at
+        all. Since the methodology MANDATES that a session run in an isolated
+        worktree, per-state attribution had effectively never functioned under
+        the only workflow the library permits (BUG_017).
+
+        The question is now decided rather than defaulted: a worktree session's
+        report is the PROJECT's. A worktree is a place the project is being
+        worked on, not a project — its spend is the project's spend, and a
+        report that splits them makes every isolated session look free.
+
+        This widens what a worktree sees to the project and no further.
+        Resolving upward hands :func:`_under_origin` the main checkout's
+        prefix, which is exactly the input the main-checkout case already gets,
+        so a sibling checkout stays excluded by the same evidence as before —
+        BUG_015 stays red from both directions. A ``None`` from git (not a
+        repository) leaves the origin alone, which keeps the narrowing at least
+        as tight as it was.
         """
         if self._roots is None:
             self._roots = []
             if self.origin is not None:
-                origin = self.origin.resolve()
+                origin = git.main_checkout(self.origin) or self.origin.resolve()
                 self._roots.append((str(origin).replace("/", PATH_MARK), origin))
-                if git.main_checkout(origin) == origin:
-                    for worktree in git.worktrees(origin):
-                        path = worktree.path.resolve()
-                        if path != origin:
-                            self._roots.append(
-                                (str(path).replace("/", PATH_MARK), path)
-                            )
+                for worktree in git.worktrees(origin):
+                    path = worktree.path.resolve()
+                    if path != origin:
+                        self._roots.append((str(path).replace("/", PATH_MARK), path))
         return self._roots
 
     def paths(self) -> list[Path]:

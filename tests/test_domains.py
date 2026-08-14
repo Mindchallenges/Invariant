@@ -11,7 +11,8 @@ from invariant.core.items import (
     SphinxNeedsBackend,
     backend_for,
 )
-from invariant.core.manifest import MANIFEST_RELPATH, Manifest
+from invariant.core.manifest import MANIFEST_RELPATH, Level, Manifest
+from invariant.core.rules import Evaluated, Verdict
 from invariant.domains.pipeline import PipelineDomain, describe_run, summarise
 from invariant.domains.session import Session, SessionDomain
 from invariant.domains.workitem import WorkItemDomain
@@ -356,6 +357,27 @@ class TestSummarise:
 
     def test_empty(self):
         assert summarise([]) == "no gates on this transition"
+
+    def test_a_skipped_blocking_gate_is_counted_apart_from_a_skipped_warning(self):
+        """BUG_020: "1 not applicable" hid which gate the project enforces.
+
+        A warn-level gate going inert is advisory noise; a block-level one
+        means a gate the project chose to enforce did not run. Collapsing both
+        into one count makes the second unreportable.
+        """
+        text = summarise(
+            [
+                Evaluated("a", Level.BLOCK, Verdict.na()),
+                Evaluated("b", Level.WARN, Verdict.na()),
+            ]
+        )
+        assert "2 not applicable" in text
+        assert "1 blocking" in text
+
+    def test_only_warning_skips_do_not_claim_a_blocking_one(self):
+        text = summarise([Evaluated("b", Level.WARN, Verdict.na())])
+        assert "1 not applicable" in text
+        assert "blocking" not in text
 
 
 # -- work items --------------------------------------------------------

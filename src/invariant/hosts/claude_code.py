@@ -1,9 +1,16 @@
 """The Claude Code host adapter.
 
-The only module that knows hook payload shapes, the hook response schema, or
-where a host keeps its agent files. Everything above this reaches the engine
-through the CLI, which is what makes a second host an addition rather than a
-rewrite.
+The only module that knows the hook *protocol* — wire format, response schema,
+settings wiring — or where a host keeps its agent files. Everything above this
+reaches the engine through the CLI, which is what makes a second host an
+addition rather than a rewrite.
+
+What travels upward is a payload dict spelled in
+``core.rules.NORMALISED_PAYLOAD_KEYS``. That tuple is the contract, and it is
+stated in exactly one place so this module and ``docs/architecture/overview.md``
+cannot drift apart about what a host owes the engine — they already had, which
+is what BUG_022 was filed about. A second host adapter's obligation is to fill
+those keys; nothing above reads anything else.
 
 **Hooks are shims; agents are copies.** A hook can be three lines that exec the
 CLI, so it has nothing to drift. An agent definition has to be a real file the

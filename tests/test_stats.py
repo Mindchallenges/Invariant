@@ -15,8 +15,11 @@ from invariant.core.stats import (
     DECLINED_NO_PIPELINE,
     DECLINED_NOT_YET,
     DECLINED_PRE_INSTRUMENTATION,
+    DECLINED_UNJOINED,
     NO_BREAKDOWN,
     NO_BREAKDOWN_NO_PIPELINE,
+    NO_BREAKDOWN_UNJOINED,
+    NO_BREAKDOWN_UNKNOWN,
     NO_BREAKDOWN_YET,
     PRICES,
     RATES_AS_OF,
@@ -478,8 +481,41 @@ class TestMarkers:
             assert "predate" not in sentence
             assert "recorded before" not in sentence
 
-    def test_an_unrecorded_reason_falls_back_to_the_oldest_sentence(self):
-        """A record written before the distinction existed carries no reason,
-        and its sessions really are the ones that sentence was written for."""
-        assert no_breakdown_sentence(None) == NO_BREAKDOWN
-        assert no_breakdown_sentence("something-a-later-release-added") == NO_BREAKDOWN
+    def test_an_unrecorded_reason_does_not_claim_a_history(self):
+        """BUG_024. The fallback used to be the pre-instrumentation sentence,
+        on the reasoning that a record carrying no reason predates the
+        distinction. It does not follow: `states_reason` landed with BUG_013's
+        fix, well AFTER the D3 instrumentation, so a record without one may
+        have been written either side of the instrumentation. The only thing
+        entailed by an absent reason is that the reason was not recorded."""
+        assert no_breakdown_sentence(None) == NO_BREAKDOWN_UNKNOWN
+        assert (
+            no_breakdown_sentence("something-a-later-release-added")
+            == NO_BREAKDOWN_UNKNOWN
+        )
+        assert "recorded before" not in NO_BREAKDOWN_UNKNOWN
+
+    def test_an_unjoined_record_says_only_that_it_is_unjoined(self):
+        """BUG_024. With no invariant session bound, nothing is known about
+        when the host session ran — including whether it predates the
+        instrumentation. Naming that cause asserts more than the record holds."""
+        assert no_breakdown_sentence(DECLINED_UNJOINED) == NO_BREAKDOWN_UNJOINED
+        assert "recorded before" not in NO_BREAKDOWN_UNJOINED
+        assert NO_BREAKDOWN_UNJOINED.strip() and "0" not in NO_BREAKDOWN_UNJOINED
+
+    def test_the_pre_instrumentation_sentence_is_reserved_to_its_own_code(self):
+        """It keeps its wording, and nothing else may reach it: after BUG_024
+        the only route to that sentence is evidence of an unobserved pipeline."""
+        reaching = {
+            code
+            for code in (
+                DECLINED_PRE_INSTRUMENTATION,
+                DECLINED_NOT_YET,
+                DECLINED_NO_PIPELINE,
+                DECLINED_UNJOINED,
+                None,
+                "unknown-future-code",
+            )
+            if no_breakdown_sentence(code) == NO_BREAKDOWN
+        }
+        assert reaching == {DECLINED_PRE_INSTRUMENTATION}
