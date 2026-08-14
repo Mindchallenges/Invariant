@@ -322,6 +322,9 @@ actually happened.
     skills/<name>/SKILL.md  /  in-frontmatter content hash; project-owned files
                                are checked for LOADABILITY but never for drift
   docs/                     architecture docs the docs-first gate reads
+    conf.py                 Sphinx config (MyST + mermaid); renders docs/ as
+                            one site — architecture, ADRs, audits. `docs/_build/`
+                            is gitignored: the site is derived, not committed.
     reports/                paths.reports — the rendered, committed telemetry
                             report. Scrubbed: session names and bare dates,
                             never a host identifier (ADR-002 D7)

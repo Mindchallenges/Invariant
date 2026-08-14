@@ -20,3 +20,6 @@ htmlcov/
 
 # Shared gate build/receipt directory: agent-local, never committed.
 .build/
+
+# Sphinx build output (docs/ is the source; the rendered site is derived).
+docs/_build/
