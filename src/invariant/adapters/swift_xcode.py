@@ -121,6 +121,9 @@ class SwiftXcodeAdapter(Adapter):
             return None
         return _swift_carries_executable_code(text)
 
+    def executable_text(self, source: str) -> str | None:
+        return _swift_executable_text(source)
+
     def hazards(self) -> list[Hazard]:
         return [
             Hazard(
@@ -389,7 +392,21 @@ _ACCESSOR_ONLY = {"get", "set", "async", "throws", "mutating", "nonmutating"}
 #: Block headers that cannot themselves introduce executable lines. Their
 #: MEMBERS still get classified — a `func` body nested in a protocol extension
 #: is its own block and is judged on its own header.
-_INERT_BLOCK_HEADER = re.compile(r"\b(protocol|enum)\b")
+#:
+#: `struct`, `class` and `actor` are here for the same reason `protocol` and
+#: `enum` are, and leaving them out was a defect rather than a caution: Swift
+#: permits no statement in a type body, so a type whose own residue is stored
+#: properties and nested type declarations has nothing a coverage run could
+#: report, and the two files that exposed this (a value type of six `let`/`var`
+#: declarations, and one wrapping a bare enum) really do produce no row in any
+#: lane. Skipping the header is not skipping the body: every `func`, `init`,
+#: `deinit`, `subscript`, computed property and property observer inside is its
+#: own block with its own header and is still judged on it, and a stored
+#: property with an initialiser expression is caught file-wide by
+#: `_INITIALISED_BINDING` before any block is classified. `extension` is
+#: deliberately NOT here — its residue can be a member list that only a body
+#: could explain.
+_INERT_BLOCK_HEADER = re.compile(r"\b(protocol|enum|struct|class|actor)\b")
 
 #: A binding with an initialiser expression: `var limit: Int = 200`. It has no
 #: brace, so no block classifies it, and the expression is an executable line.
@@ -447,6 +464,65 @@ def _strip_comments_and_strings(text: str) -> str:
             out.append(ch)
             i += 1
     return "".join(out)
+
+
+def _swift_executable_text(source: str) -> str | None:
+    """`source` with comments and layout removed and code left intact.
+
+    Deliberately NOT `_strip_comments_and_strings`. That one blanks a string
+    literal's CONTENTS, which is right for asking "is there a statement here"
+    and catastrophic for asking "did the code change": `"a"` and `"b"` reduce
+    to the same text, so a real edit would read as cosmetic — the one mistake
+    this answer must never make. Literals are copied verbatim.
+
+    Whitespace is normalised because re-indenting is not a code change and a
+    reader who reflows a signature has changed nothing a coverage run can
+    see. Line structure is not preserved for the same reason: the comparison
+    is over what the file says, not over where it says it.
+
+    ``None`` on any input this cannot read to the end — an unterminated
+    literal or block comment means the reduction is missing text, and a
+    truncated reduction compares equal too easily.
+    """
+    out: list[str] = []
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        two = source[i : i + 2]
+        if two == "//":
+            j = source.find("\n", i)
+            i = n if j < 0 else j
+        elif two == "/*":
+            depth, i = 1, i + 2  # Swift nests block comments
+            while i < n and depth:
+                if source[i : i + 2] == "/*":
+                    depth, i = depth + 1, i + 2
+                elif source[i : i + 2] == "*/":
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            if depth:
+                return None  # ran off the end inside a comment
+        elif ch == '"':
+            if source[i : i + 3] == '"""':
+                j = source.find('"""', i + 3)
+                if j < 0:
+                    return None
+                out.append(source[i : j + 3])
+                i = j + 3
+            else:
+                start = i
+                i += 1
+                while i < n and source[i] != '"':
+                    i += 2 if source[i] == "\\" else 1
+                if i >= n:
+                    return None
+                i += 1
+                out.append(source[start:i])
+        else:
+            out.append(ch)
+            i += 1
+    return " ".join("".join(out).split())
 
 
 def _brace_blocks(text: str) -> list[tuple[str, str]]:

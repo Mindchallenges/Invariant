@@ -44,6 +44,12 @@ methodology:
   gates:
     coverage_min: 90
     coverage_scope: touched    # touched | affected | all
+    coverage_exclude: []       # globs held out of the FLOOR, not the measurement:
+                               # the row is still required and the number still
+                               # reported, and the verdict names every path it set
+                               # aside. Empty by default — excluding anything from
+                               # a floor is a policy decision, and it belongs in a
+                               # diff someone can review.
 
 enforcement:
   profile: standard            # strict | standard | loose

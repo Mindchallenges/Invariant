@@ -1266,6 +1266,28 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                 ),
             )
 
+        # Held out of the FLOOR, never out of the MEASUREMENT, and only after
+        # the no-row check above has already run. Both orderings matter. A
+        # file set aside here still had to produce a row, so suppressing a
+        # path from the reporter cannot buy a pass through this door — the
+        # guard that catches a path-spelling mismatch stays exactly as sharp.
+        # And the number is kept and reported alongside the exclusion, so a
+        # suite that quietly stops executing is still legible in the verdict
+        # rather than disappearing from it.
+        #
+        # Two kinds of exclusion, and they are different claims. A glob is a
+        # POLICY the manifest states out loud ("test targets are not held to
+        # the production floor"). A comment-only diff is a FACT about this
+        # change: it altered no executable line in that file, so the file's
+        # coverage is not something this change can be asked to answer for.
+        # Neither one forgives a file that got worse — a diff that touches
+        # code is judged on the number, whatever its path.
+        touched, policy_aside = _excluded_by_manifest_globs(ctx, touched)
+        touched, comment_aside = _excluded_as_comment_only(ctx, touched, roots)
+        excluded.extend(policy_aside)
+        excluded.extend(comment_aside)
+        set_aside = _excluded_detail(excluded)
+
         if not touched:
             return Verdict.na(
                 "every touched source file has nothing a coverage run could "
@@ -1763,6 +1785,105 @@ def _explain_absent_rows(
         else:
             unexplained.append(rel)
     return excluded, unexplained
+
+
+def _excluded_by_manifest_globs(
+    ctx: RuleContext, touched: dict[str, float]
+) -> tuple[dict[str, float], list[str]]:
+    """Hold the manifest's `coverage_exclude` paths out of the floor.
+
+    A POLICY, not a measurement, and the split is the point: the manifest says
+    out loud which paths this project has decided not to hold to a production
+    floor, and the verdict repeats it back with the number still attached. The
+    alternative this replaces is a rule that quietly knows about test
+    directories, which is the same decision taken by nobody and reviewable
+    nowhere.
+
+    The number rides along in the exclusion text on purpose. A path dropped
+    from a floor is still measured, and a suite that stops executing shows up
+    as a collapsing percentage next to its own exemption instead of vanishing
+    from the verdict entirely.
+    """
+    patterns = ctx.manifest.get("methodology.gates.coverage_exclude") or []
+    if not patterns:
+        return touched, []
+
+    kept: dict[str, float] = {}
+    excluded: list[str] = []
+    for rel, pct in touched.items():
+        matched = next(
+            (p for p in patterns if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, f"{p}/*")),
+            None,
+        )
+        if matched is None:
+            kept[rel] = pct
+        else:
+            excluded.append(f"{rel} {float(pct):g}% (coverage_exclude {matched!r})")
+    return kept, excluded
+
+
+def _excluded_as_comment_only(
+    ctx: RuleContext, touched: dict[str, float], roots: list[Path]
+) -> tuple[dict[str, float], list[str]]:
+    """Hold out files this change edited without touching a single code line.
+
+    A FACT about the change, not a policy about the path. Coverage is a
+    property of executable lines; a diff that rewrote only comments moved no
+    number and can move none, so the floor has nothing about it to adjudicate
+    and the work it demands cannot affect the thing demanded. That is the
+    shape of a gate people force past — and it arrives constantly on exactly
+    the changes that deserve the least friction, because a change that DELETES
+    a symbol must rewrite every comment that cited it.
+
+    Positive evidence only, and it takes all four of: a base revision to
+    compare against, both revisions readable, an adapter that can reduce this
+    language to its executable text, and the two reductions equal. Any
+    "cannot tell" leaves the file in the floor, per the asymmetry every one of
+    these answers carries: a spurious block sends someone to look, a wrongly
+    excused file passes unmeasured code in silence.
+    """
+    base = str((ctx.session or {}).get("base") or "")
+    if not base or not touched:
+        return touched, []
+
+    cwd = _session_worktree(ctx) or ctx.cwd
+    adapters = _ecosystem_adapters(ctx)
+    if not adapters:
+        return touched, []
+
+    kept: dict[str, float] = {}
+    excluded: list[str] = []
+    for rel, pct in touched.items():
+        located = _first_existing(rel, roots)
+        before = git.file_at(cwd, base, rel)
+        if located is None or before is None:
+            kept[rel] = pct
+            continue
+        try:
+            after = located[1].read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
+            kept[rel] = pct
+            continue
+        reduced_before = _executable_text(adapters, before)
+        reduced_after = _executable_text(adapters, after)
+        if (
+            reduced_before is not None
+            and reduced_after is not None
+            and reduced_before == reduced_after
+        ):
+            excluded.append(f"{rel} {float(pct):g}% (this change altered no code in it)")
+        else:
+            kept[rel] = pct
+    return kept, excluded
+
+
+def _executable_text(adapters: list[Adapter], source: str) -> str | None:
+    """The first adapter with an opinion wins; no opinion answers ``None``."""
+    for adapter in adapters:
+        reduced = adapter.executable_text(source)
+        if reduced is not None:
+            return reduced
+    return None
 
 
 def _outside_measured_scope(adapters: list[Adapter], root: Path, path: Path) -> bool:

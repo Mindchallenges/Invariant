@@ -811,6 +811,62 @@ class TestCarriesExecutableCode:
         )
         assert self.adapter.carries_executable_code(path) is False
 
+    def test_a_stored_property_only_struct_carries_no_executable_code(self, tmp_path):
+        """A value type of declarations. Swift permits no statement in a type
+        body, so there is nothing here for a coverage run to report — and the
+        file that exposed this blocked a change whose only edit to it was a
+        comment."""
+        path = self.write(
+            tmp_path,
+            "WatchedOriginRefreshOutcome.swift",
+            """
+            import Foundation
+
+            struct WatchedOriginRefreshOutcome: Equatable, Sendable {
+                let originID: Int
+                let username: String
+                let platform: String
+                let attemptedAt: Date
+                let success: Bool
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_struct_wrapping_a_bare_enum_is_inert(self, tmp_path):
+        """The nested declaration is a member, not a body."""
+        path = self.write(
+            tmp_path,
+            "WatchedOrigin.swift",
+            """
+            struct WatchedOrigin: Identifiable, Hashable {
+                let id: Int
+                var cadenceMinutes: Int
+                var lastChecked: Date?
+                let action: Action
+
+                enum Action: String, Codable, Hashable {
+                    case review
+                    case autoDownload
+                }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_stored_property_only_class_is_inert(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "Handle.swift",
+            """
+            final class Handle: NSObject {
+                let libraryID: UUID
+                var lastOpened: Date?
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
     def test_an_enum_of_bare_cases_carries_no_executable_code(self, tmp_path):
         path = self.write(
             tmp_path,
@@ -865,6 +921,52 @@ class TestCarriesExecutableCode:
             """
             struct Runner {
                 func pumpNow() { print("go") }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_class_initialiser_body_carries_executable_code(self, tmp_path):
+        """Skipping a type's HEADER must not skip its members' bodies."""
+        path = self.write(
+            tmp_path,
+            "Registry.swift",
+            """
+            final class Registry {
+                let root: URL
+
+                init(root: URL) {
+                    self.root = root
+                }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_deinit_body_carries_executable_code(self, tmp_path):
+        """`deinit` is the member a class has and a struct cannot."""
+        path = self.write(
+            tmp_path,
+            "Handle.swift",
+            """
+            final class Handle {
+                var raw: OpaquePointer?
+
+                deinit { sqlite3_close(raw) }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_an_actor_method_body_carries_executable_code(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "DrainActor.swift",
+            """
+            actor DrainActor {
+                var claimed: Int
+
+                func claim() { claimed += 1 }
             }
             """,
         )

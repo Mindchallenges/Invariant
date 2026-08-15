@@ -215,6 +215,33 @@ class Adapter:
         """
         return None
 
+    def executable_text(self, source: str) -> str | None:
+        """This source with everything a coverage tool ignores removed.
+
+        The third fact a coverage floor needs and cannot derive. Comparing
+        two revisions of a file through this answers a question the raw diff
+        cannot: did this change alter any line a coverage run could measure?
+        A change that only rewrote comments moved no number and can move
+        none, so holding it to the floor asks for work that cannot affect
+        the thing being demanded — the shape that turns a gate into
+        something people force past.
+
+        Returns the reduced text, or ``None`` for "cannot tell". ``None``
+        carries the same obligation as :meth:`carries_executable_code`'s and
+        :meth:`measured_scope`'s: a caller deciding whether to RELAX must
+        treat it as "do not relax". The generic adapter knows no comment
+        syntax, so it always answers ``None``.
+
+        The asymmetry points the same way as :meth:`measured_scope`'s,
+        because this answer too is used to SHRINK what is demanded: reducing
+        too little costs a spurious block, reducing too much calls a real
+        code change cosmetic and passes it unmeasured. An implementation
+        that cannot parse the file must answer ``None`` rather than its best
+        guess — and must never strip anything a coverage tool would count,
+        which is why a string literal is reduced but not removed.
+        """
+        return None
+
     def measured_scope(self, root: Path) -> list[Path] | None:
         """Which directories this project's coverage reporter is scoped to.
 

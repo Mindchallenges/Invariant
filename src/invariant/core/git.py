@@ -205,6 +205,21 @@ def deleted_files(cwd: Path, base: str = "") -> list[Path] | None:
     return [Path(p) for p in sorted(found)]
 
 
+def file_at(cwd: Path, rev: str, path: str) -> str | None:
+    """This path's contents at ``rev``, or ``None`` if they cannot be read.
+
+    ``None`` covers every reason at once — no such revision, the path did not
+    exist there, a binary blob that will not decode — and does so on purpose.
+    A caller comparing two revisions of a file needs BOTH sides to say
+    anything at all; distinguishing why one side is missing would only tempt
+    it to proceed on one.
+    """
+    code, out, _ = _run(["show", f"{rev}:{path}"], cwd)
+    if code != 0:
+        return None
+    return out
+
+
 def unpushed_files(cwd: Path) -> list[Path] | None:
     """Paths touched by commits the upstream does not have yet.
 

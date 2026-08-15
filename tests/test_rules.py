@@ -2536,6 +2536,238 @@ class TestTheReportersScopeIsNotDemandedOfFilesOutsideIt:
         assert "test_mod.py" in (verdict.detail or "")
 
 
+class TestPathsTheManifestHoldsOutOfTheFloor:
+    """`methodology.gates.coverage_exclude` — the policy half of BUG_026.
+
+    A consuming project measured five of its own test files at 63–90% against
+    a floor of 90 and could express no exclusion: the floor value and the rule
+    LEVEL are both global, narrowing the reporter converts a below-floor block
+    into a no-row block, and the declared file set only ever ADDS. So the
+    decision "test targets are not held to the production floor" had nowhere
+    to live except a habit each author remembers.
+
+    It excludes from the FLOOR, never from the MEASUREMENT: the row is still
+    required, the number is still reported, and the verdict names every path
+    it set aside together with what matched it.
+    """
+
+    def ctx_for(self, ctx_factory, declared, exclude, coverage):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "touched",
+                        "coverage_exclude": exclude,
+                    }
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    SRC = "src/app/mod.py"
+    TEST = "tests/test_mod.py"
+    LIVE = "def f():\n    return g()\n"
+
+    def wire(self, ctx_factory):
+        for rel in (self.SRC, self.TEST):
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+        return {
+            str(ctx_factory.wt / self.SRC): 100.0,
+            str(ctx_factory.wt / self.TEST): 63.0,
+        }
+
+    def test_an_excluded_path_below_the_floor_does_not_block(self, ctx_factory):
+        """The reported case."""
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.SRC, self.TEST], ["tests/**"], self.wire(ctx_factory)
+            )
+        )
+        assert verdict.ok, verdict.message
+
+    def test_the_exclusion_names_the_path_the_number_and_the_pattern(
+        self, ctx_factory
+    ):
+        """All three, because each answers a different question a reader has.
+
+        The path says WHAT was set aside, the pattern says WHICH decision did
+        it, and the number is what keeps a suite that quietly stopped
+        executing visible instead of exempt-and-invisible.
+        """
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.SRC, self.TEST], ["tests/**"], self.wire(ctx_factory)
+            )
+        )
+        detail = verdict.detail or ""
+        assert "test_mod.py" in detail
+        assert "63%" in detail
+        assert "tests/**" in detail
+
+    def test_an_unexcluded_path_below_the_floor_still_blocks(self, ctx_factory):
+        """The floor is unchanged for everything the manifest did not name."""
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.SRC, self.TEST], ["nothing/**"], self.wire(ctx_factory)
+            )
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_an_excluded_path_with_no_row_still_blocks(self, ctx_factory):
+        """The guard that stops this being a silencing.
+
+        Exclusion happens AFTER the no-row check, so suppressing a path from
+        the reporter cannot buy a pass through this door. Without that
+        ordering, `coverage_exclude` plus a narrowed report would hide a
+        path-spelling mismatch — which is the exact failure the no-row guard
+        was written for.
+        """
+        measured = self.wire(ctx_factory)
+        measured.pop(str(ctx_factory.wt / self.TEST))
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC, self.TEST], ["tests/**"], measured)
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+
+    def test_no_exclude_configured_changes_nothing(self, ctx_factory):
+        """Empty by default: an exclusion is a decision, never an inheritance."""
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC, self.TEST], [], self.wire(ctx_factory))
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+
+class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:
+    """The fact half of BUG_026 — a comment-only diff.
+
+    Coverage is a property of executable lines. A change that rewrote only
+    comments moved no number and can move none, so the work the floor demands
+    of it cannot affect the thing being demanded. It arrives on exactly the
+    changes that deserve the least friction: a change that DELETES a symbol
+    must rewrite every comment citing it, and each of those files then owes a
+    coverage debt it did not create and cannot discharge.
+
+    Positive evidence only. Any "cannot tell" — no base, an unreadable
+    revision, an adapter with no opinion on the language — leaves the file in
+    the floor.
+    """
+
+    SRC = "app/mod.swift"
+
+    def repo(self, ctx_factory, before, after):
+        """`before` on the base branch, `after` dirty in the session worktree.
+
+        The real shape: the fixture's worktree is a linked one on its own
+        branch, so the base revision is a commit the session did not make.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        landed = main / self.SRC
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text(before, encoding="utf-8")
+        run(["git", "add", "-A"], main)
+        run(["git", "commit", "-qm", "base"], main)
+        run(["git", "merge", "-q", "--ff-only", "master"], wt)
+
+        path = wt / self.SRC
+        path.write_text(after, encoding="utf-8")
+        return {str(path): 30.0}
+
+    def ctx_for(self, ctx_factory, coverage):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["swift"]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.wt,
+            session={
+                "id": "s1",
+                "files": [self.SRC],
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    BEFORE = '// queued into `pending_imports`\nfunc go() {\n    run("a")\n}\n'
+
+    def test_a_comment_only_edit_below_the_floor_does_not_block(self, ctx_factory):
+        """The reported case: the only edit deletes a citation of a deleted type."""
+        after = '// queued for review\nfunc go() {\n    run("a")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured))
+        assert verdict.ok, verdict.message
+        assert "altered no code" in (verdict.detail or "")
+
+    def test_reindenting_is_not_a_code_change(self, ctx_factory):
+        """Layout is not something a coverage run can see."""
+        after = '// queued for review\nfunc go() {\n        run("a")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        assert self.verdict(self.ctx_for(ctx_factory, measured)).ok
+
+    def test_a_changed_statement_still_blocks(self, ctx_factory):
+        """The control. One line of real code and the floor applies in full."""
+        after = '// queued for review\nfunc go() {\n    run("a")\n    stop()\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured))
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_a_changed_string_literal_still_blocks(self, ctx_factory):
+        """The sharp control, and the reason this cannot reuse the reader that
+        answers `carries_executable_code`.
+
+        That one blanks a literal's CONTENTS — right for "is there a statement
+        here", fatal for "did the code change", because `"a"` and `"b"` reduce
+        to the same text. A reduction that loses this calls a real edit
+        cosmetic, which is the one mistake this answer must never make.
+        """
+        after = '// queued for review\nfunc go() {\n    run("b")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured))
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_no_base_revision_leaves_the_block_in_place(self, ctx_factory):
+        """"Cannot tell" relaxes nothing — there is no before to compare to."""
+        after = '// queued for review\nfunc go() {\n    run("a")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        ctx = self.ctx_for(ctx_factory, measured)
+        ctx.session["base"] = ""
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+
 class TestTheNormalisedPayloadContract:
     """BUG_022 — the dependency rule the code no longer kept.
 

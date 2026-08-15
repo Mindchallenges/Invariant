@@ -113,7 +113,18 @@ DEFAULTS: dict[str, Any] = {
     "methodology": {
         "pipeline": "tdd",
         "extra_machines": [],
-        "gates": {"coverage_min": 90, "coverage_scope": "touched"},
+        # `coverage_exclude` is a list of glob patterns held OUT of the floor
+        # — never out of the measurement. The row is still produced and the
+        # number still reported; only the below-floor verdict skips it, and
+        # the verdict names every path it set aside and why. Empty by
+        # default: excluding anything from a floor is a policy decision, and
+        # it belongs in a diff someone can review rather than in a habit each
+        # author has to remember.
+        "gates": {
+            "coverage_min": 90,
+            "coverage_scope": "touched",
+            "coverage_exclude": [],
+        },
     },
     "enforcement": {"profile": "standard", "rules": {}},
     "session": {

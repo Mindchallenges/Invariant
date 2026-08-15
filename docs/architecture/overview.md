@@ -139,6 +139,25 @@ block, which is visible; understating it excuses a file the reporter really
 does measure. So an adapter that cannot resolve every configured entry must
 answer `None` rather than the part of the scope it worked out.
 
+A *fourth* question is about neither the file nor the project but the CHANGE:
+a diff that rewrote only comments altered no line a coverage run could measure,
+so the floor is asking it for work that cannot move the number being demanded
+(BUG_026). `Adapter.executable_text` reduces a revision to what a coverage tool
+would count, the rule compares the base and working revisions through it, and
+`None` relaxes nothing as before. It carries `measured_scope`'s asymmetry, for
+the same reason — reducing too little costs a spurious block, reducing too much
+calls a real code change cosmetic. The Swift implementation is where that has
+teeth: it must copy string literals VERBATIM, because the reader that answers
+`carries_executable_code` blanks their contents and would make `"a"` and `"b"`
+compare equal.
+
+Alongside it sits the one lever that is policy rather than fact —
+`methodology.gates.coverage_exclude`, glob patterns a project states in its
+manifest. Both hold paths out of the FLOOR and never out of the MEASUREMENT,
+both run AFTER the no-row check so neither can hide a path-spelling mismatch,
+and both name what they set aside in the verdict. An exclusion nobody can see
+is indistinguishable from a gate that did not run.
+
 The two labelled arrows around `stats` — `CLI -. injects .-> CCTEL`, dotted,
 and `CCTEL -- implements SampleSource --> STATS`, solid — are the same rule
 applied to a case that could easily have inverted it (ADR-002 D2). Reading a host's
