@@ -2755,11 +2755,20 @@ class TestPathsTheManifestHoldsOutOfTheFloor:
         ordering, `coverage_exclude` plus a narrowed report would hide a
         path-spelling mismatch — which is the exact failure the no-row guard
         was written for.
+
+        Uses a production path rather than `self.TEST`: with the
+        `Adapter.is_test_file` mechanism (BUG_019), a touched test file with
+        no row is set aside on that positive fact alone, which would pass
+        this test for the wrong reason and stop it isolating the
+        `coverage_exclude` ordering it exists to guard.
         """
-        measured = self.wire(ctx_factory)
-        measured.pop(str(ctx_factory.wt / self.TEST))
+        excluded = "src/app/generated.py"
+        path = ctx_factory.wt / excluded
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.LIVE, encoding="utf-8")
+        measured = {str(ctx_factory.wt / self.SRC): 100.0}
         verdict = self.verdict(
-            self.ctx_for(ctx_factory, [self.SRC, self.TEST], ["tests/**"], measured)
+            self.ctx_for(ctx_factory, [self.SRC, excluded], [excluded], measured)
         )
         assert not verdict.ok
         assert "no coverage row" in verdict.message
