@@ -246,7 +246,8 @@ only available from the payload. Leaving the old sentence standing meant the
 authoritative map stated a rule a reader enforcing it would have used to
 "correct" a working fix by reverting it (BUG_022). What a host adapter owes is
 now an explicit normalisation obligation rather than an implied one, which is
-what a second agent host would need in order to be written at all.
+what a second agent host would need in order to be written at all. The
+restatement is recorded as ADR-003 D4.
 
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through

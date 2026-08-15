@@ -477,7 +477,7 @@ class TestMarkers:
         assert all(s.strip() and "0" not in s for s in sentences)
 
     def test_only_the_pre_instrumentation_sentence_claims_a_history(self):
-        for sentence in (NO_BREAKDOWN_YET, NO_BREAKDOWN_NO_PIPELINE):
+        for sentence in (NO_BREAKDOWN_YET, NO_BREAKDOWN_NO_PIPELINE, NO_BREAKDOWN_UNJOINED):
             assert "predate" not in sentence
             assert "recorded before" not in sentence
 

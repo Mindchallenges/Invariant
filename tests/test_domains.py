@@ -382,6 +382,11 @@ class TestPipelineDomain:
             session.id, str(m.root / "docs" / "architecture" / "overview.md")
         )
         pipelines.record_agent_run(session.id, "feature-architect")
+        # The agent-role gates live on the review state's exit, because a
+        # dispatch is recorded when the agent RETURNS (ADR-003 D1).
+        pipeline = pipelines.current(session.id)
+        pipeline.state = "reviewing"
+        pipelines._save(session.id, pipeline)
         verdicts = pipelines.evaluate_gates(
             session.id, session=session.to_dict(), cwd=m.root
         )
@@ -1529,6 +1534,17 @@ class TestAcknowledgingAnAdvisoryGate:
         pipelines.start(session.id, task="a task")
         return pipelines, session
 
+    def at_review(self, pipelines, session):
+        """Park the pipeline where the agent-role gates live (ADR-003 D1).
+
+        Set directly rather than advanced through, because advancing there is
+        what the gates under test would themselves have to permit.
+        """
+        pipeline = pipelines.current(session.id)
+        pipeline.state = "reviewing"
+        pipelines._save(session.id, pipeline)
+        return pipelines, session
+
     def verdict_for(self, pipelines, session, m, rule_id):
         verdicts = pipelines.evaluate_gates(session.id, cwd=m.root)
         for evaluated in verdicts:
@@ -1537,14 +1553,14 @@ class TestAcknowledgingAnAdvisoryGate:
         raise AssertionError(f"{rule_id} was not among the gates here")
 
     def test_the_gate_warns_before_it_is_acknowledged(self, m):
-        pipelines, session = self.pipeline_at(m)
+        pipelines, session = self.at_review(*self.pipeline_at(m))
         evaluated = self.verdict_for(
             pipelines, session, m, "agents.design_agent_ran"
         )
         assert not evaluated.verdict.ok
 
     def test_acknowledging_turns_it_into_a_recorded_skip(self, m):
-        pipelines, session = self.pipeline_at(m)
+        pipelines, session = self.at_review(*self.pipeline_at(m))
         pipelines.acknowledge(
             session.id, "agents.design_agent_ran", "one-line fix; no design content"
         )
@@ -1563,7 +1579,7 @@ class TestAcknowledgingAnAdvisoryGate:
         assert evidence["acknowledged"]["agents.design_agent_ran"] == "deliberate"
 
     def test_it_survives_a_reload(self, m):
-        pipelines, session = self.pipeline_at(m)
+        pipelines, session = self.at_review(*self.pipeline_at(m))
         pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
         fresh = PipelineDomain(m)
         evaluated = self.verdict_for(fresh, session, m, "agents.design_agent_ran")
@@ -1604,18 +1620,19 @@ class TestAcknowledgingAnAdvisoryGate:
 
     def test_it_is_scoped_to_one_pipeline(self, m):
         """It must not quietly become project policy."""
-        pipelines, session = self.pipeline_at(m)
+        pipelines, session = self.at_review(*self.pipeline_at(m))
         pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
 
         sessions = SessionDomain(m)
         other = sessions.start("second")
         pipelines.start(other.id, task="another task")
+        self.at_review(pipelines, other)
         evaluated = self.verdict_for(pipelines, other, m, "agents.design_agent_ran")
         assert not evaluated.verdict.ok
 
     def test_a_passing_gate_is_unaffected_by_an_acknowledgement(self, m):
         """It rewrites failures only — never manufactures a skip over a pass."""
-        pipelines, session = self.pipeline_at(m)
+        pipelines, session = self.at_review(*self.pipeline_at(m))
         pipelines.record_agent_run(session.id, "feature-architect")
         pipelines.acknowledge(session.id, "agents.design_agent_ran", "belt and braces")
         evaluated = self.verdict_for(pipelines, session, m, "agents.design_agent_ran")

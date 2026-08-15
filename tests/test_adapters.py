@@ -66,6 +66,55 @@ class TestGenericAdapter:
         files = [Path("a.txt"), Path("b.swift")]
         assert Adapter().source_files(files) == files
 
+    def test_cannot_tell_a_test_file_from_a_source_file(self):
+        """Knowing a test file by sight is ecosystem knowledge, so the base
+        adapter answers `None` — "cannot tell" — exactly as it does for
+        `carries_executable_code`."""
+        assert Adapter().is_test_file(Path("tests/test_thing.py")) is None
+
+
+class TestTestFileRecognition:
+    """BUG_019 — a touched test file was demanded a coverage row that the
+    configured reporter is defined never to produce.
+
+    The two wrong answers are not symmetrical, and the dangerous one is
+    calling a production file a test: it would set that file aside and pass
+    unmeasured code silently. So every pattern here is anchored on a naming
+    convention the ecosystem actually enforces, never on the substring
+    "test" appearing somewhere in a path.
+    """
+
+    def test_python_knows_its_own_conventions(self):
+        adapter = get_adapter("python")
+        for path in ("tests/test_rules.py", "test_rules.py", "rules_test.py",
+                     "tests/conftest.py", "src/pkg/tests/test_a.py"):
+            assert adapter.is_test_file(Path(path)) is True, path
+
+    def test_python_does_not_claim_production_files(self):
+        adapter = get_adapter("python")
+        for path in ("src/invariant/core/rules.py", "src/contest.py",
+                     "src/latest.py", "src/testing_utils.py", "protest.py"):
+            assert adapter.is_test_file(Path(path)) is False, path
+
+    def test_node_knows_its_own_conventions(self):
+        adapter = get_adapter("node")
+        for path in ("src/a.test.ts", "src/a.spec.tsx", "__tests__/a.ts"):
+            assert adapter.is_test_file(Path(path)) is True, path
+        assert adapter.is_test_file(Path("src/latest.ts")) is False
+
+    def test_swift_knows_its_own_conventions(self):
+        adapter = get_adapter("swift_xcode")
+        assert adapter.is_test_file(Path("AppTests/ThingTests.swift")) is True
+        assert adapter.is_test_file(Path("App/Thing.swift")) is False
+
+    def test_an_adapter_answers_none_outside_its_own_extensions(self):
+        """Adapters stack, so one that does not own a file must not answer for
+        it — otherwise a mixed-ecosystem project gets the first adapter's
+        opinion about the second's files."""
+        assert get_adapter("python").is_test_file(Path("AppTests/ThingTests.swift")) is None
+        assert get_adapter("swift_xcode").is_test_file(Path("tests/test_a.py")) is None
+        assert get_adapter("node").is_test_file(Path("tests/test_a.py")) is None
+
 
 class TestSwiftAdapter:
     def setup_method(self):

@@ -31,7 +31,25 @@ DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
     "review": {"exit": ["docs.updated", "docs.diagrams_current"]},
 }
 
-#: Attached the same way, and exit gates for the same reason.
+#: Attached the same way, and exit gates for the same reason — but BOTH hang
+#: off the ``review`` role, including the one that asks about the *design*
+#: agent. See ADR-003 D1.
+#:
+#: The docs-first note above turns on evidence the agent produces WHILE it
+#: runs: a design agent satisfies ``docs.read_architecture`` by reading, and
+#: the read is recorded the moment it happens. These gates turn on evidence
+#: produced when the agent RETURNS — ``Task`` PostToolUse fires on return, so a
+#: design agent that drives its own pipeline can never have its own dispatch on
+#: record before it advances out of the design state. Placed there, the gate was
+#: unsatisfiable for the one actor it names, and the only way past it was
+#: ``--force`` (BUG_021).
+#:
+#: The review state's exit is the earliest boundary driven by a DIFFERENT
+#: actor, which is what makes the evidence available: the parent dispatches the
+#: review agent only after the design agent has returned. Reached at the cost
+#: of the gate guarding *landing* rather than *leaving design* — accepted in
+#: ADR-003 D2, because a gate that blocks at a moment nothing can satisfy is
+#: not a stricter gate, it is a disarmed one.
 #:
 #: These stay ADVISORY in every shipped profile, including ``strict``. The
 #: engine can prove an agent *ran*; it cannot prove one was *needed*, and a
@@ -39,8 +57,7 @@ DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
 #: violation. ``strict`` already holds that line for its other heuristics, on
 #: the grounds that a blocking heuristic is a false positive with authority.
 AGENT_ROLE_GATES: dict[str, dict[str, list[str]]] = {
-    "design": {"exit": ["agents.design_agent_ran"]},
-    "review": {"exit": ["agents.review_agent_ran"]},
+    "review": {"exit": ["agents.design_agent_ran", "agents.review_agent_ran"]},
 }
 
 

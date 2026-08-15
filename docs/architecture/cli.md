@@ -12,6 +12,16 @@ Nothing reaches the engine another way.
   the same code, because a shim must be able to tell them apart.
 - Every command that mutates state is idempotent where that is meaningful, and
   says so in `--help` where it is not.
+- **A blocking gate that did not apply is reported; a gate that passed is
+  not.** Without `--verbose` the verdict stream carries failures and
+  `block`-level skips, and drops plain passes and advisory skips. A skip and a
+  pass are different facts — a pass has vouched for something and a skip has
+  not — and collapsing them is how a blocking gate going inert stayed
+  invisible (BUG_020). A `block`-level skip renders as `[skip:BLOCK]` and is
+  counted separately in the transition summary, because a rule the project
+  chose to enforce going inapplicable is news about that project's own
+  enforcement. Advisory skips stay behind `--verbose`, where there is nothing
+  to act on.
 - No command ever writes to the repository outside the state root and **the
   stores the manifest declares** (`items.path`, `paths.memory`,
   `paths.reports`).
@@ -103,14 +113,23 @@ invariant pipeline coverage
     needs too: a `VAR=value cmd` prefix applies to that one command alone.
 
     A changed file with no row in that evidence normally BLOCKS: an absent row
-    is what "never measured" looks like. Two absences are set aside instead,
-    each on positive evidence — a file git reports the change deleted, and a
-    file the ecosystem's adapter reports carries no executable lines. Neither
-    could ever earn a row, so demanding one is a gate no test can clear, and a
-    gate no test can clear is one people route around. Anything else,
-    including every "cannot tell", keeps blocking, and every file set aside is
-    NAMED in the verdict — a pass that quietly narrowed its own scope is the
-    vacuous green the gate exists to prevent.
+    is what "never measured" looks like. Four absences are set aside instead,
+    each on positive evidence — a file git reports the change deleted, a file
+    outside the directories the coverage reporter is CONFIGURED to measure,
+    a file the ecosystem's adapter recognises as part of the TEST SUITE, and a
+    file that adapter reports carries no executable lines. None could ever
+    earn a row, so demanding one is a gate no test can clear, and a gate no
+    test can clear is one people route around. Anything else, including every
+    "cannot tell", keeps blocking, and every file set aside is NAMED in the
+    verdict — a pass that quietly narrowed its own scope is the vacuous green
+    the gate exists to prevent.
+
+    The test-file case is a separate question from the executable-lines one and
+    not a special case of it: a test file is full of executable lines, so the
+    honest fact is not that it cannot be measured but that it is what does the
+    measuring, and the usual coverage configuration is defined never to emit a
+    row for one. A file that DOES carry a row is held to the floor like any
+    other — setting aside is for an absent row, never for a low one.
 
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
@@ -210,10 +229,14 @@ invariant stats report [--write]
 invariant stats show <session>
     One session in full, including its per-state breakdown. A session with no
     breakdown says so explicitly and says WHY: recorded before per-state
-    attribution existed, or no pipeline state left yet, or no pipeline at all.
-    Never a zero and never a blank: a blank invites the reader to conclude the
-    work was free, and a cause that is not the real one invites them to stop
-    asking. A state whose two watermarks cannot be subtracted — the counter
+    attribution existed, no pipeline state left yet, no pipeline at all, no
+    invariant session joined to the record, or the reason itself never
+    recorded — five facts, five sentences. Never a zero and never a blank: a
+    blank invites the reader to conclude the work was free, and a cause that
+    is not the real one invites them to stop asking. The unjoined case is the
+    one that most tempts an over-claim: nothing in such a record can
+    distinguish "ran before the instrumentation" from "ran after and was never
+    joined", so it names the absent join and stops there (BUG_024). A state whose two watermarks cannot be subtracted — the counter
     changed under a rebind, the reading went backwards, or it did not move —
     renders as unattributable, with the reason, and never as a figure.
 

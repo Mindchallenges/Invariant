@@ -67,6 +67,23 @@ class PythonAdapter(Adapter):
             resolved.append(candidate)
         return resolved
 
+    def is_test_file(self, path: Path) -> bool | None:
+        """pytest's own discovery conventions, and nothing looser.
+
+        ``test_*.py`` / ``*_test.py`` are what pytest collects by default, a
+        ``tests`` or ``test`` directory component is the near-universal layout,
+        and ``conftest.py`` is pytest's own fixture module. Matching on the
+        substring "test" anywhere would claim ``latest.py``, ``contest.py`` and
+        ``testing_utils.py`` — production files that would then be set aside
+        unmeasured, which is the failure direction the base docstring forbids.
+        """
+        if path.suffix != ".py":
+            return None
+        if any(part in {"tests", "test"} for part in path.parts[:-1]):
+            return True
+        name = path.name
+        return name == "conftest.py" or name.startswith("test_") or name.endswith("_test.py")
+
     def hazards(self) -> list[Hazard]:
         return [
             Hazard(

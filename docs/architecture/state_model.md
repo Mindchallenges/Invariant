@@ -347,16 +347,27 @@ has declared there is no structure to draw.
 
 ### Agent-role gates
 
-A second pair rides the same injection: `agents.design_agent_ran` leaving the
-design state, `agents.review_agent_ran` leaving review. They read the subagent
-invocations the host recorded as pipeline evidence, keyed by
-`agents.roles.<role>` in the manifest.
+A second pair rides the same injection, and **both leave the review state** —
+`agents.review_agent_ran` and, despite its name, `agents.design_agent_ran`.
+They read the subagent invocations the host recorded as pipeline evidence,
+keyed by `agents.roles.<role>` in the manifest.
 
 They exist because installing an agent and using one are different events, and
 only the second changes any outcome. A project can carry four correctly
 installed agents and never dispatch one.
 
-Three properties, each deliberate:
+Four properties, each deliberate:
+
+- **The design gate does not guard the design state.** It cannot: the host
+  records a dispatch when the subagent *returns*, so a design agent driving its
+  own pipeline can never have its own dispatch on record before it advances out
+  of designing. Placed there the gate was unsatisfiable for the one actor it
+  names, and `--force` was the only route past it. The review state's exit is
+  the earliest boundary a *different* actor drives, which is what makes the
+  evidence available. The cost — the gate guards landing rather than leaving
+  design — is accepted in ADR-003 D2. Contrast `docs.read_architecture`, which
+  stays on the design state's exit because a read is recorded the moment it
+  happens, while the agent is still running.
 
 - **Advisory in every shipped profile, including `strict`.** The engine can
   prove an agent *ran*; it cannot prove one was *needed*. A one-line fix made

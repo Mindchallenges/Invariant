@@ -1780,6 +1780,15 @@ def _explain_absent_rows(
         # no code would have been a lie told to relax a gate.
         if _outside_measured_scope(adapters, root, found):
             excluded.append(f"{rel} (outside the coverage reporter's configured scope)")
+        # The conventional half of the same question, for a project whose
+        # coverage configuration the adapter could not read: a test file is
+        # what measures, not what is measured, and the usual configuration is
+        # defined never to produce a row for one. Asked on the repo-relative
+        # spelling, not on `found`: the directory convention is what carries
+        # the answer, and an absolute path can pick up a stray `tests`
+        # component from somewhere above the project root.
+        elif _is_test_file(adapters, Path(rel)) is True:
+            excluded.append(f"{rel} (a test file; not what a coverage floor measures)")
         elif _carries_executable_code(adapters, found) is False:
             excluded.append(f"{rel} (no executable lines to measure)")
         else:
@@ -1960,6 +1969,22 @@ def _carries_executable_code(adapters: list[Adapter], path: Path) -> bool | None
     """
     for adapter in adapters:
         answer = adapter.carries_executable_code(path)
+        if answer is not None:
+            return answer
+    return None
+
+
+def _is_test_file(adapters: list[Adapter], path: Path) -> bool | None:
+    """Same stacking rule as :func:`_carries_executable_code`, same reason.
+
+    Kept a separate question rather than folded into that one: a test file is
+    full of executable lines, so answering ``False`` there to get this
+    relaxation would assert the thing the base docstring names as the
+    dangerous direction. What a coverage floor asks about a test file is not
+    "can it be measured" but "is it what we are measuring" (BUG_019).
+    """
+    for adapter in adapters:
+        answer = adapter.is_test_file(path)
         if answer is not None:
             return answer
     return None

@@ -28,6 +28,19 @@ class NodeAdapter(Adapter):
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix in {".ts", ".tsx", ".js", ".jsx"}]
 
+    def is_test_file(self, path: Path) -> bool | None:
+        """The conventions jest, vitest and node:test all key on.
+
+        ``.test.`` / ``.spec.`` infixes and a ``__tests__`` directory. Anchored
+        on the dot so ``latest.ts`` is not claimed as a test — see the base
+        docstring on why that direction is the dangerous one.
+        """
+        if path.suffix not in {".ts", ".tsx", ".js", ".jsx"}:
+            return None
+        if "__tests__" in path.parts[:-1]:
+            return True
+        return path.stem.endswith((".test", ".spec"))
+
     def hazards(self) -> list[Hazard]:
         return [
             Hazard(

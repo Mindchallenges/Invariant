@@ -112,6 +112,21 @@ class SwiftXcodeAdapter(Adapter):
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".swift"]
 
+    def is_test_file(self, path: Path) -> bool | None:
+        """The convention `swift test` and Xcode both key on.
+
+        A ``*Tests.swift`` file, or anything under a ``*Tests`` target
+        directory — the layout `swift package init` generates and Xcode's test
+        target default. Anchored on the suffix rather than on the word
+        appearing anywhere, so ``TestHarness.swift`` shipped in the app target
+        is not claimed.
+        """
+        if path.suffix != ".swift":
+            return None
+        if any(part.endswith("Tests") for part in path.parts[:-1]):
+            return True
+        return path.stem.endswith("Tests")
+
     def carries_executable_code(self, path: Path) -> bool | None:
         if path.suffix != ".swift":
             return None

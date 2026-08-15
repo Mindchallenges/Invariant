@@ -267,5 +267,34 @@ class Adapter:
         """
         return None
 
+    def is_test_file(self, path: Path) -> bool | None:
+        """Is this file part of the test suite rather than the code under test?
+
+        Asked for the same reason as :meth:`carries_executable_code` and
+        answered on the same terms — to explain an ABSENT coverage row. A test
+        file is full of executable lines, so that method cannot answer this
+        question honestly; what makes a test file different is that it is what
+        *measures*, not what is measured. :meth:`measured_scope` answers the
+        configured half of the question — where the reporter was told to look —
+        and this method answers the conventional half for projects whose
+        configuration the adapter cannot read: the usual coverage
+        configuration (``source = ["src/..."]`` and its equivalents) is
+        defined never to produce a row for a test file. Demanding a row anyway
+        is a gate no amount of work can clear.
+
+        ``None`` means "cannot tell" and relaxes nothing, exactly as there. An
+        adapter must answer ``None`` for a file outside its own ecosystem
+        rather than guess, because adapters stack and the first real answer
+        wins.
+
+        The two wrong answers are not symmetrical and an implementation must
+        prefer the second: calling a test file production costs a spurious
+        block, which is visible; calling a production file a test sets it
+        aside and passes unmeasured code silently. So implementations anchor
+        on naming conventions the ecosystem actually enforces, never on the
+        substring "test" appearing somewhere in a path.
+        """
+        return None
+
     def hazards(self) -> list[Hazard]:
         return []

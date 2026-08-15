@@ -122,7 +122,52 @@ class TestAgentRoleGates:
         assert not {g for g in entry if g.startswith("agents.")}
 
     def test_injection_targets_roles_not_names(self):
-        assert set(AGENT_ROLE_GATES) == {"design", "review"}
+        assert set(AGENT_ROLE_GATES) == {"review"}
+
+    def test_the_design_gate_does_not_sit_on_the_design_state(self, make_manifest):
+        """ADR-003 D1 — a gate an agent clears by RETURNING cannot guard the
+        state that agent is running in.
+
+        `Task` PostToolUse fires when a subagent returns, so a design agent
+        driving its own pipeline can never have its own dispatch on record
+        before it advances out of the design state. The gate was structurally
+        unsatisfiable for the one actor it names, and three pipelines on this
+        machine carry a forced override of exactly it (BUG_021).
+        """
+        machine = load_pipeline_machine(make_manifest({}))
+        design = machine.states_with_role("design")[0]
+        assert "agents.design_agent_ran" not in machine.state(design).exit_gates
+        assert "agents.design_agent_ran" not in machine.state(design).entry_gates
+
+    def test_both_agent_gates_sit_on_the_review_state(self, make_manifest):
+        """The earliest boundary driven by a DIFFERENT actor.
+
+        `reviewing -> committed` is advanced by the review agent, which the
+        parent dispatches only after the design agent returned — so the design
+        agent's dispatch is on record by then (ADR-003 D1).
+        """
+        machine = load_pipeline_machine(make_manifest({}))
+        review = machine.states_with_role("review")[0]
+        assert "agents.design_agent_ran" in machine.state(review).exit_gates
+        assert "agents.review_agent_ran" in machine.state(review).exit_gates
+
+    def test_the_docs_read_gate_stays_on_the_design_state(self, make_manifest):
+        """ADR-003 D1's limit. The design agent satisfies docs-first by
+        READING, which it completes while running, so `machines.py`'s original
+        placement argument still governs that gate and only that gate."""
+        machine = load_pipeline_machine(make_manifest({}))
+        design = machine.states_with_role("design")[0]
+        assert "docs.read_architecture" in machine.state(design).exit_gates
+
+    def test_every_shipped_methodology_with_a_design_role_has_a_review_role(self):
+        """ADR-003 D2 rests on this. A design role with no review role would
+        lose the gate outright rather than merely have it move."""
+        for machine_id in shipped_ids():
+            machine = load_machine(machine_id)
+            if machine.kind != "pipeline":
+                continue
+            if machine.states_with_role("design"):
+                assert machine.states_with_role("review"), machine_id
 
     def test_a_roleless_machine_is_unaffected(self, make_manifest):
         machine = load_pipeline_machine(make_manifest({"methodology": {"pipeline": "none"}}))

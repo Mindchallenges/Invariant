@@ -1479,6 +1479,113 @@ class TestCoverageScopeAndPathSpelling:
 
 
 
+class TestTouchedTestFilesAreNotHeldToTheFloor:
+    """BUG_019 — a Python session touching its own tests got an unsatisfiable gate.
+
+    `[tool.coverage.run] source = [...]` means test files are never measured,
+    so no row can ever exist for them, and the gate demanded one on essentially
+    every session in this repository:
+
+        2 changed source file(s) have no coverage row — tests/test_adapters.py, ...
+
+    The fix is NOT `carries_executable_code`, which BUG_019's sketch named: a
+    test file is full of executable lines, and answering `False` there would
+    assert the dangerous direction the base docstring forbids. The honest fact
+    is a different one — a test file is what measures, not what is measured.
+    """
+
+    def ctx_with(self, ctx_factory, coverage, changed=()):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        for rel in changed:
+            path = ctx_factory.main / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x = 1\n", encoding="utf-8")
+        return ctx_factory(
+            session={"id": "s1", "files": list(changed)},
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_a_touched_test_file_with_no_row_is_set_aside(self, ctx_factory):
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.py"): 95.0},
+            changed=["src/app.py", "tests/test_app.py"],
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "no coverage row" not in verdict.message
+
+    def test_the_file_set_aside_is_named(self, ctx_factory):
+        """Never silently. Every file the gate declines to answer for is
+        reported, or the pass is one the reader cannot audit."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.py"): 95.0},
+            changed=["src/app.py", "tests/test_app.py"],
+        )
+        assert "tests/test_app.py" in self.verdict(ctx).detail
+
+    def test_a_production_file_with_no_row_still_blocks(self, ctx_factory):
+        """The relaxation must not widen by one inch. This is the case the
+        gate exists for."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.py"): 95.0},
+            changed=["src/app.py", "src/untested.py"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "src/untested.py" in verdict.detail
+
+    def test_a_measured_test_file_is_still_held_to_the_floor(self, ctx_factory):
+        """A project that DOES measure its tests keeps the answer it earned.
+        Setting a file aside is for an absent row, never for a low one."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {
+                str(ctx_factory.main / "src" / "app.py"): 95.0,
+                str(ctx_factory.main / "tests" / "test_app.py"): 10.0,
+            },
+            changed=["src/app.py", "tests/test_app.py"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "tests/test_app.py" in verdict.detail
+
+    def test_a_project_with_no_python_adapter_gets_no_relaxation(self, ctx_factory):
+        """The rule keeps the policy, the adapter supplies the fact. With no
+        adapter that knows the language, "cannot tell" relaxes nothing."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        for rel in ("src/app.py", "tests/test_app.py"):
+            path = ctx_factory.main / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x = 1\n", encoding="utf-8")
+        ctx = ctx_factory(
+            session={"id": "s1", "files": ["src/app.py", "tests/test_app.py"]},
+            pipeline={
+                "evidence": {"coverage": {str(ctx_factory.main / "src" / "app.py"): 95.0}}
+            },
+        )
+        assert not self.verdict(ctx).ok
+
+
 class TestCoverageAcrossTwoRoots:
     """An isolated session has two roots, and the gate saw only one.
 
@@ -2517,14 +2624,22 @@ class TestTheReportersScopeIsNotDemandedOfFilesOutsideIt:
     def test_an_unreadable_scope_leaves_the_block_in_place(self, ctx_factory):
         """`None` from the adapter is "cannot tell", which relaxes nothing.
 
-        Without a resolvable `source`, the touched test file keeps blocking —
-        the pre-fix behaviour, retained wherever the fact is unavailable.
+        Without a resolvable `source`, a production file with no row keeps
+        blocking — the pre-fix behaviour, retained wherever no positive fact
+        is available. A touched TEST file no longer depends on this scope
+        fact: `is_test_file` answers the conventional half of the question
+        positively, so it is set aside even when the configured scope cannot
+        be read (the complementary mechanism recorded on BUG_019).
         """
         measured = self.wire(ctx_factory, pyproject='[project]\nname = "x"\n')
-        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.SRC, self.TEST]))
+        other = ctx_factory.wt / "src/app/unmeasured.py"
+        other.write_text(self.LIVE, encoding="utf-8")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, measured, [self.SRC, "src/app/unmeasured.py"])
+        )
         assert not verdict.ok
         assert "no coverage row" in verdict.message
-        assert "test_mod.py" in verdict.detail
+        assert "unmeasured.py" in verdict.detail
 
     def test_a_scope_emptied_by_the_narrowing_is_not_a_pass(self, ctx_factory):
         """A change touching ONLY test files has nothing left to hold to the
