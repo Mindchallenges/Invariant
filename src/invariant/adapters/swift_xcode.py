@@ -418,15 +418,96 @@ _ACCESSOR_ONLY = {"get", "set", "async", "throws", "mutating", "nonmutating"}
 #: `deinit`, `subscript`, computed property and property observer inside is its
 #: own block with its own header and is still judged on it, and a stored
 #: property with an initialiser expression is caught file-wide by
-#: `_INITIALISED_BINDING` before any block is classified. `extension` is
-#: deliberately NOT here — its residue can be a member list that only a body
-#: could explain.
+#: `_INITIALISED_BINDING` before any block is classified — unless the binding
+#: is a type-level constant, which `_is_constant_declaration` sets aside for
+#: the reason recorded there. `extension` is deliberately NOT here — its
+#: residue can be a member list that only a body could explain, which is why
+#: a constant member of one has to be recognised as a declaration on its own
+#: terms rather than by the block it sits in.
 _INERT_BLOCK_HEADER = re.compile(r"\b(protocol|enum|struct|class|actor)\b")
 
 #: A binding with an initialiser expression: `var limit: Int = 200`. It has no
 #: brace, so no block classifies it, and the expression is an executable line.
 #: `typealias X = Y` and `case a = "a"` are deliberately not matched.
 _INITIALISED_BINDING = re.compile(r"\b(?:var|let)\b[^\n=]*=(?!=)")
+
+#: A value with no work behind it. The string alternative is `""` rather than
+#: anything between quotes because `_strip_comments_and_strings` has already
+#: blanked the CONTENTS by the time this reads them, leaving the quotes as the
+#: shape to match.
+_LITERAL = (
+    r"(?:\"\"|-?(?:0[xXbBoO])?\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][-+]?\d+)?"
+    r"|true|false|nil)"
+)
+
+#: `Notification.Name("activeLibraryDidChange")` — a dotted path of CAPITALISED
+#: components applied to literals. Every component capitalised is what says the
+#: callee is a type name, so the call is naming a value rather than reaching
+#: through a lowercase member into whatever that member does.
+#:
+#: At least one argument is REQUIRED, which excludes `Registry()`. A custom
+#: `init` can do real work, the empty argument list is the shape a singleton
+#: wears, and the argument list is the only evidence available here — so the
+#: zero-argument case keeps blocking.
+_CONSTANT_CALL = (
+    r"[A-Z]\w*(?:\.[A-Z]\w*)*\("
+    rf"\s*(?:\w+\s*:\s*)?{_LITERAL}(?:\s*,\s*(?:\w+\s*:\s*)?{_LITERAL})*\s*"
+    r"\)"
+)
+
+#: The whole right-hand side, and nothing else. Arithmetic a compiler would
+#: fold (`60 * 60`) is deliberately not here: this reader cannot fold, and
+#: what it cannot read as one value it must keep blocking on.
+_CONSTANT_EXPRESSION = re.compile(rf"^(?:{_LITERAL}|{_CONSTANT_CALL})$")
+
+#: A TYPE-LEVEL binding with an initialiser: `static let x = …`, whatever
+#: attributes and access modifiers precede it. `static` is load-bearing rather
+#: than incidental — see `_is_constant_declaration`.
+_STATIC_BINDING = re.compile(
+    r"^[^=\n]*\bstatic\b[^=\n]*\b(?:let|var)\b[^=\n]*=(?!=)(?P<rhs>[^\n]*)$"
+)
+
+
+def _statements(text: str) -> list[str]:
+    """`text` cut at every boundary a statement cannot cross.
+
+    A newline, a `;`, and either brace. Cutting at braces is what lets a
+    one-line member — `extension N { static let x = N("a") }` — be read as the
+    declaration it is instead of as a line with a stray `}` on the end.
+    """
+    return re.split(r"[\n;{}]", text)
+
+
+def _is_constant_declaration(fragment: str) -> bool:
+    """Is this a type-level binding to a value, rather than to work?
+
+    Two conditions, and the second is the one that keeps this narrow.
+
+    **`static`.** A type-level or global binding is emitted as a lazily
+    initialised global, and the observed fact this exists to explain is that a
+    file whose only members are such bindings gets NO coverage row at all —
+    checked three ways against a consuming project's report, including a grep
+    of the raw JSON, while sibling files in the same directory are present and
+    numbered. An INSTANCE stored property is the opposite case: its initialiser
+    is emitted into every `init` the type has, so it is a line a coverage run
+    really does report, and `var limit: Int = 200` must keep answering True.
+    `static` is the only thing in the text that tells the two apart.
+
+    **A constant right-hand side.** A literal, or a call on a capitalised
+    dotted path with at least one literal argument. Anything else — a call to
+    a lowercase function, a value read from another symbol, arithmetic, a
+    closure, a multi-line expression this cut into fragments — is not
+    recognised, and an unrecognised initialiser goes on meaning "carries code".
+
+    The asymmetry is the whole design: calling a live file inert passes
+    unmeasured code silently, so every case this cannot read must fall through
+    to blocking.
+    """
+    match = _STATIC_BINDING.match(fragment)
+    if match is None:
+        return False
+    return bool(_CONSTANT_EXPRESSION.match(match.group("rhs").strip()))
+
 
 #: Top-level lines that may remain once every block has been lifted out. A
 #: file whose residue is only these is declarations and nothing else.
@@ -444,6 +525,14 @@ def _strip_comments_and_strings(text: str) -> str:
     naive version of the other, so both are consumed in ONE left-to-right
     pass — whichever opens first wins, which is what the compiler does.
     Newlines are preserved so line-oriented checks still see the shape.
+
+    A string's CONTENTS go and its QUOTES stay, which is what "blank" means
+    here and what the sibling reducer's docstring has always said this one
+    did. Dropping the quotes too erased the difference between a literal and
+    nothing at all: `Notification.Name("a")` came out as `Notification.Name()`,
+    indistinguishable from a bare `Registry()` call, and an initialiser with a
+    string on the right came out with an empty right-hand side. Both are
+    distinctions a reader downstream has to be able to make.
     """
     out: list[str] = []
     i, n = 0, len(text)
@@ -468,13 +557,14 @@ def _strip_comments_and_strings(text: str) -> str:
             if text[i : i + 3] == '"""':
                 j = text.find('"""', i + 3)
                 chunk = text[i : n if j < 0 else j + 3]
-                out.append("\n" * chunk.count("\n"))
+                out.append('""' + "\n" * chunk.count("\n"))
                 i = n if j < 0 else j + 3
             else:
                 i += 1
                 while i < n and text[i] != '"':
                     i += 2 if text[i] == "\\" else 1
                 i += 1
+                out.append('""')
         else:
             out.append(ch)
             i += 1
@@ -580,13 +670,30 @@ def _swift_carries_executable_code(source: str) -> bool | None:
     if re.search(r"^\s*#(if|elseif|else)\b", text, re.M):
         return None
 
-    if _INITIALISED_BINDING.search(text):
-        return True
+    # An initialised binding has no brace, so no block classifies it and the
+    # expression is an executable line — with one exception, which is why this
+    # is a scan rather than the single search it used to be: a type-level
+    # constant declares a value and earns no row. It falls through to the block
+    # classification below, where its own residue is dropped, so it neither
+    # proves code here nor smuggles anything past the checks there.
+    for fragment in _statements(text):
+        if _INITIALISED_BINDING.search(fragment) and not _is_constant_declaration(
+            fragment
+        ):
+            return True
 
     for header, content in _brace_blocks(text):
         if _INERT_BLOCK_HEADER.search(header):
             continue
-        own = _without_nested_blocks(content).strip()
+        # Constant declarations are dropped from a block's OWN residue for the
+        # reason the file-wide scan lets them past: they are members, not
+        # statements. Nothing else is dropped, so a body sitting next to one is
+        # still its own block and still judged on its own header.
+        own = "\n".join(
+            fragment
+            for fragment in _statements(_without_nested_blocks(content))
+            if not _is_constant_declaration(fragment)
+        ).strip()
         if not own:
             continue  # `{}` — a marker type's body holds nothing to run
         # An accessor requirement NAMES its accessors. Requiring a keyword

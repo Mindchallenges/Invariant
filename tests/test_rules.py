@@ -2747,6 +2747,58 @@ class TestFilesThatCannotHaveACoverageRow:
         assert "no coverage row" in verdict.message
         assert "Unmeasured.swift" in verdict.detail
 
+    PORTS = "Heap/Library/LibrarySwapPorts.swift"
+    CONSTANTS = (
+        "import Foundation\n"
+        "\n"
+        "protocol LibrarySwitchableMediaStore: AnyObject {\n"
+        "    func prepareForLibrarySwitch() async\n"
+        "}\n"
+        "\n"
+        "extension Notification.Name {\n"
+        '    static let activeLibraryDidChange = Notification.Name("activeLibraryDidChange")\n'
+        "}\n"
+        "\n"
+        "extension Notification {\n"
+        '    static let blobRelativePathKey = "blobRelativePath"\n'
+        "}\n"
+    )
+
+    def test_a_file_of_type_level_constants_no_longer_blocks(self, ctx_factory):
+        """The second reported shape, and the one the block-level gate refused
+        a merge over: bare protocols and two extensions of `static let`
+        constants, absent from all ten targets of the report that named it."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.PORTS, self.CONSTANTS)
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PORTS]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "LibrarySwapPorts.swift" in (verdict.detail or "")
+
+    def test_one_real_initialiser_in_that_file_still_blocks(self, ctx_factory):
+        """The one-bit control, at the layer the consumer sees. One right-hand
+        side that is a call rather than a constant, and the demand comes
+        straight back — which is what says the relaxation reads the file
+        rather than its shape."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            self.PORTS,
+            self.CONSTANTS.replace(
+                'static let blobRelativePathKey = "blobRelativePath"',
+                "static let blobRelativePathKey = resolveKey()",
+            ),
+        )
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PORTS]
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "LibrarySwapPorts.swift" in verdict.detail
+
     def test_an_adapter_that_cannot_tell_leaves_the_block_in_place(self, ctx_factory):
         """`None` is not a negative answer, and must not relax anything."""
         self.write(ctx_factory, self.MEASURED, self.LIVE)

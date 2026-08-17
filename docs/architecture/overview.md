@@ -117,6 +117,22 @@ that knows the language can tell those apart, so the rule asks
 the fact. (`MANIFEST → adapters`, for command and rule-level defaults, is the
 same arrow and predates it.)
 
+What the adapter owes is a fact about the LANGUAGE, and the Swift one has been
+wrong about that fact twice, in the same direction both times: it read a
+declaration as a statement. A stored-property-only type was the first case
+(BUG_025); a type-level constant — `static let name = Notification.Name("…")`
+in an extension — was the second, and the file that exposed it is seven bare
+protocols and four such constants, absent from all ten targets of the consuming
+project's coverage report. The discriminator is not "is there an initialiser"
+but WHERE the binding lives: a `static` or global binding is emitted as a
+lazily initialised global and earns no row, while an INSTANCE stored property's
+initialiser is emitted into every `init` the type has and does. Anything the
+reader cannot resolve to a literal — a call to a lowercase member, a value read
+from another symbol, arithmetic, a closure — goes on meaning "carries code",
+because this answer's asymmetry runs the same way as the rule's: a spurious
+block is visible, and a file wrongly called inert passes unmeasured code in
+silence.
+
 An absent row has a *third* cause, and it is about the project rather than the
 file: the reporter was configured never to look there. A Python project setting
 `[tool.coverage.run] source` to its package directory can never produce a row

@@ -1136,6 +1136,180 @@ class TestCarriesExecutableCode:
         )
         assert self.adapter.carries_executable_code(path) is False
 
+    # -- a type-level constant is a declaration, not a statement --------
+
+    def test_an_extension_of_constant_notification_names_is_inert(self, tmp_path):
+        """The shape that exposed this: seven bare protocols and two extensions
+        holding nothing but `static let` constants. Confirmed absent from every
+        target of the consuming project's coverage report three ways — the
+        engine's own recorded evidence, a direct `xccov --json` extraction over
+        nine targets, and a grep of the raw 23 MB report — while sibling files
+        in the same directory are present and numbered."""
+        path = self.write(
+            tmp_path,
+            "LibrarySwapPorts.swift",
+            """
+            import Foundation
+
+            protocol LibrarySwitchableMediaStore: AnyObject {
+                func prepareForLibrarySwitch() async
+                func adoptLibrary(at root: URL) async throws
+            }
+
+            protocol LibrarySwitchableEncryptor: AnyObject {
+                func rekeyForLibrary(_ libraryID: UUID) throws
+            }
+
+            extension Notification.Name {
+                static let activeLibraryDidChange = Notification.Name("activeLibraryDidChange")
+                static let libraryRegistryDidChange = Notification.Name("libraryRegistryDidChange")
+                static let blobReadDidFail404 = Notification.Name("blobReadDidFail404")
+            }
+
+            extension Notification {
+                static let blobRelativePathKey = "blobRelativePath"
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_one_constant_static_let_in_an_extension_is_inert(self, tmp_path):
+        """The defect isolated to a single line. `extension` is deliberately
+        not an inert BLOCK HEADER — its residue can be a member list only a
+        body explains — so this member has to be recognised as a declaration
+        on its own terms rather than by where it sits."""
+        path = self.write(
+            tmp_path,
+            "Names.swift",
+            'extension Notification.Name { static let x = Notification.Name("abc") }\n',
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    def test_a_static_string_constant_is_inert(self, tmp_path):
+        """A bare literal, with no constructor call to recognise. The real file
+        carries one of these next to its `Notification.Name` constants, so a
+        rule that took only the call shape would still have blocked it."""
+        path = self.write(
+            tmp_path,
+            "Keys.swift",
+            """
+            enum PayloadKeys {
+                static let blobRelativePath = "blobRelativePath"
+                static let attempt = 0
+                static let verbose = false
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is False
+
+    # -- one bit away from each of those, and each must still block -----
+
+    def test_a_static_let_from_a_call_carries_code(self, tmp_path):
+        """The one-bit control. Identical to the inert extension above except
+        for one right-hand side, which is a call rather than a constant — if
+        this ever answers False the relaxation has stopped being narrow."""
+        path = self.write(
+            tmp_path,
+            "Names.swift",
+            """
+            extension Notification.Name {
+                static let activeLibraryDidChange = Notification.Name("activeLibraryDidChange")
+                static let derived = computeChannelName()
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_static_let_derived_from_another_symbol_carries_code(self, tmp_path):
+        """No literal anywhere in the initialiser: reading another declaration
+        is work, and the reader has no way to know how much."""
+        path = self.write(
+            tmp_path,
+            "Names.swift",
+            """
+            extension Notification.Name {
+                static let mirrored = Notification.Name(Channels.active)
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_zero_argument_constructor_is_not_a_constant(self, tmp_path):
+        """`Foo()` is the shape a custom `init` doing real work wears, and a
+        singleton is exactly where it appears. Excluded deliberately: the
+        argument list is the only evidence available here that the call is
+        naming a value rather than building one."""
+        path = self.write(
+            tmp_path,
+            "Registry.swift",
+            """
+            enum Services {
+                static let registry = Registry()
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is not False
+
+    def test_arithmetic_in_a_static_initialiser_carries_code(self, tmp_path):
+        """Constant-foldable to a compiler, not to this reader. Anything it
+        cannot read as one literal keeps blocking."""
+        path = self.write(
+            tmp_path,
+            "Limits.swift",
+            """
+            enum Limits {
+                static let window = 60 * 60
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_an_instance_stored_property_constant_still_carries_code(self, tmp_path):
+        """The asymmetry that keeps this narrow. An instance initialiser is
+        emitted into every `init` the type has, so it is a line a coverage run
+        really does report — unlike a type-level binding, which is a lazily
+        initialised global. Only the second is relaxed, and `static` is what
+        tells them apart."""
+        path = self.write(
+            tmp_path,
+            "Defaults.swift",
+            """
+            struct Defaults {
+                let name = "inbox"
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_constant_beside_a_body_still_carries_code(self, tmp_path):
+        """Dropping the constant from a block's residue must not drop the
+        block: the function next to it is its own block with its own header."""
+        path = self.write(
+            tmp_path,
+            "Channels.swift",
+            """
+            extension Notification.Name {
+                static let active = Notification.Name("active")
+
+                static func named(_ raw: String) -> Notification.Name {
+                    Notification.Name(raw)
+                }
+            }
+            """,
+        )
+        assert self.adapter.carries_executable_code(path) is True
+
+    def test_a_file_scope_constant_is_not_claimed_inert(self, tmp_path):
+        """A global at file scope is a real initialiser rather than a type
+        member, and this reader has no evidence about what a coverage run does
+        with it. Unrelaxed on purpose."""
+        path = self.write(
+            tmp_path,
+            "Globals.swift",
+            'let defaultChannel = "inbox"\n',
+        )
+        assert self.adapter.carries_executable_code(path) is not False
+
     def test_an_unrecognised_top_level_shape_is_unknown_not_inert(self, tmp_path):
         """A residue this reader cannot classify answers None, never False.
 
