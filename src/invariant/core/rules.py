@@ -23,7 +23,8 @@ from typing import Any, Callable, Iterable, Mapping
 from ..adapters import Adapter, get_adapter
 from . import git
 from .errors import InvariantError
-from .machines import load_pipeline_machine, load_session_machine
+from .items import backend_for
+from .machines import load_item_machine, load_pipeline_machine, load_session_machine
 from .manifest import Level, Manifest
 from .privacy import PrivacyScanner
 
@@ -740,7 +741,7 @@ def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
             "invariant session review",
             "invariant session merge      # from the main checkout",
             "invariant session teardown   # removes the worktree AND the branch",
-            "invariant session abandon    # if this work is deliberately dropped",
+            "invariant session transition abandoned --reason '<why>'  # if dropped",
         ),
     )
 
@@ -829,7 +830,7 @@ def _pipeline_complete(ctx: RuleContext) -> Verdict:
             "whose methodology was called off.",
             fixes=(
                 "invariant pipeline start --task '<what you are doing>'",
-                "invariant session abandon    # if the work really is dropped",
+                "invariant session transition abandoned --reason '<why>'  # if dropped",
             ),
         )
 
@@ -1059,23 +1060,14 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
 # -- test rules --------------------------------------------------------
 
 
-@rule("test.suite_runs", summary="The test suite executes at all.", events=())
-def _test_suite_runs(ctx: RuleContext) -> Verdict:
-    runs = ctx.evidence("test_runs", []) or []
-    if not runs:
-        return Verdict.fail(
-            "the test suite has not been run in this pipeline",
-            fixes=("invariant pipeline advance <state>  (runs the configured suite)",),
-        )
-    last = runs[-1]
-    if last.get("executed") == 0:
-        return Verdict.fail(
-            "the last run executed zero tests",
-            detail="A filter that matches nothing exits clean. A green run is "
-            "only meaningful alongside a non-zero executed count.",
-            fixes=("check the test selector",),
-        )
-    return Verdict.clean(f"last run executed {last.get('executed', 'some')} test(s)")
+# ``test.suite_runs`` was registered here and graded by all three profiles,
+# and no machine named it and no event reached it — an enforcement level
+# reported for a rule that never ran once. Both questions it asked are asked
+# by ``test.all_pass`` below, which fails on no recorded run and fails on a
+# clean exit that executed nothing. Retired rather than wired, because there
+# is no state where "a run happened, green or not" is the useful demand: the
+# red state already needs a *failing* run (``test.new_test_fails``) and every
+# other state needs a passing one.
 
 
 @rule(
@@ -1092,7 +1084,10 @@ def _test_new_test_fails(ctx: RuleContext) -> Verdict:
             detail="A test written after the fix proves the fix compiles, not "
             "that it addresses anything. A green repro has several readings and "
             "only one of them is 'fixed'.",
-            fixes=("invariant pipeline advance red  (records the failing run)",),
+            # `advance` evaluates gates; it does not run anything. Naming it
+            # here sent people to the command that reads the evidence in
+            # search of the command that writes it.
+            fixes=("invariant pipeline test --phase red  (records the failing run)",),
         )
     if any(not r.get("passed", True) for r in red):
         return Verdict.clean("a red run is on record")
@@ -1109,7 +1104,10 @@ def _test_all_pass(ctx: RuleContext) -> Verdict:
     runs = ctx.evidence("test_runs", []) or []
     if not runs:
         return Verdict.fail(
-            "no test run recorded", fixes=("run the configured test command",)
+            "no test run recorded",
+            detail="Running the suite outside the pipeline leaves no record, "
+            "and this gate can only answer from the record.",
+            fixes=("invariant pipeline test",),
         )
     last = runs[-1]
     if not last.get("passed"):
@@ -1422,29 +1420,51 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
 
 
 # -- memory rules ------------------------------------------------------
+#
+# All four hang off ``stop`` and nothing else. They were bound to no event and
+# named by no machine gate, so no code path reached them: instrumenting the
+# whole suite found them only ever skipping, which made them the four
+# counterexamples to the README's promise that a gate is a function with a
+# fixture proving it fails on a known-positive input (AUD-14).
+#
+# ``stop`` is where they belong rather than a pipeline gate. Memory hygiene is
+# a property of a knowledge store that every session shares, not of the change
+# under review — holding a merge hostage to a stale index in a file the branch
+# never touched would be a gate answering about someone else's work. Turn end
+# is when drift is worth naming and cheap to fix.
 
 
-@rule("memory.schema_valid", summary="Every memory file parses.", events=())
+@rule("memory.schema_valid", summary="Every memory file parses.", events=("stop",))
 def _memory_schema_valid(ctx: RuleContext) -> Verdict:
     return _memory_check(ctx, "schema")
 
 
-@rule("memory.index_current", summary="The memory index matches the directory.", events=())
+@rule(
+    "memory.index_current",
+    summary="The memory index matches the directory.",
+    events=("stop",),
+)
 def _memory_index_current(ctx: RuleContext) -> Verdict:
     return _memory_check(ctx, "index")
 
 
-@rule("memory.no_dead_links", summary="Every memory link resolves.", events=())
+@rule("memory.no_dead_links", summary="Every memory link resolves.", events=("stop",))
 def _memory_no_dead_links(ctx: RuleContext) -> Verdict:
     return _memory_check(ctx, "links")
 
 
-@rule("memory.no_duplicates", summary="No two memories cover the same fact.", events=())
+@rule(
+    "memory.no_duplicates",
+    summary="No two memories cover the same fact.",
+    events=("stop",),
+)
 def _memory_no_duplicates(ctx: RuleContext) -> Verdict:
     return _memory_check(ctx, "duplicates")
 
 
 def _memory_check(ctx: RuleContext, aspect: str) -> Verdict:
+    if ctx.payload.get("stop_hook_active"):
+        return Verdict.na("already raised this turn")
     if not ctx.manifest.get("memory.managed", True):
         return Verdict.na("memory is not managed by this library")
     from ..domains.memorystore import MemoryStore  # local: avoids a cycle
@@ -1513,6 +1533,106 @@ def _residue_matches_status(ctx: RuleContext) -> Verdict:
             ),
         )
     return Verdict.clean("status and residue agree")
+
+
+@rule(
+    "item.history_matches_status",
+    summary="An item's status is explained by its own recorded history.",
+    events=("stop",),
+)
+def _history_matches_status(ctx: RuleContext) -> Verdict:
+    """Drift detection over a store no gate can sit in front of.
+
+    The item store is data, and data is exempt from session isolation — a
+    deliberate decision, and the right one: every session touches the backlog,
+    and routing it through a branch produces conflicts with no review value.
+    But the exemption has a cost the FSM cannot pay for. ``filed -> fixed`` is
+    an edge the bug machine does not have, and ``item.bug_reproduced_before_fix``
+    blocks it; both are enforced only for callers who go through the CLI.
+    Seven bugs in this library's own backlog reached ``fixed`` with
+    ``history: []``, by writing the file (AUD-10). The machine was never asked,
+    so it never refused, and nothing was recorded as having been skipped.
+
+    A gate cannot close that — there is no transition to attach it to. What can
+    is re-deriving the status from the history and reporting the ones that
+    disagree, which is the same shape as the memory domain's index check: not
+    "you may not do this" but "this store no longer says what it means".
+
+    A ``forced`` entry is not drift. An override went through the machine, was
+    refused, and recorded a written reason; flagging it would report the audit
+    trail working as if it were the failure.
+    """
+    if ctx.payload.get("stop_hook_active"):
+        return Verdict.na("already raised this turn")
+
+    try:
+        items = backend_for(ctx.manifest).load_all()
+    except (InvariantError, OSError) as exc:
+        return Verdict.na(f"the item store could not be read: {exc}")
+    if not items:
+        return Verdict.na("no work items")
+
+    machines: dict[str, Any] = {}
+    problems: list[str] = []
+    checked = 0
+    for item in items:
+        if item.type not in machines:
+            # A project may keep other kinds of entry in the same store. This
+            # rule can only speak for the types it has a machine for, and a
+            # missing machine is that answer rather than a finding.
+            try:
+                machines[item.type] = load_item_machine(item.type, ctx.manifest)
+            except (InvariantError, OSError):
+                machines[item.type] = None
+        machine = machines[item.type]
+        if machine is None:
+            continue
+        checked += 1
+        problems.extend(_history_problems(item, machine))
+
+    if not checked:
+        return Verdict.na("no items of a type this library has a machine for")
+    if not problems:
+        return Verdict.clean(f"{checked} item(s): every status is explained")
+    return Verdict.fail(
+        f"{len(problems)} item(s) hold a status their history does not explain",
+        detail="; ".join(problems[:6]),
+        fixes=(
+            "invariant item show <id>   # read what the record actually says",
+            "record the missing transitions, or correct the status to what was proven",
+        ),
+    )
+
+
+def _history_problems(item, machine) -> list[str]:
+    """Walk the recorded history and report where it stops explaining status."""
+    at = machine.initial
+    for entry in item.history or []:
+        target = str(entry.get("to") or "")
+        if not target:
+            continue
+        source = str(entry.get("from") or at)
+        if entry.get("forced"):
+            at = target
+            continue
+        if source != at:
+            return [f"{item.id}: history resumes at {source!r} after {at!r}"]
+        if not machine.can(source, target):
+            unknown = (
+                f"{item.id}: history records the edge {source} -> {target}, "
+                f"which the {machine.id} machine does not have"
+            )
+            return [unknown]
+        at = target
+    if at != item.status:
+        if not item.history:
+            unrecorded = (
+                f"{item.id}: status {item.status!r} with no recorded history "
+                f"(the machine starts at {machine.initial!r})"
+            )
+            return [unrecorded]
+        return [f"{item.id}: status {item.status!r} but its history ends at {at!r}"]
+    return []
 
 
 # -- helpers -----------------------------------------------------------
@@ -1914,14 +2034,6 @@ def _outside_measured_scope(adapters: list[Adapter], root: Path, path: Path) -> 
             continue
         return not any(_is_within(path, directory) for directory in scope)
     return False
-
-
-def _is_within(path: Path, directory: Path) -> bool:
-    try:
-        path.resolve().relative_to(directory.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 def _excluded_detail(excluded: list[str]) -> str:

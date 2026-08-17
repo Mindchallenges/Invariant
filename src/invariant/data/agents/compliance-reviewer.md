@@ -303,10 +303,15 @@ The goal: bring your fresh commit on top of **the exact ref Phase 8c will fast-f
 
 3. **Confirm the rebase only.** `git status -sb`, plus `git rev-list --count <main>..HEAD` equal to your commit count and `git rev-list --count HEAD..<main>` equal to zero. Behind-by-zero against the merge target is the property Phase 8c needs; behind-by-zero against anything else proves nothing. Do **not** run `git push` here.
 
+4. **Advance the session to `reviewed`.** Run `invariant session review` — from the worktree, before you go anywhere near the main checkout. This is a required step of the lifecycle, not a formality: `merged` is reachable only from `reviewed`, so a run that goes straight from `working` to `invariant session merge` is asking for an edge the session machine does not have, and the only way past that refusal is `--force`. Skipping it would also skip the gates that hang off the review boundary — `pipeline.complete` on entry, `privacy.clean` on exit, and the agent-role gates the review state carries (ADR-003) — which is the whole reason the state exists.
+   - The command evaluates the review gates and advances only if they hold. If it refuses, that refusal is the finding: fix what it names and re-run. Loop back to Phase 3 if the fix is a code change. Do **not** `--force` past it, and do **not** proceed to Phase 8c with the session still in `working`.
+   - It advances state as well as reporting, so run it exactly once per successful pass.
+
 Hard rules:
 - **Never** push in this phase.
 - A rebase conflict bails the run — it never discards or rewrites the local commit.
 - Never rebase onto a ref the merge will not use. A green rebase against the wrong target manufactures the very divergence that then blocks the merge.
+- The session must be in `reviewed` before Phase 8c runs. Confirm with `invariant session status` if in any doubt.
 
 ---
 

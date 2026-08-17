@@ -28,7 +28,6 @@ states:
     next: [red, abandoned]
   red:
     description: A failing test that fails on the reported symptom.
-    entry_gates: [test.suite_runs]
     exit_gates: [test.new_test_fails]
     next: [green, abandoned]
   green:
@@ -40,11 +39,23 @@ states:
     exit_gates: [test.all_pass]
     next: [reviewing, red, abandoned]
   reviewing:
-    exit_gates: [docs.updated, coverage.meets_floor, privacy.clean]
-    next: [committed, red, abandoned]
+    description: Review, coverage, docs, and privacy before committing.
+    roles: [review]          # docs.updated and the agent-role gates attach here
+    exit_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+    next: [committed, red, refactor, abandoned]
   committed:
     description: Work is committed locally. Pushing is a session-level event.
+  abandoned: {}
 ```
+
+Every state, edge, gate and role above is quoted from the shipped `tdd.yaml`;
+only the descriptions are abridged, and the two `#` notes are added here. The
+structure is the part a reader checks against the engine, so the structure is
+the part that is verbatim. Note what it does **not** contain: no
+`docs.updated`, no `agents.*`. Those attach centrally
+from the `design` and `review` roles, so forking a methodology cannot silently
+drop them — a rule the suite pins, and a rule an inline example that declared
+them would teach people to break.
 
 Fields:
 
@@ -413,7 +424,33 @@ A separate field records *residue* — what remains owed after the status says
 done, such as a device soak that has not been run. Status and residue are
 distinct on purpose: a status of `fixed` with an unfulfilled residue is a
 normal, honest state, and collapsing the two produces documents that claim
-more than was proven.
+more than was proven. `item.residue_matches_status` guards the closing state
+on **entry** in both machines — `bug.closed` and `idea.done`. Entry rather
+than exit because both are terminal: nothing ever leaves them, so an exit gate
+there is never evaluated and an entry could close owing three legs with the
+gate named to prevent exactly that staying silent.
+
+### The store the gates cannot sit in front of
+
+Work items are data, and `items.exempt` holds them out of session isolation —
+deliberately: every session touches the backlog, and routing it through a
+branch produces conflicts with no review value. The cost is that the FSM's
+invariants bind only callers who go through the CLI. Writing the file directly
+never asks the machine, so it is never refused, and nothing records that
+anything was skipped. Seven bugs in this library's own backlog reached `fixed`
+with an empty history exactly that way.
+
+`item.history_matches_status` covers the gap from the other side. It is bound
+to the `stop` event rather than to any transition — there is no transition to
+attach it to — and at turn end it re-derives each item's status by walking its
+recorded history through that type's machine, reporting the ones that
+disagree: a status no history explains, a history that ends somewhere else, an
+edge the machine does not have. A `forced` entry is not drift; an override
+went through the machine, was refused, and recorded a written reason, so
+flagging it would report the audit trail working.
+
+This is the same shape as the memory domain's index check below — not "you may
+not do this", but "this store no longer says what it means".
 
 ## Domain: memory
 
@@ -430,6 +467,19 @@ Not an FSM. A store with invariants and repair operations.
 The index is a **generated artifact** (D-memory, per interview): regenerating
 it is a command, not an editing task. A hand-maintained index over hundreds of
 files drifts, and the drift is silent.
+
+The first four rows are the four `memory.*` rules, and all four are bound to
+the `stop` event and to nothing else. They are not pipeline gates on purpose:
+memory hygiene is a property of a knowledge store every session shares, not of
+the change under review, so holding a merge hostage to a stale index in a file
+the branch never touched would be a gate answering about someone else's work.
+Turn end is when the drift is worth naming and cheap to fix. They short-circuit
+to "not applicable" where `memory.managed` is false, so a project that does not
+use the domain hears nothing.
+
+Before they carried that binding they were reachable by no code path at all —
+graded by all three profiles, evaluated by none of them, which is an
+enforcement level reported for a control that never ran.
 
 ## Domain: stats
 

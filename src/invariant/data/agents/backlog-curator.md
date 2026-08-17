@@ -94,7 +94,13 @@ instead of working around it.
   authority.
 - `PROMOTE IDEA_<id>` → `invariant item transition IDEA_<id> accepted`.
 - `MARK IDEA_<id> DONE <commit-hash>` → `invariant item transition IDEA_<id>
-  done`, prepend `**Shipped <date>** (commit <hash>).` to the body.
+  done`, prepend `**Shipped <date>** (commit <hash>).` to the body. `done` is
+  reachable only from `in_progress`, so an idea still sitting in `proposed` or
+  `accepted` needs its intermediate transitions recorded first — run them, in
+  order, rather than forcing the last one: an idea that was built has been
+  accepted and worked on by definition, and the record should say so. `done`
+  also carries the residue gate on entry, so clear or carry over anything the
+  entry still owes before closing it.
 - `MARK BUG_<id> FIXED <commit-hash>` → `invariant item transition BUG_<id>
   fixed`, prepend `**Fixed <date>** (commit <hash>).` to the body. Note the
   lifecycle makes `fixed` reachable only from `reproduced` — a fix for an

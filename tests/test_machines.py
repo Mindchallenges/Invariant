@@ -256,6 +256,26 @@ class TestBugMachine:
         assert "item.residue_matches_status" in machine.state("closed").entry_gates
 
 
+class TestIdeaMachine:
+    def test_the_residue_gate_guards_entry_to_done_not_exit_from_it(self):
+        """An exit gate on a terminal state is a gate that can never fire.
+
+        `done` is terminal, so nothing ever leaves it and its exit gates are
+        never evaluated — an idea could close owing three unresolved legs and
+        the gate named to prevent exactly that would stay silent. The bug
+        machine already gets this right on `closed`; this is the same fix.
+        """
+        machine = load_item_machine("idea")
+        assert "item.residue_matches_status" in machine.state("done").entry_gates
+        assert not machine.state("done").exit_gates
+
+    def test_no_terminal_state_of_any_item_machine_carries_an_exit_gate(self):
+        for item_type in ("idea", "bug"):
+            machine = load_item_machine(item_type)
+            for state_id in machine.terminal:
+                assert not machine.state(state_id).exit_gates, f"{item_type}.{state_id}"
+
+
 class TestLoaderErrors:
     def test_unknown_machine_lists_the_shipped_ones(self):
         with pytest.raises(ManifestError, match="shipped machines are: .*tdd"):

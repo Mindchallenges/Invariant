@@ -11,5 +11,9 @@ states:
   in_progress:
     next: [done, accepted]
   done:
-    exit_gates: [item.residue_matches_status]
+    # Entry, not exit. `done` is terminal: nothing ever leaves it, so an exit
+    # gate here is never evaluated and an idea could close owing three
+    # unresolved legs with the gate named to prevent that staying silent. The
+    # bug machine guards `closed` on entry for the same reason.
+    entry_gates: [item.residue_matches_status]
   dropped: {}

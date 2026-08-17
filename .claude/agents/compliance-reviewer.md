@@ -1,5 +1,5 @@
 ---
-# invariant-managed: e9a4928528a59c1a
+# invariant-managed: 6c0b1f495317d36f
 name: compliance-reviewer
 description: End-to-end pre-commit pipeline. Reviews uncommitted changes against the project's guidelines (the canonical compliance checklist in the architecture docs plus the engine's rules), resolves violations (refactor + add tests to the configured coverage floor on touched files + update the architecture docs), builds, runs tests, produces a risk assessment, commits and merges through the session commands, syncs any pending memory/config writes in the shared main checkout, and tears down its own session worktree AND branch — only if every gate passes. Publishing is a separate, optional step that is off by default; a run that does not push is a complete run. Use when the user says "ship this", "commit this", "pre-commit", "review and commit", "review commit", or hands off any change for finalization. PARENT-AGENT INSTRUCTION (read this before invoking): (1) Enumerate every file YOU edited/created in THIS session — that's the SESSION FILE SET. Pass it to the subagent as an explicit, newline-separated list in the invocation prompt under a `SESSION FILES:` header. The subagent reviews/commits ONLY those files; any other dirty path in the worktree belongs to a different session and must be left untouched. (2) When this subagent returns, you MUST paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. Do not paraphrase, do not condense, do not "summarize the findings". The user has specifically complained that previous runs hid the report. The report IS the deliverable. (3) If the session work implements (fully or partially) an item in the project's release-plan document, name the item ID in the invocation prompt and include the session's rough token spend if you know it — the subagent updates the release-dashboard row in the same commit.
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -304,10 +304,15 @@ The goal: bring your fresh commit on top of **the exact ref Phase 8c will fast-f
 
 3. **Confirm the rebase only.** `git status -sb`, plus `git rev-list --count <main>..HEAD` equal to your commit count and `git rev-list --count HEAD..<main>` equal to zero. Behind-by-zero against the merge target is the property Phase 8c needs; behind-by-zero against anything else proves nothing. Do **not** run `git push` here.
 
+4. **Advance the session to `reviewed`.** Run `invariant session review` — from the worktree, before you go anywhere near the main checkout. This is a required step of the lifecycle, not a formality: `merged` is reachable only from `reviewed`, so a run that goes straight from `working` to `invariant session merge` is asking for an edge the session machine does not have, and the only way past that refusal is `--force`. Skipping it would also skip the gates that hang off the review boundary — `pipeline.complete` on entry, `privacy.clean` on exit, and the agent-role gates the review state carries (ADR-003) — which is the whole reason the state exists.
+   - The command evaluates the review gates and advances only if they hold. If it refuses, that refusal is the finding: fix what it names and re-run. Loop back to Phase 3 if the fix is a code change. Do **not** `--force` past it, and do **not** proceed to Phase 8c with the session still in `working`.
+   - It advances state as well as reporting, so run it exactly once per successful pass.
+
 Hard rules:
 - **Never** push in this phase.
 - A rebase conflict bails the run — it never discards or rewrites the local commit.
 - Never rebase onto a ref the merge will not use. A green rebase against the wrong target manufactures the very divergence that then blocks the merge.
+- The session must be in `reviewed` before Phase 8c runs. Confirm with `invariant session status` if in any doubt.
 
 ---
 

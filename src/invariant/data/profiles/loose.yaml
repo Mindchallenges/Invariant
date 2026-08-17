@@ -27,7 +27,6 @@ rules:
   docs.updated: warn
   docs.diagrams_current: "off"
 
-  test.suite_runs: warn
   test.new_test_fails: warn
   test.all_pass: warn
   coverage.meets_floor: "off"
@@ -41,3 +40,4 @@ rules:
 
   item.bug_reproduced_before_fix: warn
   item.residue_matches_status: "off"
+  item.history_matches_status: warn

@@ -41,6 +41,18 @@ enforcement:
     # rather than a fact on every file. Advisory until it is.
     coverage.meets_floor: warn
 
+    # Second exception, for the reason the rule's own docstring gives: it is
+    # "the gate that makes every other pipeline gate mandatory", because every
+    # gate a methodology owns is an EXIT gate on a state nobody is required to
+    # pass through. At `warn` it is not a gate at all, and the record shows it:
+    # of 13 enforced merges here, only 4 carried a completed pipeline — four
+    # merged with their pipeline still in its INITIAL state, five with no
+    # pipeline record at all, including the flagship five-bug batch commit
+    # whose session record is pristine while its pipeline never left
+    # `designing` (AUD-11). A methodology that is advisory to follow is prose,
+    # which is the thing this library exists to replace.
+    pipeline.complete: block
+
     # The exception to "deliberately not strict" above. Coding is done through
     # the agents and the pipeline is always followed — that rule holds here
     # too, and a library that will not run its own control has no business

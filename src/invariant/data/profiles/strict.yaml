@@ -29,7 +29,6 @@ rules:
   docs.updated: block
   docs.diagrams_current: block
 
-  test.suite_runs: block
   test.new_test_fails: block
   test.all_pass: block
   coverage.meets_floor: block
@@ -46,3 +45,6 @@ rules:
   item.bug_reproduced_before_fix: block
   # Residue is free text; matching it against a status is a judgement call.
   item.residue_matches_status: warn
+  # This one is not a judgement call: the history either walks the machine to
+  # the recorded status or it does not, and an override says so in the record.
+  item.history_matches_status: block

@@ -1,5 +1,5 @@
 ---
-# invariant-managed: abe3734bbc7d2b5f
+# invariant-managed: fa17662a4e6df0d9
 name: backlog-curator
 description: Technical product owner for the work-item backlog — it manages two item types, IDEAS and BUGS. Use for IDEAS when the user proposes a new feature, want, wish, "we should…", "wouldn't it be nice if…", "add to backlog", "park this", or any feature ask not yet scoped enough to build. Use for BUGS when the user reports a defect in already-shipped behaviour — "X is broken", "still not working", "regressed", "doesn't do Y anymore", "file a bug", "track this bug". The agent classifies the payload, interviews the user (one focused round at a time) to nail down the missing fields, cross-checks the existing backlog for duplicates and links related architecture-doc anchors, and files either an idea (scored value × effort, placed in a tier) or a bug (scored severity × priority) through the configured work-item backend via `invariant item`. It also runs admin shortcuts on existing entries (drop / promote / mark done / mark fixed). DO NOT use for: (a) implementing a backlog item or fixing a bug (use `feature-architect`), (b) ranking or grooming the existing tier list without a new item (run that as a plain conversation), (c) committing code changes (use `compliance-reviewer`) — note the curator DOES commit its own backend file edit immediately when the backend is file-based (backlog entries never wait for the pre-commit pipeline) but does NOT push it; publishing is optional and off by default, so the commit simply lands on the base branch at the merge. PARENT-AGENT INSTRUCTION (read this before invoking): (1) When the subagent returns an `INTERVIEW` block, you MUST relay those questions to the user verbatim — using `AskUserQuestion` when the answers map cleanly to choices, otherwise as a plain numbered list. Do not paraphrase the questions, do not answer them yourself, do not skip any. Collect every answer, then re-invoke the subagent with the original payload plus the answers under an `INTERVIEW ANSWERS:` header. Repeat until the subagent returns a `DRAFT` or `WRITTEN` block. (2) Whatever the subagent returns — INTERVIEW, DRAFT, WRITTEN, or BAIL — paste its final report block VERBATIM into the chat wrapped in a fenced code block, before any summary of your own. The report IS the deliverable.
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -95,7 +95,13 @@ instead of working around it.
   authority.
 - `PROMOTE IDEA_<id>` → `invariant item transition IDEA_<id> accepted`.
 - `MARK IDEA_<id> DONE <commit-hash>` → `invariant item transition IDEA_<id>
-  done`, prepend `**Shipped <date>** (commit <hash>).` to the body.
+  done`, prepend `**Shipped <date>** (commit <hash>).` to the body. `done` is
+  reachable only from `in_progress`, so an idea still sitting in `proposed` or
+  `accepted` needs its intermediate transitions recorded first — run them, in
+  order, rather than forcing the last one: an idea that was built has been
+  accepted and worked on by definition, and the record should say so. `done`
+  also carries the residue gate on entry, so clear or carry over anything the
+  entry still owes before closing it.
 - `MARK BUG_<id> FIXED <commit-hash>` → `invariant item transition BUG_<id>
   fixed`, prepend `**Fixed <date>** (commit <hash>).` to the body. Note the
   lifecycle makes `fixed` reachable only from `reproduced` — a fix for an

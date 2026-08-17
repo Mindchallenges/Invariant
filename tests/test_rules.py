@@ -108,6 +108,62 @@ class TestRegistry:
             for rule_id in raw.get("rules", {}):
                 assert rule_id in registered, f"{profile.name} names unknown {rule_id}"
 
+    def test_every_registered_rule_is_graded_by_every_profile(self):
+        """The other direction, which is the one that fails silently.
+
+        A profile naming an unknown rule is caught above. A rule no profile
+        names is not: `rule_level` answers `warn` for anything absent, so a
+        new rule ships advisory in every profile — including `strict`, whose
+        whole promise is that everything provable is enforced — and nothing
+        says so. The omission is invisible precisely where it matters most.
+        """
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        registered = {spec.id for spec in all_rules()}
+        for profile in (DATA_DIR / "profiles").glob("*.yaml"):
+            raw = yaml.safe_load(profile.read_text(encoding="utf-8"))
+            graded = set(raw.get("rules", {}))
+            assert registered <= graded, (
+                f"{profile.name} grades no level for "
+                f"{sorted(registered - graded)}; absent means 'warn' silently"
+            )
+
+    def test_every_registered_rule_is_reachable(self):
+        """A graded rule that nothing ever evaluates reports a level it has no
+        way to apply.
+
+        Two routes reach a rule: an event binding, or a gate naming it in some
+        machine. A rule with neither is dead code wearing an enforcement
+        level — `invariant rules list` shows it as `block`, the profiles argue
+        about it, and it never once runs. That reads as a control being
+        present, which is the failure mode this library exists to remove.
+        """
+        from invariant.core.machines import (
+            AGENT_ROLE_GATES,
+            DOCS_FIRST_GATES,
+            load_machine,
+            shipped_ids,
+        )
+
+        reachable = {
+            gate
+            for injected in (DOCS_FIRST_GATES, AGENT_ROLE_GATES)
+            for spec in injected.values()
+            for gates in spec.values()
+            for gate in gates
+        }
+        for machine_id in shipped_ids():
+            for state in load_machine(machine_id).states.values():
+                reachable.update(state.entry_gates)
+                reachable.update(state.exit_gates)
+
+        orphans = [
+            spec.id for spec in all_rules() if not spec.events and spec.id not in reachable
+        ]
+        assert not orphans, f"registered, graded, and never evaluated: {sorted(orphans)}"
+
     def test_unknown_rule_id_fails_loudly(self, ctx_factory):
         result = only(evaluate(["no.such.rule"], ctx_factory()))
         assert not result.verdict.ok
@@ -630,12 +686,16 @@ class TestTheChangedSetIsAnsweredOrRefused:
 
 
 class TestTestRules:
+    # Both of these were written against `test.suite_runs`, which is retired:
+    # it was graded by three profiles and evaluated by nothing. They are kept
+    # pointed at `test.all_pass`, which is where the two questions are actually
+    # asked — retiring a rule must not quietly retire its coverage.
     def test_no_run_recorded_fails(self, ctx_factory):
-        assert not only(evaluate(["test.suite_runs"], ctx_factory(pipeline={}))).verdict.ok
+        assert not only(evaluate(["test.all_pass"], ctx_factory(pipeline={}))).verdict.ok
 
     def test_zero_executed_is_caught_despite_a_pass(self, ctx_factory):
         pipeline = {"evidence": {"test_runs": [{"passed": True, "executed": 0}]}}
-        result = only(evaluate(["test.suite_runs"], ctx_factory(pipeline=pipeline)))
+        result = only(evaluate(["test.all_pass"], ctx_factory(pipeline=pipeline)))
         assert "executed zero tests" in result.verdict.message
 
     def test_green_run_passes(self, ctx_factory):
@@ -1010,6 +1070,252 @@ class TestItemRules:
         item = {"type": "bug", "status": "verified", "residue": []}
         ctx = ctx_factory(extra={"item": item, "target_status": "closed"})
         assert only(evaluate(["item.residue_matches_status"], ctx)).verdict.ok
+
+
+class TestMemoryRulesCanActuallyFail:
+    """Four rules that had never once produced a failing verdict.
+
+    Instrumenting the whole suite found them only ever skipping: bound to no
+    event and named by no machine gate, they were unreachable, and every
+    project that reads `invariant rules list` was being told memory hygiene
+    was enforced at whatever level its profile named. The README's claim is
+    that a gate is a function with a fixture proving it fails on a
+    known-positive input; these four are that claim's counterexamples, so each
+    gets both — a binding that reaches it, and an input it fails on.
+    """
+
+    def managed(self, ctx_factory, **payload):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "paths": {"memory": "memory"},
+                "memory": {"managed": True},
+            },
+        )
+        return ctx_factory(payload=payload or {})
+
+    def memo(self, root, name, body="Body text.", description="a fact"):
+        path = root / "memory"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n"
+            f"metadata:\n  type: project\n---\n\n{body}\n",
+            encoding="utf-8",
+        )
+
+    def index(self, root, text):
+        (root / "memory" / "MEMORY.md").write_text(text, encoding="utf-8")
+
+    def test_an_unparseable_memory_fails_the_schema_rule(self, ctx_factory):
+        (ctx_factory.main / "memory").mkdir()
+        (ctx_factory.main / "memory" / "bad.md").write_text("just prose\n", encoding="utf-8")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.schema_valid"], ctx)).verdict.ok
+
+    def test_a_memory_missing_from_the_index_fails_the_index_rule(self, ctx_factory):
+        self.memo(ctx_factory.main, "alpha")
+        self.index(ctx_factory.main, "# Memory\n")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.index_current"], ctx)).verdict.ok
+
+    def test_a_link_to_nothing_fails_the_dead_link_rule(self, ctx_factory):
+        self.memo(ctx_factory.main, "alpha", body="see [[ghost]]")
+        self.index(ctx_factory.main, "- [Alpha](alpha.md)\n")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.no_dead_links"], ctx)).verdict.ok
+
+    def test_two_memories_of_one_fact_fail_the_duplicate_rule(self, ctx_factory):
+        text = "The deploy script must be run from the repository root every time."
+        self.memo(ctx_factory.main, "alpha", body=text, description="deploy from root")
+        self.memo(ctx_factory.main, "beta", body=text, description="deploy from root")
+        self.index(ctx_factory.main, "- [A](alpha.md)\n- [B](beta.md)\n")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.no_duplicates"], ctx)).verdict.ok
+
+    def test_an_unmanaged_project_still_hears_nothing(self, ctx_factory):
+        """The short-circuit stays. Wiring the rules to an event must not turn
+        memory hygiene into noise for the projects that do not use it."""
+        for rule_id in (
+            "memory.schema_valid",
+            "memory.index_current",
+            "memory.no_dead_links",
+            "memory.no_duplicates",
+        ):
+            assert only(evaluate([rule_id], ctx_factory())).verdict.skipped
+
+    def test_they_run_at_the_end_of_a_turn(self):
+        bound = {spec.id for spec in rules_for_event("stop")}
+        assert {
+            "memory.schema_valid",
+            "memory.index_current",
+            "memory.no_dead_links",
+            "memory.no_duplicates",
+        } <= bound
+
+    def test_they_do_not_ask_twice_in_one_turn(self, ctx_factory):
+        (ctx_factory.main / "memory").mkdir()
+        (ctx_factory.main / "memory" / "bad.md").write_text("prose\n", encoding="utf-8")
+        ctx = self.managed(ctx_factory, stop_hook_active=True)
+        assert only(evaluate(["memory.schema_valid"], ctx)).verdict.skipped
+
+
+class TestItemHistoryDrift:
+    """The item store is exempt from isolation, so a hand edit never asks the
+    machine.
+
+    That exemption is deliberate and correct — a backlog entry is data, every
+    session touches it, and routing it through a branch produces conflicts with
+    no review value. But it means the FSM's load-bearing invariant is
+    structural only for callers who go through the CLI. Seven bugs in this
+    repository's own backlog show `status: fixed` with `history: []`: the
+    `filed -> reproduced -> fixed` edge the machine will not let you skip was
+    skipped, by writing the file. Nothing noticed for months.
+
+    So the machine cannot be the only reader. This rule re-derives the status
+    from the recorded history at turn end and reports the ones that disagree —
+    drift detection over a store the gate cannot sit in front of.
+    """
+
+    def backlog(self, root):
+        from invariant.core.items import MarkdownBackend
+
+        path = root / "docs" / "backlog"
+        path.mkdir(parents=True, exist_ok=True)
+        return MarkdownBackend(path)
+
+    def save(self, root, **kwargs):
+        from invariant.core.items import Item
+
+        kwargs.setdefault("type", "bug")
+        kwargs.setdefault("title", "a defect")
+        self.backlog(root).save(Item(**kwargs))
+
+    def check(self, ctx_factory, **payload):
+        ctx = ctx_factory(payload=payload or {})
+        return only(evaluate(["item.history_matches_status"], ctx))
+
+    def test_a_status_no_history_explains_is_reported(self, ctx_factory):
+        # The BUG_002..BUG_008 shape exactly: fixed, with nothing recorded.
+        self.save(ctx_factory.main, id="BUG_900", status="fixed", history=[])
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "BUG_900" in result.verdict.detail
+
+    def test_a_history_that_walks_the_machine_passes(self, ctx_factory):
+        self.save(
+            ctx_factory.main,
+            id="BUG_901",
+            status="fixed",
+            history=[
+                {"from": "filed", "to": "reproduced"},
+                {"from": "reproduced", "to": "fixed"},
+            ],
+        )
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_a_fresh_item_sitting_in_its_initial_state_passes(self, ctx_factory):
+        self.save(ctx_factory.main, id="BUG_902", status="filed", history=[])
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_history_that_ends_somewhere_else_than_the_status_is_reported(
+        self, ctx_factory
+    ):
+        self.save(
+            ctx_factory.main,
+            id="BUG_903",
+            status="closed",
+            history=[{"from": "filed", "to": "reproduced"}],
+        )
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "reproduced" in result.verdict.detail
+
+    def test_an_illegal_edge_in_the_history_is_reported(self, ctx_factory):
+        self.save(
+            ctx_factory.main,
+            id="BUG_904",
+            status="fixed",
+            history=[{"from": "filed", "to": "fixed"}],
+        )
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "filed -> fixed" in result.verdict.detail
+
+    def test_a_recorded_override_is_not_drift(self, ctx_factory):
+        """`--force` already demanded a written reason and recorded itself.
+
+        An override is the machine being asked and answered, not bypassed. A
+        drift check that flagged it would be reporting the audit trail working.
+        """
+        self.save(
+            ctx_factory.main,
+            id="BUG_905",
+            status="fixed",
+            history=[{"from": "filed", "to": "fixed", "forced": True, "reason": "x"}],
+        )
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_a_gap_in_the_chain_is_reported(self, ctx_factory):
+        """The fourth drift kind: each entry is legal, the sequence is not.
+
+        `filed -> reproduced` then `verified -> closed` is two edges the
+        machine has, spliced together across a step that was never recorded.
+        Checking edges one at a time would pass it; the walk is what catches
+        it, so the walk needs its own fixture.
+        """
+        self.save(
+            ctx_factory.main,
+            id="BUG_907",
+            status="closed",
+            history=[
+                {"from": "filed", "to": "reproduced"},
+                {"from": "verified", "to": "closed"},
+            ],
+        )
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "resumes at 'verified' after 'reproduced'" in result.verdict.detail
+
+    def test_a_history_entry_naming_no_target_is_stepped_over(self, ctx_factory):
+        """Hand-edited files are the whole reason this rule exists, so a
+        malformed entry must not decide the verdict for the item around it."""
+        self.save(
+            ctx_factory.main,
+            id="BUG_908",
+            status="reproduced",
+            history=[{"reason": "typed by hand"}, {"from": "filed", "to": "reproduced"}],
+        )
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_every_item_is_walked_not_only_the_first(self, ctx_factory):
+        """One machine is loaded per type, not per item — and the second item
+        of that type still gets checked rather than riding the cache."""
+        self.save(ctx_factory.main, id="BUG_909", status="filed", history=[])
+        self.save(ctx_factory.main, id="BUG_910", status="fixed", history=[])
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "BUG_910" in result.verdict.detail
+        assert "BUG_909" not in result.verdict.detail
+
+    def test_an_empty_backlog_is_not_a_finding(self, ctx_factory):
+        assert self.check(ctx_factory).verdict.skipped
+
+    def test_an_item_of_an_unknown_type_is_left_alone(self, ctx_factory):
+        """A project may store other kinds in the same backlog. This rule can
+        only speak for the types it has a machine for."""
+        self.save(ctx_factory.main, id="RFC_001", type="rfc", status="whatever")
+        assert self.check(ctx_factory).verdict.skipped
+
+    def test_it_does_not_ask_twice_in_one_turn(self, ctx_factory):
+        self.save(ctx_factory.main, id="BUG_906", status="fixed", history=[])
+        assert self.check(ctx_factory, stop_hook_active=True).verdict.skipped
+
+    def test_it_runs_at_the_end_of_a_turn(self):
+        assert "item.history_matches_status" in {
+            spec.id for spec in rules_for_event("stop")
+        }
 
 
 def test_render_includes_level_and_fixes(ctx_factory):

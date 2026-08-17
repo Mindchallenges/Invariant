@@ -120,6 +120,28 @@ Build a `REFACTOR-TODO` list from this review. Every entry becomes a change in P
 
 Advance the pipeline as you go: `invariant pipeline advance red` when the failing test exists, `invariant pipeline advance green` when the minimum change makes it pass, `invariant pipeline advance refactor` for the cleanup passes. Failing test first, then the code, then verify green.
 
+**Record every run through the pipeline, or the gates read nothing.**
+`advance` validates the transition and evaluates the gates — it does **not**
+run your suite. The test and coverage gates answer from recorded evidence
+only, and the two commands that record it are `invariant pipeline test` and
+`invariant pipeline coverage`. Run the suite outside them and the run
+happened, but no gate can see it: `test.new_test_fails` then reports "no
+failing run was recorded before the implementation" on a red test you
+genuinely wrote and genuinely watched fail, and the only way forward is
+`--force` on the one gate that proves TDD was followed.
+
+So each advance is preceded by the command that gives it something to read:
+
+| Before advancing to | Run first | What it records |
+|---|---|---|
+| `red` | `invariant pipeline test --phase red` (add `--selector <the new test>` to keep it fast) | The failing run `test.new_test_fails` demands |
+| `green` | `invariant pipeline test --phase green` | The passing run `test.all_pass` demands |
+| `refactor` | `invariant pipeline test --phase refactor` | That the cleanup kept the suite green |
+| `reviewing` | `invariant pipeline test` then `invariant pipeline coverage` | The final green run, and the per-file numbers `coverage.meets_floor` reads |
+
+A red-phase run is *expected* to exit non-zero. That is the evidence, not a
+failure of the step — record it and move on.
+
 **If this task is a `BUG_<id>` that cleared gate B9**, the failing test already
 exists — `bug-reproducer` committed it. Do not write a second one. Your first
 edit is to delete its expected-failure wrapper so the assertion goes live,

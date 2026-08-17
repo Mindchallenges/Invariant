@@ -34,7 +34,6 @@ rules:
   docs.diagrams_current: warn
 
   # Tests.
-  test.suite_runs: warn
   test.new_test_fails: warn
   test.all_pass: block
   coverage.meets_floor: warn
@@ -51,3 +50,7 @@ rules:
   # A fix for an unreproduced defect proves nothing.
   item.bug_reproduced_before_fix: block
   item.residue_matches_status: warn
+  # Drift detection over a store that is exempt from isolation, so it reports
+  # rather than blocks: by the time it can see the inconsistency the edit has
+  # already happened, and there is nothing left to prevent.
+  item.history_matches_status: warn
