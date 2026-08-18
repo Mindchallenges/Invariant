@@ -2899,6 +2899,283 @@ class TestFilesThatCannotHaveACoverageRow:
         assert not verdict.ok
         assert "Misspelt.swift" in verdict.detail
 
+class TestABinaryAssetHasNoExecutableLinesToMeasure:
+    """A committed binary file was a question every set-aside branch refused.
+
+    A snapshot-testing session committed a golden PNG. It is a changed file
+    that is not docs, so it enters the touched set; no coverage reporter emits
+    a row for an image; and every branch of `_explain_absent_rows` answers
+    "cannot tell" for it — deletion says no, the file is present; the
+    reporter's scope is usually unreadable for an asset directory; and both
+    adapter hooks are keyed on a language suffix, so `is_test_file` and
+    `carries_executable_code` return `None` for anything that is not source.
+    The result is a block no work can clear: there is no test to write for a
+    PNG, and the file set only ever ADDS, so the verdict's own advice to drop
+    it was both unavailable and — since `_changed_set` unions git's answer
+    with the declared one — ineffective.
+
+    The answer is not a relaxation. A binary file positively carries no
+    executable lines; that is a FACT about the bytes, true in every ecosystem,
+    and it is the same kind of positive evidence the other branches demand.
+    The dangerous direction stays shut: the fact is read from the CONTENT, so
+    a file that decodes as text is untouched however it is named, and a file
+    that cannot be read at all stays "cannot tell" and keeps blocking.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared, ecosystems=("swift",)):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": list(ecosystems)},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    MEASURED = "Heap/Intake/FileBytesIngester.swift"
+    LIVE = "struct A { func f() { g() } }"
+    GOLDEN = "HeapTests/Snapshots/StorageScreen/test_exemptBlock.1.png"
+    #: A real PNG signature. The NUL bytes that follow it open the IHDR chunk
+    #: of every PNG ever written, so a byte-level reader has its answer inside
+    #: the first two dozen bytes.
+    PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x08\x06"
+
+    def write(self, ctx_factory, relpath, body):
+        path = ctx_factory.wt / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(body, bytes):
+            path.write_bytes(body)
+        else:
+            path.write_text(body, encoding="utf-8")
+        return path
+
+    def measured_row(self, ctx_factory):
+        return {str(ctx_factory.wt / self.MEASURED): 100.0}
+
+    def test_a_changed_binary_asset_with_no_row_does_not_block(self, ctx_factory):
+        """The reported wedge, reduced to its mechanism."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.GOLDEN]
+            )
+        )
+        assert verdict.ok, verdict.message
+
+    def test_the_binary_file_is_named_rather_than_silently_dropped(self, ctx_factory):
+        """Set aside, never disappeared.
+
+        A gate that narrows its own scope without saying which file it dropped
+        is the vacuous green one layer down, and a reader cannot audit a
+        decision that left no trace.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.GOLDEN]
+            )
+        )
+        detail = verdict.detail or ""
+        assert "test_exemptBlock.1.png" in detail
+        assert "binary" in detail
+
+    def test_a_binary_file_without_nul_bytes_is_still_recognised(self, ctx_factory):
+        """NUL is the cheap tell, not the definition.
+
+        A JPEG header carries none in its opening bytes, and a format that
+        avoided them entirely would otherwise reopen the same wedge under a
+        different extension. What decides is whether the bytes are text, which
+        is asked directly.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        jpeg = "HeapTests/Snapshots/StorageScreen/test_exemptBlock.2.jpg"
+        self.write(ctx_factory, jpeg, b"\xff\xd8\xff\xe0\x10JFIF\xc3\x28\xff\xd9")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, jpeg])
+        )
+        assert verdict.ok, verdict.message
+
+    def test_a_text_source_file_with_no_row_still_blocks(self, ctx_factory):
+        """The guard, and the reason this is an answer rather than a hole.
+
+        The case the gate exists for — a live file the run never measured —
+        must read exactly as it did before, so a path-spelling mismatch is
+        still caught with the same sharpness.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Unmeasured.swift",
+            "struct Unmeasured {\n    func work() { compute() }\n}\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+            )
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Unmeasured.swift" in verdict.detail
+
+    def test_a_text_file_whose_last_character_straddles_the_sniff_boundary_blocks(
+        self, ctx_factory
+    ):
+        """The widening this fix must not do, pinned at its likeliest entry.
+
+        Deciding on a bounded prefix can cut a multi-byte character in half,
+        and a decoder asked to treat that truncation as an error calls a live
+        UTF-8 source file binary — passing unmeasured code silently, which is
+        the one direction `_explain_absent_rows` refuses. The file below is
+        ordinary Swift with executable lines, arranged so its final character
+        begins exactly at the last byte read.
+        """
+        head = 'struct Wide {\n    func work() { compute("x") }\n}\n// '
+        pad = "a" * (8191 - len(head.encode("utf-8")))
+        body = head + pad + "é" + "a" * 40 + "\n"
+        assert body.encode("utf-8")[8191] == 0xC3, "the sniff boundary must split a char"
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Heap/Intake/Wide.swift", body)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Wide.swift"],
+            )
+        )
+        assert not verdict.ok, verdict.detail
+        assert "Wide.swift" in verdict.detail
+
+    def test_a_file_that_cannot_be_read_still_blocks(self, ctx_factory):
+        """A read that failed is "cannot tell", which relaxes nothing.
+
+        Only a successful read proving the content is not text may set a file
+        aside. An unreadable file is exactly the shape a wrong answer would
+        take — nothing about it says there is no code inside.
+        """
+        import os
+
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        sealed = self.write(
+            ctx_factory,
+            "Heap/Intake/Sealed.swift",
+            "struct Sealed {\n    func work() { compute() }\n}\n",
+        )
+        os.chmod(sealed, 0o000)
+        try:
+            if os.access(sealed, os.R_OK):
+                pytest.skip("this user can read a mode-000 file; the case cannot arise")
+            verdict = self.verdict(
+                self.ctx_for(
+                    ctx_factory,
+                    self.measured_row(ctx_factory),
+                    [self.MEASURED, "Heap/Intake/Sealed.swift"],
+                )
+            )
+        finally:
+            os.chmod(sealed, 0o644)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Sealed.swift" in verdict.detail
+
+    def test_the_existing_set_aside_reasons_are_unchanged(self, ctx_factory):
+        """The controls that must read the same in both states.
+
+        A declaration-only file and a test file are set aside on the evidence
+        they always were, and the binary branch neither replaces their reason
+        nor swallows their name.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Heap/Intake/Ports.swift", "protocol P { func a() }\n")
+        self.write(
+            ctx_factory,
+            "HeapTests/IntakeTests.swift",
+            "final class IntakeTests {\n    func testA() { assert(true) }\n}\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Ports.swift", "HeapTests/IntakeTests.swift"],
+            )
+        )
+        assert verdict.ok, verdict.message
+        detail = verdict.detail or ""
+        assert "Ports.swift (no executable lines to measure)" in detail
+        assert "IntakeTests.swift (a test file; not what a coverage floor measures)" in detail
+
+    def test_the_verdict_no_longer_advises_an_action_that_does_not_exist(
+        self, ctx_factory
+    ):
+        """`session files` exposes only `add`, and there is no remove verb.
+
+        That absence is deliberate: removing a source file from the declared
+        set would be a lever for dropping it out of the floor. The union in
+        `_changed_set` means it would not even work — git re-supplies a file
+        committed on the branch. Advice that is unavailable AND ineffective
+        teaches a reader that the gate does not know what it is talking about.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Unmeasured.swift",
+            "struct Unmeasured {\n    func work() { compute() }\n}\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+            )
+        )
+        assert not verdict.ok
+        assert not any("session file set" in fix for fix in verdict.fixes)
+
+    def test_a_binary_only_change_is_na_before_any_coverage_run_exists(
+        self, ctx_factory
+    ):
+        """The same fact, read by the guard that runs before any recording.
+
+        `_nothing_a_run_could_measure` unlocks on exactly the evidence
+        `_explain_absent_rows` collects, so a change that committed only a
+        golden image must not be told to run coverage — the run would produce
+        no row for it however long it took, and on a project whose suite is
+        not green it banks a failing test entry to say so.
+        """
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(self.ctx_for(ctx_factory, {}, [self.GOLDEN]))
+        assert verdict.ok and verdict.skipped, verdict.message
+        assert "test_exemptBlock.1.png" in (verdict.detail or "")
+
+    def test_a_source_file_alongside_it_still_demands_a_run(self, ctx_factory):
+        """The control on that guard. One file that could have had a row keeps
+        the ordinary "you forgot to run coverage" refusal reading as itself."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, {}, [self.MEASURED, self.GOLDEN])
+        )
+        assert not verdict.ok, verdict.message
+        assert "no coverage was recorded" in verdict.message
+
 
 class TestTheReportersScopeIsNotDemandedOfFilesOutsideIt:
     """Repro for BUG_019 — see the backlog entry.

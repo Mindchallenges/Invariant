@@ -14,6 +14,7 @@ a gate that can be satisfied by accident.
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
 import re
 from dataclasses import dataclass, field
@@ -1379,7 +1380,8 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                 ),
                 fixes=(
                     "check these files are in the coverage target",
-                    "or drop them from the session file set if they are not code",
+                    "or check the reporter and git spell the path the same way",
+                    "or teach the ecosystem adapter to answer for this file type",
                 ),
             )
 
@@ -1985,7 +1987,8 @@ def _nothing_a_run_could_measure(
     measurement. ``coverage.meets_floor`` already declines to hold a file to
     the floor when something positively says the file cannot produce a row —
     deleted by this change, outside the reporter's configured scope, a test
-    file, or free of executable lines. That verdict simply sat behind the
+    file, free of executable lines, or not text at all. That verdict simply
+    sat behind the
     "no coverage was recorded" guard, so a change touching only such files
     could never reach it.
 
@@ -2020,8 +2023,9 @@ def _explain_absent_rows(
     """Split "no row could exist" from "no row was produced".
 
     Returns ``(excluded, unexplained)``. Only the first is set aside, and only
-    where something positively says so: git reporting the path deleted, or an
-    adapter reporting the file carries no executable lines. Everything else —
+    where something positively says so: git reporting the path deleted, an
+    adapter reporting the file carries no executable lines, or the file's own
+    bytes proving it is not text at all. Everything else —
     including every "cannot tell" — stays in the second list and keeps
     blocking, because the two mistakes are not symmetrical. Calling a live
     file inert passes unmeasured code silently; calling an inert file live
@@ -2071,6 +2075,18 @@ def _explain_absent_rows(
             excluded.append(f"{rel} (a test file; not what a coverage floor measures)")
         elif _carries_executable_code(adapters, found) is False:
             excluded.append(f"{rel} (no executable lines to measure)")
+        # Asked last, so an adapter that HAS an opinion about the file always
+        # answers first. This one is the fact no adapter is positioned to
+        # state: both hooks above are keyed on a language suffix and return
+        # `None` for anything that is not source, so a committed asset — a
+        # golden PNG from a snapshot suite is the case that surfaced it — was
+        # unanswerable by every branch and blocked forever, with no test
+        # anybody could write to clear it. Bytes that are not text carry no
+        # executable lines in any ecosystem, which is the same shape of
+        # positive evidence the branches above demand rather than a relaxation
+        # of what they demand.
+        elif _is_binary_file(found):
+            excluded.append(f"{rel} (a binary file; no executable lines to measure)")
         else:
             unexplained.append(rel)
     return excluded, unexplained
@@ -2193,6 +2209,48 @@ def _outside_measured_scope(adapters: list[Adapter], root: Path, path: Path) -> 
         if scope is None:
             continue
         return not any(_is_within(path, directory) for directory in scope)
+    return False
+
+
+#: How much of a file settles whether it is text. Bounded because the
+#: alternative is reading an arbitrarily large asset to answer a question its
+#: first kilobytes already answer, and 8 KiB is the prefix `git diff` itself
+#: inspects for the same decision.
+_TEXT_SNIFF_BYTES = 8192
+
+
+def _is_binary_file(path: Path) -> bool:
+    """Whether the file's own bytes prove it is not text.
+
+    ``True`` only on a successful read whose content cannot be text. Every
+    other outcome — a read that failed, an empty file, anything that decodes —
+    returns ``False`` and leaves the demand standing, because this answer is
+    used to SHRINK what the coverage floor asks for and the asymmetry
+    :func:`_explain_absent_rows` documents applies here unchanged: calling a
+    live file inert passes unmeasured code silently, while calling an inert
+    file live costs a visible block.
+
+    Two tells, and the second is the definition rather than the shortcut. A
+    NUL byte cannot occur in UTF-8 text and settles the common formats
+    immediately; a prefix that will not decode settles the rest, including the
+    formats that happen to carry no NUL early on. The decode is INCREMENTAL on
+    purpose — a bounded read can cut a multi-byte character in half, and a
+    decoder that reported that truncation as an error would call a live UTF-8
+    source file binary, which is precisely the direction that must stay shut.
+    """
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(_TEXT_SNIFF_BYTES)
+    except (OSError, ValueError):
+        return False  # cannot tell, so nothing is set aside
+    if not prefix:
+        return False  # an empty file proves nothing about what belongs in it
+    if b"\x00" in prefix:
+        return True
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(prefix, final=False)
+    except UnicodeDecodeError:
+        return True
     return False
 
 
