@@ -1561,3 +1561,28 @@ class TestCheckReportsTheSameWayAdvanceDoes:
     def test_a_failure_is_always_reported(self):
         for level in (Level.BLOCK, Level.WARN):
             assert worth_reporting(Evaluated("d", level, Verdict.fail("nope")), verbose=False)
+
+
+class TestRepeatedSelectorsSurviveTheParser:
+    """BUG_031 — `--selector` was declared without `action="append"`, so
+    argparse's documented behaviour for a repeated single-value option
+    applied: the last occurrence silently overwrote the earlier ones. The
+    run then reported a healthy green for a scope nobody asked for.
+
+    `item new --field` in the same parser has carried `action="append"` for
+    exactly this reason, so this is one option declared without the idiom
+    rather than a missing capability.
+    """
+
+    def test_both_selectors_reach_the_command(self):
+        from invariant.cli.main import build_parser
+
+        args = build_parser().parse_args(
+            ["pipeline", "test", "--selector", "A", "--selector", "B"]
+        )
+        assert args.selector == ["A", "B"]
+
+    def test_one_selector_is_still_a_list(self):
+        from invariant.cli.main import build_parser
+
+        assert build_parser().parse_args(["pipeline", "test", "--selector", "A"]).selector == ["A"]

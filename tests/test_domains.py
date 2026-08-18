@@ -2099,3 +2099,114 @@ class TestSlugIdStrategy:
     def test_an_unknown_strategy_is_refused_by_name(self, tmp_path):
         with pytest.raises(UsageError, match="id_strategy"):
             self.domain(tmp_path, "hieroglyph").new("bug", "x")
+
+
+class TestSeveralSelectorsRunOrRefuse:
+    """BUG_031 — a repeated `--selector` kept only the last one and reported
+    a healthy green for a scope nobody asked for. A flag that is accepted and
+    then discarded is the worst of the three outcomes, because the caller
+    believes a scope was covered that was not.
+
+    How several selectors are spelled in one command is ecosystem knowledge:
+    pytest takes node ids positionally, xcodebuild needs a repeated
+    `-only-testing:` flag the manifest template owns. So the adapter supplies
+    the fact and the domain keeps the policy — run them, or refuse.
+    """
+
+    def project(self, tmp_path, ecosystem, test_one):
+        return git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"ecosystems": [ecosystem]},
+                "commands": {"test": "true", "test_one": test_one},
+            },
+        )
+
+    def pipeline_for(self, m):
+        session = SessionDomain(m).start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        return pipelines, session
+
+    def test_both_selectors_reach_the_command(self, tmp_path):
+        m = self.project(tmp_path, "python", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        record = pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+        assert "A" in record["command"] and "B" in record["command"]
+
+    def test_a_single_selector_is_unchanged(self, tmp_path):
+        m = self.project(tmp_path, "python", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        record = pipelines.run_tests(session.id, phase="red", selectors=["A"], cwd=m.root)
+        assert record["command"] == "echo ran A"
+
+    def test_an_ecosystem_that_cannot_join_them_refuses(self, tmp_path):
+        """Refusal costs the caller one retry. A discard costs them the
+        belief that the scope was covered."""
+        m = self.project(tmp_path, "generic", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        with pytest.raises(UsageError, match="one selector at a time"):
+            pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+
+    def test_the_refusal_names_both_selectors(self, tmp_path):
+        m = self.project(tmp_path, "generic", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        with pytest.raises(UsageError) as exc:
+            pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+        assert "A" in str(exc.value) and "B" in str(exc.value)
+
+    def test_nothing_is_recorded_when_the_request_is_refused(self, tmp_path):
+        """A refused request must not leave a run behind for `test.all_pass`
+        to read as the current state of the suite."""
+        m = self.project(tmp_path, "generic", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        with pytest.raises(UsageError):
+            pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+        assert pipelines.current(session.id).evidence.get("test_runs") is None
+
+
+class TestTheSuiteDoesNotInheritTheRecordersIdentity:
+    """BUG_035 — `INVARIANT_SESSION_ID` was inherited by the spawned test
+    process. In THIS repository, whose own suite exercises session creation,
+    every test that starts a session then collided with the named live one
+    and died on `session '<id>' already exists`: 25 false failures recorded
+    as durable red evidence, against a bare run that was fully green.
+
+    The documented way to name a run for recording purposes must not change
+    what the suite it records measures.
+    """
+
+    def env_probe(self, tmp_path):
+        return git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"ecosystems": ["python"]},
+                "commands": {
+                    "test": "test -z \"$INVARIANT_SESSION_ID\"",
+                    "coverage": "test -z \"$INVARIANT_SESSION_ID\"",
+                },
+            },
+        )
+
+    def test_the_test_command_does_not_see_it(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INVARIANT_SESSION_ID", "live-session")
+        m = self.env_probe(tmp_path)
+        session = SessionDomain(m).start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        record = pipelines.run_tests(session.id, phase="red", cwd=m.root)
+        assert record["passed"], "the spawned suite inherited INVARIANT_SESSION_ID"
+
+    def test_the_parents_own_environment_is_untouched(self, tmp_path, monkeypatch):
+        """Stripping it for the child must not deregister the caller."""
+        import os
+
+        monkeypatch.setenv("INVARIANT_SESSION_ID", "live-session")
+        m = self.env_probe(tmp_path)
+        session = SessionDomain(m).start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        pipelines.run_tests(session.id, phase="red", cwd=m.root)
+        assert os.environ["INVARIANT_SESSION_ID"] == "live-session"

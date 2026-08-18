@@ -1,5 +1,5 @@
 ---
-# invariant-managed: 8b8a4d32b7c2f2e6
+# invariant-managed: 50f8cf054059dbc3
 name: feature-architect
 description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's compliance checklist), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase. MODEL: no hardcoded assignment — the parent scores the task's complexity per the host-injected rubric and passes `model` at invocation (session model for anything with design content; a smaller model only when every low-complexity signal holds).
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -206,15 +206,32 @@ under the repo — keep it out of version control), so its build is incremental 
 top of yours instead of a cold rebuild. Once coverage passes, write a receipt
 recording exactly what you gated so the reviewer can detect whether anything
 changed after you (e.g. the main agent edited a file post-handoff) and reuse
-your green build+coverage when nothing did:
+your green build+coverage when nothing did.
+
+Build the file set as a shell ARRAY and expand it quoted. This is not a style
+preference: **zsh does not word-split an unquoted parameter**, so
+`-- $SESSION_FILES` hands git ONE bogus pathspec, the diff comes back empty,
+and `diff_sha` becomes the SHA-256 of the empty string whatever you changed.
+`git diff` exits 0 on a pathspec that matches nothing and prints no
+diagnostic, so nothing anywhere signals the failure. An array is correct in
+both bash and zsh and does not depend on knowing which shell the host runs.
 
 ```bash
-SESSION_FILES="<space-separated touched source/test/doc files>"
-{
-  echo "head $(git rev-parse HEAD)"
-  echo "diff_sha $(git diff --no-color HEAD -- $SESSION_FILES | shasum -a 256 | cut -d' ' -f1)"
-  echo "coverage <File1>=<pct> <File2>=<pct> ..."
-} > .build/gate/gate-receipt.txt
+SESSION_FILES=( <one touched source/test/doc file per element> )
+DIFF_SHA=$(git diff --no-color HEAD -- "${SESSION_FILES[@]}" | shasum -a 256 | cut -d' ' -f1)
+
+# A receipt over a non-empty file set with a zero-line diff is suspicious on
+# its face. This constant is `printf "" | shasum -a 256` — the hash of nothing.
+EMPTY_SHA=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+if [ "$DIFF_SHA" = "$EMPTY_SHA" ] && [ ${#SESSION_FILES[@]} -gt 0 ]; then
+  echo "NOT writing a receipt: the diff over ${#SESSION_FILES[@]} changed file(s) hashed empty"
+else
+  {
+    echo "head $(git rev-parse HEAD)"
+    echo "diff_sha $DIFF_SHA"
+    echo "coverage <File1>=<pct> <File2>=<pct> ..."
+  } > .build/gate/gate-receipt.txt
+fi
 ```
 
 `diff_sha` is the signature compliance-reviewer compares against. If the tree it
@@ -222,6 +239,10 @@ sees is byte-identical (same `head` + same `diff_sha`), it trusts these coverage
 numbers and runs only an incremental smoke build. If it differs, the receipt is
 ignored and the reviewer runs its full build+test+coverage. The receipt is
 advisory — never a substitute for the reviewer's own gates when anything moved.
+
+Never write a receipt you could not compute. A receipt whose signature is the
+empty-string hash matches every other broken receipt, so the fast path fires on
+a tree that has moved — which is the one case the receipt exists to detect.
 
 ---
 

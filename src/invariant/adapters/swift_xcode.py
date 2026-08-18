@@ -112,6 +112,15 @@ class SwiftXcodeAdapter(Adapter):
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".swift"]
 
+    # `join_selectors` is deliberately NOT overridden. xcodebuild takes a
+    # repeated `-only-testing:` FLAG rather than a list of values, and the flag
+    # lives in `commands.test_one` — a template a project may have rewritten.
+    # Producing `A -only-testing:B` would be correct against the shipped
+    # default and silently wrong against any other, which is the same class of
+    # defect as the discarded selector this answers (BUG_031). The base
+    # `None` makes the CLI refuse and say so, and one selector per invocation
+    # still works.
+
     def is_test_file(self, path: Path) -> bool | None:
         """The convention `swift test` and Xcode both key on.
 

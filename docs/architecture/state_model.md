@@ -68,6 +68,21 @@ Fields:
 - **`entry_gates`** / **`exit_gates`** — rule ids that must return clean before
   the state is entered or left. Whether a failing gate *blocks* or merely
   *warns* is policy, resolved from the manifest at evaluation time.
+- **`red_phase`** — optional; which of this machine's states does
+  proof-of-red. Only a machine declaring `test.new_test_fails` needs it, and
+  only when that state is not literally called `red`.
+
+`red_phase` exists because a rule cannot carry a state name that only one
+machine has. `test.new_test_fails` selects its evidence by the phase a run was
+recorded in, was written against `tdd` — which has a `red` state — and is
+declared by `bugfix`, which runs `triaging → reproducing → fixing` and has no
+legal transition to any state called `red`. Its own exit gate was therefore
+satisfiable only by recording a run under a phase name the machine cannot
+produce, which writes into durable evidence that the run happened in a state
+the pipeline was never in (BUG_030). Renaming `reproducing` was rejected: the
+state is named for what it proves, and a machine's vocabulary is not a
+string comparison's to set. The rule now asks the machine, and a new
+methodology answers the question by existing.
 
 A gate names a rule id. The rule's implementation lives in `core/rules`, which
 is the escape hatch for logic YAML cannot express (D5).
@@ -297,7 +312,7 @@ Shipped methodologies:
 |---|---|---|
 | `tdd` | Default. Test-first development | designing → red → green → refactor → reviewing → committed |
 | `spec-first` | Design-heavy work where the spec is the deliverable | designing → specified → implementing → reviewing → committed |
-| `bugfix` | Proving a reported defect is real before fixing it | triaging → reproducing → fixing → verifying → committed |
+| `bugfix` | Proving a reported defect is real before fixing it | triaging → reproducing → fixing → verifying → committed (`red_phase: reproducing`) |
 | `chore` | Mechanical work with no design content | doing → reviewing → committed |
 | `docs` | Prose, records, backlog entries — nothing to test or diagram | drafting → reviewing → committed |
 | `none` | Escape hatch — a single state, no gates | working |

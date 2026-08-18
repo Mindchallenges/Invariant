@@ -1070,14 +1070,78 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
 # other state needs a passing one.
 
 
+def _red_phase(ctx: RuleContext) -> tuple[str | None, str]:
+    """Which state this pipeline's machine calls its proof-of-red state.
+
+    Returns ``(phase, error)``; ``error`` non-empty means the machine could
+    not be loaded and the question is unanswerable.
+
+    The name used to be the constant ``"red"``, which is a state ``tdd`` has
+    and ``bugfix`` does not — and ``bugfix`` declares this gate (BUG_030).
+    A pipeline with no record at all keeps the old default: there is no
+    machine to ask, and the gate is about to fail on the absent evidence
+    anyway.
+    """
+    if not ctx.pipeline:
+        return "red", ""
+    try:
+        machine = load_pipeline_machine(
+            ctx.manifest, str(ctx.pipeline.get("methodology") or "") or None
+        )
+    except InvariantError as exc:
+        return None, str(exc)
+    return machine.red_phase or "red", ""
+
+
+def _why_not_proof(run: Mapping[str, Any]) -> str:
+    """Why this failing run does not prove a TEST failed, or "" if it does.
+
+    ``passed`` is derived from the exit status, and a compile error, a signing
+    failure, a missing simulator and a host crash all exit non-zero. The
+    gate's name is a claim about a test, so the predicate is a parsed,
+    non-zero failure count — the same distinction ``test.all_pass`` already
+    draws one rule below, where a clean exit that executed nothing is refused
+    (BUG_029).
+
+    Hazards are deliberately NOT a rejection here, and the asymmetry with
+    ``test.all_pass`` is the point. A hazard casts doubt on a green because
+    the doubt is "tests may not have run"; against a counted, non-zero
+    failure there is positive evidence that one ran and failed. Rejecting on
+    a hazard would make the gate unsatisfiable in the ecosystem it was written
+    for, which is the failure mode this tracker files most often.
+    """
+    executed = run.get("executed")
+    failed = run.get("failed")
+    # `executed is None` is not zero: it means this adapter does not count
+    # tests, which is the generic adapter's permanent state. Holding a missing
+    # adapter feature against a real run is the mistake TestResult.trustworthy
+    # already documents not making.
+    if executed == 0:
+        return "it executed no tests"
+    if failed is None:
+        return "no failure count could be parsed from its output"
+    if failed == 0:
+        return "it exited non-zero with no test failures counted"
+    return ""
+
+
 @rule(
     "test.new_test_fails",
     summary="A new test failed before the fix existed.",
     events=(),
 )
 def _test_new_test_fails(ctx: RuleContext) -> Verdict:
+    phase, error = _red_phase(ctx)
+    if phase is None:
+        return Verdict.fail(
+            f"the pipeline machine could not be loaded: {error}",
+            detail="Which state this methodology records its failing run in is "
+            "the machine's answer to give, and an unanswerable question is not "
+            "a pass.",
+            fixes=("fix methodology.pipeline, or the machine file it names",),
+        )
     runs = ctx.evidence("test_runs", []) or []
-    red = [r for r in runs if r.get("phase") == "red"]
+    red = [r for r in runs if r.get("phase") == phase]
     if not red:
         return Verdict.fail(
             "no failing run was recorded before the implementation",
@@ -1086,16 +1150,52 @@ def _test_new_test_fails(ctx: RuleContext) -> Verdict:
             "only one of them is 'fixed'.",
             # `advance` evaluates gates; it does not run anything. Naming it
             # here sent people to the command that reads the evidence in
-            # search of the command that writes it.
-            fixes=("invariant pipeline test --phase red  (records the failing run)",),
+            # search of the command that writes it. The phase named is this
+            # machine's own, so the advice stopped being a workaround that
+            # teaches a session to label a run with a state it was never in.
+            fixes=(
+                f"invariant pipeline test --phase {phase}  (records the failing run)",
+            ),
         )
-    if any(not r.get("passed", True) for r in red):
-        return Verdict.clean("a red run is on record")
+    failing = [r for r in red if not r.get("passed", True)]
+    if not failing:
+        return Verdict.fail(
+            f"the run recorded in the {phase} phase passed",
+            detail="A test that passes before the change cannot be evidence for it. "
+            "Either it does not reach the defect, or the defect is not there.",
+            fixes=("make the test fail on the reported symptom first",),
+        )
+    rejected = []
+    for run in failing:
+        reason = _why_not_proof(run)
+        if not reason:
+            return Verdict.clean("a red run is on record")
+        rejected.append((run, reason))
+    # "Not yet proven", not "cannot be proven". A `Verdict.fail` here says the
+    # gate has not passed, and a genuine red still satisfies it — so this does
+    # not join the family of gates in this tracker that no correct work can
+    # clear. `Verdict.na` was the other candidate and is wrong for BUG_020's
+    # reason: a skip a reader cannot tell from a pass is worse than a refusal.
     return Verdict.fail(
-        "the run recorded in the red phase passed",
-        detail="A test that passes before the change cannot be evidence for it. "
-        "Either it does not reach the defect, or the defect is not there.",
-        fixes=("make the test fail on the reported symptom first",),
+        f"the failing run in the {phase} phase does not show a test failing",
+        detail="; ".join(
+            # Naming the run is the whole difference between "go find the
+            # compile error" and "go hunt a second red".
+            "{}: {} (exit {})".format(
+                run.get("command") or "the recorded run", reason, run.get("exit_code")
+            )
+            for run, reason in rejected
+        ),
+        fixes=(
+            (
+                "read the run's output — a build or launch failure exits "
+                "non-zero having tested nothing"
+            ),
+            (
+                "then record a run in which a test fails: "
+                f"invariant pipeline test --phase {phase}"
+            ),
+        ),
     )
 
 

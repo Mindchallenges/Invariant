@@ -199,3 +199,74 @@ class TestFrontmatterHelper:
     def test_rendering_refuses_a_source_without_frontmatter(self):
         with pytest.raises(ValueError):
             assets.render_managed("just prose\n", "abc")
+
+
+class TestTheGateReceiptCannotHashAnEmptyDiff:
+    """BUG_033 — the shipped receipt block ran
+
+        git diff --no-color HEAD -- $SESSION_FILES | shasum -a 256
+
+    and zsh does not word-split an unquoted parameter. A multi-file set
+    arrived at git as ONE bogus pathspec, the diff came back empty, and
+    `diff_sha` became the SHA-256 of the empty string whatever had changed —
+    silently, because `git diff` exits 0 on a pathspec matching nothing.
+
+    Both sides of the comparison computed it the same broken way, so
+    `WANT_DIFF == GOT_DIFF` held always and compliance-reviewer's fast path
+    took a tree that had moved, every time. The receipt's stated purpose is
+    to detect exactly that case.
+
+    This is markdown nothing here executes, which is why it needed a test at
+    all: a shipped instruction no test runs is an instrument nobody
+    self-tested.
+    """
+
+    #: `printf '' | shasum -a 256`. Recognising this constant is the only way
+    #: four separate agents caught the defect.
+    EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    RECEIPT_AGENTS = ("feature-architect", "compliance-reviewer")
+
+    def shipped(self, name):
+        from invariant.hosts.claude_code import DATA_DIR
+
+        return (DATA_DIR / "agents" / f"{name}.md").read_text(encoding="utf-8")
+
+    def shell(self, name):
+        """Only the fenced shell blocks — the prose NAMES the broken form as
+        the thing not to write, and a check that cannot tell an example from
+        an instruction would forbid documenting the defect."""
+        text = self.shipped(name)
+        blocks, inside = [], False
+        for line in text.splitlines():
+            if line.startswith("```"):
+                inside = line.startswith(("```bash", "```sh"))
+                continue
+            if inside:
+                blocks.append(line)
+        assert blocks, f"{name} ships no shell block"
+        return "\n".join(blocks)
+
+    @pytest.mark.parametrize("name", RECEIPT_AGENTS)
+    def test_the_file_set_is_never_expanded_unquoted(self, name):
+        residue = self.shell(name).replace('"${SESSION_FILES[@]}"', "").replace(
+            "${#SESSION_FILES[@]}", ""
+        )
+        assert "SESSION_FILES" not in residue.replace("SESSION_FILES=(", "")
+
+    @pytest.mark.parametrize("name", RECEIPT_AGENTS)
+    def test_both_sides_build_the_pathspec_the_same_way(self, name):
+        """The reviewer carried a `<SESSION FILE SET>` placeholder instead of
+        a construction, which is how it reached the same empty hash. A fix
+        that changes only the architect leaves the other free to reintroduce
+        it."""
+        text = self.shipped(name)
+        assert "SESSION_FILES=(" in text
+        assert '"${SESSION_FILES[@]}"' in text
+
+    @pytest.mark.parametrize("name", RECEIPT_AGENTS)
+    def test_the_empty_string_hash_is_named_as_a_refusal(self, name):
+        """Naming the constant costs one line and converts a silent match
+        into a caught one — which matters because the next way to produce an
+        empty diff will not be a quoting bug."""
+        assert self.EMPTY_SHA in self.shipped(name)

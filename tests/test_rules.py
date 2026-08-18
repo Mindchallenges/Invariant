@@ -720,7 +720,14 @@ class TestTestRules:
         assert "recorded in the red phase passed" in result.verdict.message
 
     def test_a_genuine_red_passes(self, ctx_factory):
-        pipeline = {"evidence": {"test_runs": [{"phase": "red", "passed": False}]}}
+        # The counts are what make it genuine. This case used to be spelled
+        # `{"phase": "red", "passed": False}` and nothing else, which is
+        # precisely the shape a compile error produces (BUG_029).
+        pipeline = {
+            "evidence": {
+                "test_runs": [{"phase": "red", "passed": False, "executed": 4, "failed": 1}]
+            }
+        }
         assert only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))).verdict.ok
 
 
@@ -3303,3 +3310,144 @@ class TestTheNormalisedPayloadContract:
         ).read_text(encoding="utf-8")
         assert "NORMALISED_PAYLOAD_KEYS" in overview
         assert "Nothing above `hosts/` is aware of hook schemas." not in overview
+
+
+class TestProofOfRedIsAProofAboutATest:
+    """BUG_029 — `test.new_test_fails` keyed off the exit status alone.
+
+    A compile error, a signing failure or a missing simulator all exit
+    non-zero and execute nothing, and every one of them was reported as
+    "a red run is on record". The gate's name is a claim about a TEST, and
+    the same file one rule below already refuses a GREEN that executed
+    nothing — the asymmetry was the defect.
+    """
+
+    def red(self, **record):
+        return {"evidence": {"test_runs": [{"phase": "red", "passed": False, **record}]}}
+
+    def test_an_unparseable_failure_count_is_not_proof(self, ctx_factory):
+        """The observed run, verbatim: exit 65, nothing countable."""
+        result = only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=65, executed=1, failed=None)),
+            )
+        )
+        assert not result.verdict.ok
+        assert "failure count" in result.verdict.detail
+
+    def test_a_run_that_executed_nothing_is_not_proof(self, ctx_factory):
+        result = only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=65, executed=0, failed=None)),
+            )
+        )
+        assert not result.verdict.ok
+        assert "executed no tests" in result.verdict.detail
+
+    def test_a_non_zero_exit_with_zero_failures_is_not_proof(self, ctx_factory):
+        """The compile-error shape: the tool failed, no test did."""
+        result = only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=65, executed=0, failed=0)),
+            )
+        )
+        assert not result.verdict.ok
+
+    def test_the_rejected_run_is_named(self, ctx_factory):
+        """An inconclusive verdict that does not name the run sends the
+        session hunting a second red rather than reading the build log."""
+        pipeline = self.red(exit_code=65, executed=0, failed=None, command="swift test -x")
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert "swift test -x" in result.verdict.detail
+
+    def test_a_counted_failure_is_proof(self, ctx_factory):
+        assert only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=1, executed=5, failed=2)),
+            )
+        ).verdict.ok
+
+    def test_an_adapter_that_cannot_count_tests_is_not_held_against_the_run(
+        self, ctx_factory
+    ):
+        """`executed is None` means "this adapter does not count", which is
+        the generic adapter's permanent state — the same distinction
+        `TestResult.trustworthy` already draws between None and zero."""
+        assert only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=1, executed=None, failed=3)),
+            )
+        ).verdict.ok
+
+    def test_one_conclusive_red_among_several_is_enough(self, ctx_factory):
+        pipeline = {
+            "evidence": {
+                "test_runs": [
+                    {"phase": "red", "passed": False, "executed": 0, "failed": None},
+                    {"phase": "red", "passed": False, "executed": 4, "failed": 1},
+                ]
+            }
+        }
+        assert only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+
+class TestProofOfRedReadsTheMachinesOwnRedState:
+    """BUG_030 — the rule hardcoded the state name `red`.
+
+    `bugfix` runs triaging -> reproducing -> fixing, and `reproducing` is the
+    state that DECLARES this gate. `advance red` is not a legal transition
+    from anywhere on that machine, so the gate its own machine names as an
+    exit condition was unsatisfiable except by labelling a run with a state
+    the pipeline was never in.
+    """
+
+    def test_the_bugfix_machines_red_state_satisfies_the_gate(self, ctx_factory):
+        pipeline = {
+            "methodology": "bugfix",
+            "state": "reproducing",
+            "evidence": {
+                "test_runs": [
+                    {"phase": "reproducing", "passed": False, "executed": 3, "failed": 1}
+                ]
+            },
+        }
+        assert only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+    def test_the_advice_names_the_phase_this_machine_can_produce(self, ctx_factory):
+        pipeline = {"methodology": "bugfix", "state": "reproducing", "evidence": {}}
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert not result.verdict.ok
+        assert "--phase reproducing" in " ".join(result.verdict.fixes)
+
+    def test_tdd_still_reads_red(self, ctx_factory):
+        pipeline = {
+            "methodology": "tdd",
+            "state": "red",
+            "evidence": {
+                "test_runs": [{"phase": "red", "passed": False, "executed": 3, "failed": 1}]
+            },
+        }
+        assert only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+    def test_a_machine_that_cannot_be_loaded_is_not_a_pass(self, ctx_factory):
+        """An unanswerable question is not a pass — the AUD-08 convention."""
+        pipeline = {
+            "methodology": "no-such-methodology",
+            "evidence": {
+                "test_runs": [{"phase": "red", "passed": False, "executed": 3, "failed": 1}]
+            },
+        }
+        assert not only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok

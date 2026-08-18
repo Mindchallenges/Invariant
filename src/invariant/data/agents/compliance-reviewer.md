@@ -165,13 +165,29 @@ per-file coverage. If the tree you see is byte-identical, its green build +
 coverage still hold and re-deriving them from scratch is pure duplication.
 Check:
 
-```
+Use the same construction the architect writes with — a shell ARRAY, expanded
+quoted. An unquoted `-- $SESSION_FILES` is not word-split by zsh, so git gets
+one bogus pathspec, the diff comes back empty and exits 0, and the hash is the
+SHA-256 of the empty string. Both sides computing it that way made
+`WANT_DIFF == GOT_DIFF` hold unconditionally, so this fast path fired on every
+tree, moved or not.
+
+```bash
 RECEIPT=.build/gate/gate-receipt.txt
+# `printf "" | shasum -a 256` — the hash of nothing. A receipt carrying it was
+# computed over no diff at all and vouches for nothing.
+EMPTY_SHA=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 if [ -f "$RECEIPT" ]; then
+  SESSION_FILES=( <one element per file in YOUR session file set> )
   WANT_HEAD=$(git rev-parse HEAD)
-  WANT_DIFF=$(git diff --no-color HEAD -- <SESSION FILE SET> | shasum -a 256 | cut -d' ' -f1)
+  WANT_DIFF=$(git diff --no-color HEAD -- "${SESSION_FILES[@]}" | shasum -a 256 | cut -d' ' -f1)
   GOT_HEAD=$(awk '$1=="head"{print $2}' "$RECEIPT")
   GOT_DIFF=$(awk '$1=="diff_sha"{print $2}' "$RECEIPT")
+  # Either side landing on the empty hash means the signature was not computed.
+  # Ignore the receipt and run the full gates.
+  if [ "$WANT_DIFF" = "$EMPTY_SHA" ] || [ "$GOT_DIFF" = "$EMPTY_SHA" ]; then
+    GOT_DIFF=ignored
+  fi
 fi
 ```
 

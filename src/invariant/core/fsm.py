@@ -57,6 +57,19 @@ class Machine:
     states: Mapping[str, State]
     terminal: frozenset[str] = field(default_factory=frozenset)
     description: str = ""
+    #: The state whose job is proof-of-red, for a machine that declares
+    #: ``test.new_test_fails``. ``None`` means the machine has not said, and
+    #: the rule falls back to the state literally called ``red``.
+    #:
+    #: The rule used to carry that name as a constant. It was written against
+    #: ``tdd``, which has a ``red`` state, and declared by ``bugfix``, which
+    #: runs ``triaging -> reproducing -> fixing`` and has no such state and no
+    #: legal transition to one — so its own exit gate was satisfiable only by
+    #: labelling a run with a state the pipeline had never been in (BUG_030).
+    #: Renaming ``reproducing`` to ``red`` was rejected: the state is named for
+    #: what it proves, and renaming a state to satisfy a string comparison is
+    #: the shape this library files bugs against.
+    red_phase: str | None = None
 
     # -- construction --------------------------------------------------
 
@@ -78,6 +91,7 @@ class Machine:
             description=str(raw.get("description", "")),
             initial=str(raw["initial"]),
             terminal=frozenset(raw.get("terminal", ()) or ()),
+            red_phase=(str(raw["red_phase"]) if raw.get("red_phase") else None),
             states={
                 state_id: State.from_dict(state_id, body)
                 for state_id, body in raw_states.items()
@@ -114,6 +128,9 @@ class Machine:
 
         for terminal in sorted(self.terminal - known):
             problems.append(f"terminal state {terminal!r} is not defined")
+
+        if self.red_phase is not None and self.red_phase not in known:
+            problems.append(f"red_phase {self.red_phase!r} is not defined")
 
         for state in self.states.values():
             for target in state.next:

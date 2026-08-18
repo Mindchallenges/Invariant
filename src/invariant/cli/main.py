@@ -1047,7 +1047,7 @@ def cmd_pipeline_test(args) -> int:
     ctx = Context()
     session = ctx.require_session()
     record = ctx.pipelines.run_tests(
-        session.id, phase=args.phase, selector=args.selector, cwd=ctx.cwd
+        session.id, phase=args.phase, selectors=args.selector, cwd=ctx.cwd
     )
     status = "passed" if record["passed"] else "FAILED"
     note = f"\n  note: {record['note']}" if record["note"] else ""
@@ -1580,7 +1580,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = pipeline.add_parser("test", help="run the configured suite and record it")
     q.add_argument("--phase")
-    q.add_argument("--selector")
+    # Repeatable. Declared without `action="append"`, argparse's documented
+    # behaviour for a repeated single-value option applied — the last
+    # occurrence silently overwrote the earlier ones, and the run reported a
+    # healthy green for a scope nobody asked for (BUG_031). `item new --field`
+    # a few lines below has carried the idiom all along.
+    q.add_argument("--selector", action="append")
     q.set_defaults(func=cmd_pipeline_test)
 
     # items

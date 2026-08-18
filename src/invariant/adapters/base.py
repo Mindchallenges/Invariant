@@ -14,6 +14,7 @@ might not be.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -188,6 +189,27 @@ class Adapter:
 
     def parse_coverage(self, raw: str) -> dict[str, float]:
         return {}
+
+    def join_selectors(self, selectors: Sequence[str]) -> str | None:
+        """How this ecosystem spells SEVERAL selectors in one `{selector}` slot.
+
+        ``None`` means it cannot, and the caller must REFUSE rather than run a
+        narrower scope than was asked for. A repeated ``--selector`` used to
+        keep only the last one, so the run reported a healthy green for a scope
+        nobody asked for and nothing was printed about the discarded flag
+        (BUG_031). Of the three possible behaviours — run both, refuse, discard
+        one — the discard is the only one that leaves the caller believing
+        something was covered.
+
+        The base answer is deliberately narrow. ``commands.test_one`` is a
+        template a project may have overridden, and whether several selectors
+        are a space-separated list of positional arguments or a repeated FLAG
+        is a fact about the tool the template invokes. Guessing wrong builds a
+        well-formed command against the wrong scope, which is the defect this
+        exists to close, one layer along.
+        """
+        selectors = list(selectors)
+        return selectors[0] if len(selectors) == 1 else None
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         """Narrow a changed-file list to this ecosystem's source files."""

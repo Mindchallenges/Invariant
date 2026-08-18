@@ -27,6 +27,25 @@ def _no_ambient_host_project_dir(monkeypatch):
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_session_id(monkeypatch):
+    """This suite creates sessions, and `INVARIANT_SESSION_ID` names one.
+
+    `SessionDomain.start()` resolves the id to register as
+    `session_id or os.environ["INVARIANT_SESSION_ID"]`, so with the variable
+    set every `.start()` that does not pass an id explicitly resolves to the
+    real, live session instead of the derived fallback — and collides with it.
+    Measured: 25 false failures in `test_domains.py` against an identical bare
+    run that was fully green (BUG_035).
+
+    `domains/pipeline` now strips it from the environment it spawns the suite
+    with, which fixes the route through `invariant pipeline test`. This is the
+    other route: a bare `uv run pytest` typed in a shell that has it exported.
+    Tests that need the variable set it explicitly.
+    """
+    monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
+
+
 def write_manifest(root: Path, body: dict) -> Path:
     path = root / MANIFEST_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)

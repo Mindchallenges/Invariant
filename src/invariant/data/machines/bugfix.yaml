@@ -8,6 +8,12 @@ description: >
 initial: triaging
 terminal: [committed, not_reproducible, abandoned]
 
+# `reproducing` IS the red state; it is named for what it proves rather than
+# for its colour. Declaring it here is what makes `test.new_test_fails` — the
+# gate this machine names as that state's exit condition — satisfiable from
+# this machine at all (BUG_030).
+red_phase: reproducing
+
 states:
   triaging:
     description: Read the report and the docs that own the affected area.

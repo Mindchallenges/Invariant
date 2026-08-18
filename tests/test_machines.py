@@ -364,3 +364,29 @@ class TestDocsMethodology:
         machine = self.machine(make_manifest)
         assert machine.can("drafting", "reviewing")
         assert machine.can("reviewing", "committed")
+
+
+class TestEveryMachineDeclaringProofOfRedNamesItsRedState:
+    """BUG_030 — the gate was declared by two machines and written against
+    one. A machine that names `test.new_test_fails` as a gate and has no
+    state called `red` must say which of its own states is the red one, or
+    it ships a gate nothing on it can satisfy."""
+
+    def test_no_shipped_machine_declares_an_unsatisfiable_proof_of_red(self):
+        for machine_id in shipped_ids():
+            machine = load_machine(machine_id)
+            declares = [
+                state.id
+                for state in machine.states.values()
+                if "test.new_test_fails" in (*state.entry_gates, *state.exit_gates)
+            ]
+            if not declares:
+                continue
+            red = machine.red_phase or "red"
+            assert red in machine.states, (
+                f"{machine_id} declares test.new_test_fails from {declares} "
+                f"but has no state {red!r} to record a failing run in"
+            )
+
+    def test_bugfix_names_reproducing(self):
+        assert load_machine("bugfix").red_phase == "reproducing"

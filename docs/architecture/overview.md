@@ -227,11 +227,21 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `adapters/`
 
 An adapter supplies ecosystem knowledge the manifest should not have to spell
-out: how to build, how to test a single unit, how to read a coverage number,
-what that coverage run was even pointed at, how to tell a real failure from a
-tooling failure. Adapters are selected in the manifest and may be stacked;
-`generic` is the always-present fallback that executes literal commands from
-the manifest and parses nothing.
+out: how to build, how to test a single unit, how to test SEVERAL, how to read
+a coverage number, what that coverage run was even pointed at, how to tell a
+real failure from a tooling failure. Adapters are selected in the manifest and
+may be stacked; `generic` is the always-present fallback that executes literal
+commands from the manifest and parses nothing.
+
+`join_selectors` is the newest of those questions and carries the layer's
+usual asymmetry. Whether several test selectors are a space-separated list of
+positional arguments or a repeated FLAG is a fact about the tool the manifest's
+`commands.test_one` template invokes, and the template is a project's to
+rewrite — so an adapter with no confident answer returns `None`, the domain
+refuses the request, and the caller runs them one at a time. Guessing would
+build a well-formed command against the wrong scope, which is the exact defect
+the question exists to close: a repeated `--selector` used to keep only the
+last, and report a healthy green for a scope nobody asked for (BUG_031).
 
 The `swift_xcode` adapter exists first because the originating project needs
 it, and because it carries the most instructive ecosystem traps — a build tool

@@ -205,15 +205,32 @@ under the repo — keep it out of version control), so its build is incremental 
 top of yours instead of a cold rebuild. Once coverage passes, write a receipt
 recording exactly what you gated so the reviewer can detect whether anything
 changed after you (e.g. the main agent edited a file post-handoff) and reuse
-your green build+coverage when nothing did:
+your green build+coverage when nothing did.
+
+Build the file set as a shell ARRAY and expand it quoted. This is not a style
+preference: **zsh does not word-split an unquoted parameter**, so
+`-- $SESSION_FILES` hands git ONE bogus pathspec, the diff comes back empty,
+and `diff_sha` becomes the SHA-256 of the empty string whatever you changed.
+`git diff` exits 0 on a pathspec that matches nothing and prints no
+diagnostic, so nothing anywhere signals the failure. An array is correct in
+both bash and zsh and does not depend on knowing which shell the host runs.
 
 ```bash
-SESSION_FILES="<space-separated touched source/test/doc files>"
-{
-  echo "head $(git rev-parse HEAD)"
-  echo "diff_sha $(git diff --no-color HEAD -- $SESSION_FILES | shasum -a 256 | cut -d' ' -f1)"
-  echo "coverage <File1>=<pct> <File2>=<pct> ..."
-} > .build/gate/gate-receipt.txt
+SESSION_FILES=( <one touched source/test/doc file per element> )
+DIFF_SHA=$(git diff --no-color HEAD -- "${SESSION_FILES[@]}" | shasum -a 256 | cut -d' ' -f1)
+
+# A receipt over a non-empty file set with a zero-line diff is suspicious on
+# its face. This constant is `printf "" | shasum -a 256` — the hash of nothing.
+EMPTY_SHA=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+if [ "$DIFF_SHA" = "$EMPTY_SHA" ] && [ ${#SESSION_FILES[@]} -gt 0 ]; then
+  echo "NOT writing a receipt: the diff over ${#SESSION_FILES[@]} changed file(s) hashed empty"
+else
+  {
+    echo "head $(git rev-parse HEAD)"
+    echo "diff_sha $DIFF_SHA"
+    echo "coverage <File1>=<pct> <File2>=<pct> ..."
+  } > .build/gate/gate-receipt.txt
+fi
 ```
 
 `diff_sha` is the signature compliance-reviewer compares against. If the tree it
@@ -221,6 +238,10 @@ sees is byte-identical (same `head` + same `diff_sha`), it trusts these coverage
 numbers and runs only an incremental smoke build. If it differs, the receipt is
 ignored and the reviewer runs its full build+test+coverage. The receipt is
 advisory — never a substitute for the reviewer's own gates when anything moved.
+
+Never write a receipt you could not compute. A receipt whose signature is the
+empty-string hash matches every other broken receipt, so the fast path fires on
+a tree that has moved — which is the one case the receipt exists to detect.
 
 ---
 

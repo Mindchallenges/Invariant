@@ -99,6 +99,27 @@ invariant session push                Publish the base branch. `pushed`'s
                                       (off by default) and the one-push
                                       barrier — are read from the machine and
                                       evaluated before the push runs.
+invariant pipeline test [--phase <state>] [--selector <sel>]...
+    Run the configured suite and record it as pipeline evidence. --phase
+    labels the run; it defaults to the pipeline's current state, which is
+    what the proof-of-red gate reads.
+
+    --selector is REPEATABLE, and how several are spelled in one command is
+    the adapter's answer: pytest takes node ids positionally, xcodebuild needs
+    a repeated `-only-testing:` flag that lives in the manifest's template.
+    An adapter that cannot join them makes the command REFUSE, having run and
+    recorded nothing. The one behaviour that is not on offer is the one it
+    used to have — accepting both flags and silently keeping the last, so the
+    run reported a healthy green for a scope nobody asked for (BUG_031). A
+    refusal costs one retry; a discard costs the belief that the scope was
+    covered.
+
+    The spawned suite does NOT inherit INVARIANT_SESSION_ID. That variable
+    names the session a CALLER is recording against, and the test command is a
+    child program: in the one repository whose suite exercises session
+    creation, inheriting it collided every test that starts a session with the
+    live one and wrote 25 false failures into durable evidence (BUG_035).
+
 invariant pipeline coverage
     Run commands.coverage, parse it with the adapter, and record per-file
     numbers as pipeline evidence. This is what coverage.meets_floor reads.

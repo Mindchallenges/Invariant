@@ -30,6 +30,15 @@ class PythonAdapter(Adapter):
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".py"]
 
+    def join_selectors(self, selectors) -> str | None:
+        """pytest takes node ids positionally, so several are just several.
+
+        This is the ecosystem fact the base class declines to guess at: the
+        selectors go where the command's arguments go, with no repeated flag
+        and no separator of its own.
+        """
+        return " ".join(selectors)
+
     def measured_scope(self, root: Path) -> list[Path] | None:
         """``[tool.coverage.run] source``, resolved to directories.
 

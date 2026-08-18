@@ -8,8 +8,10 @@ between a gate that verifies and a gate that can be satisfied by accident.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,31 @@ def _refuse_chained_coverage(coverage: str, report: str, bundle: str) -> None:
         "environment the second leg needs too — a `VAR=value cmd` prefix "
         "applies to that one command alone and never crossed the `;`."
     )
+
+
+#: Variables stripped from the environment a spawned suite inherits.
+#:
+#: ``INVARIANT_SESSION_ID`` is how a caller names the session a command should
+#: record against, and the test command is a CHILD PROGRAM, not a caller. In
+#: the one repository whose own suite exercises session creation — this one —
+#: inheriting it made every test that starts a session collide with the real,
+#: live session and die on "session already exists": 25 false failures written
+#: into durable pipeline evidence, against a bare run of the same suite that
+#: was fully green (BUG_035). The documented way to name a run for recording
+#: purposes must not change what the suite it records measures.
+#:
+#: An inflated failure count on a phase that later reads green is the harder
+#: of the two mistakes to notice: a false green hides behind nothing, a false
+#: red hides behind a plausible regression a reader has to actively disprove.
+CHILD_ENV_STRIPPED = ("INVARIANT_SESSION_ID",)
+
+
+def _child_env() -> dict[str, str]:
+    """The environment for a command this domain spawns."""
+    env = dict(os.environ)
+    for name in CHILD_ENV_STRIPPED:
+        env.pop(name, None)
+    return env
 
 
 @dataclass
@@ -501,7 +528,12 @@ class PipelineDomain:
             _refuse_chained_coverage(command, report_command, str(bundle))
 
         proc = subprocess.run(
-            command, shell=True, cwd=str(root), capture_output=True, text=True
+            command,
+            shell=True,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            env=_child_env(),
         )
         # The suite's own status, read from the command that RAN the suite.
         # When a report leg follows, this is the whole point of the split: the
@@ -521,6 +553,7 @@ class PipelineDomain:
                 cwd=str(root),
                 capture_output=True,
                 text=True,
+                env=_child_env(),
             )
             measured = adapter.parse_coverage(f"{report.stdout}\n{report.stderr}")
             report_exit = report.returncode
@@ -639,18 +672,38 @@ class PipelineDomain:
         self,
         session_id: str,
         phase: str | None = None,
-        selector: str | None = None,
+        selectors: Sequence[str] | None = None,
         cwd: Path | None = None,
     ) -> dict:
-        """Run the configured suite and record what actually happened."""
+        """Run the configured suite and record what actually happened.
+
+        ``selectors`` is a list because a caller may legitimately ask for
+        several. Whether several fit in one command is the adapter's answer;
+        what to do when they do not is this domain's, and the answer is to
+        refuse. A refusal costs the caller one retry, and the alternative —
+        running a subset — costs them the belief that the scope was covered
+        (BUG_031).
+        """
         pipeline = self.require(session_id)
-        command_key = "test_one" if selector else "test"
+        selectors = [s for s in (selectors or ()) if s]
+        adapter = get_adapter(self.manifest.ecosystems[0])
+        command_key = "test_one" if selectors else "test"
         bundle = self._fresh_bundle(session_id, "test")
         extra = {"result_bundle": str(bundle)}
-        if selector:
-            extra["selector"] = selector
+        if selectors:
+            joined = adapter.join_selectors(selectors)
+            if joined is None:
+                raise UsageError(
+                    f"the {adapter.id!r} adapter takes one selector at a time, "
+                    f"and {len(selectors)} were given.\n"
+                    + "".join(f"  - {s}\n" for s in selectors)
+                    + "  Run them one per invocation. Nothing was run and "
+                    "nothing was recorded: a run covering part of the requested "
+                    "scope would be read by test.all_pass as the state of the "
+                    "whole suite."
+                )
+            extra["selector"] = joined
         command = self.manifest.command_for(command_key, **extra)
-        adapter = get_adapter(self.manifest.ecosystems[0])
 
         proc = subprocess.run(
             command,
@@ -658,6 +711,7 @@ class PipelineDomain:
             cwd=str(cwd or self.manifest.root),
             capture_output=True,
             text=True,
+            env=_child_env(),
         )
         result = adapter.read_run(
             proc.stdout, proc.stderr, proc.returncode, bundle=bundle

@@ -150,3 +150,19 @@ class TestLoad:
 def test_state_from_dict_defaults():
     s = State.from_dict("x", None)
     assert s.id == "x" and s.next == () and s.roles == ()
+
+
+class TestTheMachineNamesItsOwnRedState:
+    """BUG_030 — `test.new_test_fails` carried the state name `red` as a
+    constant, and two machines declare that gate. A methodology names the
+    state whose job is proof-of-red; the rule stops guessing."""
+
+    def test_a_machine_declaring_none_answers_none(self):
+        assert machine().red_phase is None
+
+    def test_a_declared_red_phase_is_read(self):
+        assert machine(red_phase="b").red_phase == "b"
+
+    def test_a_red_phase_naming_no_state_is_rejected(self):
+        with pytest.raises(UsageError, match="red_phase 'zzz' is not defined"):
+            machine(red_phase="zzz")
