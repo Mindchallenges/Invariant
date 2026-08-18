@@ -3149,6 +3149,27 @@ class TestABinaryAssetHasNoExecutableLinesToMeasure:
         assert not verdict.ok
         assert not any("session file set" in fix for fix in verdict.fixes)
 
+    def test_an_empty_file_is_not_evidence_of_anything(self, ctx_factory):
+        """Zero bytes are not a positive answer, and the branch says so.
+
+        An empty asset is the shape a truncated write leaves behind. Nothing
+        about it establishes that no code belongs there, and a rule that read
+        emptiness as "binary" would set aside a file whose content is simply
+        missing — evidence by absence, which is what every branch here
+        refuses. It keeps blocking, and the block is what sends someone to
+        look at a file that should not be empty.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, b"")
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.GOLDEN]
+            )
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "test_exemptBlock.1.png" in verdict.detail
+
     def test_a_binary_only_change_is_na_before_any_coverage_run_exists(
         self, ctx_factory
     ):
