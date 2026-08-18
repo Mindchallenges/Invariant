@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +22,11 @@ from ..core.rules import RuleContext, all_rules, evaluate
 from ..core.store import JsonStore
 from ..domains.pipeline import PipelineDomain, describe_run, summarise
 from ..domains.session import SessionDomain
+
+#: Absolute paths inside free text. Used only to find a session worktree an
+#: agent prompt names — every hit is checked against the live session registry
+#: before it means anything, so a loose match costs nothing.
+_ABSOLUTE_PATH = re.compile(r"/[^\s'\"`,;]+")
 
 EXIT_OK = 0
 
@@ -208,9 +214,19 @@ class Context:
         on the working directory the host happens to be in or on an environment
         variable a tool call cannot carry. That is true of a *read* as much as
         of a write, which is why post-tool-use recording resolves through here
-        too rather than by working directory alone (BUG_010). A call carrying
-        no path — an agent dispatch — simply falls through to the rest of the
-        order; it is one route with one precedence, not two.
+        too rather than by working directory alone (BUG_010). An agent dispatch
+        carries no ``file_path``, but it is not therefore pathless: a dispatch
+        whose prompt names exactly one live session's worktree is aimed at that
+        session as plainly as an edit landing inside it, so that is read as the
+        target too. It is one route with one precedence, not two.
+
+        Reading it is what lets ONE host session drive several tracks at once.
+        Without it a dispatch resolves by working directory and host identifier
+        alone, so a parent driving two sessions records every agent against
+        whichever session it happens to be bound to. The other track's pipeline
+        then shows that no agent ran, and its block-level ``agents.*_ran`` gates
+        become unsatisfiable by anything that track can do — the wedge shape
+        this project treats as an engine defect rather than a reason to force.
 
         When that path identifies a session which has no host identifier
         recorded — every session registered before the identifier existed — the
@@ -226,6 +242,8 @@ class Context:
         if isinstance(tool_input, Mapping):
             raw = tool_input.get("file_path") or tool_input.get("notebook_path")
             target = Path(str(raw)) if raw else None
+            if target is None:
+                target = self._worktree_named_in_prompt(tool_input.get("prompt"))
 
         resolution = self.sessions.resolve(
             self.cwd, target=target, host_session_id=self.host_session_id
@@ -242,6 +260,31 @@ class Context:
         # "Someone successfully edited inside this worktree" is evidence of
         # ownership; "someone asked whether they could" is not.
         return resolution.session
+
+    def _worktree_named_in_prompt(self, prompt) -> Path | None:
+        """The one live session worktree an agent prompt names, if exactly one.
+
+        Deliberately conservative. Candidate paths are matched only against
+        worktrees that are already registered and live — never against
+        arbitrary text — and the answer is discarded unless every match lands
+        on the SAME session. A brief that names two tracks, or none, resolves
+        exactly as it did before: ambiguity must fall through to the ordinary
+        order rather than pick a winner, because attributing a dispatch to the
+        wrong session is worse than not attributing it at all.
+        """
+        if not isinstance(prompt, str) or "/" not in prompt:
+            return None
+
+        found: dict[str, Path] = {}
+        for raw in _ABSOLUTE_PATH.findall(prompt):
+            candidate = Path(raw.rstrip(".,;:)]}'\"`"))
+            owner = self.sessions.by_worktree_containing(candidate)
+            if owner is None:
+                continue
+            found[owner.id] = candidate
+            if len(found) > 1:
+                return None
+        return next(iter(found.values()), None)
 
     def rule_context(self, payload=None, extra=None) -> RuleContext:
         # Non-strict on purpose. Rules are evaluated on behalf of hooks, and an

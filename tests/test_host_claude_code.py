@@ -751,6 +751,75 @@ class TestReadIsAttributedByItsPath:
         ]
 
 
+    def test_a_dispatch_naming_a_worktree_is_recorded_against_that_session(
+        self, two_live_sessions
+    ):
+        """One host driving two tracks must not bank every agent on one of them.
+
+        A parent that owns session alpha and dispatches an agent AT session
+        beta -- naming beta's worktree in the brief, which is the only way the
+        agent can work there -- used to record `feature-architect` against
+        alpha, because a dispatch carries no `file_path` and so fell through to
+        the host identifier. Beta's pipeline then showed no agent had run, and
+        `agents.design_agent_ran` is block-level: no action available to beta
+        could satisfy it, because the evidence had been filed under alpha.
+        """
+        world = two_live_sessions
+        world["pipelines"].start(world["peer"], task="the change beta is designing")
+        peer_worktree = world["peer_worktree"]
+
+        self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {
+                    "subagent_type": "feature-architect",
+                    "description": "design the change",
+                    "prompt": f"Work inside {peer_worktree} and fix the thing.",
+                },
+            },
+        )
+
+        assert self.evidence(world, world["peer"], "agents_run") == [
+            "feature-architect"
+        ]
+        assert self.evidence(world, world["owner"], "agents_run") == [], (
+            "the dispatch was banked on the host's own session instead of the "
+            "one the brief names"
+        )
+
+    def test_a_dispatch_naming_two_worktrees_falls_through_rather_than_guessing(
+        self, two_live_sessions
+    ):
+        """Ambiguity resolves as before; a wrong attribution is worse than none.
+
+        Naming a peer's tree alongside your own is ordinary -- "do not touch
+        X" -- so a brief mentioning two live worktrees must not silently pick
+        one. Here the host owns nothing, so falling through records nothing.
+        """
+        world = two_live_sessions
+        world["pipelines"].start(world["peer"], task="the change beta is designing")
+
+        self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {
+                    "subagent_type": "feature-architect",
+                    "description": "design the change",
+                    "prompt": (
+                        f"Work in {world['worktree']}. "
+                        f"Do NOT touch {world['peer_worktree']}."
+                    ),
+                },
+            },
+            host_session_id=None,
+        )
+
+        assert self.evidence(world, world["owner"], "agents_run") == []
+        assert self.evidence(world, world["peer"], "agents_run") == []
+
+
 class TestAutomaticBinding:
     """`session start` runs through Bash, which carries no hook payload.
 
