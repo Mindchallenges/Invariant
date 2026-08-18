@@ -117,9 +117,10 @@ that knows the language can tell those apart, so the rule asks
 the fact. (`MANIFEST → adapters`, for command and rule-level defaults, is the
 same arrow and predates it.)
 
-What the adapter owes is a fact about the LANGUAGE, and the Swift one has been
-wrong about that fact twice, in the same direction both times: it read a
-declaration as a statement. A stored-property-only type was the first case
+What the adapter owes is a fact about the ECOSYSTEM: its language, and which
+of its file kinds a compiler ever sees. The Swift one has been wrong about the
+first half twice, in the same direction both times: it read a declaration as a
+statement. A stored-property-only type was the first case
 (BUG_025); a type-level constant — `static let name = Notification.Name("…")`
 in an extension — was the second, and the file that exposed it is seven bare
 protocols and four such constants, absent from all ten targets of the consuming
@@ -132,6 +133,31 @@ from another symbol, arithmetic, a closure — goes on meaning "carries code",
 because this answer's asymmetry runs the same way as the rule's: a spurious
 block is visible, and a file wrongly called inert passes unmeasured code in
 silence.
+
+The second half is coarser and was simply missing. That reader answers about a
+Swift file's CONTENTS, so every other path answered "cannot tell" — correctly
+refusing to relax, and leaving a consuming project blocked over `Info.plist`,
+a kind `xccov` cannot report on however it is written, in a change where the
+property list was the load-bearing edit and the production Swift count was
+zero (BUG_039). Both of the gate's own suggestions were dead ends: no test
+clears it, and dropping the file from the declared set hides the change in
+order to describe it. So the adapter now answers the kind question too, as an
+**allowlist** of resource types — property lists and entitlements, strings and
+string catalogs, storyboards and nibs, asset catalogs, build configuration
+files — plus the directory bundles whose every payload is a resource, which is
+the half that matters in practice: a touched path more often names a file
+several components inside a catalog than the catalog itself.
+
+Three properties keep it as narrow as the reader beside it. Compiled kinds are
+listed explicitly and tested first, so neither a later allowlist entry nor the
+directory rule can reach an `.m` or a `.h` that `xccov` really does measure.
+An extension absent from the allowlist answers `None`, because inverting this
+into "any extension I do not recognise is inert" is precisely the silent pass
+the base `None` exists to prevent. And documentation and configuration
+suffixes are deliberately absent from it: `core/rules` already holds `.md`,
+`.rst`, `.json`, `.yaml` and `.toml` out of the changed-source set for every
+ecosystem, and the same judgement written down in two layers is the
+duplication that drifts.
 
 An absent row has a *third* cause, and it is about the project rather than the
 file: the reporter was configured never to look there. A Python project setting

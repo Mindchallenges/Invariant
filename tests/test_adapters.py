@@ -1324,8 +1324,122 @@ class TestCarriesExecutableCode:
         assert self.adapter.carries_executable_code(tmp_path / "gone.swift") is None
 
     def test_a_non_swift_file_is_not_this_adapters_question(self, tmp_path):
+        """Unless it is a resource type Xcode is known never to compile.
+
+        A markdown file is not one: `.md` is not an Xcode file kind at all,
+        and `core/rules` already holds documentation suffixes out of the
+        changed-source set one layer up. Answering here would be this adapter
+        claiming a fact that is neither its ecosystem's nor needed.
+        """
         path = self.write(tmp_path, "notes.md", "# not swift")
         assert self.adapter.carries_executable_code(path) is None
+
+    # -- resource file kinds no Xcode target ever compiles ----------------
+    #
+    # The same question as a bare protocol's, asked about the file's KIND
+    # rather than its contents: `xccov` measures compiled Swift/ObjC/C, so a
+    # property list can never earn a row no matter what is written in it, and
+    # a floor demanding one is a gate no test can clear.
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Info.plist",
+            "Heap.entitlements",
+            "Localizable.strings",
+            "Plurals.stringsdict",
+            "Localizable.xcstrings",
+            "Main.storyboard",
+            "LaunchScreen.xib",
+            "Release.xcconfig",
+            "Assets.xcassets",
+        ],
+    )
+    def test_an_xcode_resource_kind_carries_no_executable_code(self, tmp_path, name):
+        path = self.write(tmp_path, name, "<resource/>")
+        assert self.adapter.carries_executable_code(path) is False
+
+    @pytest.mark.parametrize(
+        "relpath",
+        [
+            "Assets.xcassets/AppIcon.appiconset/icon-1024.png",
+            "en.lproj/InfoPlist.strings",
+            "Heap.docc/Overview.md",
+            "Heap.xcodeproj/project.pbxproj",
+            "Heap.xcworkspace/contents.xcworkspacedata",
+            "Model.xcdatamodeld/Model.xcdatamodel/contents",
+        ],
+    )
+    def test_a_file_inside_a_resource_bundle_directory_is_inert(
+        self, tmp_path, relpath
+    ):
+        """The useful half in practice. A touched path rarely names the
+        catalog; it names a payload file several components inside one, whose
+        own suffix (`.png`, or none at all) says nothing. The ancestor
+        directory is what carries the fact.
+        """
+        path = tmp_path / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("payload", encoding="utf-8")
+        assert self.adapter.carries_executable_code(path) is False
+
+    # -- everything else must NOT be called inert ------------------------
+    #
+    # `False` is the dangerous answer here, so each of these asserts the
+    # contract exactly: a compiled language `xccov` really does measure, and
+    # an extension this adapter has no opinion about, both stay `None`.
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Ingester.m",
+            "Bridge.mm",
+            "shim.c",
+            "vendor.cc",
+            "vendor.cpp",
+            "vendor.cxx",
+            "Ingester.h",
+            "vendor.hpp",
+            "vendor.hh",
+            "Blur.metal",
+        ],
+    )
+    def test_a_compiled_source_kind_is_never_called_inert(self, tmp_path, name):
+        """`xccov` measures Objective-C, C and C++ as readily as Swift.
+
+        Calling one of these inert is precisely the direction the base
+        docstring forbids — it would pass unmeasured compiled code in
+        silence. This adapter reads no C, so the honest answer is `None`,
+        and the assertion pins that rather than merely "not False".
+        """
+        path = self.write(tmp_path, name, "int main(void) { return 0; }\n")
+        assert self.adapter.carries_executable_code(path) is None
+
+    def test_a_source_file_inside_a_bundle_directory_is_still_not_inert(
+        self, tmp_path
+    ):
+        """The ancestor rule must not reach a file kind that is compiled.
+
+        A directory suffix is weaker evidence than a file's own kind, so the
+        two are not allowed to compose in the relaxing direction.
+        """
+        path = tmp_path / "Heap.docc" / "Snippet.m"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        assert self.adapter.carries_executable_code(path) is None
+
+    def test_an_unknown_extension_is_still_unknown(self, tmp_path):
+        """Not a denylist. An extension absent from the allowlist is a file
+        this adapter has no fact about, which is `None` — inverting that into
+        "anything I do not recognise is inert" is the silent-pass failure.
+        """
+        path = self.write(tmp_path, "rules.mystery", "who knows")
+        assert self.adapter.carries_executable_code(path) is None
+
+    def test_a_swift_file_still_reads_its_contents(self, tmp_path):
+        """The allowlist sits beside the reader, never in front of it."""
+        path = self.write(tmp_path, "Work.swift", "struct A { func f() { g() } }\n")
+        assert self.adapter.carries_executable_code(path) is True
 
     def test_the_generic_adapter_never_claims_to_know(self, tmp_path):
         path = tmp_path / "a.swift"

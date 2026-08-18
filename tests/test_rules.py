@@ -2862,6 +2862,55 @@ class TestFilesThatCannotHaveACoverageRow:
         assert not verdict.ok
         assert "Present.swift" in verdict.detail
 
+    def test_a_touched_property_list_is_set_aside_and_named(self, ctx_factory):
+        """The reported case, at the layer the consuming project sees it.
+
+        A session whose load-bearing edit was `Info.plist` was handed "1
+        changed source file(s) have no coverage row" by a block-level gate.
+        `xccov` measures compiled Swift/ObjC/C, so no test anyone could write
+        would ever produce that row, and the gate's own suggestion — drop the
+        file from the session's declared set — asks the author to hide the
+        change in order to describe it.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Heap/Info.plist", "<plist><dict/></plist>\n")
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Info.plist"],
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        # Passing is only half of it. A file that vanished from the verdict
+        # instead of being named would be a worse outcome than the block: an
+        # exclusion nobody can see is indistinguishable from a gate that did
+        # not run.
+        assert "Info.plist" in (verdict.detail or "")
+        assert "no executable lines to measure" in (verdict.detail or "")
+
+    def test_a_touched_objective_c_file_still_blocks(self, ctx_factory):
+        """The one-bit control for the relaxation above.
+
+        `xccov` measures Objective-C, so an absent row for a `.m` file is the
+        thing this gate exists to catch. If the resource allowlist ever grows
+        far enough to swallow a compiled language, this is where it shows.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Legacy.m",
+            "@implementation Legacy\n- (void)work { compute(); }\n@end\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Legacy.m"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Legacy.m" in verdict.detail
+
     def test_a_scope_emptied_by_exclusion_reports_itself_as_empty(self, ctx_factory):
         """Nothing left to hold to the floor is N/A, not a pass.
 

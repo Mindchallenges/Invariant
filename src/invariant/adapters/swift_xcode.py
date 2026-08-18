@@ -137,8 +137,18 @@ class SwiftXcodeAdapter(Adapter):
         return path.stem.endswith("Tests")
 
     def carries_executable_code(self, path: Path) -> bool | None:
+        """A Swift file by its contents; every other kind by whether Xcode
+        compiles it at all.
+
+        Two questions with one answer type. `.swift` goes to the reader, which
+        is the only thing that can tell a bare protocol from a function body.
+        Everything else goes to :func:`_xcode_resource_kind`, which answers
+        `False` only for the kinds this ecosystem is certain never to compile
+        and `None` for the rest — so a non-Swift file this adapter has no fact
+        about relaxes nothing, exactly as before.
+        """
         if path.suffix != ".swift":
-            return None
+            return _xcode_resource_kind(path)
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError, ValueError):
@@ -407,6 +417,112 @@ class SwiftXcodeAdapter(Adapter):
 # contain a statement. Anything unrecognised answers "has code" or "cannot
 # tell", never "inert" — see ``Adapter.carries_executable_code`` for why those
 # two mistakes are not interchangeable.
+#
+# The reader above answers about a Swift file's CONTENTS. The three tables
+# below answer a coarser question the same gate needs — whether the file is a
+# kind an Xcode target compiles at all — because `xccov` reports on compiled
+# Swift/ObjC/C and nothing else. A property list can never earn a row however
+# it is written, so a floor demanding one is a gate no test can clear, which
+# is the family this adapter has already been wrong about twice (BUG_025,
+# BUG_034) and the shape this library treats as an engine defect rather than
+# as a reason to force anything.
+#
+# Three properties keep the relaxation as narrow as the reader's:
+#
+#   - It is an ALLOWLIST. An extension absent from it answers `None`, not
+#     `False`. "Not a source kind I recognise" is a guess, and a guess in the
+#     relaxing direction passes unmeasured code in silence — the one mistake
+#     `Adapter.carries_executable_code`'s docstring forbids outright.
+#   - Compiled kinds are named explicitly and checked FIRST, so no future
+#     entry and no directory rule can reach one of them. `.m`, `.mm`, `.c`,
+#     `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, `.hh` are measured by `xccov` as
+#     readily as Swift is; `.metal` and `.s` are not, and are listed here
+#     anyway, because the cost of being wrong about them runs the wrong way.
+#   - Documentation and configuration suffixes — `.md`, `.json`, `.yaml`,
+#     `.toml` — are deliberately ABSENT. `core/rules` already holds those out
+#     of the changed-source set for every ecosystem, and a second copy of that
+#     judgement here is the duplication that drifts.
+
+#: Kinds a coverage report can name, so this adapter may never call one inert.
+#: Checked before every other table, including the directory one: a file's own
+#: kind is stronger evidence than the folder it happens to sit in.
+_COMPILED_SUFFIXES = frozenset(
+    {
+        ".swift",
+        ".m",
+        ".mm",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hpp",
+        ".hh",
+        ".metal",
+        ".s",
+    }
+)
+
+#: Xcode resource kinds. Each is consumed by a resource step — `plutil`,
+#: `ibtool`, `actool`, the strings compilers — that produces a bundle payload
+#: rather than an instrumented binary, so none can appear in a coverage report
+#: under any build configuration. `.xcconfig` is build SETTINGS, read before
+#: compilation and never a compilation input itself.
+_RESOURCE_SUFFIXES = frozenset(
+    {
+        ".plist",
+        ".entitlements",
+        ".strings",
+        ".stringsdict",
+        ".xcstrings",
+        ".storyboard",
+        ".xib",
+        ".xcassets",
+        ".xcconfig",
+    }
+)
+
+#: Directory bundles whose entire contents are resources or project metadata.
+#: The useful half in practice: a touched path rarely names the catalog, it
+#: names a payload several components inside one — `Assets.xcassets/AppIcon.
+#: appiconset/icon.png`, or an `.xcdatamodel/contents` with no suffix at all —
+#: and that payload's own name carries no fact. Each entry is here because
+#: nothing inside it is ever a compilation input: asset catalogs and
+#: localisation directories hold resources, `.docc` holds documentation,
+#: `.xcodeproj` and `.xcworkspace` hold project metadata, and an
+#: `.xcdatamodeld` holds model versions compiled by `momc` into a bundle
+#: resource. `.bundle` and `.framework` are deliberately absent — a vendored
+#: bundle may hold anything, and "vendored" is exactly the guess this table
+#: must not make.
+_RESOURCE_BUNDLE_DIR_SUFFIXES = (
+    ".xcassets",
+    ".lproj",
+    ".docc",
+    ".xcodeproj",
+    ".xcworkspace",
+    ".xcdatamodeld",
+    ".xcdatamodel",
+)
+
+
+def _xcode_resource_kind(path: Path) -> bool | None:
+    """``False`` for a path no Xcode target compiles, ``None`` if unsure.
+
+    Never returns ``True``: "this kind is compiled" is not the same claim as
+    "this file has executable lines in it", and the Swift reader is what
+    answers the second. Returning ``True`` here would let a `.swift` file skip
+    that reader entirely.
+    """
+    suffix = path.suffix.lower()
+    if suffix in _COMPILED_SUFFIXES:
+        return None
+    if suffix in _RESOURCE_SUFFIXES:
+        return False
+    if any(
+        part.lower().endswith(_RESOURCE_BUNDLE_DIR_SUFFIXES) for part in path.parts[:-1]
+    ):
+        return False
+    return None
 
 #: Everything legal inside a protocol's accessor requirement. A block holding
 #: only these is `{ get }`, a promise about a member; a block holding anything
