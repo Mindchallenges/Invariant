@@ -243,7 +243,30 @@ class Context:
             raw = tool_input.get("file_path") or tool_input.get("notebook_path")
             target = Path(str(raw)) if raw else None
             if target is None:
-                target = self._worktree_named_in_prompt(tool_input.get("prompt"))
+                named = self._worktree_named_in_prompt(tool_input.get("prompt"))
+                if named is not None:
+                    # A dispatch outranks the host's own binding, where a read
+                    # or an edit does not. The distinction is who acts. Reading
+                    # a peer's file is the host reaching across a boundary, and
+                    # attributing it to the peer would hide the crossing — which
+                    # is why step 2 beats step 3 there, and still does.
+                    #
+                    # A dispatch is the opposite shape: the host is not acting
+                    # on the named worktree, it is DELEGATING into it, and the
+                    # run being recorded is the delegate's. One host binding
+                    # holds one session, so it cannot represent two concurrent
+                    # delegations — a parent driving two tracks banks every
+                    # agent on whichever session it started last. That is the
+                    # wedge this route exists to close: the OTHER track's
+                    # block-level ``agents.*_ran`` gates become unsatisfiable by
+                    # anything that track can do, because the evidence was filed
+                    # under a session it does not own. Adding the route without
+                    # this precedence left it unreachable in the one case it was
+                    # written for.
+                    owner = self.sessions.by_worktree_containing(named)
+                    if owner is not None:
+                        return owner
+                    target = named
 
         resolution = self.sessions.resolve(
             self.cwd, target=target, host_session_id=self.host_session_id

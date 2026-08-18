@@ -788,6 +788,53 @@ class TestReadIsAttributedByItsPath:
             "one the brief names"
         )
 
+    def test_a_dispatch_at_a_peer_outranks_the_hosts_own_binding(
+        self, two_live_sessions
+    ):
+        """The parent that OWNS a session must still be able to dispatch at another.
+
+        The sibling test above proves the prompt route works when the host owns
+        nothing. That is not the production case: a parent driving two tracks
+        ran ``invariant session start`` for each, and the second bound the host,
+        so ``by_host_session`` answers first and step 3 is never reached. Every
+        dispatch then banks on whichever session the host happens to hold,
+        including the ones whose briefs name a different worktree entirely --
+        and the OTHER track's ``agents.*_ran`` gates become unsatisfiable by
+        anything that track can do.
+
+        Attribution by host is right for a read or an edit: reading a peer's
+        file is not evidence that the peer did the reading, which is what
+        ``test_the_host_identifier_still_outranks_the_path`` pins. A dispatch is
+        the opposite shape. The host is not acting on the named worktree, it is
+        DELEGATING into it, and the delegate is the one whose run gets recorded.
+        One host binding cannot represent two concurrent delegations, so for a
+        dispatch the brief is the better evidence -- and it is the only evidence
+        that scales past one track.
+        """
+        world = two_live_sessions
+        world["sessions"].adopt_host_session(world["owner"], self.HOST_ID)
+        world["pipelines"].start(world["peer"], task="the change beta is designing")
+
+        self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {
+                    "subagent_type": "compliance-reviewer",
+                    "description": "review the change",
+                    "prompt": f"Work inside {world['peer_worktree']} and review it.",
+                },
+            },
+        )
+
+        assert self.evidence(world, world["peer"], "agents_run") == [
+            "compliance-reviewer"
+        ], "the brief named beta's worktree and beta recorded nothing"
+        assert self.evidence(world, world["owner"], "agents_run") == [], (
+            "the dispatch was banked on the host's own session, which is the "
+            "wedge: beta can never satisfy agents.review_agent_ran"
+        )
+
     def test_a_dispatch_naming_two_worktrees_falls_through_rather_than_guessing(
         self, two_live_sessions
     ):

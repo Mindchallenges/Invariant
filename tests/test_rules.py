@@ -3015,6 +3015,49 @@ class TestTheReportersScopeIsNotDemandedOfFilesOutsideIt:
         assert verdict.ok and verdict.skipped
         assert "test_mod.py" in (verdict.detail or "")
 
+    def test_a_test_only_change_is_na_before_any_coverage_run_exists(
+        self, ctx_factory
+    ):
+        """Nothing to measure is an answer a RUN cannot change.
+
+        The sibling above proves the scope empties correctly once a run has
+        recorded something. It cannot see the ordering defect, because it
+        hands the gate a recording. `coverage.meets_floor` returns
+        `no coverage was recorded` from an early guard that fires roughly
+        fifty lines BEFORE the scoping logic, so a change touching only test
+        files can never reach the N/A that is already written for it.
+
+        The demand that creates is not merely redundant, it is destructive.
+        `invariant pipeline coverage` takes no selector, so the only way to
+        satisfy the guard is a whole-scheme run; and a coverage run is
+        recorded as a test run, so on a project whose suite is not green that
+        run banks a FAILING `test_runs` entry and flips `test.all_pass` from
+        green to red — to produce numbers this rule then discards, because
+        every file it measured was excluded from the floor anyway.
+
+        Only positive evidence unlocks this: `_explain_absent_rows` sets a
+        file aside for being deleted, outside the reporter's scope, a test
+        file, or free of executable lines. One real source file in the set
+        lands in `unexplained` and the recording is demanded exactly as
+        before — which the sibling test below pins.
+        """
+        self.wire(ctx_factory)
+        ctx = self.ctx_for(ctx_factory, {}, [self.TEST])
+        verdict = self.verdict(ctx)
+        assert verdict.ok and verdict.skipped, verdict.message
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_a_source_file_with_no_run_still_demands_one(self, ctx_factory):
+        """The control. Relaxing the guard must not relax the common case.
+
+        A touched file that COULD carry a row keeps the original refusal, so
+        "I forgot to run coverage" still reads as itself rather than as a
+        scope answer.
+        """
+        self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, {}, [self.SRC]))
+        assert not verdict.ok, verdict.message
+
 
 class TestPathsTheManifestHoldsOutOfTheFloor:
     """`methodology.gates.coverage_exclude` — the policy half of BUG_026.

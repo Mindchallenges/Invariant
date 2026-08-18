@@ -1250,23 +1250,16 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
     if floor <= 0:
         return Verdict.na("no coverage floor configured")
     recorded = ctx.evidence("coverage", {}) or {}
-    if not recorded:
-        return Verdict.fail(
-            "no coverage was recorded",
-            detail="The gate reads what a coverage run measured; nothing has "
-            "measured anything in this pipeline.",
-            fixes=("invariant pipeline coverage",),
-        )
 
     # Reporters emit absolute paths; changed files are repo-relative. Comparing
     # the two spellings directly yields an empty intersection, and an empty
     # intersection would report "all files at or above the floor" — a gate
     # passing vacuously, which is worse than the blocking it replaced.
     roots = _coverage_roots(ctx)
-    coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
 
     scope = str(ctx.manifest.get("methodology.gates.coverage_scope", "touched"))
     excluded: list[str] = []
+    source_changed: set[str] = set()
     if scope == "touched":
         # The union of the three sources that can know what changed. This
         # gate is where that union was first worked out; it now lives in
@@ -1277,6 +1270,32 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         changed = {_relative_to_any(path, roots) for path in touched_set.paths}
         source_changed = {p for p in changed if not _looks_like_docs(p)}
 
+        # Whether anything here is MEASURABLE is a different question from
+        # whether anything was measured, and only the first is answerable
+        # without a run. It is asked HERE, ahead of the recording guard,
+        # because that guard used to fire first and made the N/A written for
+        # this case unreachable. Everything else still queues behind the
+        # guard: when nothing was recorded AND the scope cannot be
+        # established, "run coverage" is the more actionable of the two
+        # refusals, and it often makes the scope answerable as a side effect.
+        if source_changed:
+            _unmeasurable = _nothing_a_run_could_measure(
+                ctx, recorded, source_changed, roots
+            )
+            if _unmeasurable is not None:
+                return _unmeasurable
+
+    if not recorded:
+        return Verdict.fail(
+            "no coverage was recorded",
+            detail="The gate reads what a coverage run measured; nothing has "
+            "measured anything in this pipeline.",
+            fixes=("invariant pipeline coverage",),
+        )
+
+    coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
+
+    if scope == "touched":
         # An empty touched set used to fall through to the full measured set,
         # silently converting a touched-scope floor into a project-wide one.
         # Every legacy file below the floor then blocks a change that never
@@ -1952,6 +1971,47 @@ def _coverage_roots(ctx: RuleContext) -> list[Path]:
     roots.append(_repo_root(ctx))
     roots.append(ctx.manifest.root)
     return roots
+
+
+def _nothing_a_run_could_measure(
+    ctx: RuleContext,
+    recorded: dict,
+    source_changed: set[str],
+    roots: list[Path],
+) -> Verdict | None:
+    """N/A when no touched file could ever carry a coverage row, else ``None``.
+
+    Answers the one question about an unmeasured change that does not need a
+    measurement. ``coverage.meets_floor`` already declines to hold a file to
+    the floor when something positively says the file cannot produce a row —
+    deleted by this change, outside the reporter's configured scope, a test
+    file, or free of executable lines. That verdict simply sat behind the
+    "no coverage was recorded" guard, so a change touching only such files
+    could never reach it.
+
+    The demand that created was not merely redundant, it was destructive.
+    ``invariant pipeline coverage`` takes no selector, so the only way to
+    satisfy the guard is a whole-scheme run; a coverage run is recorded as a
+    TEST run; and on a project whose suite is not green that banks a failing
+    entry and flips ``test.all_pass`` from green to red — all to produce
+    numbers the rule then discards, having excluded every one of those files
+    from the floor anyway. A gate whose only remedy destroys a passing gate is
+    not strict, it is a gate people route around.
+
+    Returns ``None`` the moment ONE file could have had a row, so the ordinary
+    "you forgot to run coverage" refusal is untouched. Only positive evidence
+    unlocks the skip; every "cannot tell" keeps blocking, exactly as
+    :func:`_explain_absent_rows` already decides for the measured path.
+    """
+    if recorded:
+        return None
+    set_aside, still_owed = _explain_absent_rows(ctx, sorted(source_changed), roots)
+    if still_owed:
+        return None
+    return Verdict.na(
+        "no touched source file is one a coverage run could measure",
+        detail=_excluded_detail(set_aside),
+    )
 
 
 def _explain_absent_rows(
