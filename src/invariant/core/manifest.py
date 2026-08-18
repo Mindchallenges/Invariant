@@ -120,10 +120,17 @@ DEFAULTS: dict[str, Any] = {
         # default: excluding anything from a floor is a policy decision, and
         # it belongs in a diff someone can review rather than in a habit each
         # author has to remember.
+        # `coverage_baseline` is a path to a recorded per-file shortfall the
+        # floor is ratcheted against: below the floor but at or above the
+        # record does not block, below the record is a regression and does,
+        # and no record at all fails exactly as it did before. Null by
+        # default, because the relaxation must rest on evidence somebody
+        # wrote down rather than on the absence of any.
         "gates": {
             "coverage_min": 90,
             "coverage_scope": "touched",
             "coverage_exclude": [],
+            "coverage_baseline": None,
         },
     },
     "enforcement": {"profile": "standard", "rules": {}},

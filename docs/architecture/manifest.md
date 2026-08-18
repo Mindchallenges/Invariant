@@ -50,6 +50,17 @@ methodology:
                                # aside. Empty by default — excluding anything from
                                # a floor is a policy decision, and it belongs in a
                                # diff someone can review.
+    coverage_baseline: null    # path to a recorded per-file shortfall the floor is
+                               # RATCHETED against. One entry per line,
+                               # `<repo-relative-path> <pct>`, `#` comments and
+                               # blank lines ignored. Below the floor and at or
+                               # above its entry does not block; below its entry is
+                               # a regression and does; no entry fails exactly as
+                               # before. A line that will not parse, an entry
+                               # recorded twice, and a file this key names but no
+                               # root holds are all ERRORS — a record read in part
+                               # drops entries in both directions invisibly. Null
+                               # by default.
 
 enforcement:
   profile: standard            # strict | standard | loose

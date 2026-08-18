@@ -200,6 +200,21 @@ both run AFTER the no-row check so neither can hide a path-spelling mismatch,
 and both name what they set aside in the verdict. An exclusion nobody can see
 is indistinguishable from a gate that did not run.
 
+A third lever answers a question neither of those can: the floor is right for
+new code and wrong for old. A file months below it blocks a two-line, fully
+covered, net-negative edit, so the gate refuses precisely the change that
+improves it. `methodology.gates.coverage_baseline` names a recorded per-file
+shortfall — the same idiom as `scripts/arch_layering_baseline.txt` — and the
+floor is RATCHETED against it: at or above the record is a pre-existing
+shortfall and does not block, below the record is a regression and gets its own
+verdict rather than the floor's, and no record at all fails exactly as before,
+because the relaxation must rest on evidence somebody wrote down. It is asked
+LAST, of files the floor has already rejected, so a record cannot buy a pass for
+a path with no coverage row and a stale entry cannot become a second, higher
+floor for a file that already clears the first. A record read only in PART is an
+error, never a smaller record: a dropped entry stops being enforced and stops
+being honoured at the same time, with nothing in any verdict to say so.
+
 The two labelled arrows around `stats` — `CLI -. injects .-> CCTEL`, dotted,
 and `CCTEL -- implements SampleSource --> STATS`, solid — are the same rule
 applied to a case that could easily have inverted it (ADR-002 D2). Reading a host's

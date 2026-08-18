@@ -3537,6 +3537,337 @@ class TestPathsTheManifestHoldsOutOfTheFloor:
         assert "below the 90% floor" in verdict.message
 
 
+class TestTheRecordedBaselineThatRatchetsTheFloor:
+    """`methodology.gates.coverage_baseline` — a floor that legacy debt cannot veto.
+
+    The floor is right for new code and wrong for old. A file that has sat at
+    70% for months blocks a two-line, fully covered, net-negative edit — so the
+    gate refuses precisely the change that improves it, and the only ways
+    forward are to close a several-hundred-line gap that was never this
+    change's, or to route around the gate. The motivating case moved a file
+    from 69.17% to 70.99% while deleting more than it added, and was blocked.
+
+    A ratchet, on the same idiom this project already uses for its layering
+    baseline: a recorded per-file number the measurement may never fall below.
+    Below the floor and at or above the record is a pre-existing shortfall and
+    does not block; below the record is a REGRESSION and does, in its own
+    words; and no record at all fails exactly as before, because the
+    relaxation must rest on positive, reviewable evidence rather than on the
+    absence of any.
+    """
+
+    SRC = "src/app/mod.py"
+    LEGACY = "src/app/legacy.py"
+    LIVE = "def f():\n    return g()\n"
+    BASELINE = "scripts/coverage_baseline.txt"
+
+    #: Distinguishes "no key" from "a key whose value is this".
+    UNSET = object()
+
+    def ctx_for(self, ctx_factory, declared, coverage, baseline=UNSET):
+        gates = {"coverage_min": 90, "coverage_scope": "touched"}
+        if baseline is not self.UNSET:
+            gates["coverage_baseline"] = baseline
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {"gates": gates},
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def wire(self, ctx_factory, measured, baseline_text=None):
+        """Source files on disk, a measurement, and optionally a baseline file."""
+        out = {}
+        for rel, pct in measured.items():
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+            out[str(path)] = pct
+        if baseline_text is not None:
+            recorded = ctx_factory.wt / self.BASELINE
+            recorded.parent.mkdir(parents=True, exist_ok=True)
+            recorded.write_text(baseline_text, encoding="utf-8")
+        return out
+
+    # -- the shortfall the record forgives ----------------------------
+
+    def test_a_file_exactly_at_its_recorded_baseline_does_not_block(
+        self, ctx_factory
+    ):
+        """The floor is missed, the record is met, and the change proceeds."""
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} 70.99\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+    def test_an_improvement_still_short_of_the_floor_does_not_block(
+        self, ctx_factory
+    ):
+        """The reported case, and the whole point of the mechanism.
+
+        A change that RAISED the number from 69.17 to 70.99 was blocked by a
+        floor of 90. The ratchet is what makes an improvement legal before the
+        gap is fully closed.
+        """
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+    def test_the_set_aside_names_the_file_and_both_numbers(self, ctx_factory):
+        """A relaxation nobody can read in the verdict is how a gate goes inert.
+
+        Three facts, each answering a different question: WHICH file was let
+        past, what it MEASURES now, and what it was RECORDED at — the last
+        being the only one that says the pass was earned against evidence
+        rather than granted.
+        """
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        detail = verdict.detail or ""
+        assert "legacy.py" in detail
+        assert "70.99%" in detail
+        assert "69.17%" in detail
+        assert "ratcheted" in detail
+
+    def test_a_ratcheted_file_is_still_named_when_another_file_blocks(
+        self, ctx_factory
+    ):
+        """The set-aside is reported whatever the verdict turns out to be.
+
+        A pass that narrowed its own scope is reviewable only if the narrowing
+        is written where the verdict is read, and that is no less true of a
+        FAILING verdict — a reader deciding what to fix needs to know which
+        below-floor file was already answered for.
+        """
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99, self.SRC: 40.0},
+            f"{self.LEGACY} 69.17\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY, self.SRC], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "mod.py" in (verdict.detail or "")
+        assert "legacy.py" in (verdict.detail or "")
+        assert "69.17%" in (verdict.detail or "")
+
+    # -- the ratchet biting -------------------------------------------
+
+    def test_a_drop_below_the_recorded_baseline_fails(self, ctx_factory):
+        """The half that makes this a ratchet rather than an amnesty."""
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 65.0}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok, verdict.message
+
+    def test_the_regression_reads_as_a_regression_not_a_floor_miss(
+        self, ctx_factory
+    ):
+        """Two different failures need two different sentences.
+
+        "Below the floor" sends the author to write several hundred lines of
+        test for a gap that predates them. "You lost 4.17 points against a
+        number this project recorded" sends them to the four lines they just
+        deleted. Same file, same floor, opposite next action.
+        """
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 65.0}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert "below the 90% floor" not in verdict.message
+        assert "baseline" in verdict.message
+        detail = verdict.detail or ""
+        assert "65%" in detail
+        assert "69.17%" in detail
+
+    # -- the fail-safe --------------------------------------------------
+
+    def test_a_below_floor_file_with_no_entry_blocks_exactly_as_before(
+        self, ctx_factory
+    ):
+        """No record means no acknowledged debt.
+
+        The relaxation is granted on positive evidence only. An absent entry
+        is the ordinary case — every file in the project has one — so reading
+        it as permission would turn the ratchet into a global amnesty.
+        """
+        measured = self.wire(
+            ctx_factory, {self.SRC: 50.0}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+        assert "mod.py" in (verdict.detail or "")
+
+    def test_no_baseline_configured_leaves_the_gate_as_it_was(self, ctx_factory):
+        """Absent key, feature entirely off, verdict unchanged."""
+        measured = self.wire(ctx_factory, {self.LEGACY: 70.99}, None)
+        verdict = self.verdict(self.ctx_for(ctx_factory, [self.LEGACY], measured))
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+        assert "ratchet" not in (verdict.detail or "").lower()
+
+    def test_a_null_baseline_is_the_same_as_no_baseline(self, ctx_factory):
+        """An explicit null is the default written out, not an empty record."""
+        measured = self.wire(ctx_factory, {self.LEGACY: 70.99}, None)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, None)
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_a_file_above_the_floor_is_never_measured_against_the_record(
+        self, ctx_factory
+    ):
+        """The record answers for shortfalls, and nothing else.
+
+        Discriminating on purpose: the file measures 95 against a floor of 90
+        and a STALE record of 100. Consulting the record for a file that
+        already clears the floor would read that as a 5-point regression and
+        block a change that is fine — the ratchet would have quietly become a
+        second, higher floor nobody agreed to.
+        """
+        measured = self.wire(ctx_factory, {self.SRC: 95.0}, f"{self.SRC} 100\n")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+    # -- a record the gate cannot read ----------------------------------
+
+    def test_a_malformed_line_is_an_error_not_a_skipped_entry(self, ctx_factory):
+        """A baseline that silently drops entries is the grandfathering trap.
+
+        The dropped entry is invisible in both directions: the debt it
+        recorded stops being enforced, and the file it named stops being
+        forgiven — and neither shows up anywhere. So an unparseable line
+        fails the gate rather than reducing the record behind the reader's
+        back.
+        """
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99},
+            f"{self.LEGACY} 69.17 stale\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok, verdict.message
+        assert "baseline" in verdict.message
+        assert "ratcheted" not in (verdict.detail or "")
+
+    def test_a_non_numeric_percentage_is_an_error(self, ctx_factory):
+        """Same fact, the other half of the line."""
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} sixty\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "baseline" in verdict.message
+
+    def test_the_error_names_the_line_it_could_not_read(self, ctx_factory):
+        """An error that does not say WHICH line is a hunt, not a report."""
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99},
+            f"# a comment\n\n{self.LEGACY} sixty\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        detail = verdict.detail or ""
+        assert "line 3" in detail
+        assert "sixty" in detail
+
+    def test_a_duplicate_entry_is_an_error(self, ctx_factory):
+        """Two records for one file name no number the gate can enforce.
+
+        Last-wins would silently pick one of them, and which one it picked
+        would decide whether a regression passes.
+        """
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99},
+            f"{self.LEGACY} 69.17\n{self.LEGACY} 40\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "baseline" in verdict.message
+
+    def test_a_configured_baseline_that_does_not_exist_is_an_error(
+        self, ctx_factory
+    ):
+        """An absent file is not an empty record.
+
+        It is indistinguishable from a ratchet that was never wired, and the
+        gate will not read a relaxation — or the absence of one — out of a
+        file it could not find. Loud, because the manifest key and the file it
+        names have to land in the same commit.
+        """
+        measured = self.wire(ctx_factory, {self.SRC: 100.0}, None)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "baseline" in verdict.message
+
+    # -- what the format tolerates --------------------------------------
+
+    def test_comments_blank_lines_and_ragged_whitespace_are_accepted(
+        self, ctx_factory
+    ):
+        """Liberal in the shape of a line, strict about one it cannot parse."""
+        text = (
+            "# The coverage ratchet. A number here may only fall.\n"
+            "\n"
+            "   \n"
+            f"\t{self.LEGACY}   69.17  # IDEA_LEGACY_COVERAGE_FLOOR\n"
+        )
+        measured = self.wire(ctx_factory, {self.LEGACY: 70.99}, text)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+
 class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:
     """The fact half of BUG_026 — a comment-only diff.
 

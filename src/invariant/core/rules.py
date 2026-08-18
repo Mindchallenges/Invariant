@@ -1450,16 +1450,64 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         )
     suffix = ("  (" + "; ".join(caveats) + ")") if caveats else ""
 
+    below = {f: pct for f, pct in coverage.items() if float(pct) < floor}
+
+    # The ratchet, asked LAST and only of what the floor already rejected.
+    # Position is the whole of its safety. Everything above still applies in
+    # full: a file with no coverage row never reaches here, so a recorded
+    # baseline cannot buy a pass for a path the reporter stopped emitting, and
+    # a file at or above the floor is never measured against a record at all.
+    #
+    # The floor is right for new code and wrong for old, and a single gate
+    # cannot be both without being told which is which. A file months below
+    # the floor blocks a two-line, fully covered, net-negative edit — so the
+    # gate refuses exactly the change that improves it, and the only ways past
+    # are to close a gap that was never this change's or to route around the
+    # gate. A recorded number is the project saying out loud which shortfalls
+    # it has already accounted for; nothing else relaxes, and the record may
+    # only ever be met or beaten.
+    baseline, unreadable = _coverage_baseline(ctx)
+    if unreadable is not None:
+        return unreadable
+    below, ratcheted, regressed = _ratcheted_against_baseline(below, baseline, floor)
+
     # Whatever the floor decides, the gate reports what it declined to hold to
     # the floor. A pass that quietly narrowed its own scope is the vacuous
     # green this gate exists to prevent, and the narrowing is only reviewable
     # if it is written down where the verdict is read.
     aside = _excluded_detail(excluded)
+    ratchet_aside = _ratchet_detail(ratcheted)
+    if ratchet_aside:
+        aside = f"{aside}  {ratchet_aside}" if aside else ratchet_aside
 
-    below = {f: pct for f, pct in coverage.items() if float(pct) < floor}
+    if regressed:
+        return Verdict.fail(
+            f"{len(regressed)} file(s) fell below a recorded coverage baseline",
+            detail=", ".join(regressed[:6])
+            + ". This is the ratchet, not the floor: the shortfall itself is "
+            "already accounted for, but a recorded number may only be met or "
+            "beaten. Restore what the change removed — or, if the number is "
+            "honestly lower because a repaired test stopped overstating it, "
+            "lower the recorded baseline in the same commit, where the reason "
+            "is reviewable."
+            + (f"  {aside}" if aside else ""),
+            fixes=(
+                "restore the coverage the baseline recorded",
+                "or lower the recorded baseline deliberately, with the reason",
+            ),
+        )
+
     if not below:
+        held = len(coverage) - len(ratcheted)
+        # Never "all N at or above the floor" when some of them are not. A
+        # ratcheted file is a pass this gate GRANTED, not a number it read.
         return Verdict.clean(
-            f"all {len(coverage)} file(s) at or above {floor:g}%{suffix}",
+            f"all {held} file(s) at or above {floor:g}%{suffix}"
+            if not ratcheted
+            else (
+                f"{held} file(s) at or above {floor:g}%, {len(ratcheted)} below "
+                f"it and at or above a recorded baseline{suffix}"
+            ),
             detail=aside,
         )
     listed = ", ".join(f"{f} {pct:g}%" for f, pct in sorted(below.items())[:6])
@@ -2180,6 +2228,166 @@ def _excluded_as_comment_only(
         else:
             kept[rel] = pct
     return kept, excluded
+
+
+#: How far under a recorded baseline still counts as "at" it. Half of the last
+#: decimal place a baseline is written with, because a reporter that emits
+#: 70.98999 for the number recorded as 70.99 is stating the same measurement,
+#: and a ratchet that fired on that would report a regression of zero points.
+#: Deliberately smaller than any drop a real change produces.
+_BASELINE_TOLERANCE = 0.005
+
+
+def _coverage_baseline(
+    ctx: RuleContext,
+) -> tuple[dict[str, float] | None, Verdict | None]:
+    """The recorded per-file shortfall the floor may be ratcheted against.
+
+    Returns ``(baseline, None)`` when the manifest names one and it reads, or
+    ``(None, None)`` when it names none — the default, under which this whole
+    mechanism is absent and the floor behaves exactly as it did before.
+    Anything else returns ``(None, verdict)`` and the caller fails the gate on
+    it, which is the entire discipline of the format.
+
+    A baseline is EVIDENCE that a shortfall predates the change being judged.
+    Evidence read only in part is worse than none: a line the parser cannot
+    make sense of would drop an entry, and a dropped entry is invisible in
+    both directions — the debt it recorded silently stops being enforced, and
+    the file it named silently stops being forgiven. That is the grandfathered
+    baseline that hides a live defect, so a line that will not parse, an entry
+    recorded twice, and a file the manifest names but no root holds are all
+    errors rather than a smaller record.
+
+    Liberal about the shape of a line, because ragged whitespace and a
+    trailing note are how a human maintains a file like this: any run of
+    whitespace separates the two fields, ``#`` starts a comment anywhere, and
+    blank lines are nothing.
+    """
+    configured = ctx.manifest.get("methodology.gates.coverage_baseline")
+    if not configured:
+        return None, None
+
+    located = _first_existing(str(configured), _coverage_roots(ctx))
+    if located is None:
+        return None, Verdict.fail(
+            "the recorded coverage baseline is missing",
+            detail=(
+                f"methodology.gates.coverage_baseline names {configured!r}, "
+                "which no candidate root holds. An absent file is not an empty "
+                "record — it cannot be told apart from a ratchet that was "
+                "never wired, so the gate will not read either a relaxation or "
+                "its absence out of a file it could not find. The manifest key "
+                "and the file it names belong in the same commit."
+            ),
+            fixes=(
+                f"create {configured}",
+                "or clear methodology.gates.coverage_baseline",
+            ),
+        )
+
+    try:
+        text = located[1].read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return None, Verdict.fail(
+            "the recorded coverage baseline could not be read",
+            detail=f"{configured}: {exc}.",
+            fixes=(f"check {configured} is readable UTF-8 text",),
+        )
+
+    def unreadable(number: int, line: str, why: str) -> Verdict:
+        return Verdict.fail(
+            "the recorded coverage baseline could not be read",
+            detail=(
+                f"{configured} line {number}: {line.strip()!r} — {why}. "
+                "Each entry is '<repo-relative-path> <pct>'. The gate will not "
+                "answer from a record it read only part of: the entry it "
+                "dropped would stop being enforced AND stop being honoured, "
+                "with nothing in any verdict to say so."
+            ),
+            fixes=(f"fix or delete {configured} line {number}",),
+        )
+
+    baseline: dict[str, float] = {}
+    seen: dict[str, int] = {}
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        fields = line.split()
+        if len(fields) != 2:
+            return None, unreadable(number, raw, "expected exactly two fields")
+        rel, recorded = fields
+        try:
+            pct = float(recorded)
+        except ValueError:
+            return None, unreadable(number, raw, f"{recorded!r} is not a number")
+        if not 0.0 <= pct <= 100.0:
+            return None, unreadable(number, raw, f"{pct:g} is not a percentage")
+        if rel in seen:
+            return None, unreadable(
+                number, raw, f"already recorded on line {seen[rel]}"
+            )
+        seen[rel] = number
+        baseline[rel] = pct
+    return baseline, None
+
+
+def _ratcheted_against_baseline(
+    below: dict[str, float], baseline: dict[str, float] | None, floor: float
+) -> tuple[dict[str, float], list[str], list[str]]:
+    """Split a below-floor set by what the recorded baseline says about it.
+
+    Returns ``(still_below, ratcheted, regressed)``. Asked ONLY of files the
+    floor has already rejected, and that restriction is the mechanism: a file
+    at or above the floor is never measured against a record, or a stale entry
+    would quietly become a second and higher floor nobody agreed to.
+
+    Three answers, and they are three different claims. At or above the record
+    is a PRE-EXISTING shortfall this change did not create and, at 70.99
+    against a recorded 69.17, has just reduced — held out of the floor with
+    both numbers attached, exactly as :func:`_excluded_by_manifest_globs`
+    holds out a policy path. Below the record is a REGRESSION and gets its own
+    sentence, because "you are below the floor" sends an author to write
+    several hundred lines of test for a gap that predates them while "you lost
+    four points against a number this project recorded" sends them to the
+    lines they just deleted. No record at all keeps the original refusal
+    untouched: an absent entry is the ordinary case for every file in the
+    project, so reading it as permission would turn a ratchet into an amnesty.
+    """
+    if not baseline:
+        return below, [], []
+
+    still: dict[str, float] = {}
+    ratcheted: list[str] = []
+    regressed: list[str] = []
+    for rel, measured in sorted(below.items()):
+        pct = float(measured)
+        recorded = next(
+            (v for k, v in baseline.items() if _same_file(k, rel)), None
+        )
+        if recorded is None:
+            still[rel] = measured
+        elif pct + _BASELINE_TOLERANCE >= recorded:
+            ratcheted.append(
+                f"{rel} {pct:g}% — below the {floor:g}% floor but at or above "
+                f"its recorded baseline {recorded:g}% (pre-existing shortfall, "
+                f"ratcheted)"
+            )
+        else:
+            regressed.append(
+                f"{rel} {pct:g}%, recorded baseline {recorded:g}% "
+                f"(down {recorded - pct:g} point(s))"
+            )
+    return still, ratcheted, regressed
+
+
+def _ratchet_detail(ratcheted: list[str]) -> str:
+    if not ratcheted:
+        return ""
+    return (
+        "Not held to the floor, because a recorded baseline says the shortfall "
+        "predates this change: " + "; ".join(ratcheted) + "."
+    )
 
 
 def _executable_text(adapters: list[Adapter], source: str) -> str | None:
