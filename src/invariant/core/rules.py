@@ -27,7 +27,7 @@ from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
 from .manifest import Level, Manifest
-from .privacy import PrivacyScanner
+from .privacy import EXEMPTION_MARKER, PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
@@ -1583,7 +1583,12 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
         fixes=(
             "describe by characteristics rather than identity",
             "resolve operational identifiers at runtime instead of writing them down",
-            "add 'invariant: allow-privacy' on the line if this is a false positive",
+            (
+                f"if this is a false positive, add '{EXEMPTION_MARKER}' on the "
+                "line — or, in markup with no inline comment, on a comment line "
+                "of its own, which covers the rest of that line's block and the "
+                "whole of the next one, and nothing beyond"
+            ),
         ),
     )
 

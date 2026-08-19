@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import pytest
 
 from invariant.core.privacy import PrivacyScanner
@@ -348,3 +350,239 @@ class TestLinksNameANetworkHost:
 
     def test_the_scp_arm_still_works(self):
         assert self.flagged("git@host.invalid:org/repo.git")
+
+
+class TestExemptionMarkerScope:
+    """BUG_045: the marker has to be usable from a comment that owns its line.
+
+    reStructuredText and Markdown have no inline comment, so a same-line-only
+    marker can be written in prose and nowhere else — where it renders into the
+    published output. The scope rule, stated once:
+
+        A marker exempts its own line; and when nothing but comment
+        punctuation precedes it on that line, it also exempts the rest of the
+        block it opens and the whole of the next block, where a block is a run
+        of consecutive non-blank lines.
+
+    Both directions are tabled below, because a table that can only prove the
+    exemption GRANTS is not evidence about a mechanism whose whole risk is
+    reaching too far.
+    """
+
+    MARKER = "invariant: allow-privacy"
+    LEAK = "someone@example.invalid"
+
+    #: Placements the marker must cover. Each is paired with a mutation — the
+    #: same text with the marker neutralised — that must produce a finding, so
+    #: a case cannot pass by containing nothing to find.
+    GRANTED: ClassVar = [
+        (
+            "rst comment before a paragraph, leak mid-paragraph",
+            (
+                ".. invariant: allow-privacy -- reason\n"
+                "\n"
+                "Opening line of the paragraph,\n"
+                "which mentions someone@example.invalid in the middle,\n"
+                "and closes here.\n"
+            ),
+        ),
+        (
+            "rst comment wrapped onto a second line",
+            (
+                ".. invariant: allow-privacy -- a reason long enough\n"
+                "   to wrap onto a second comment line\n"
+                "\n"
+                "Prose mentioning someone@example.invalid inside.\n"
+            ),
+        ),
+        (
+            "rst comment before a bullet list, leak in a later item",
+            (
+                ".. invariant: allow-privacy -- reason\n"
+                "\n"
+                "- first item\n"
+                "- second item, someone@example.invalid, still the same list\n"
+                "- third item\n"
+            ),
+        ),
+        (
+            "rst comment indented inside a directive body",
+            (
+                ".. directive:: title\n"
+                "   :id: X\n"
+                "\n"
+                "   .. invariant: allow-privacy -- reason\n"
+                "\n"
+                "   1. step one\n"
+                "   2. step two, someone@example.invalid,\n"
+                "      continued on the next line\n"
+                "   3. step three\n"
+            ),
+        ),
+        (
+            "markdown html comment before a paragraph",
+            (
+                "<!-- invariant: allow-privacy -- reason -->\n"
+                "\n"
+                "Prose mentioning someone@example.invalid inside.\n"
+            ),
+        ),
+        (
+            "a hash comment directly above the line it covers",
+            (
+                "# invariant: allow-privacy -- reason\n"
+                'default = "someone@example.invalid"\n'
+            ),
+        ),
+        (
+            "the pre-existing same-line form, unchanged",
+            "mail someone@example.invalid  invariant: allow-privacy\n",
+        ),
+        (
+            "a tight comment reaches its own block AND the next one",
+            (
+                "<!-- invariant: allow-privacy -- reason -->\n"
+                "prose sharing the marker's own block\n"
+                "\n"
+                "the next block, someone@example.invalid, still covered\n"
+            ),
+        ),
+    ]
+
+    #: Placements the marker must NOT cover. Each carries a leak the scanner is
+    #: still required to report; a case here goes green only by over-reaching.
+    REFUSED: ClassVar = [
+        (
+            "the block after the next one is out of reach",
+            (
+                ".. invariant: allow-privacy -- reason\n"
+                "\n"
+                "the block this marker covers\n"
+                "\n"
+                "a later block, someone@example.invalid, uncovered\n"
+            ),
+        ),
+        (
+            "a block before the marker is out of reach",
+            (
+                "an earlier block, someone@example.invalid, uncovered\n"
+                "\n"
+                ".. invariant: allow-privacy -- reason\n"
+                "\n"
+                "the block this marker covers\n"
+            ),
+        ),
+        (
+            "a line above the marker in the marker's own block is out of reach",
+            (
+                "an earlier line, someone@example.invalid, uncovered\n"
+                ".. invariant: allow-privacy -- reason\n"
+            ),
+        ),
+        (
+            "an inline marker does not reach the next block",
+            (
+                "mail ok@example.invalid  invariant: allow-privacy\n"
+                "\n"
+                "the next block, someone@example.invalid, uncovered\n"
+            ),
+        ),
+        (
+            "an inline marker does not reach the rest of its own block",
+            (
+                "mail ok@example.invalid  invariant: allow-privacy\n"
+                "still the same block, someone@example.invalid, uncovered\n"
+            ),
+        ),
+        (
+            "only the FIRST following block is covered, however wide the gap",
+            (
+                ".. invariant: allow-privacy -- reason\n"
+                "\n"
+                "\n"
+                "\n"
+                "the block this marker covers\n"
+                "\n"
+                "a later block, someone@example.invalid, uncovered\n"
+            ),
+        ),
+        (
+            "a marker before one list does not reach a second list",
+            (
+                ".. invariant: allow-privacy -- reason\n"
+                "\n"
+                "- covered item\n"
+                "\n"
+                "- a separate list, someone@example.invalid, uncovered\n"
+            ),
+        ),
+        (
+            "a tight comment stops after the next block, like a spaced one",
+            # The markup shape the advice text describes: no blank line between
+            # the comment and what it covers, so the marker's own block runs on
+            # into the prose. The reach is still two blocks and stops there --
+            # this is the bound for the placement a Markdown author reaches for.
+            (
+                "<!-- invariant: allow-privacy -- reason -->\n"
+                "prose sharing the marker's own block\n"
+                "\n"
+                "the one following block, covered\n"
+                "\n"
+                "a later block, someone@example.invalid, uncovered\n"
+            ),
+        ),
+    ]
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["emails"])
+
+    def neutralised(self, text):
+        """The same text with the marker defused, structure untouched."""
+        return text.replace(self.MARKER, "invariant: NOT-a-marker")
+
+    def test_both_tables_are_non_empty(self):
+        # "examined nothing" and "found nothing wrong" are the same green, so
+        # the corpus asserts its own size before either direction is read.
+        assert len(self.GRANTED) >= 6
+        assert len(self.REFUSED) >= 6
+
+    @pytest.mark.parametrize(("name", "text"), GRANTED, ids=[n for n, _ in GRANTED])
+    def test_the_marker_reaches_what_it_should(self, name, text):
+        assert self.scanner.scan_text(text) == [], name
+
+    @pytest.mark.parametrize(("name", "text"), GRANTED, ids=[n for n, _ in GRANTED])
+    def test_each_granted_case_has_something_to_find(self, name, text):
+        # The mutation control: without the marker the same text is a finding,
+        # so a green above is the exemption working rather than an empty case.
+        assert self.scanner.scan_text(self.neutralised(text)) != [], name
+
+    @pytest.mark.parametrize(("name", "text"), REFUSED, ids=[n for n, _ in REFUSED])
+    def test_the_marker_reaches_no_further(self, name, text):
+        assert [f.raw for f in self.scanner.scan_text(text)] == [self.LEAK], name
+
+    def test_a_marker_with_nothing_after_it_covers_nothing_beyond_itself(self):
+        text = (
+            "prose, someone@example.invalid, uncovered\n"
+            "\n"
+            ".. invariant: allow-privacy\n"
+            "\n"
+            "\n"
+        )
+        assert [f.raw for f in self.scanner.scan_text(text)] == [self.LEAK]
+
+    def test_the_reach_is_two_blocks_whatever_the_pattern(self):
+        # The law is about placement, not about which pattern matched: the
+        # same two-block reach holds for a home path as for an address.
+        scanner = PrivacyScanner(patterns=["home_paths"])
+        covered = ".. invariant: allow-privacy\n\nsee /Users/someone/app\n"
+        beyond = ".. invariant: allow-privacy\n\ncovered\n\nsee /Users/someone/app\n"
+        assert scanner.scan_text(covered) == []
+        assert len(scanner.scan_text(beyond)) == 1
+
+    def test_the_marker_string_is_the_one_the_advice_names(self):
+        # One spelling, read by the scanner and by the rule that prints the
+        # fix advice — the AUD-15 lesson applied to the escape hatch.
+        from invariant.core.privacy import EXEMPTION_MARKER
+        from invariant.core.rules import EXEMPTION_MARKER as advised
+
+        assert EXEMPTION_MARKER == self.MARKER == advised

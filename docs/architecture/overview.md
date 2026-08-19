@@ -242,7 +242,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level | Decide policy — levels come from the manifest |
 | `items` | The work-item model and the pluggable store backends that read and write it | Know an item's lifecycle — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
-| `privacy` | Pattern-based detection of personal data in text | Know which files matter |
+| `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 
 ### `domains/`

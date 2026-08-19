@@ -10,6 +10,14 @@ second copy of the secret, and reports get pasted into commits and issues. The
 raw match stays available in-process for a caller that genuinely needs it —
 `invariant privacy scan --reveal`, which is for a human reading a terminal —
 but nothing writes it down by default.
+
+**The escape hatch is block-scoped, not file-scoped.** A marker exempts its
+own line; written on a line nothing but comment punctuation precedes, it also
+exempts the rest of its own block and the whole of the next one. That is what
+makes it usable from reStructuredText and Markdown, which have no inline
+comment — and it is deliberately not "the rest of the file" or "the rest of
+the section", because a reach a reviewer cannot see the end of is a place to
+hide a leak. See `PrivacyScanner._exempt_lines`.
 """
 
 from __future__ import annotations
@@ -17,7 +25,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, Pattern
+from typing import Iterable, Mapping, Pattern, Sequence
 
 
 @dataclass(frozen=True)
@@ -40,6 +48,13 @@ def _redact(text: str, keep: int = 2) -> str:
     if len(text) <= keep:
         return "█" * len(text)
     return text[:keep] + "█" * min(len(text) - keep, 12)
+
+
+#: The exemption marker — the ONE authoritative spelling, read by the scanner
+#: and by the rule that prints the advice, so the two cannot drift apart the
+#: way the two construction paths did (AUD-15). Its SCOPE is stated in
+#: ``PrivacyScanner._exempt_lines`` and nowhere else.
+EXEMPTION_MARKER = "invariant: allow-privacy"
 
 
 #: A dotted-quad address, octet by octet. Named because two patterns need the
@@ -184,8 +199,10 @@ class PrivacyScanner:
 
     def scan_text(self, text: str, path: Path | None = None) -> list[Finding]:
         findings: list[Finding] = []
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if self._is_exempt_line(line):
+        lines = text.splitlines()
+        exempt = self._exempt_lines(lines)
+        for lineno, line in enumerate(lines, start=1):
+            if lineno in exempt:
                 continue
             for name, pattern in self.compiled.items():
                 if name == "clock_times" and _TIME_FALSE_ALARM.search(line):
@@ -228,9 +245,60 @@ class PrivacyScanner:
         return findings
 
     @staticmethod
-    def _is_exempt_line(line: str) -> bool:
-        """An explicit inline exemption, for the case the gate gets wrong."""
-        return "invariant: allow-privacy" in line
+    def _exempt_lines(lines: Sequence[str]) -> set[int]:
+        """The 1-based line numbers an exemption marker covers.
+
+        **The rule, in one sentence:** a marker exempts its own line; and when
+        nothing but comment punctuation precedes it on that line, it also
+        exempts the rest of the block it opens and the whole of the next
+        block, where a block is a run of consecutive non-blank lines.
+
+        The same-line form is the first half and is unchanged: a marker with
+        text to its left reaches that line and no further. The second half
+        exists because a same-line marker is unwritable in the markup the gate
+        mostly scans. reStructuredText and Markdown have no inline comment — a
+        comment there owns its line — so the only way to exempt a finding in
+        prose was to append the marker to the prose, where it renders into the
+        published output. Six of those went out in one consuming project's
+        documentation before this was fixed (BUG_045).
+
+        A block rather than a line, because in RST the marker cannot be put
+        next to what it covers. Inserted mid-paragraph a comment SPLITS the
+        paragraph; inserted between list items it ENDS the list and starts a
+        second one. Both are visible in the rendered output, which is the thing
+        the marker is supposed to leave alone, so the comment can only go
+        before the whole block — and every real case sits mid-block.
+
+        Two blocks and not the rest of the file or of the section, because a
+        marker whose reach a reviewer cannot see the end of is a place to hide
+        a leak rather than an escape hatch for a false positive. Its own block
+        is included so a wrapped comment covers what follows it rather than
+        only itself; the reach runs FORWARD from the marker only, so a line
+        above it in the same block is still scanned.
+
+        Blank lines between the marker and the block it covers are the normal
+        shape — RST needs one to close the comment — so they are skipped, and
+        what follows them is still exactly one block.
+        """
+        exempt: set[int] = set()
+        total = len(lines)
+        for index, line in enumerate(lines):
+            at = line.find(EXEMPTION_MARKER)
+            if at < 0:
+                continue
+            exempt.add(index + 1)  # the marker's own line, in either form
+            if any(char.isalnum() for char in line[:at]):
+                continue  # inline: something else is on this line
+            cursor = index
+            while cursor < total and lines[cursor].strip():
+                exempt.add(cursor + 1)  # the rest of the marker's own block
+                cursor += 1
+            while cursor < total and not lines[cursor].strip():
+                cursor += 1  # the blank run the markup requires
+            while cursor < total and lines[cursor].strip():
+                exempt.add(cursor + 1)  # the next block, and nothing past it
+                cursor += 1
+        return exempt
 
     # -- construction from configuration -------------------------------
 

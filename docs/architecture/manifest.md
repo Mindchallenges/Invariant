@@ -203,6 +203,68 @@ Two consequences of the test being structural, both deliberate:
 The schemeless `www.` form and the scp-style `user@host:path` a git remote is
 written in are separate arms and are unaffected by any of the above.
 
+### The exemption marker, and how far it reaches
+
+Every gate needs an escape hatch for the case it gets wrong, and this one is a
+string written into the text being scanned: `invariant: allow-privacy`. The
+spelling lives in exactly one place — `EXEMPTION_MARKER` in `core/privacy` —
+read both by the scanner and by the rule that prints the advice, so the two
+cannot come to disagree about it.
+
+**The rule, in one sentence:** a marker exempts its own line; and when nothing
+but comment punctuation precedes it on that line, it also exempts the rest of
+the block it opens and the whole of the next block, where a block is a run of
+consecutive non-blank lines.
+
+```mermaid
+graph TD
+    M["a line carrying the marker"] --> Q{"anything alphanumeric<br/>to its LEFT?"}
+    Q -- yes --> INLINE["INLINE — that line, and no other"]
+    Q -- no --> BLOCK["BLOCK — that line,<br/>the rest of its own block,<br/>and the whole of the NEXT block"]
+    BLOCK --> STOP["the blank line after the next block<br/>ends the reach; nothing beyond it"]
+```
+
+The inline half is the older of the two and is unchanged. It is the right form
+in source code, where every language has an inline comment, and it is what the
+`allow` list is not: `privacy.allow` exempts a literal string everywhere it
+appears, and a marker exempts a *place*.
+
+The block half exists because the inline form is unwritable in the markup this
+gate mostly scans. `privacy.scope` defaults to documents, memories and reports
+— all prose — and **reStructuredText and Markdown have no inline comment**: a
+comment there owns its line. So the only way to exempt a finding in prose was
+to append the marker to the prose itself, where it renders into the published
+output. One consuming project shipped six of those, visible in its built HTML
+as parentheticals, before this was fixed (BUG_045).
+
+**A block and not a line**, because in RST the marker cannot be put next to
+what it covers. A comment inserted mid-paragraph *splits the paragraph*; a
+comment inserted between list items *ends the list* and starts a second one.
+Both change the rendered output, which is the thing the marker exists to leave
+alone — so the comment can only go before the whole block, and in practice the
+finding is mid-block every time. A one-line reach would exempt nothing that
+needs exempting.
+
+**Two blocks and not the rest of the file, or of the section**, because the
+reach is the whole risk. A marker is a place a real leak can be parked, so its
+cover has to be something a reviewer reading the diff can see the end of. Its
+own block is included so that a comment wrapped over two lines covers what
+follows it rather than only itself, and the reach runs FORWARD only — a line
+above the marker in the same block is still scanned. Blank lines between the
+marker and the block it covers are skipped, because RST needs one to close the
+comment; what follows them is still exactly one block.
+
+A file can be exempted only by marking every block in it, which is a diff full
+of markers rather than a single line nobody notices. That is the intended
+trade: the escape hatch is cheap to use honestly and conspicuous to abuse.
+
+Two things the engine deliberately does not know. It does not parse markup, so
+whether the marker's line is *really* a comment is the author's problem — a
+bullet beginning with the marker is block-scoped and also renders. And a
+comment is still source text: Sphinx keeps the marker out of every rendered
+page, but a published `_sources` mirror or a machine-readable export of the
+directive bodies carries the source verbatim, as it does for the inline form.
+
 ### Where worktrees live
 
 `session.worktree_dir` exists for hosts that trust one location and confirm
