@@ -386,12 +386,15 @@ class FakePipelines:
     def __init__(self):
         self.docs: list[tuple[str, str]] = []
         self.agents: list[tuple[str, str]] = []
+        self.agent_how: list[tuple[str, str, str]] = []
 
     def record_docs_read(self, session_id, path):
         self.docs.append((session_id, path))
 
-    def record_agent_run(self, session_id, agent_type):
+    def record_agent_run(self, session_id, agent_type, *, how="dispatch"):
         self.agents.append((session_id, agent_type))
+        self.agent_how.append((session_id, agent_type, how))
+        return "recorded"
 
 
 class FakeSession:
@@ -422,17 +425,25 @@ class FakeCtx:
     file. Asking the wrong question now raises.
     """
 
-    def __init__(self, host_session_id="host-1111"):
+    def __init__(self, host_session_id="host-1111", how="host"):
         self.pipelines = FakePipelines()
         self.sessions = FakeSessions()
         self.host_session_id = host_session_id
+        #: How the fake claims it identified the session. ``host`` is a proven
+        #: route; tests that need a guess pass ``origin``.
+        self.how = how
         #: Every payload attribution was asked about, so a test can assert the
         #: call's own path was in hand at the moment the owner was chosen.
         self.asked: list[dict] = []
 
     def session_for_payload(self, payload):
+        return self.resolution_for_payload(payload).session
+
+    def resolution_for_payload(self, payload):
         self.asked.append(payload)
-        return FakeSession()
+        from invariant.domains.session import Resolution
+
+        return Resolution(FakeSession(), self.how)
 
     def rule_context(self, payload=None):  # pragma: no cover - unused here
         raise NotImplementedError
@@ -486,7 +497,7 @@ class TestAgentInvocationIsRecorded:
         error, which is a far worse outcome than a gate missing one data point.
         """
         class Exploding(FakePipelines):
-            def record_agent_run(self, session_id, agent_type):
+            def record_agent_run(self, session_id, agent_type, *, how="dispatch"):
                 raise InvariantError("state store is unwritable")
 
         ctx = FakeCtx()
@@ -517,8 +528,10 @@ class TestAgentInvocationIsRecorded:
 
     def test_recording_is_skipped_without_a_session(self, host):
         class NoSession(FakeCtx):
-            def session_for_payload(self, payload):
-                return None
+            def resolution_for_payload(self, payload):
+                from invariant.domains.session import Resolution
+
+                return Resolution(None, "none")
 
         ctx = NoSession()
         host._post_tool_use(
@@ -865,6 +878,498 @@ class TestReadIsAttributedByItsPath:
 
         assert self.evidence(world, world["owner"], "agents_run") == []
         assert self.evidence(world, world["peer"], "agents_run") == []
+
+
+class TestBUG028TheAgentThatCreatedThePipelineIsInIt:
+    """A subagent that starts its own session and pipeline must be recordable.
+
+    The reported wedge, end to end. A ``feature-architect`` was dispatched, and
+    IT ran `session start`, `session isolate` and `pipeline start` before
+    authoring anything. The dispatch was therefore observed at a moment when
+    the session it would belong to did not exist and the pipeline it would be
+    evidence for did not exist either — so `agents.design_agent_ran`, which is
+    block-level, refused the pipeline the design agent had itself created, and
+    no action available to that pipeline could satisfy it.
+
+    No lookup fixes this. A better resolution still resolves to nothing when
+    the destination has not been created yet. What is available instead is the
+    ACTOR: the host stamps the acting agent's type on every hook payload,
+    including the ones the subagent's own tool calls raise, so the run is
+    observable from the agent's side even though the dispatch was not
+    attributable from the parent's.
+    """
+
+    HOST_ID = "host-parent"
+
+    @pytest.fixture
+    def world(self, tmp_path, monkeypatch):
+        """A governed repository whose design role names one agent."""
+        import subprocess
+
+        from invariant.cli.main import Context
+        from invariant.core.manifest import MANIFEST_RELPATH
+
+        monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+
+        (tmp_path / MANIFEST_RELPATH).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo"},
+                    "session": {"worktree_dir": ".claude/worktrees"},
+                    "agents": {"roles": {"design": ["feature-architect"]}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "architecture").mkdir(parents=True)
+
+        def git(*args):
+            subprocess.run(
+                ["git", *args], cwd=str(tmp_path), check=True, capture_output=True
+            )
+
+        git("init", "-q", "-b", "master")
+        git("config", "user.email", "dev@example.invalid")
+        git("config", "user.name", "Dev")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+        return tmp_path, Context(cwd=tmp_path, host_session_id=self.HOST_ID)
+
+    def post(self, world, payload, cwd=None, host_session_id=None):
+        from invariant.cli.main import Context
+
+        root, _ = world
+        return ClaudeCodeHost(root)._post_tool_use(
+            payload,
+            Context(
+                cwd=cwd or root,
+                host_session_id=(
+                    self.HOST_ID if host_session_id is None else host_session_id
+                ),
+            ),
+        )
+
+    def design_gate(self, world, session_id):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import RuleContext, evaluate
+
+        root, ctx = world
+        results = evaluate(
+            ["agents.design_agent_ran"],
+            RuleContext(
+                manifest=Manifest.load(root),
+                cwd=root,
+                session={"id": session_id},
+                pipeline=ctx.pipelines.current(session_id).to_dict(),
+                payload={},
+                extra={},
+            ),
+        )
+        assert len(results) == 1, "the gate under test did not evaluate"
+        return results[0].verdict
+
+    def test_the_architect_that_created_the_pipeline_clears_the_design_gate(
+        self, world
+    ):
+        """The whole defect, in the order it actually happened."""
+        _root, ctx = world
+
+        # 1. The parent dispatches. There is no session and no pipeline yet, so
+        #    there is nothing to attribute this to and nothing to be evidence
+        #    for. This is the event the engine used to rely on.
+        self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {
+                    "subagent_type": "feature-architect",
+                    "description": "design the change",
+                    "prompt": "Design it.",
+                },
+            },
+        )
+
+        # 2. The SUBAGENT registers the session. Its Bash call carries the
+        #    parent's host session id -- a subagent shares it -- and the agent
+        #    type the host stamped on the payload.
+        session = ctx.sessions.start("designs-itself")
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": "feature-architect",
+                "tool_input": {"command": "invariant session start designs-itself"},
+                "tool_response": f"session {session.id} (designs-itself) registered",
+            },
+        )
+        ctx.sessions.isolate(session.id, execute=True)
+
+        # 3. The subagent starts the pipeline, still as itself.
+        ctx.pipelines.start(session.id, task="the ADR the architect is writing")
+        assert not self.design_gate(world, session.id).ok, (
+            "the gate was already satisfied; there is nothing to prove"
+        )
+
+        # 4. The subagent does its work. Every call it makes is stamped.
+        self.post(
+            world,
+            {
+                "tool_name": "Write",
+                "agent_type": "feature-architect",
+                "tool_input": {
+                    "file_path": str(
+                        Path(ctx.sessions.get(session.id).worktree)
+                        / "docs"
+                        / "adr"
+                        / "ADR-062.md"
+                    )
+                },
+            },
+        )
+
+        verdict = self.design_gate(world, session.id)
+        assert verdict.ok, verdict.message
+
+    def test_the_actor_is_recorded_as_an_actor_not_as_a_dispatch(self, world):
+        """The record says WHY the agent is in it, because the two differ.
+
+        A dispatch proves somebody asked for this agent and that the request
+        resolved here. An actor reading proves the agent operated in this
+        pipeline. Only the second survives the question "did the design
+        actually happen in this pipeline", so the record keeps them apart
+        instead of flattening both into a name in a list.
+        """
+        root, ctx = world
+        session = ctx.sessions.start("designs-itself")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.pipelines.start(session.id, task="t")
+
+        self.post(
+            world,
+            {
+                "tool_name": "Read",
+                "agent_type": "feature-architect",
+                "tool_input": {"file_path": str(root / "docs" / "architecture")},
+            },
+        )
+        self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {"subagent_type": "compliance-reviewer"},
+            },
+        )
+
+        evidence = ctx.pipelines.current(session.id).evidence
+        assert evidence["agents_run_how"] == {
+            "feature-architect": "actor",
+            "compliance-reviewer": "dispatch",
+        }
+
+    def test_an_actor_reading_is_not_downgraded_by_a_later_dispatch(self, world):
+        _root, ctx = world
+        session = ctx.sessions.start("s")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.pipelines.start(session.id, task="t")
+
+        actor = {
+            "tool_name": "Bash",
+            "agent_type": "feature-architect",
+            "tool_input": {"command": "ls"},
+        }
+        self.post(world, actor)
+        self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {"subagent_type": "feature-architect"},
+            },
+        )
+
+        evidence = ctx.pipelines.current(session.id).evidence
+        assert evidence["agents_run"] == ["feature-architect"], "recorded twice"
+        assert evidence["agents_run_how"]["feature-architect"] == "actor", (
+            "the weaker reading overwrote the stronger one"
+        )
+
+    def test_an_ordinary_turn_carries_no_actor_and_records_none(self, world):
+        """`agent_type` is absent from a main-loop payload, and absence is not
+        an empty agent. Asserted on key PRESENCE, not on contents: `.get(k) or
+        []` cannot tell a dropped write from a key that was never written, and
+        that conflation already cost one analysis of this bug."""
+        _root, ctx = world
+        session = ctx.sessions.start("s")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.pipelines.start(session.id, task="t")
+
+        self.post(world, {"tool_name": "Bash", "tool_input": {"command": "ls"}})
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence
+
+    def test_an_actor_working_outside_an_isolated_session_is_not_banked_on_it(
+        self, world
+    ):
+        """The contamination that actually happened, from the actor side.
+
+        A subagent shares its PARENT's `session_id`, so the host route answers
+        for every agent that parent dispatched — including ones working in the
+        shared checkout while the bound session sits isolated elsewhere. Two
+        real pipelines carry exactly this: a `backlog-curator` and a
+        `general-purpose` agent, dispatched by the same host that owned the
+        session, filed against a pipeline that had recorded none of its own
+        work.
+
+        `Resolution.proven` does NOT catch this — the host route identified the
+        session, it did not guess it. An actor row has to clear a higher bar
+        than a dispatch row, because it asserts the agent worked HERE.
+        """
+        _root, ctx = world
+        session = ctx.sessions.start("isolated-elsewhere")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.sessions.isolate(session.id, execute=True)
+        ctx.pipelines.start(session.id, task="what this session is really doing")
+
+        # A curator filing a bug in the SHARED checkout, dispatched by the same
+        # host. No path inside the worktree, no worktree named in a brief.
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": "backlog-curator",
+                "tool_input": {"command": "invariant item new"},
+            },
+        )
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence, (
+            "an agent working in the shared checkout was recorded as having "
+            "worked in an isolated session's pipeline"
+        )
+
+    def test_an_actor_inside_the_worktree_is_still_recorded(self, world):
+        """The restriction above must not cost the case the fix exists for.
+
+        The same host, the same binding, the same isolated session — but a call
+        whose path lands inside the worktree. That is the architect authoring
+        its ADR, and it must still record.
+        """
+        _root, ctx = world
+        session = ctx.sessions.start("designs-itself")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.sessions.isolate(session.id, execute=True)
+        ctx.pipelines.start(session.id, task="the ADR the architect is writing")
+
+        self.post(
+            world,
+            {
+                "tool_name": "Write",
+                "agent_type": "feature-architect",
+                "tool_input": {
+                    "file_path": str(
+                        Path(ctx.sessions.get(session.id).worktree)
+                        / "docs"
+                        / "adr"
+                        / "ADR-062.md"
+                    )
+                },
+            },
+        )
+
+        assert ctx.pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
+
+    def test_an_actor_in_a_second_tracks_worktree_is_recorded_there(self, world):
+        """One host binding cannot represent two concurrent tracks.
+
+        A parent that owns session A and drives session B has every pathless
+        call resolve to A, because step 2 answers first. For a DISPATCH that is
+        already inverted when the brief names B's worktree. For an actor there
+        is no brief to read — but there is something better: the agent is
+        standing in B, or writing into it, right now.
+
+        Refusing here would keep A clean and leave B unable to record any agent
+        that never names a path, which is the original wedge seen from the
+        other end. So the location wins, and it wins for this route only:
+        reading a peer's file stays a detectable crossing, because a main-loop
+        turn never names an actor.
+        """
+        _root, ctx = world
+        owned = ctx.sessions.start("track-a")
+        ctx.sessions.adopt_host_session(owned.id, self.HOST_ID)
+        ctx.sessions.isolate(owned.id, execute=True)
+        ctx.pipelines.start(owned.id, task="what the host is bound to")
+
+        other = ctx.sessions.start("track-b")
+        ctx.sessions.isolate(other.id, execute=True)
+        ctx.pipelines.start(other.id, task="the second track")
+        assert ctx.sessions.get(other.id).host_session_id is None, (
+            "the second track is bound; the 1:1 rule did not hold and this "
+            "test is not exercising what it claims"
+        )
+
+        self.post(
+            world,
+            {
+                "tool_name": "Write",
+                "agent_type": "feature-architect",
+                "tool_input": {
+                    "file_path": str(
+                        Path(ctx.sessions.get(other.id).worktree) / "src" / "x.py"
+                    )
+                },
+            },
+        )
+
+        assert ctx.pipelines.current(other.id).evidence["agents_run"] == [
+            "feature-architect"
+        ], "the second track recorded nothing an agent demonstrably did in it"
+        assert "agents_run" not in ctx.pipelines.current(owned.id).evidence, (
+            "the host's own session absorbed a run that happened elsewhere"
+        )
+
+    def test_a_session_with_no_worktree_still_accepts_the_host_route(self, world):
+        """A session that has not isolated has nowhere else its agents could be.
+
+        The shared checkout IS that session's location, so the host binding
+        cannot be contradicted by where the call stands, and refusing here
+        would lose every agent that runs before `session isolate`.
+        """
+        _root, ctx = world
+        session = ctx.sessions.start("never-isolated")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.pipelines.start(session.id, task="t")
+        assert ctx.sessions.get(session.id).worktree is None
+
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": "feature-architect",
+                "tool_input": {"command": "ls"},
+            },
+        )
+
+        assert ctx.pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
+
+    def test_a_guessed_session_never_receives_an_actor(self, world):
+        """The foreign-write cell, from the actor side.
+
+        A curator running in the main checkout under a different host resolves
+        by `origin` -- "the only session registered at or above here that is
+        not somebody else's" -- which is a guess. A guess must never write
+        evidence, because the pipeline that receives it clears its gate on work
+        that never happened in it.
+        """
+        root, ctx = world
+        victim = ctx.sessions.start("someone-elses-work")
+        ctx.pipelines.start(victim.id, task="t")
+        other = ctx.sessions.start("bound-elsewhere")
+        ctx.sessions.adopt_host_session(other.id, self.HOST_ID)
+
+        # A different host entirely: `other` is excluded as somebody else's, so
+        # `victim` is the single candidate left standing and `origin` answers.
+        from invariant.cli.main import Context
+
+        resolution = Context(
+            cwd=root, host_session_id="host-stranger"
+        ).resolution_for_payload({"tool_name": "Bash", "tool_input": {}})
+        assert resolution.how == "origin", (
+            f"the guess route was not exercised (got {resolution.how!r})"
+        )
+        assert resolution.session.id == victim.id
+
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": "backlog-curator",
+                "tool_input": {"command": "ls"},
+            },
+            host_session_id="host-stranger",
+        )
+
+        assert "agents_run" not in ctx.pipelines.current(victim.id).evidence, (
+            "a foreign agent was written to a pipeline that never ran it"
+        )
+
+    def test_a_guessed_session_never_receives_a_dispatch_and_is_told_so(
+        self, world
+    ):
+        """The same cell from the dispatch side -- and it stops being silent.
+
+        BUG_028's cost was not only the wrong write. It was that the dispatcher
+        could not tell a write that landed from one that vanished until a
+        blocking gate refused, after the phase that needed the evidence.
+        """
+        _root, ctx = world
+        victim = ctx.sessions.start("someone-elses-work")
+        ctx.pipelines.start(victim.id, task="t")
+        other = ctx.sessions.start("bound-elsewhere")
+        ctx.sessions.adopt_host_session(other.id, self.HOST_ID)
+
+        response = self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {"subagent_type": "backlog-curator"},
+            },
+            host_session_id="host-stranger",
+        )
+
+        assert "agents_run" not in ctx.pipelines.current(victim.id).evidence
+        said = response["hookSpecificOutput"]["additionalContext"]
+        assert "NOT recorded" in said and "backlog-curator" in said
+
+    def test_a_dispatch_before_any_pipeline_is_allowed_and_announced(self, world):
+        """The legitimate case the old silence was defending, kept and voiced.
+
+        Dispatching an agent before starting a pipeline is allowed and still
+        is: nothing raises and nothing is refused. What changed is that the
+        caller is told the dispatch cannot be evidence, at the moment it
+        happens, while starting a pipeline first is still an option.
+        """
+        _root, ctx = world
+        session = ctx.sessions.start("no-pipeline-yet")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        assert ctx.pipelines.current(session.id) is None
+
+        response = self.post(
+            world,
+            {
+                "tool_name": "Task",
+                "tool_input": {"subagent_type": "feature-architect"},
+            },
+        )
+
+        said = response["hookSpecificOutput"]["additionalContext"]
+        assert "no pipeline running" in said
+        assert "feature-architect" in said
+
+    def test_a_dispatch_that_lands_says_nothing(self, world):
+        """Silence is still correct when there is nothing to report."""
+        _root, ctx = world
+        session = ctx.sessions.start("s")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.pipelines.start(session.id, task="t")
+
+        assert (
+            self.post(
+                world,
+                {
+                    "tool_name": "Task",
+                    "tool_input": {"subagent_type": "feature-architect"},
+                },
+            )
+            == {}
+        )
+        assert ctx.pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
 
 
 class TestAutomaticBinding:

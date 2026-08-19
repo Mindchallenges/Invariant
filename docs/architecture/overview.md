@@ -316,6 +316,14 @@ now an explicit normalisation obligation rather than an implied one, which is
 what a second agent host would need in order to be written at all. The
 restatement is recorded as ADR-003 D4.
 
+The contract has been widened once since, deliberately and for the same class
+of reason. `agent_type` — the acting agent, which Claude Code stamps on every
+hook payload including a subagent's own — was added because a subagent that
+creates its own session and pipeline dispatches *before* either exists, so the
+design agent that created a pipeline could never be evidence for it (BUG_028).
+No layering rule could recover that; only a fact the host already knows and
+now hands upward. A host that cannot say who is acting omits the key.
+
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through
 hooks and installed assets, while this one *reads back* what the host already

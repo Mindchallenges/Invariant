@@ -3998,8 +3998,22 @@ class TestTheNormalisedPayloadContract:
             "tool_input",
             "tool_input.file_path",
             "tool_input.notebook_path",
+            "agent_type",
             "stop_hook_active",
         }
+
+    def test_the_acting_agent_is_part_of_the_contract(self):
+        """BUG_028 widened the seam, and this is the record of that decision.
+
+        A dispatch is observed from the PARENT's tool call, which happens
+        before a subagent that starts its own session and pipeline has either.
+        No lookup can attribute an event to a destination that does not exist
+        yet, so the agent that CREATED a pipeline could never be evidence for
+        that pipeline's design gate. The actor CAN be observed — the host
+        stamps it on every payload, the subagent's own calls included — so the
+        engine now reads it, and a second host adapter owes it.
+        """
+        assert "agent_type" in NORMALISED_PAYLOAD_KEYS
 
     def test_the_rule_context_reads_the_declared_top_level_keys(self, ctx_factory):
         ctx = ctx_factory(

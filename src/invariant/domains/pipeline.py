@@ -86,6 +86,26 @@ def _child_env() -> dict[str, str]:
     return env
 
 
+#: How an agent came to be in ``agents_run``. Kept beside the list rather than
+#: folded into it, because the gate reads names and an auditor reads evidence:
+#: changing the list's shape would break every stored record and every gate for
+#: the sake of a question the gate does not ask.
+#:
+#: ``dispatch`` — a parent invoked this agent and the invocation resolved to
+#: this session. ``actor`` — the host itself named this agent as the one making
+#: a call that landed in this pipeline, which is the stronger reading: it is
+#: the agent's own work being observed rather than a request for it.
+VIA_DISPATCH = "dispatch"
+VIA_ACTOR = "actor"
+
+#: What :meth:`PipelineDomain.record_agent_run` did. Returned rather than
+#: logged, so the hook that called it can surface a drop to the session that
+#: would otherwise meet it at a blocking gate (BUG_028).
+RECORDED = "recorded"
+ALREADY = "already"
+NO_PIPELINE = "no-pipeline"
+
+
 @dataclass
 class Pipeline:
     session_id: str
@@ -463,20 +483,46 @@ class PipelineDomain:
             read.append(path)
             self._save(session_id, pipeline)
 
-    def record_agent_run(self, session_id: str, agent_type: str) -> None:
-        """Note that a subagent was dispatched in this pipeline.
+    def record_agent_run(
+        self, session_id: str, agent_type: str, *, how: str = VIA_DISPATCH
+    ) -> str:
+        """Note that a subagent ran in this pipeline, and say what happened.
 
-        Unrecorded outside a pipeline, like a docs read: dispatching an agent
-        before starting one is allowed, it just cannot be evidence for a gate
-        that does not exist yet.
+        Returns one of :data:`RECORDED`, :data:`ALREADY` or
+        :data:`NO_PIPELINE`. The return value is the point. This used to be a
+        bare ``return`` when there was no pipeline, defended as "dispatching an
+        agent before starting one is allowed, it just cannot be evidence for a
+        gate that does not exist yet". The permission is right and is kept —
+        nothing here raises, and no dispatch is refused. What was wrong is the
+        silence: ``agents.*_ran`` is block-level, so the caller learns its
+        evidence went nowhere at the gate, at the end of the phase, with no way
+        left to satisfy it (BUG_028). A caller that is told can say so.
+
+        ``how`` records WHY this agent is here, because the two routes are not
+        equally strong and a reader of the record cannot otherwise tell them
+        apart. :data:`VIA_DISPATCH` means a parent asked for this agent and the
+        request resolved to this session. :data:`VIA_ACTOR` means the host
+        named this agent as the one making a call that landed in this
+        pipeline — the agent's own work, not somebody's account of it. An actor
+        reading is never downgraded to a dispatch reading.
         """
         pipeline = self.current(session_id)
         if pipeline is None:
-            return
+            return NO_PIPELINE
+
         ran = pipeline.evidence.setdefault("agents_run", [])
+        via = pipeline.evidence.setdefault("agents_run_how", {})
+        changed = False
         if agent_type not in ran:
             ran.append(agent_type)
-            self._save(session_id, pipeline)
+            changed = True
+        if via.get(agent_type) not in (VIA_ACTOR, how):
+            via[agent_type] = how
+            changed = True
+        if not changed:
+            return ALREADY
+        self._save(session_id, pipeline)
+        return RECORDED
 
     def _fresh_bundle(self, session_id: str, kind: str) -> Path:
         """A per-run result-bundle path, cleared before use.

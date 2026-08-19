@@ -276,6 +276,47 @@ teach it. Learning from a weaker signal would bind the wrong pair permanently.
 Learning is reserved to a call that *wrote* — a read is evidence of where the
 reader was looking, not of who owns the worktree.
 
+**A resolution is not automatically an identification.** Steps 1–4 name the
+session from something the call itself carried; step 5 names the only session
+left standing. Both return a session, and only the first four are evidence.
+Writing evidence on step 5 is how a *foreign* session's agent came to sit in a
+pipeline that never dispatched it: a curator run in the shared checkout, under
+a host bound to nothing, resolved to whichever session happened to be the sole
+attributable candidate — and the pipeline that received it would then clear a
+block-level `agents.*_ran` gate on work that never happened in it (BUG_028).
+
+So the evidence writers ask `Resolution.proven`, not `resolution.session is not
+None`. Enforcement and display still use step 5: telling somebody where they
+probably are is a fair use of a guess, and recording a fact against them is
+not.
+
+**A proof of identity is not a proof of place**, and an actor row needs both.
+Step 2 deliberately outranks step 3 — who is acting beats where the bytes land
+— so it answers identically for an architect writing inside its own worktree
+and for a curator filing a bug in the shared checkout, because a subagent
+shares its parent's host identifier. Both are `host`, both are proven, and only
+one of them worked in the pipeline. A *dispatch* row can live with that: at
+dispatch time there is no better evidence, and the row only claims the request
+resolved here. An *actor* row claims the agent worked here, so for the host
+route — and only for it — the location is asked for explicitly rather than
+inferred. A session with no worktree passes on the binding alone, having no
+location to contradict.
+
+Where the location contradicts the binding, the location wins and the run is
+recorded against the session it landed in. That is step 2 inverted, for the
+same reason the dispatch route already inverts it when a brief names a
+worktree: the host is not acting there, it is delegating into it, and the run
+belongs to the delegate. One binding holds one session, so a parent driving two
+tracks cannot represent the second — and refusing outright would leave that
+track unable to record any agent that never names a path, which is the original
+wedge from the other end. The inversion is safe because it applies only when
+the host names an ACTOR, and a main-loop turn never does: a session reaching
+into a peer's worktree by hand stays attributed to the reacher, and stays a
+detectable crossing. When a *dispatch* cannot be recorded — the route was a guess, or the
+session has no pipeline — the hook says so in the turn where it happened,
+because the alternative is the caller discovering it at a blocking gate at the
+end of the phase, when nothing it can do will satisfy it.
+
 **One order, every recorded call.** Enforcement resolved through this order and
 recording did not: a docs read and an agent dispatch used steps 2 and 4 only,
 so a `Read` naming a file inside a session's worktree was not attributed to
@@ -384,6 +425,20 @@ installed agents and never dispatch one.
 
 Four properties, each deliberate:
 
+- **Two events, not one: the dispatch and the actor.** A dispatch is observed
+  from the *parent's* tool call. An agent that starts its own session and
+  pipeline has neither at that moment, so the dispatch has no destination and
+  no better lookup invents one — the agent that *created* a pipeline could not
+  be evidence for it (BUG_028). The actor can be observed instead: Claude Code
+  stamps the acting agent's type onto every hook payload, including the ones
+  the subagent's own tool calls raise, so a `feature-architect` that runs
+  `pipeline start` and then writes an ADR records itself in the pipeline it
+  made. Both land in `agents_run`; `agents_run_how` keeps them apart, because
+  `dispatch` proves somebody asked for the agent and `actor` proves the agent
+  worked here, and only the second answers "did the design happen in this
+  pipeline". A host that cannot name the actor omits the key and loses that
+  route only.
+
 - **The design gate does not guard the design state.** It cannot: the host
   records a dispatch when the subagent *returns*, so a design agent driving its
   own pipeline can never have its own dispatch on record before it advances out
@@ -394,6 +449,14 @@ Four properties, each deliberate:
   design — is accepted in ADR-003 D2. Contrast `docs.read_architecture`, which
   stays on the design state's exit because a read is recorded the moment it
   happens, while the agent is still running.
+
+  The actor route weakens this premise and is recorded as doing so, rather
+  than quietly acted on: an actor reading IS available while the agent is still
+  running, exactly like a docs read, so the reason the gate sits on the review
+  state no longer holds for a design agent that drives its own pipeline. It
+  still holds for one dispatched into a pipeline it does not act in. Moving the
+  gate is an ADR-003 D2 decision and has not been made here; what has changed
+  is that it is now a choice rather than a constraint.
 
 - **Advisory in every shipped profile, including `strict`.** The engine can
   prove an agent *ran*; it cannot prove one was *needed*. A one-line fix made

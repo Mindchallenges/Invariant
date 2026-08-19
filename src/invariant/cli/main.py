@@ -234,8 +234,21 @@ class Context:
         resolves by identifier alone and works for tool calls that carry no
         path at all.
         """
+        return self.resolution_for_payload(payload).session
+
+    def resolution_for_payload(self, payload: dict):
+        """:meth:`session_for_payload`, plus *how* it decided.
+
+        Callers that only need the answer use ``session_for_payload``. The
+        ``how`` matters to the evidence writers: ``origin`` returns a real
+        session and is still a guess, and evidence written on a guess is what
+        put a foreign session's agent into a pipeline that never dispatched it
+        (BUG_028). :attr:`Resolution.proven` is the question they ask.
+        """
+        from ..domains.session import Resolution
+
         if self.session_id:
-            return self.sessions.require(self.session_id)
+            return Resolution(self.sessions.require(self.session_id), "explicit")
 
         tool_input = payload.get("tool_input")
         target = None
@@ -265,7 +278,7 @@ class Context:
                     # written for.
                     owner = self.sessions.by_worktree_containing(named)
                     if owner is not None:
-                        return owner
+                        return Resolution(owner, "prompt")
                     target = named
 
         resolution = self.sessions.resolve(
@@ -282,7 +295,7 @@ class Context:
         # The binding now happens in post-tool-use, where the tool provably ran.
         # "Someone successfully edited inside this worktree" is evidence of
         # ownership; "someone asked whether they could" is not.
-        return resolution.session
+        return resolution
 
     def _worktree_named_in_prompt(self, prompt) -> Path | None:
         """The one live session worktree an agent prompt names, if exactly one.

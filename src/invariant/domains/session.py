@@ -40,19 +40,44 @@ _GATE_EXTRA_BY_TARGET: dict[str, dict[str, Any]] = {
 }
 
 
+#: Routes that IDENTIFIED the session, as against merely nominating one.
+#:
+#: Every member names the session from something the call itself carried: an
+#: explicit id, the host identifier, the path the call is aimed at, the
+#: worktree the brief names, or the worktree the call is standing in. ``origin``
+#: is deliberately absent — it is the last-resort guess, "the only session
+#: registered at or above here", and it is the route by which a FOREIGN
+#: session's agent was recorded as evidence on a pipeline that never dispatched
+#: it (BUG_028). A guess is fine for deciding what to *display*; it is not fine
+#: for writing evidence a block-level gate will then read as fact.
+PROVEN_ROUTES = frozenset({"explicit", "host", "target", "prompt", "cwd"})
+
+
 @dataclass(frozen=True)
 class Resolution:
     """Which session, and on what evidence.
 
     ``how`` is not decoration. A caller that wants to *record* an attribution —
-    binding a host identifier to a session so later calls resolve cheaply — may
-    only do so when the evidence actually identified the editor. Learning the
-    wrong mapping from a weak signal would be worse than not learning one.
+    binding a host identifier to a session so later calls resolve cheaply, or
+    writing pipeline evidence — may only do so when the evidence actually
+    identified the session. Learning the wrong mapping from a weak signal would
+    be worse than not learning one.
     """
 
     session: "Session | None"
-    how: str  # explicit | host | target | cwd | origin | ambiguous | none
+    #: explicit | host | target | prompt | cwd | origin | ambiguous | none
+    how: str
     candidates: tuple["Session", ...] = ()
+
+    @property
+    def proven(self) -> bool:
+        """Did the call name this session, or did we pick the only one left?
+
+        The distinction the evidence writers turn on. ``session is not None``
+        is not the same question: ``origin`` returns a real session and is
+        still a guess.
+        """
+        return self.session is not None and self.how in PROVEN_ROUTES
 
 
 @dataclass

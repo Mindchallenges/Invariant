@@ -49,11 +49,22 @@ EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 #: adapter for a different agent host has an explicit normalisation obligation
 #: rather than an implied one. Widening this tuple is a decision about the
 #: layer contract, not a convenience.
+#:
+#: ``agent_type`` is the newest member and the one that widened the contract
+#: deliberately. A dispatch is recorded from the PARENT's tool call, which
+#: happens before a subagent that starts its own session and pipeline has
+#: either — so the design agent that CREATED a pipeline could never be evidence
+#: for that pipeline's design gate (BUG_028). Claude Code puts the acting
+#: agent's type on every hook payload it sends, including the ones the subagent
+#: itself makes, so the actor can be recorded where the dispatch cannot. A host
+#: that cannot say who is acting simply omits the key and loses only that
+#: route.
 NORMALISED_PAYLOAD_KEYS = (
     "tool_name",
     "tool_input",
     "tool_input.file_path",
     "tool_input.notebook_path",
+    "agent_type",
     "stop_hook_active",
 )
 

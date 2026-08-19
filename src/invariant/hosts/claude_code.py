@@ -36,6 +36,7 @@ from pathlib import Path
 
 from ..core.errors import InvariantError
 from ..core.rules import EDIT_TOOLS, evaluate_event
+from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -766,10 +767,10 @@ class ClaudeCodeHost:
         return {}
 
     def _post_tool_use(self, payload: dict, ctx) -> dict:
-        # Two facts get recorded here, for the same reason: a gate that reads
+        # Three facts get recorded here, for the same reason: a gate that reads
         # what happened is a gate that cannot be satisfied by assertion.
         # Reading an architecture doc feeds the docs-first gate; dispatching a
-        # subagent feeds the agent-role gates.
+        # subagent feeds the agent-role gates; and so does being one.
         tool = str(payload.get("tool_name", ""))
 
         # A session registered through the CLI cannot see the host identifier:
@@ -778,13 +779,17 @@ class ClaudeCodeHost:
         # call that did the registering — so the binding is made here, where
         # both halves are in hand, rather than left to a flag someone has to
         # remember to pass.
+        #
+        # Ordered before the actor recording below on purpose: the call being
+        # bracketed is very often the subagent's own `session start`, and the
+        # binding it makes is what lets every following call from that subagent
+        # resolve by host identifier instead of by guess.
         if tool == "Bash":
             self._bind_started_session(payload, ctx)
-            return {}
-
-        if tool in EDIT_TOOLS:
+        elif tool in EDIT_TOOLS:
             self._bind_by_successful_edit(payload, ctx)
-            return {}
+
+        self._record_acting_agent(payload, ctx)
 
         if tool != "Read" and tool not in AGENT_TOOLS:
             return {}
@@ -797,25 +802,181 @@ class ClaudeCodeHost:
         # file inside a session's worktree was NOT attributed to that session
         # while several were live, even though the payload carried the answer
         # and the recording below pulls that same key out to store it
-        # (BUG_010, narrow half). Agent dispatches carry no path, so they
-        # resolve exactly as before; routing both through one call is what
-        # keeps a second, divergent copy of the order from existing here.
-        session = ctx.session_for_payload(payload)
+        # (BUG_010, narrow half). A dispatch carries no `file_path`, so it
+        # reaches the same route through the worktree its brief names; routing
+        # both through one call is what keeps a second, divergent copy of the
+        # order from existing here. What that route still cannot do is attribute
+        # a dispatch made BEFORE its session existed, which is why the actor is
+        # recorded separately above rather than by making this guess harder
+        # (BUG_028).
+        resolution = ctx.resolution_for_payload(payload)
+        session = resolution.session
         if session is None:
+            # Nobody is identifiable, so there is nothing to record and nobody
+            # to tell. Deliberately silent: an ungoverned turn in a governed
+            # repository is ordinary, and a note on every such dispatch would
+            # be noise rather than the signal below.
             return {}
 
         try:
             if tool == "Read":
                 target = tool_input.get("file_path")
-                if target:
+                if target and resolution.proven:
                     ctx.pipelines.record_docs_read(session.id, str(target))
-            else:
-                agent_type = tool_input.get("subagent_type")
-                if agent_type:
-                    ctx.pipelines.record_agent_run(session.id, str(agent_type))
+                return {}
+
+            agent_type = tool_input.get("subagent_type")
+            if not agent_type:
+                return {}
+
+            # A session WAS identified, so somebody is working under the gates.
+            # From here every path that fails to record says so. `agents.*_ran`
+            # is block-level, and the whole cost of BUG_028 was that a dropped
+            # write was indistinguishable from a write that landed until the
+            # gate refused at the end of the phase — by which point no action
+            # available to that session could satisfy it.
+            if not resolution.proven:
+                return _context_response("PostToolUse", _UNPROVEN_DISPATCH.format(
+                    agent=agent_type, session=session.id, how=resolution.how
+                ))
+
+            outcome = ctx.pipelines.record_agent_run(session.id, str(agent_type))
+            if outcome == NO_PIPELINE:
+                return _context_response("PostToolUse", _UNRECORDED_DISPATCH.format(
+                    agent=agent_type, session=session.id
+                ))
         except InvariantError:
+            # Evidence is a side effect. A hook that raises turns every dispatch
+            # in the project into a failed tool call, which is strictly worse
+            # than a gate missing one data point.
             pass
         return {}
+
+    def _record_acting_agent(self, payload: dict, ctx) -> None:
+        """Record the agent the HOST says is making this call.
+
+        The dispatch and the run are different events at different times, and
+        only the second one can be attributed when a subagent creates its own
+        session. A `feature-architect` dispatched to design something runs
+        `session start`, `session isolate` and `pipeline start` ITSELF: at the
+        moment the parent's Task call was recorded there was no session to
+        record it against and no pipeline to be evidence for, so the agent that
+        created the pipeline could never appear in it. That is not a lookup bug
+        that a better guess would fix — the destination did not exist yet
+        (BUG_028).
+
+        What does exist by the time the subagent acts is the subagent. Claude
+        Code stamps the acting agent's type onto every hook payload, the ones
+        the subagent's own tool calls raise included, so the run can be
+        observed from the actor's side even though the dispatch could not be
+        attributed from the parent's. Recorded as ``actor`` rather than
+        ``dispatch`` because it is the stronger fact: this agent demonstrably
+        operated in this pipeline, rather than somebody having asked for it.
+
+        Silent when it cannot record, unlike a dispatch. This fires on EVERY
+        tool call, so a note here would be a note on every call the subagent
+        makes; the dispatch is the one event rare enough to speak up about.
+        """
+        agent_type = payload.get("agent_type")
+        if not isinstance(agent_type, str) or not agent_type:
+            # Absent in an ordinary main-loop turn, and absent from any host
+            # that does not report an actor. Both mean "no such fact", not
+            # "the fact is empty".
+            return
+
+        try:
+            resolution = ctx.resolution_for_payload(payload)
+            session = self._actor_session(resolution, payload, ctx)
+            if session is None:
+                return
+            ctx.pipelines.record_agent_run(session.id, agent_type, how=VIA_ACTOR)
+        except InvariantError:
+            pass
+
+    @staticmethod
+    def _actor_session(resolution, payload: dict, ctx):
+        """The session this agent is *working in*, or ``None``.
+
+        Stricter than :attr:`Resolution.proven`, and deliberately so. `proven`
+        asks whether the session was IDENTIFIED rather than guessed, which is
+        the right question for recording a dispatch — somebody asked for an
+        agent, and the request resolved here. An actor row claims more: that
+        the agent did work in this pipeline. So it needs the call to be PLACED
+        in the session, not merely attributable to the host that owns it.
+
+        The distinction is load-bearing because a subagent shares its parent's
+        `session_id`. The host route therefore answers for every agent the
+        parent dispatched, including the ones working somewhere else entirely,
+        and one host session that owned an isolated session also ran a
+        `backlog-curator` and a `general-purpose` agent against the shared
+        checkout — both filed against the isolated session's pipeline, which
+        had recorded none of its own work. Writing those as ACTORS would be
+        worse than the dispatch rows already there, because an actor row
+        asserts the stronger thing.
+
+        The host route is the one that has to be asked twice. It deliberately
+        outranks the path a call names — who is acting beats where the bytes
+        land, which is what keeps a session reaching into a peer's worktree a
+        detectable crossing — so `how` alone cannot tell an architect writing
+        inside its own worktree from a curator filing a bug in the shared
+        checkout. Both resolve as `host`. The location is therefore asked for
+        explicitly here rather than inferred from the route, and only for this
+        one route.
+
+        A session with no worktree passes on the binding alone: there is no
+        location for it to contradict, and an agent working in the shared
+        checkout for a session that has not isolated is working in the only
+        place that session has.
+
+        Where the location DOES contradict the binding, the location wins and
+        the call is recorded against the session it actually landed in. That
+        inverts step 2 for this route only, and for the reason the dispatch
+        route already inverts it: the host is not acting on that worktree, it
+        is delegating into it, and the run being recorded is the delegate's.
+        One host binding holds one session, so a parent driving two tracks
+        cannot represent the second — and refusing outright would leave the
+        second track unable to record any agent that never names a path,
+        which is the same wedge from the other end. Reading a peer's file
+        stays a detectable crossing because that inversion applies only when
+        the host names an ACTOR, which a main-loop turn never does.
+        """
+        if not resolution.proven:
+            return None
+        if resolution.how != "host":
+            return resolution.session
+
+        session = resolution.session
+        if not getattr(session, "worktree", None):
+            return session
+
+        tool_input = payload.get("tool_input") or {}
+        raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+        here = Path(str(raw)) if raw else ctx.cwd
+        return ctx.sessions.by_worktree_containing(here)
+
+
+#: Said to the session that made a dispatch nothing could file. Both are the
+#: removal of the silence BUG_028 is about: the dispatcher used to learn its
+#: evidence had gone nowhere at a blocking gate, after the phase it needed the
+#: evidence for was over.
+_UNPROVEN_DISPATCH = (
+    "invariant — {agent} was NOT recorded as evidence. The nearest session is "
+    "{session}, but nothing in this call proved it (resolved by {how!r}, which "
+    "is a guess, not an identification). Evidence is never written on a guess, "
+    "because a pipeline that receives another session's agent clears its gate "
+    "on work that never happened.\n"
+    "  try: run the dispatch from inside the session's worktree, name that "
+    "worktree in the brief, or set INVARIANT_SESSION_ID"
+)
+
+_UNRECORDED_DISPATCH = (
+    "invariant — {agent} was NOT recorded as evidence: session {session} has "
+    "no pipeline running, so there is no gate for it to be evidence for. This "
+    "is allowed; it is said out loud because agents.*_ran is block-level and a "
+    "pipeline started after the fact will not contain this dispatch.\n"
+    "  try: invariant pipeline start --task \"<what you are doing>\" first, or "
+    "let the agent record itself by dispatching it after the pipeline exists"
+)
 
 
 #: `invariant session start <name>` — with any flags, and however the command
