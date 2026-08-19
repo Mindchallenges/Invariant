@@ -152,6 +152,57 @@ The gate reads every payload shape the edit tools produce: `content`
 rules fired on all four tools, so the same data that blocked a `Write` passed
 through a `MultiEdit` untouched (AUD-06).
 
+### What `links` flags
+
+Of the default patterns, `links` is the one whose concept is easiest to state
+too broadly, so it is stated here: **a link is a URI whose authority names a
+network host.** The authority is the axis, not the scheme.
+
+```mermaid
+graph TD
+    U["a candidate URI"] --> A{"is there an authority<br/>between :// and the path?"}
+    A -- "no — bare or three-slash form" --> N["not a link"]
+    A -- yes --> H{"does that authority<br/>name a network host?"}
+    H -- "a dotted name with a<br/>TLD-like suffix" --> L["a link — flagged<br/>whatever the scheme is"]
+    H -- "an IP literal, v4 or bracketed v6" --> L
+    H -- "a single label with no dot,<br/>or a placeholder" --> N
+```
+
+An authority names a network host when it is a dotted name ending in a
+TLD-like suffix, or an IP literal — v4, or v6 in brackets. Optional userinfo
+before it and a port after it change nothing. That is a finding whatever
+scheme carries it, which is the half worth keeping: a private scheme aimed at
+a real host leaks exactly as much as a web address does, and narrowing the
+pattern to an allowlist of the web's own schemes would have stopped catching
+it.
+
+An authority names no network host when it is **absent** — the bare `file://`
+form, or the three-slash local-file form — or when it is a single label with
+no dot: `applephotos://asset/<lid>`, `scan://<uuid>/document`,
+`encrypted-media://local/...`. These are documented identifier *formats*
+written with placeholders. They address nothing reachable and can leak
+nothing, and every one of them used to be a finding, because the pattern
+matched anything before a `://`. On two architecture documents of one
+consuming project that came to 26 findings, 20 of them false — which is the
+shape the module's own rule warns about: a noisy privacy gate is one that gets
+disabled wholesale rather than tuned (BUG_044).
+
+Two consequences of the test being structural, both deliberate:
+
+- A **single-label host** — a loopback name, or a container-network service
+  name — is not a finding, with or without a port. Those name the reader's own
+  machine or its private network and identify nobody. The rest of that class is
+  the accepted residue: a bare intranet hostname parses the same way, and a
+  machine name can carry its owner's. It is accepted rather than unnoticed —
+  a personal machine reaches a document far more often through its home path,
+  which `home_paths` still catches.
+- A **reverse-DNS identifier** in the authority position *is* a finding.
+  Nothing in the text distinguishes it from a hostname, and where the two are
+  indistinguishable this pattern errs noisy rather than silent.
+
+The schemeless `www.` form and the scp-style `user@host:path` a git remote is
+written in are separate arms and are unaffected by any of the above.
+
 ### Where worktrees live
 
 `session.worktree_dir` exists for hosts that trust one location and confirm

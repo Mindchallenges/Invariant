@@ -197,3 +197,154 @@ class TestNonIdentifyingAddresses:
 
     def test_a_lookalike_local_part_is_still_a_finding(self):
         assert self.scanner.scan_text("noreplyactually@example.com") != []
+
+
+class TestLinksNameANetworkHost:
+    """BUG_044: a link is a URI whose AUTHORITY names a network host.
+
+    The pattern used to match any scheme followed by ``://``, which made every
+    private-scheme identifier a finding. Measured on two architecture documents
+    in a consuming project: 26 findings, 20 of them false, in the eleven forms
+    of ``PRIVATE_SCHEME_IDENTIFIERS`` below — several with no authority at all.
+
+    Scheme breadth is the wrong axis; the authority is the right one. So the
+    corpora below are built by AUTHORITY CLASS and crossed with a range of
+    schemes, because the law is "the authority decides and the scheme does
+    not" — a list of the literal strings that happened to be observed would
+    pin the instances instead.
+
+    Fixture note: the network-host corpus uses reserved names
+    (``.example``/``.invalid``, RFC 2606) rather than the real hosts of the
+    downstream evidence, which is this file's established convention — a
+    privacy suite whose fixtures are real addresses is a privacy leak. The
+    substitution is sound precisely because the law is structural: a reserved
+    name and a real one are the same class member.
+    """
+
+    #: Verbatim from the downstream evidence. Every one is a documented
+    #: identifier FORMAT written with placeholders; none addresses a network
+    #: resource, and none can leak anything.
+    PRIVATE_SCHEME_IDENTIFIERS = (
+        "applephotos://asset/<lid>",
+        "applephotos://livePhoto/<localIdentifier>",
+        "appleshare://<uuid>",
+        "appleinspect://capture/<hash>/<ts>",
+        "encrypted-media://",
+        "encrypted-media://local/segment?file=<abs>",
+        "scan://<uuid>",
+        "scan://<sessionUUID>",
+        "scan://<uuid>/document",
+        "file://",
+        "file://blob",
+    )
+
+    #: Authorities that name no network host: absent, or a bare label with no
+    #: dot — an opaque payload kind, or a placeholder for one.
+    NON_HOST_AUTHORITIES = (
+        "",            # no authority at all
+        "asset",       # a bare payload-kind label
+        "livePhoto",
+        "local",
+        "capture",
+        "blob",
+        "<uuid>",      # a placeholder, as documents write them
+        "<sessionUUID>",
+        "v1.2",        # dotted, but the suffix is not TLD-like
+        "a.b",         # dotted, but the suffix is one character
+    )
+
+    #: Authorities that DO name a network host: a dotted label with a
+    #: TLD-like suffix, or an IP literal.
+    HOST_AUTHORITIES = (
+        "a.example",
+        "sub.domain.example",
+        "www.a.example",
+        "a.invalid",
+        "host.example.invalid",
+        "user@a.example",   # userinfo does not stop it being a host
+        "192.0.2.10",       # IPv4 literal
+        "192.0.2.10:8443",  # ...with a port
+        "[2001:db8::1]",    # IPv6 literal
+    )
+
+    #: The axis that is NOT the test. Every one of these is crossed with both
+    #: authority corpora, so a verdict that tracked the scheme would show up as
+    #: a whole row of failures.
+    SCHEMES = ("http", "https", "ftp", "file", "scan", "applephotos",
+               "encrypted-media", "myscheme", "x-private+v2")
+
+    TRAILERS = ("", "/", "/path", "/path/to/thing?q=<placeholder>#frag")
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner()
+
+    def flagged(self, text):
+        return "links" in patterns(self.scanner.scan_text(text))
+
+    # -- the corpora are non-empty ------------------------------------
+    #
+    # "examined nothing" and "found nothing" are the same green otherwise.
+
+    def test_every_corpus_is_non_empty(self):
+        assert len(self.PRIVATE_SCHEME_IDENTIFIERS) == 11
+        assert len(self.NON_HOST_AUTHORITIES) >= 10
+        assert len(self.HOST_AUTHORITIES) >= 9
+        assert len(self.SCHEMES) >= 9
+        assert len(self.TRAILERS) >= 4
+
+    # -- direction 1: a non-host authority is not a link ---------------
+
+    def test_the_downstream_false_positives_are_not_links(self):
+        leaked = [s for s in self.PRIVATE_SCHEME_IDENTIFIERS if self.flagged(s)]
+        assert leaked == []
+
+    def test_no_scheme_makes_a_non_host_authority_a_link(self):
+        checked = 0
+        leaked = []
+        for scheme in self.SCHEMES:
+            for authority in self.NON_HOST_AUTHORITIES:
+                for trailer in self.TRAILERS:
+                    checked += 1
+                    text = f"{scheme}://{authority}{trailer}"
+                    if self.flagged(text):
+                        leaked.append(text)
+        assert checked == len(self.SCHEMES) * len(self.NON_HOST_AUTHORITIES) * len(self.TRAILERS)
+        assert leaked == []
+
+    def test_a_private_scheme_identifier_in_running_prose_is_not_a_link(self):
+        assert not self.flagged("the asset is addressed as scan://<uuid>/document here")
+
+    # -- direction 2: a network-host authority is still a link ---------
+
+    def test_every_scheme_over_a_host_authority_is_a_link(self):
+        checked = 0
+        missed = []
+        for scheme in self.SCHEMES:
+            for authority in self.HOST_AUTHORITIES:
+                for trailer in self.TRAILERS:
+                    checked += 1
+                    text = f"{scheme}://{authority}{trailer}"
+                    if not self.flagged(text):
+                        missed.append(text)
+        assert checked == len(self.SCHEMES) * len(self.HOST_AUTHORITIES) * len(self.TRAILERS)
+        assert missed == []
+
+    def test_a_custom_scheme_pointing_at_a_real_host_is_still_a_link(self):
+        # The regression the obvious narrowing (an allowlist of http/https/ftp)
+        # would have caused, and the reason the axis is the authority.
+        assert self.flagged("myscheme://internal.example.invalid/secret")
+
+    def test_a_web_address_at_the_end_of_a_sentence_is_still_a_link(self):
+        assert self.flagged("documented at https://a.example.")
+
+    def test_two_identifiers_on_one_line_are_judged_separately(self):
+        found = self.scanner.scan_text("scan://<uuid> and https://a.example/x")
+        assert [f.raw for f in found if f.pattern == "links"] == ["https://a.example/x"]
+
+    # -- the other two arms are untouched ------------------------------
+
+    def test_the_www_arm_still_works(self):
+        assert self.flagged("see www.a.example for details")
+
+    def test_the_scp_arm_still_works(self):
+        assert self.flagged("git@host.invalid:org/repo.git")

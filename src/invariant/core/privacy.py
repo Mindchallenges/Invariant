@@ -42,16 +42,22 @@ def _redact(text: str, keep: int = 2) -> str:
     return text[:keep] + "█" * min(len(text) - keep, 12)
 
 
+#: A dotted-quad address, octet by octet. Named because two patterns need the
+#: same notion of "an IP literal" — ``ip_addresses`` is the address itself, and
+#: ``links`` asks whether a URI's authority is one — and two spellings of one
+#: fact are two things that drift.
+_IPV4 = (
+    r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+)
+
 # Each pattern is deliberately narrow. Breadth here buys false positives, and a
 # noisy privacy gate is one that gets disabled wholesale rather than tuned.
 PATTERNS: dict[str, Pattern[str]] = {
     # A home path that embeds a username. The generic prefixes alone are fine.
     "home_paths": re.compile(r"(?:/Users|/home)/(?!$)[A-Za-z0-9][A-Za-z0-9._-]*"),
     "emails": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    "ip_addresses": re.compile(
-        r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
-        r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"
-    ),
+    "ip_addresses": re.compile(rf"\b{_IPV4}\b"),
     "tokens": re.compile(
         r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}"
         r"|sk-[A-Za-z0-9-]{20,}"
@@ -62,9 +68,49 @@ PATTERNS: dict[str, Pattern[str]] = {
     "clock_times": re.compile(
         r"(?<![\d.])(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?(?:Z|\s?[AaPp][Mm])?(?![\d.])"
     ),
+    # A link is a URI whose AUTHORITY names a network host. The scheme is not
+    # the axis: this used to match anything before a `://`, which made every
+    # documented private-scheme identifier a finding — 20 false out of 26 on
+    # two architecture documents in one consuming project, several of them with
+    # no authority at all (BUG_044). An empty authority, or a bare label with
+    # no dot, addresses nothing reachable and can leak nothing.
+    #
+    # Narrowing the SCHEME instead — an allowlist of the web's own — would have
+    # been the smaller edit and a loss of protection: a custom scheme aimed at
+    # a real host is exactly the leak worth catching, and the authority test
+    # keeps it caught.
+    #
+    # Two consequences follow from the test being structural, and both are
+    # meant. A single-label authority is not a host here, so a loopback or
+    # container-network address is no longer a finding — it names the reader's
+    # own machine and identifies nobody. A reverse-DNS identifier sitting in
+    # the authority position IS one, because nothing in the text distinguishes
+    # it from a hostname; that is the narrow residue, and it is on the
+    # noisy-not-silent side of the trade.
     "links": re.compile(
-        r"\b(?:[a-z][a-z0-9+.-]*://\S+|www\.[A-Za-z0-9.-]+\.[A-Za-z]{2,}\S*"
-        r"|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}:\S+)"
+        rf"""\b(?:
+            # scheme://[userinfo@]authority...
+            [a-z][a-z0-9+.-]*://
+            (?:[^\s/?\#@]*@)?
+            (?:
+                # a dotted name ending in a TLD-like suffix,
+                [A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{{2,}}
+                # or an IP literal, v4 or bracketed v6.
+              | {_IPV4}
+              | \[[0-9A-Fa-f:]+\]
+            )
+            # The host must END here: a trailing label the suffix rule could
+            # not consume (`x.dev1`) is not a host with a stray character after
+            # it. A dot is deliberately absent from this set, so a URI ending a
+            # sentence keeps matching.
+            (?![A-Za-z0-9_-])
+            \S*
+            # Unaffected: the schemeless `www.` form, and the scp-style
+            # `user@host:path` a git remote is written in.
+          | www\.[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}\S*
+          | [A-Za-z0-9._-]+@[A-Za-z0-9.-]+\.[A-Za-z]{{2,}}:\S+
+        )""",
+        re.VERBOSE,
     ),
     "device_ids": re.compile(
         r"\b(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
