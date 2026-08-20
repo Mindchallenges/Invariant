@@ -920,6 +920,53 @@ class TestPrivacyPayloadShapes:
         assert not result.verdict.ok and not result.verdict.skipped
 
 
+def heredoc_write_payload(path, content):
+    """A shell-mediated write: the route BUG_027 reports as unscreened.
+
+    A ``cat``/``python3`` heredoc is what at least one consuming host's
+    harness emits for every file edit; ``sed -i`` is the other observed form.
+    """
+    return bash_payload(f"cat > {path} <<'EOF'\n{content}\nEOF\n")
+
+
+class TestPrivacyReachesAShellMediatedWrite:
+    """Repro for BUG_027 - see docs/backlog/BUG_027.md.
+
+    Fails while the defect is live. When the fix lands, delete the xfail
+    marker; the assertion must then pass unchanged.
+
+    ``_privacy_clean`` extracts content only under ``ctx.is_edit``, and
+    ``Bash`` is not in ``EDIT_TOOLS``, so a heredoc writing personal data into
+    a path inside ``privacy.scope`` appends nothing to ``scanned`` and the
+    rule falls through to ``na("nothing in privacy scope was written here")``.
+    That sentence is affirmatively false on this route, and cli.md holds that
+    "a skip and a pass are different facts" - here the skip reads as a pass
+    over content nobody screened.
+
+    The same rule already reads a ``Bash`` payload for its other half: a shell
+    call that COMMITS a file is scanned, a shell call that WRITES one is not.
+    """
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_027 is live - delete this marker with the fix"
+    )
+    def test_BUG_027_a_leak_written_by_a_shell_heredoc_is_blocked(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=heredoc_write_payload(doc, "contact a.person@example.com"),
+        )
+        result = only(evaluate(["privacy.clean"], ctx))
+        # The symptom, in the order it presents: the gate reports that it had
+        # nothing to look at, about a call that provably writes personal data
+        # into a scoped path.
+        assert not result.verdict.skipped, (
+            f"privacy.clean skipped a shell-mediated write with: "
+            f"{result.verdict.message!r}"
+        )
+        assert not result.verdict.ok and result.level is Level.BLOCK
+
+
 class TestCommitMessageForms:
     """AUD-09: only exact ``-m`` forms were scanned — ``git commit -am`` and
     ``-F <file>`` carried a message past the gate unread."""
