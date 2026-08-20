@@ -341,6 +341,59 @@ class TestAGitFailureIsNotAnAnswer:
         assert git.in_linked_worktree(ctx_factory.main) is False
         assert git.in_linked_worktree(ctx_factory.wt) is True
 
+
+class TestReadingAStagedBlob:
+    """What ``privacy.clean`` screens at the commit boundary is read through
+    these two, so each of their abstentions is a fail-closed for that gate."""
+
+    def test_the_staged_bytes_come_back_undecoded_and_unstripped(self, ctx_factory):
+        """Unstripped matters: stripping a leading blank line would move every
+        line number a scan of the result reports."""
+        from invariant.core import git
+
+        main = ctx_factory.main
+        (main / "docs" / "architecture" / "x.md").write_text(
+            "\n\nmail a.person@example.com\n", encoding="utf-8"
+        )
+        run(["git", "add", "docs/architecture/x.md"], main)
+        assert git.staged_blob(main, "docs/architecture/x.md") == (
+            b"\n\nmail a.person@example.com\n"
+        )
+
+    def test_a_path_that_is_not_staged_has_no_blob(self, ctx_factory):
+        from invariant.core import git
+
+        assert git.staged_blob(ctx_factory.main, "docs/architecture/absent.md") is None
+
+    def test_a_directory_git_cannot_be_run_in_abstains(self, tmp_path):
+        from invariant.core import git
+
+        assert git.staged_blob(tmp_path / "nowhere", "docs/architecture/x.md") is None
+
+    def test_a_deletion_can_be_left_out_of_the_staged_list(self, ctx_factory):
+        """A deleted path has no staged content, so a caller that goes on to
+        read each path must be able to exclude it."""
+        from invariant.core import git
+
+        main = ctx_factory.main
+        run(["git", "rm", "-q", "docs/architecture/overview.md"], main)
+        listed = [str(p) for p in git.staged_files(main)]
+        kept = [str(p) for p in git.staged_files(main, exclude_deleted=True)]
+        assert "docs/architecture/overview.md" in listed
+        assert kept == []
+
+    def test_output_that_is_not_text_abstains_rather_than_raising(self, ctx_factory):
+        """``text=True`` decodes inside ``subprocess.run``, so a blob that is
+        not UTF-8 used to raise straight out of ``file_at`` — which documents
+        itself as answering ``None`` for exactly that case."""
+        from invariant.core import git
+
+        main = ctx_factory.main
+        (main / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00")
+        run(["git", "add", "logo.png"], main)
+        run(["git", "commit", "-qm", "binary"], main)
+        assert git.file_at(main, "HEAD", "logo.png") is None
+
     def test_an_unreadable_staged_set_fails_the_file_gate(self, ctx_factory, tmp_path):
         norepo = tmp_path / "norepo"
         norepo.mkdir()
@@ -929,42 +982,309 @@ def heredoc_write_payload(path, content):
     return bash_payload(f"cat > {path} <<'EOF'\n{content}\nEOF\n")
 
 
-class TestPrivacyReachesAShellMediatedWrite:
-    """Repro for BUG_027 - see docs/backlog/BUG_027.md.
+def shell_write(main, relpath, text):
+    """Write a file the way BUG_027's route does: through a real shell.
 
-    Fails while the defect is live. When the fix lands, delete the xfail
-    marker; the assertion must then pass unchanged.
+    Nothing in the resulting index records which tool wrote it, which is the
+    property the gate is being held to — it screens what LANDED, so every
+    route that can land text is covered by the same code, including the ones
+    nobody has enumerated.
+    """
+    target = main / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    run(["sh", "-c", f"cat > {target} <<'EOF'\n{text}\nEOF"], main)
+    return target
 
-    ``_privacy_clean`` extracts content only under ``ctx.is_edit``, and
-    ``Bash`` is not in ``EDIT_TOOLS``, so a heredoc writing personal data into
-    a path inside ``privacy.scope`` appends nothing to ``scanned`` and the
-    rule falls through to ``na("nothing in privacy scope was written here")``.
-    That sentence is affirmatively false on this route, and cli.md holds that
-    "a skip and a pass are different facts" - here the skip reads as a pass
-    over content nobody screened.
 
-    The same rule already reads a ``Bash`` payload for its other half: a shell
-    call that COMMITS a file is scanned, a shell call that WRITES one is not.
+def stage(main, *relpaths):
+    run(["git", "add", "--", *[str(p) for p in relpaths]], main)
+
+
+class TestPrivacyScreensWhatLandedAtTheCommitBoundary:
+    """BUG_027 — see docs/backlog/BUG_027.md.
+
+    The entry's axis is content LANDING, not tool identity: widening
+    ``EDIT_TOOLS`` cannot close it, "because the next route will not be a tool
+    name either". So the gate screens at the boundary where every route
+    converges — the commit — over what is actually staged there.
+
+    ``privacy.clean`` already reads a ``Bash`` payload for its other half: a
+    shell call that commits a MESSAGE is scanned, and until this landed, the
+    same call's staged CONTENT was not.
     """
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_027 is live - delete this marker with the fix"
-    )
-    def test_BUG_027_a_leak_written_by_a_shell_heredoc_is_blocked(self, ctx_factory):
+    def test_BUG_027_a_leak_written_by_a_shell_heredoc_is_blocked_at_the_commit(
+        self, ctx_factory
+    ):
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'add a doc'"))
+
+        result = only(evaluate(["privacy.clean"], ctx))
+        # The symptom, at the boundary where it is worst: the gate answers
+        # about a commit that provably carries personal data into a scoped
+        # path, having read only the commit MESSAGE. Its verdict must name
+        # the staged file, and it must not vouch for the commit.
+        assert not result.verdict.skipped, (
+            "privacy.clean skipped a commit carrying personal data into "
+            f"docs/architecture/new.md: {result.verdict.message!r}"
+        )
+        assert "docs/architecture/new.md" in (
+            result.verdict.message + result.verdict.detail
+        ), (
+            "privacy.clean never looked at the staged content of a commit "
+            "carrying personal data into docs/architecture/new.md; it "
+            f"answered from the commit message alone: {result.verdict.message!r}"
+        )
+        assert not result.verdict.ok and result.level is Level.BLOCK, (
+            "privacy.clean vouched for a commit that puts personal data into "
+            f"history: {result.verdict.message!r}"
+        )
+
+    def test_the_route_that_wrote_the_file_is_not_a_variable(self, ctx_factory):
+        """`sed -i`, a `cp`, a generator emitting a doc: the entry names three
+        routes a command-string scan would miss. None of them is visible in
+        what lands, which is why nothing here asks."""
+        import sys
+
+        main = ctx_factory.main
+        run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib; pathlib.Path('docs/architecture/gen.md')"
+                    ".write_text('mail a.person@example.com\\n')"
+                ),
+            ],
+            main,
+        )
+        stage(main, "docs/architecture/gen.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'generated'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_clean_staged_document_is_reported_by_path(self, ctx_factory):
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/clean.md", "nothing personal here")
+        stage(main, "docs/architecture/clean.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+        assert "docs/architecture/clean.md" in verdict.message
+
+    def test_a_staged_path_outside_privacy_scope_is_not_claimed_as_scanned(
+        self, ctx_factory
+    ):
+        """Scope still decides WHICH paths are read. The commit message is
+        scanned here whatever happens, so the fact under test is that the
+        out-of-scope file is neither read nor named."""
+        main = ctx_factory.main
+        shell_write(main, "src/thing.py", "mail = 'a.person@example.com'")
+        stage(main, "src/thing.py")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'code'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+        assert "src/thing.py" not in verdict.message + verdict.detail
+
+    def test_a_commit_with_nothing_in_scope_says_that_and_not_more(self, ctx_factory):
+        """The skip sentence for the commit route. Scoped to ``docs`` alone so
+        the commit-message half does not answer for it."""
+        main = ctx_factory.main
+        write_manifest(
+            main,
+            {"version": 1, "project": {"name": "demo"}, "privacy": {"scope": ["docs"]}},
+        )
+        shell_write(main, "src/thing.py", "mail = 'a.person@example.com'")
+        stage(main, "src/thing.py")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'code'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped
+        assert "no staged path" in verdict.message and "privacy scope" in verdict.message
+
+    def test_an_exemption_marker_in_staged_content_still_exempts(self, ctx_factory):
+        """The marker's reach is a BLOCK (BUG_045), so the scan has to see the
+        staged file whole. Reading only a diff's added lines would lose a
+        marker sitting on an unchanged line above them."""
+        main = ctx_factory.main
+        shell_write(
+            main,
+            "docs/architecture/exempt.md",
+            "<!-- invariant: allow-privacy -->\n\ncontact a.person@example.com",
+        )
+        stage(main, "docs/architecture/exempt.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'exempt'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_staged_deletion_is_not_an_unreadable_blob(self, ctx_factory):
+        """A deleted path has no staged content to read, and reading its
+        absence as "could not be scanned" would fail every commit that removes
+        a document."""
+        main = ctx_factory.main
+        run(["git", "rm", "-q", "docs/architecture/overview.md"], main)
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'drop it'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+
+    def test_a_binary_staged_blob_is_not_a_fail_closed(self, ctx_factory):
+        """Nothing in bytes that do not decode can leak in text form — the
+        answer scan_file already gives — and a gate no commit can clear is one
+        people route around."""
+        main = ctx_factory.main
+        (main / "docs" / "architecture" / "diagram.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n\xff\xfe binary \x00"
+        )
+        stage(main, "docs/architecture/diagram.png")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a diagram'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+
+    def test_an_unreadable_index_fails_closed(self, ctx_factory, monkeypatch):
+        """AUD-07's convention, and the one this rule's own ``-F`` branch
+        already follows: the scan's subject exists and could not be looked at,
+        and an unanswered question is not a pass."""
+        from invariant.core import rules as rules_mod
+
+        monkeypatch.setattr(rules_mod.git, "staged_files", lambda *a, **k: None)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload("git commit -m 'anything'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_an_unreadable_staged_blob_fails_closed(self, ctx_factory, monkeypatch):
+        from invariant.core import rules as rules_mod
+
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "harmless")
+        stage(main, "docs/architecture/new.md")
+        monkeypatch.setattr(rules_mod.git, "staged_blob", lambda *a, **k: None)
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_commit_run_from_a_subdirectory_still_resolves_scope(self, ctx_factory):
+        """Staged paths are spelled against the repository toplevel, not
+        against the directory the commit was typed in."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(
+            cwd=main / "docs", payload=bash_payload("git commit -m 'a doc'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_commit_in_a_linked_worktree_is_screened(self, ctx_factory):
+        """The scope test runs in project-relative space, and a worktree is
+        where this library's own work happens."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=wt, payload=bash_payload("git commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_chained_commit_is_still_a_commit(self, ctx_factory):
+        """`git add -A && git commit -m ...` is the spelling agents emit."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload("git add -A && git commit -m 'a doc'"),
+        )
+        stage(main, "docs/architecture/new.md")
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_bash_call_that_is_not_a_commit_says_it_was_not_screened(
+        self, ctx_factory
+    ):
+        """The half of BUG_027 that let it survive a long session: the old
+        message — "nothing in privacy scope was written here" — was
+        affirmatively FALSE on this route and read exactly like a pass."""
         doc = ctx_factory.main / "docs" / "architecture" / "new.md"
         ctx = ctx_factory(
             cwd=ctx_factory.main,
             payload=heredoc_write_payload(doc, "contact a.person@example.com"),
         )
-        result = only(evaluate(["privacy.clean"], ctx))
-        # The symptom, in the order it presents: the gate reports that it had
-        # nothing to look at, about a call that provably writes personal data
-        # into a scoped path.
-        assert not result.verdict.skipped, (
-            f"privacy.clean skipped a shell-mediated write with: "
-            f"{result.verdict.message!r}"
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped
+        assert "not screened" in verdict.message
+        assert "committed" in verdict.message
+
+    def test_a_word_containing_commit_is_not_a_commit(self, ctx_factory):
+        """The predicate reads WORDS. A substring test would treat this as a
+        commit and go read an index nothing is being written to."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload("git config commit.gpgsign false")
         )
-        assert not result.verdict.ok and result.level is Level.BLOCK
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+    def test_a_command_that_cannot_be_read_as_words_is_not_called_screened(
+        self, ctx_factory
+    ):
+        """An unbalanced quote leaves nothing reliable to read. The answer is
+        the honest skip, never a silent pass and never a guess at a commit."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'unbalanced"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+    def test_a_call_that_writes_nothing_says_so(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload={"tool_name": "Read"})
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+    def test_an_edit_outside_scope_still_says_nothing_in_scope_was_written(
+        self, ctx_factory
+    ):
+        """The one route where the old sentence was true keeps it."""
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / "src" / "x.py", "hello"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "nothing in privacy scope was written" in verdict.message
+
+
+class TestSkipsThatUsedToStateNoReasonAtAll:
+    """BUG_027's second half, applied to the three rules that share its
+    predicate. ``session.isolated_before_edit``,
+    ``session.no_edit_in_main_checkout`` and ``pipeline.started_before_edit``
+    all open with ``if not ctx.is_edit: return Verdict.na()`` — a BARE N/A,
+    with no reason at all, on every shell call.
+
+    Their ENFORCEMENT is deliberately unchanged: teaching them to recognise a
+    shell-mediated write is a real behaviour change that could wedge a live
+    session, and it is its own scoped decision. What is fixed here is that
+    their silence no longer reads as a pass (BUG_020).
+    """
+
+    SHARE_THE_PREDICATE = (
+        "session.isolated_before_edit",
+        "session.no_edit_in_main_checkout",
+        "pipeline.started_before_edit",
+    )
+
+    @pytest.mark.parametrize("rule_id", SHARE_THE_PREDICATE)
+    def test_a_shell_call_is_skipped_with_a_stated_reason(self, rule_id, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=heredoc_write_payload(doc, "hello")
+        )
+        verdict = only(evaluate([rule_id], ctx)).verdict
+        assert verdict.skipped
+        assert verdict.message and verdict.message != "not applicable here"
+        assert "Edit" in verdict.message
 
 
 class TestCommitMessageForms:

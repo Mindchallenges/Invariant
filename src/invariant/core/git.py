@@ -13,6 +13,12 @@ from pathlib import Path
 
 
 def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
+    # UnicodeDecodeError belongs with the other two: ``text=True`` decodes in
+    # ``communicate``, so a command whose output is not valid UTF-8 raises
+    # from INSIDE the call rather than returning something to inspect. Every
+    # caller here is written against "git could not answer", and a decode that
+    # escapes turns that into a crashed rule — which this module's own
+    # docstring rules out.
     try:
         proc = subprocess.run(
             ["git", *args],
@@ -20,10 +26,33 @@ def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return 1, "", "git unavailable"
+    except UnicodeDecodeError:
+        return 1, "", "git output is not text"
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def _run_bytes(args: list[str], cwd: Path) -> tuple[int, bytes]:
+    """Like :func:`_run`, undecoded and unstripped.
+
+    Two properties the text form cannot offer, both load-bearing for reading a
+    blob: bytes that are not text are an ANSWER here rather than a failure,
+    and stripping would move every line number a scan of the result reports.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, b""
+    return proc.returncode, proc.stdout
 
 
 @dataclass(frozen=True)
@@ -108,16 +137,39 @@ def worktrees(cwd: Path) -> list[Worktree]:
     return result
 
 
-def staged_files(cwd: Path) -> list[Path] | None:
+def staged_files(cwd: Path, *, exclude_deleted: bool = False) -> list[Path] | None:
     """Paths currently staged, or ``None`` when git could not say.
 
     An empty list is a real answer — nothing is staged. ``None`` is the
     absence of one, and a caller deciding whether to *relax* must treat it as
     "do not relax": this used to answer ``[]`` on a git failure, which the
     file-set gate read as "0 staged file(s), all declared" (AUD-07).
+
+    ``exclude_deleted`` drops the paths this commit REMOVES. A caller that
+    names paths — the file-set gate — wants them; a caller that goes on to
+    read each path's staged content does not, because a deleted path has no
+    staged content, and reading its absence as "could not be read" would fail
+    closed on every commit that deletes a file.
     """
-    code, out, _ = _run(["diff", "--cached", "--name-only"], cwd)
+    args = ["diff", "--cached", "--name-only"]
+    if exclude_deleted:
+        args.append("--diff-filter=d")
+    code, out, _ = _run(args, cwd)
     return [Path(p) for p in out.splitlines() if p] if code == 0 else None
+
+
+def staged_blob(cwd: Path, path: str) -> bytes | None:
+    """The exact bytes staged for ``path``, or ``None`` when git could not
+    produce them.
+
+    Bytes rather than text, because what an UNDECODABLE blob means is policy
+    and belongs to the caller: a scan for personal data reads it as "nothing
+    that can leak in text form", which is the same answer
+    ``PrivacyScanner.scan_file`` gives a binary file, while ``None`` here is
+    the unanswered question that a caller must not read as a pass.
+    """
+    code, out = _run_bytes(["show", f":{path}"], cwd)
+    return out if code == 0 else None
 
 
 def changed_files(cwd: Path, since: str | None = None) -> list[Path]:

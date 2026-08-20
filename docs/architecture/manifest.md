@@ -152,6 +152,70 @@ The gate reads every payload shape the edit tools produce: `content`
 rules fired on all four tools, so the same data that blocked a `Write` passed
 through a `MultiEdit` untouched (AUD-06).
 
+### Where the gate screens, and why it is not only the edit tools
+
+Reading edit payloads can only ever cover writes that arrive as an edit
+payload. A write made through the shell does not: a `cat` heredoc, a `sed -i`,
+a `cp`, or a generator that emits a document all carry their content in a
+`Bash` command, land in the same file, and used to reach history with the gate
+reporting *"nothing in privacy scope was written here"* — a sentence that is
+affirmatively false on that route, and indistinguishable from a pass. In one
+consuming project whose harness edits Bash-first, that was **every** edit of a
+long session (BUG_027).
+
+So the gate screens at a second point, where every route converges:
+
+```mermaid
+graph TD
+    W["a write"] --> E{"did an edit tool<br/>announce it?"}
+    E -- yes --> P["scan the payload<br/>against privacy.scope"]
+    E -- "no — shell, generator,<br/>a route nobody enumerated" --> U["not screened yet,<br/>and the verdict says so"]
+    U --> C{"git commit"}
+    P --> C
+    C --> S["scan what is STAGED,<br/>path by path, against privacy.scope"]
+    S --> H["history"]
+```
+
+The commit is the boundary that makes the answer route-independent: nothing in
+a staged blob records which tool produced it, so nothing in the gate has to
+enumerate them. Five properties of that scan are deliberate:
+
+- **The whole staged blob, not the diff's added lines.** An exemption marker
+  reaches a *block* (BUG_045), so a marker on an unchanged line above an added
+  one is invisible to a scan of the addition alone — and the gate would block
+  on a finding the project had already exempted, at a spot the author cannot
+  see in the diff.
+- **`privacy.scope` decides which staged paths are read**, by the same
+  project-relative prefix rules as an edit's target. A commit typed in a
+  subdirectory names the same blobs, because staged paths are spelled against
+  the repository toplevel.
+- **A staged set or a staged blob that cannot be read FAILS**, in the same
+  do-not-relax convention as `-F` on an unreadable message (AUD-09). This is
+  the one gate whose subject cannot be recovered after the fact.
+- **A deleted path is not an unreadable one.** Deletions are excluded from the
+  list before any blob is read, so removing a document is not a fail-closed.
+- **Bytes that do not decode carry nothing that can leak in text form** — the
+  same answer `PrivacyScanner.scan_file` and `invariant privacy scan` already
+  give a binary file. A commit containing a diagram is not a gate no change
+  can clear.
+
+The skip sentences were rewritten in the same change, because the false one is
+what let the gap survive a long session unnoticed. Each route now states the
+limit that actually applies to it: an edit outside scope still says nothing in
+scope was written; a commit says no staged path is inside scope; a shell call
+that is not a commit says it is not read as it runs and that what it writes is
+screened when it is committed. A skip and a pass are different facts, and a
+skip that misstates its own reason is the harder of the two to notice
+(BUG_020).
+
+**Deliberately unchanged:** `session.isolated_before_edit`,
+`session.no_edit_in_main_checkout` and `pipeline.started_before_edit` share the
+same "is this an edit tool" predicate and are therefore blind to the same
+route. They now *say* so instead of returning a reason-less N/A, but their
+enforcement is untouched: teaching them to refuse shell commands is a
+behaviour change that could wedge a live session, and it is its own scoped
+decision rather than a rider on this one.
+
 ### What `links` flags
 
 Of the default patterns, `links` is the one whose concept is easiest to state

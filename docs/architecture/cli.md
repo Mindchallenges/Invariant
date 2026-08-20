@@ -22,6 +22,15 @@ Nothing reaches the engine another way.
   chose to enforce going inapplicable is news about that project's own
   enforcement. Advisory skips stay behind `--verbose`, where there is nothing
   to act on.
+
+  **A skip states the limit that applies to the call it is answering about.**
+  Rendering it separately is only half the job: a skip carrying a reason that
+  is untrue of this call, or no reason at all, reads as a pass to the one
+  reader who could act on it. `privacy.clean` returned one sentence — "nothing
+  in privacy scope was written here" — on every route including the
+  shell-mediated write it was false about, and the three rules keyed on the
+  same "is this an edit tool" predicate returned a bare N/A whose default text
+  is "not applicable here" (BUG_027). Both are now route-specific.
 - No command ever writes to the repository outside the state root and **the
   stores the manifest declares** (`items.path`, `paths.memory`,
   `paths.reports`).

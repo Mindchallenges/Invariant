@@ -17,8 +17,9 @@ from __future__ import annotations
 import codecs
 import fnmatch
 import re
+import shlex
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
 
 from ..adapters import Adapter, get_adapter
@@ -307,6 +308,22 @@ def evaluate_event(event: str, ctx: RuleContext) -> list[Evaluated]:
 
 # -- session rules -----------------------------------------------------
 
+#: What the three rules keyed on ``ctx.is_edit`` say when a call is not one.
+#:
+#: They used to say NOTHING — a bare ``Verdict.na()``, whose default text is
+#: "not applicable here" — on every shell call, which reads exactly like a
+#: pass and is how BUG_027's sibling blind spot stayed invisible: on a host
+#: whose harness edits through the shell, these three rules are silent for a
+#: whole session and never say why.
+#:
+#: Their ENFORCEMENT is deliberately unchanged. A shell-mediated write really
+#: is outside what they screen; teaching them to recognise one is a behaviour
+#: change that could refuse work in a live session, and it is its own scoped
+#: decision rather than a rider on the privacy fix. What is fixed here is that
+#: the silence now states its own limit, so a reader can tell an inapplicable
+#: gate from a satisfied one (BUG_020).
+_NOT_AN_EDIT = "not screened: this call is not an Edit or a Write"
+
 
 @rule(
     "session.isolated_before_edit",
@@ -315,7 +332,7 @@ def evaluate_event(event: str, ctx: RuleContext) -> list[Evaluated]:
 )
 def _isolated_before_edit(ctx: RuleContext) -> Verdict:
     if not ctx.is_edit:
-        return Verdict.na()
+        return Verdict.na(_NOT_AN_EDIT)
     if _is_outside_project(ctx, ctx.target_path):
         return Verdict.na("path is outside this project")
     if _is_exempt(ctx, ctx.target_path):
@@ -370,7 +387,7 @@ def _isolated_before_edit(ctx: RuleContext) -> Verdict:
 )
 def _no_edit_in_main_checkout(ctx: RuleContext) -> Verdict:
     if not ctx.is_edit:
-        return Verdict.na()
+        return Verdict.na(_NOT_AN_EDIT)
     target = ctx.target_path
     if target is None:
         return Verdict.na("no file path in this call")
@@ -791,7 +808,7 @@ def _teardown_complete(ctx: RuleContext) -> Verdict:
 )
 def _pipeline_started_before_edit(ctx: RuleContext) -> Verdict:
     if not ctx.is_edit:
-        return Verdict.na()
+        return Verdict.na(_NOT_AN_EDIT)
     if _is_outside_project(ctx, ctx.target_path):
         return Verdict.na("path is outside this project")
     if _is_exempt(ctx, ctx.target_path):
@@ -1560,13 +1577,14 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
             scanned.append(str(target))
             findings.extend(scanner.scan_text(content, path=target))
 
+    command = str(ctx.tool_input.get("command", "")) if ctx.tool_name == "Bash" else ""
+    committing = _is_git_commit(command)
+
     if "commit_messages" in scope:
         message = ctx.extra.get("commit_message")
         problem = None
         if not message and ctx.tool_name == "Bash":
-            message, problem = _extract_commit_message(
-                str(ctx.tool_input.get("command", "")), cwd=ctx.cwd
-            )
+            message, problem = _extract_commit_message(command, cwd=ctx.cwd)
         if problem:
             # Fail closed, per the do-not-relax convention every other
             # unanswerable question here follows (AUD-07/08): a message this
@@ -1580,8 +1598,25 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
             scanned.append("commit message")
             findings.extend(scanner.scan_text(message))
 
+    if committing or ctx.extra.get("committing"):
+        staged, problem = _staged_content_in_scope(ctx, scope)
+        if problem:
+            return Verdict.fail(
+                "the staged content could not be scanned",
+                detail=problem,
+                fixes=(
+                    (
+                        "run `invariant privacy scan <path>` over what is "
+                        "staged, then commit"
+                    ),
+                ),
+            )
+        for path, text in staged:
+            scanned.append(path)
+            findings.extend(scanner.scan_text(text, path=Path(path)))
+
     if not scanned:
-        return Verdict.na("nothing in privacy scope was written here")
+        return Verdict.na(_privacy_screened_nothing(ctx, committing=committing))
     if not findings:
         return Verdict.clean(f"scanned {', '.join(scanned)}: no matches")
 
@@ -2763,6 +2798,89 @@ def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
     return False
 
 
+def _staged_content_in_scope(
+    ctx: RuleContext, scope: set[str]
+) -> tuple[list[tuple[str, str]], str | None]:
+    """What this commit would put into history, for the paths scope covers.
+
+    Screening at the COMMIT is what makes the gate independent of the route
+    that wrote the file. ``_edit_content`` can only read a payload an edit
+    tool announced itself with, so a heredoc, a ``sed -i``, a ``cp`` or a
+    generator emitting a document all landed unscreened — and the rule
+    reported "nothing in privacy scope was written here" about every one of
+    them (BUG_027). Nothing in a staged blob records which tool produced it,
+    which is exactly why nothing here has to enumerate them: the next route
+    will not be a tool name either.
+
+    The WHOLE staged blob, not the added lines of a diff. An exemption marker
+    reaches a block (BUG_045), so a marker sitting on an unchanged line above
+    an added one is invisible to a scan of the addition alone — and the gate
+    would then block on a finding the project had already exempted, in a spot
+    the author cannot see from the diff.
+
+    Returns ``(pairs, problem)``. ``problem`` is set when the commit's content
+    exists and could not be read, and the caller fails closed on it: this is
+    the one gate here whose subject cannot be recovered afterwards, because
+    nothing un-writes an identifier out of a published history.
+    """
+    listed = git.staged_files(ctx.cwd, exclude_deleted=True)
+    if listed is None:
+        return [], (
+            f"git could not list what is staged in {ctx.cwd}, so the content "
+            "this commit would put into history could not be read."
+        )
+
+    root = git.toplevel(ctx.cwd) or ctx.manifest.root
+    found: list[tuple[str, str]] = []
+    for rel in listed:
+        # Staged paths are spelled against the repository toplevel, so they
+        # are resolved against it and not against ``ctx.cwd`` — a commit typed
+        # in a subdirectory names the same blobs.
+        if not _in_privacy_scope(ctx, Path(root) / rel, scope):
+            continue
+        blob = git.staged_blob(ctx.cwd, str(rel))
+        if blob is None:
+            return [], (
+                f"{rel} is staged and inside privacy scope, and its staged "
+                "content could not be read."
+            )
+        try:
+            found.append((str(rel), blob.decode("utf-8")))
+        except UnicodeDecodeError:
+            # Bytes that do not decode carry nothing that can leak in TEXT
+            # form — the same answer ``PrivacyScanner.scan_file`` gives a
+            # binary file, and the same one ``invariant privacy scan`` gives.
+            # Counted as looked at rather than dropped, so a commit of a
+            # diagram is not a gate no test can clear.
+            found.append((str(rel), ""))
+    return found, None
+
+
+def _privacy_screened_nothing(ctx: RuleContext, *, committing: bool) -> str:
+    """Why this call was not screened, in a sentence that is true OF IT.
+
+    One sentence — "nothing in privacy scope was written here" — used to be
+    returned on every route that reached the end, including the
+    shell-mediated write where it was affirmatively false. That is what let
+    BUG_027 survive a long session in which every edit went through a heredoc:
+    the gate answered, the answer read like a pass, and nobody re-checked. A
+    skip and a pass are different facts (BUG_020), and a skip that misstates
+    its own reason is the harder of the two to notice.
+    """
+    if ctx.is_edit:
+        return "nothing in privacy scope was written here"
+    if committing:
+        return "no staged path in this commit is inside privacy scope"
+    if ctx.tool_name == "Bash":
+        return (
+            "not screened: a shell command is not read as it runs — what it "
+            "writes is screened when it is committed"
+        )
+    if ctx.tool_name:
+        return f"not screened: {ctx.tool_name} is not an Edit, a Write or a commit"
+    return "not screened: this turn made no Edit, Write or commit"
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
         resolved = Path(path).resolve()
@@ -2787,6 +2905,37 @@ _COMMIT_MESSAGE_CLUSTER = re.compile(r"-[a-zA-Z]*m$")
 _COMMIT_FILE_CLUSTER = re.compile(r"-[a-zA-Z]*F$")
 
 
+def _shell_tokens(command: str) -> list[str]:
+    """A shell command as words, or nothing when it cannot be read as words."""
+    try:
+        return shlex.split(command)
+    except ValueError:  # unbalanced quotes: nothing here is reliable
+        return []
+
+
+def _is_git_commit(command: str) -> bool:
+    """Whether this shell command runs ``git commit``.
+
+    Token-aware rather than a substring test, in both directions: ``git config
+    commit.gpgsign false`` is not a commit, and ``git add -A && git commit -m
+    …`` — the chained spelling agents actually emit — is. A path-qualified
+    ``/usr/bin/git`` counts, and a ``git commit`` inside a quoted string is one
+    word and so does not.
+
+    Both halves of ``privacy.clean`` ask through here. A rule whose message
+    half and content half disagreed about what a commit is would screen one
+    and not the other on the very same call, which is the shape of the defect
+    this function was added for (BUG_027).
+    """
+    saw_git = False
+    for token in _shell_tokens(command):
+        if saw_git and token == "commit":
+            return True
+        if PurePosixPath(token).name == "git":
+            saw_git = True
+    return False
+
+
 def _extract_commit_message(command: str, cwd: Path | None = None) -> tuple[str, str | None]:
     """The message a ``git commit`` invocation carries, or why it is unreadable.
 
@@ -2796,14 +2945,9 @@ def _extract_commit_message(command: str, cwd: Path | None = None) -> tuple[str,
     closed on it: the scan's whole subject exists and could not be looked at,
     and an unanswered question is not a pass (AUD-09).
     """
-    import shlex
-
-    if "git" not in command or "commit" not in command:
+    if not _is_git_commit(command):
         return "", None
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return "", None
+    tokens = _shell_tokens(command)
     for index, token in enumerate(tokens):
         following = tokens[index + 1] if index + 1 < len(tokens) else ""
         if token == "--message" or _COMMIT_MESSAGE_CLUSTER.fullmatch(token):

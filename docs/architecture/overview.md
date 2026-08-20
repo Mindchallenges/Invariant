@@ -29,6 +29,7 @@ graph TD
         MEMORY[memory]
         PRIVACY[privacy]
         STATS[stats]
+        GIT[git]
     end
 
     subgraph domains["domains/ — the five state domains"]
@@ -84,8 +85,12 @@ graph TD
     RULES --> PRIVACY
     RULES --> MANIFEST
     RULES --> adapters
-    MANIFEST --> adapters
+    RULES --> GIT
+    SESSION --> GIT
+    MANIFEST --> GIT
+    CCTEL --> GIT
     MANIFEST --> PRIVACY
+    MANIFEST --> adapters
     PIPELINE --> adapters
     CC --> AGENTS
 ```
@@ -99,6 +104,28 @@ the one function every transition passes through. `MANIFEST → PRIVACY` carries
 exactly one name — `DEFAULT_PATTERNS`, the single authoritative default
 pattern set — so the manifest's default and a bare `PrivacyScanner()` cannot
 drift apart (AUD-15).
+
+The four arrows into `git` were drawn late. The module has been imported by
+`core/rules`, `core/manifest`, `domains/session` and the telemetry host since
+long before this document named it — the narrowing discussion below even
+appeals to "`core/git` for the worktrees placed beside it" — while the diagram
+and the component table, which this document calls the authoritative map, left
+it out. A dependency a reader cannot see is one a design argues from without
+being checked.
+
+`RULES → GIT` is the newest of them and carries the most weight, because it is
+how a gate screens **what landed rather than what announced itself**.
+`privacy.clean` used to read only the payload of an edit tool, so a write made
+through a shell — a heredoc, a `sed -i`, a `cp`, a generator emitting a
+document — reached history unscreened while the gate reported that nothing in
+scope had been written (BUG_027). Widening the list of tool names could not fix
+that, because the next route is not a tool name either. Reading the *staged
+content* at the commit does fix it, for every route at once, including the ones
+nobody has enumerated: nothing in a staged blob records which tool produced it.
+The same asymmetry as everywhere else governs the unanswerable case — a commit
+whose staged content cannot be read FAILS, because this is the one gate whose
+subject cannot be recovered afterwards. Nothing un-writes an identifier out of
+a published history.
 
 **Dependency rule:** arrows point down and never back up. `core/` knows
 nothing about hosts or the CLI. `adapters/` know their ecosystem and nothing
@@ -243,6 +270,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `items` | The work-item model and the pluggable store backends that read and write it | Know an item's lifecycle — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
+| `git` | Read-only queries about the repository — worktrees, branches, the staged set and the bytes staged for a path | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 
 ### `domains/`
