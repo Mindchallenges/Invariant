@@ -136,19 +136,27 @@ class SwiftXcodeAdapter(Adapter):
             return True
         return path.stem.endswith("Tests")
 
-    def carries_executable_code(self, path: Path) -> bool | None:
+    def carries_executable_code(
+        self, path: Path, relative: Path | None = None
+    ) -> bool | None:
         """A Swift file by its contents; every other kind by whether Xcode
         compiles it at all.
 
-        Two questions with one answer type. `.swift` goes to the reader, which
-        is the only thing that can tell a bare protocol from a function body.
-        Everything else goes to :func:`_xcode_resource_kind`, which answers
-        `False` only for the kinds this ecosystem is certain never to compile
-        and `None` for the rest — so a non-Swift file this adapter has no fact
-        about relaxes nothing, exactly as before.
+        Two questions with one answer type, and — the reason this method takes
+        two spellings — two different paths. `.swift` goes to the reader, which
+        OPENS the file and therefore needs ``path`` resolvable. Everything else
+        goes to :func:`_xcode_resource_kind`, whose ancestor rule is a
+        statement about the project's own layout and therefore needs
+        ``relative``. Swapping one for the other would have broken whichever
+        half it was not chosen for, which is why the argument is split rather
+        than replaced.
+
+        `_xcode_resource_kind` answers `False` only for the kinds this
+        ecosystem is certain never to compile and `None` for the rest, so a
+        non-Swift file this adapter has no fact about relaxes nothing.
         """
         if path.suffix != ".swift":
-            return _xcode_resource_kind(path)
+            return _xcode_resource_kind(path, relative)
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError, ValueError):
@@ -400,10 +408,31 @@ class SwiftXcodeAdapter(Adapter):
         }
 
     def parse_coverage(self, raw: str) -> dict[str, float]:
+        """Every measured source row `xccov` reported, whatever language it is.
+
+        The pattern used to end in a literal `\\.swift`, which was the whole of
+        BUG_041: an Objective-C file the tool genuinely measured, and genuinely
+        had a percentage for, was dropped on the way in. It then reached
+        `coverage.meets_floor` looking exactly like a file no run had touched,
+        the rule correctly refused to relax over a compiled kind, and the gate
+        blocked permanently — a floor no test the author could write would ever
+        clear. Every layer below behaved correctly on a false picture supplied
+        here.
+
+        The suffix set is :data:`_COMPILED_SUFFIXES` rather than a second list
+        written beside it, so the reviewed table cannot drift from its copy.
+        Note the asymmetry runs the OPPOSITE way from the relaxation question
+        that table usually serves: a suffix listed here that `xccov` never
+        emits a row for simply matches nothing, while one omitted drops a real
+        measurement. So the whole table is used, `.metal` and `.s` included,
+        rather than a cautious subset.
+
+        Still an allowlist, and that is what keeps the widening honest — the
+        report's target lines (`Heap.app  78.00%`) and any resource kind carry
+        the same shape and must not become coverage rows.
+        """
         out: dict[str, float] = {}
-        for match in re.finditer(
-            r"^\s*(?P<file>[\w./+-]+\.swift)\s+(?P<pct>\d+(?:\.\d+)?)%", raw, re.M
-        ):
+        for match in _COVERAGE_ROW.finditer(raw):
             out[match.group("file")] = float(match.group("pct"))
         return out
 
@@ -458,6 +487,19 @@ _COMPILED_SUFFIXES = frozenset(
         ".h",
         ".hpp",
         ".hh",
+        # The C++ spellings the table missed. Same claim as `.h`/`.hpp`/`.hh`
+        # one line up — a header or inline file can carry code `xccov`
+        # attributes to it — in extensions clang recognises and this list did
+        # not. The omission was not neutral: an unlisted compiled kind falls
+        # past this check and becomes reachable by the directory rule below,
+        # which is the only way BUG_042's wrong relaxation could happen at all.
+        # This table is checked FIRST and answers `None`, so an entry here can
+        # never relax anything; over-inclusion costs a spurious block.
+        ".hxx",
+        ".ipp",
+        ".inl",
+        ".cp",
+        ".c++",
         ".metal",
         ".s",
     }
@@ -505,21 +547,44 @@ _RESOURCE_BUNDLE_DIR_SUFFIXES = (
 )
 
 
-def _xcode_resource_kind(path: Path) -> bool | None:
+#: One `xccov view --report` row for a file it measured:
+#: ``    <path>    <pct>% (<covered>/<total>)``. Longest suffix first, so
+#: `Engine.swift` cannot be truncated to a `.s` match by backtracking.
+_COVERAGE_ROW = re.compile(
+    r"^\s*(?P<file>[\w./+-]+(?:"
+    + "|".join(
+        re.escape(s) for s in sorted(_COMPILED_SUFFIXES, key=len, reverse=True)
+    )
+    + r"))\s+(?P<pct>\d+(?:\.\d+)?)%",
+    re.M,
+)
+
+
+def _xcode_resource_kind(path: Path, relative: Path | None) -> bool | None:
     """``False`` for a path no Xcode target compiles, ``None`` if unsure.
 
     Never returns ``True``: "this kind is compiled" is not the same claim as
     "this file has executable lines in it", and the Swift reader is what
     answers the second. Returning ``True`` here would let a `.swift` file skip
     that reader entirely.
+
+    The SUFFIX questions are answered from ``path``, which carries the file's
+    own kind wherever it is spelled. The ANCESTOR question is answered from
+    ``relative`` and from nothing else: `parts[:-1]` on an absolute path walks
+    out of the project and into the machine's layout, so a checkout under a
+    directory named `*.docc` would relax the coverage gate for everything
+    inside it (BUG_042). Without a project-relative spelling the ancestor rule
+    abstains — `None` relaxes nothing, which is the direction the base
+    contract requires when an adapter cannot tell.
     """
     suffix = path.suffix.lower()
     if suffix in _COMPILED_SUFFIXES:
         return None
     if suffix in _RESOURCE_SUFFIXES:
         return False
-    if any(
-        part.lower().endswith(_RESOURCE_BUNDLE_DIR_SUFFIXES) for part in path.parts[:-1]
+    if relative is not None and any(
+        part.lower().endswith(_RESOURCE_BUNDLE_DIR_SUFFIXES)
+        for part in relative.parts[:-1]
     ):
         return False
     return None

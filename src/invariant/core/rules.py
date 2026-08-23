@@ -2407,7 +2407,14 @@ def _explain_absent_rows(
         # component from somewhere above the project root.
         elif _is_test_file(adapters, Path(rel)) is True:
             excluded.append(f"{rel} (a test file; not what a coverage floor measures)")
-        elif _carries_executable_code(adapters, found) is False:
+        # Both spellings, because the question has two halves that need
+        # different ones: the Swift reader OPENS `found`, while the
+        # directory convention is a statement about the project's own
+        # layout and must be read from `rel`. Handing over only the
+        # absolute path let an ancestor above the repository root decide
+        # (BUG_042) — the same hazard the comment above guards
+        # `_is_test_file` against, one question over.
+        elif _carries_executable_code(adapters, found, Path(rel)) is False:
             excluded.append(f"{rel} (no executable lines to measure)")
         # Asked last, so an adapter that HAS an opinion about the file always
         # answers first. This one is the fact no adapter is positioned to
@@ -2784,7 +2791,9 @@ def _ecosystem_adapters(ctx: RuleContext) -> list[Adapter]:
     return [get_adapter(eco) for eco in ctx.manifest.ecosystems]
 
 
-def _carries_executable_code(adapters: list[Adapter], path: Path) -> bool | None:
+def _carries_executable_code(
+    adapters: list[Adapter], path: Path, relative: Path | None = None
+) -> bool | None:
     """The first adapter with an opinion answers; ``None`` if none has one.
 
     Adapters stack, and one that does not know a language returns ``None`` for
@@ -2792,7 +2801,7 @@ def _carries_executable_code(adapters: list[Adapter], path: Path) -> bool | None
     taking the first real answer is what makes a mixed-ecosystem project work.
     """
     for adapter in adapters:
-        answer = adapter.carries_executable_code(path)
+        answer = adapter.carries_executable_code(path, relative)
         if answer is not None:
             return answer
     return None

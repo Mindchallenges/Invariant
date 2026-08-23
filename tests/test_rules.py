@@ -3307,6 +3307,13 @@ class TestFilesThatCannotHaveACoverageRow:
         `xccov` measures Objective-C, so an absent row for a `.m` file is the
         thing this gate exists to catch. If the resource allowlist ever grows
         far enough to swallow a compiled language, this is where it shows.
+
+        Read narrowly, and BUG_041 is why. What this pins is that an ObjC file
+        WITH NO ROW still blocks. It must not be read as settled intent that an
+        ObjC file never HAS one — for a while the parser guaranteed that by
+        dropping every non-Swift row on the way in, which turned this correct
+        assertion into the visible half of an unsatisfiable gate. The sibling
+        below is the other half.
         """
         self.write(ctx_factory, self.MEASURED, self.LIVE)
         self.write(
@@ -3323,6 +3330,59 @@ class TestFilesThatCannotHaveACoverageRow:
         assert not verdict.ok
         assert "no coverage row" in verdict.message
         assert "Legacy.m" in verdict.detail
+
+    def test_BUG_041_a_measured_objective_c_file_is_judged_on_the_merits(
+        self, ctx_factory
+    ):
+        """A row `xccov` really produced must reach the gate and be judged.
+
+        The sibling above proves an unmeasured `.m` still blocks. This proves
+        the OTHER outcome is reachable at all: with a row present the file is
+        held to the floor like any other, so the verdict is one a test can
+        move. While `parse_coverage` dropped every non-Swift row, no ObjC file
+        could ever be in this state — the gate had exactly one answer for them
+        and no work could change it.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Legacy.m",
+            "@implementation Legacy\n- (void)work { compute(); }\n@end\n",
+        )
+        rows = self.measured_row(ctx_factory)
+        rows[str(ctx_factory.wt / "Heap/Intake/Legacy.m")] = 96.0
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, rows, [self.MEASURED, "Heap/Intake/Legacy.m"])
+        )
+        assert verdict.ok, verdict.message
+
+    def test_BUG_041_a_measured_objective_c_file_below_the_floor_is_caught(
+        self, ctx_factory
+    ):
+        """And the floor actually applies to it.
+
+        Not a redundant pair. With the rows dropped, an ObjC file was invisible
+        to the floor in `all` scope as well as unsatisfiable in `touched` — so
+        widening the parser both un-wedges one scope and starts enforcing the
+        other. A green here would mean the row arrived and was then ignored,
+        which is the vacuous pass the first test cannot distinguish on its own.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Legacy.m",
+            "@implementation Legacy\n- (void)work { compute(); }\n@end\n",
+        )
+        rows = self.measured_row(ctx_factory)
+        rows[str(ctx_factory.wt / "Heap/Intake/Legacy.m")] = 41.0
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, rows, [self.MEASURED, "Heap/Intake/Legacy.m"])
+        )
+        assert not verdict.ok
+        assert "Legacy.m" in (verdict.detail or "")
+        assert "no coverage row" not in verdict.message, (
+            "the file was reported as unmeasured, not as under the floor"
+        )
 
     def test_a_scope_emptied_by_exclusion_reports_itself_as_empty(self, ctx_factory):
         """Nothing left to hold to the floor is N/A, not a pass.

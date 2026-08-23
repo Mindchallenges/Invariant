@@ -175,16 +175,35 @@ files — plus the directory bundles whose every payload is a resource, which is
 the half that matters in practice: a touched path more often names a file
 several components inside a catalog than the catalog itself.
 
-Three properties keep it as narrow as the reader beside it. Compiled kinds are
+Four properties keep it as narrow as the reader beside it. Compiled kinds are
 listed explicitly and tested first, so neither a later allowlist entry nor the
-directory rule can reach an `.m` or a `.h` that `xccov` really does measure.
+directory rule can reach a kind that list names. That guarantee is exactly as
+wide as the list and no wider, which is worth stating plainly because it was
+once written as though it were absolute: the C++ spellings `.hxx`, `.ipp`,
+`.inl`, `.cp` and `.c++` were missing, and a compiled kind the table does not
+name falls straight through to the directory rule (BUG_042). They are listed
+now. The property is maintained by keeping the table complete, not by the
+ordering alone.
 An extension absent from the allowlist answers `None`, because inverting this
 into "any extension I do not recognise is inert" is precisely the silent pass
-the base `None` exists to prevent. And documentation and configuration
+the base `None` exists to prevent. Documentation and configuration
 suffixes are deliberately absent from it: `core/rules` already holds `.md`,
 `.rst`, `.json`, `.yaml` and `.toml` out of the changed-source set for every
 ecosystem, and the same judgement written down in two layers is the
 duplication that drifts.
+
+And the fourth, which is about the QUESTION rather than the tables. The
+directory rule is a statement about the project's own layout, so it is asked on
+the **project-relative** spelling and abstains without one. Asked on an absolute
+path it scans components above the repository root — a checkout that happens to
+sit inside a directory named `*.docc` or `*.xcodeproj` would then relax the
+coverage floor for every unlisted compiled file underneath it. Its neighbour
+`is_test_file` had been safe from this since BUG_019, but only because of a
+comment at a call site in `core/rules`; the guarantee lived where the
+implementer could not see it, and the next ancestor-scanning rule written
+walked into it. `Adapter.carries_executable_code` now takes both spellings and
+says which answers which — the resolvable path for the reader that OPENS the
+file, the project-relative one for anything reading a directory convention.
 
 An absent row has a *third* cause, and it is about the project rather than the
 file: the reporter was configured never to look there. A Python project setting
@@ -301,6 +320,19 @@ a coverage number, what that coverage run was even pointed at, how to tell a
 real failure from a tooling failure. Adapters are selected in the manifest and
 may be stacked; `generic` is the always-present fallback that executes literal
 commands from the manifest and parses nothing.
+
+"How to read a coverage number" is the layer's quietest duty and the one whose
+failures travel furthest, because everything downstream of it behaves correctly
+on whatever picture it supplies. The Xcode adapter's row parser matched a
+literal `.swift`, so an Objective-C file `xccov` had genuinely measured arrived
+at `coverage.meets_floor` looking exactly like a file no run had touched — the
+rule then correctly refused to relax over a compiled kind, and the gate blocked
+with no test anyone could write to clear it (BUG_041). The extensions it
+accepts are now read from the same `_COMPILED_SUFFIXES` table the kind question
+uses, so the two cannot drift; note that the asymmetry inverts between them. For
+the kind question, a suffix wrongly listed would RELAX a gate, so the table is
+conservative. For the row pattern, a suffix wrongly listed matches nothing while
+one omitted drops a real measurement — so the parser takes the whole table.
 
 `join_selectors` is the newest of those questions and carries the layer's
 usual asymmetry. Whether several test selectors are a space-separated list of

@@ -215,7 +215,9 @@ class Adapter:
         """Narrow a changed-file list to this ecosystem's source files."""
         return list(changed)
 
-    def carries_executable_code(self, path: Path) -> bool | None:
+    def carries_executable_code(
+        self, path: Path, relative: Path | None = None
+    ) -> bool | None:
         """Does this file contribute lines a coverage tool could measure?
 
         Asked only to explain an ABSENT coverage row. Reporters emit nothing
@@ -224,6 +226,23 @@ class Adapter:
         file the run never measured. The two need opposite handling: the
         first is vacuously fine, the second is the thing a coverage floor
         exists to catch.
+
+        **Two spellings, and which one answers which question.** ``path`` is
+        resolvable: an implementation that needs the file's CONTENTS opens it.
+        ``relative`` is the same file spelled against the project root, and is
+        the only spelling a DIRECTORY convention may be read from — an absolute
+        path carries components above the project that the project does not
+        own, so a checkout sitting inside a directory named `*.docc` would
+        otherwise decide the answer for every file underneath it (BUG_042).
+        ``relative`` is ``None`` when the caller could not supply one, and an
+        implementation whose answer depends on the directory convention must
+        then answer ``None``: the fail-safe direction relaxes nothing, and
+        reading the absolute spelling instead is the defect itself.
+
+        This obligation used to live only as a comment at ONE call site in
+        another layer, protecting :meth:`is_test_file` and not this method. A
+        guarantee written where the implementer cannot see it is one the next
+        ancestor-scanning rule inherits by luck.
 
         ``None`` means "cannot tell", and carries the same obligation as
         :func:`git.branch_files`' ``None`` — a caller deciding whether to
@@ -291,6 +310,12 @@ class Adapter:
 
     def is_test_file(self, path: Path) -> bool | None:
         """Is this file part of the test suite rather than the code under test?
+
+        ``path`` is the PROJECT-RELATIVE spelling. This question is answered
+        from the directory convention, and only the project's own layout
+        carries that fact — see :meth:`carries_executable_code` for the
+        spelling rule and for what happened when a sibling rule was written
+        without it.
 
         Asked for the same reason as :meth:`carries_executable_code` and
         answered on the same terms — to explain an ABSENT coverage row. A test

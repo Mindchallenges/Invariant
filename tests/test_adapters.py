@@ -1377,11 +1377,18 @@ class TestCarriesExecutableCode:
         catalog; it names a payload file several components inside one, whose
         own suffix (`.png`, or none at all) says nothing. The ancestor
         directory is what carries the fact.
+
+        The project-relative spelling is passed because that is the one the
+        ancestor rule is entitled to read; asking on the absolute path is
+        BUG_042 and now abstains. What this test pins is unchanged — a payload
+        inside a bundle the PROJECT owns is inert.
         """
         path = tmp_path / relpath
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("payload", encoding="utf-8")
-        assert self.adapter.carries_executable_code(path) is False
+        assert (
+            self.adapter.carries_executable_code(path, Path(relpath)) is False
+        )
 
     # -- everything else must NOT be called inert ------------------------
     #
@@ -1445,6 +1452,142 @@ class TestCarriesExecutableCode:
         path = tmp_path / "a.swift"
         path.write_text("protocol P {}", encoding="utf-8")
         assert Adapter().carries_executable_code(path) is None
+
+    # -- BUG_042: which SPELLING the question is asked on ------------------
+
+    def test_BUG_042_an_ancestor_above_the_project_does_not_decide(self, tmp_path):
+        """A path component the project does not own must not relax the gate.
+
+        The ancestor scan reads `parts[:-1]`, and `_explain_absent_rows` hands
+        this question an ABSOLUTE path — so a checkout that happens to sit
+        inside a directory named `*.docc` or `*.xcodeproj` answers `False`,
+        "no executable lines, relax the coverage floor", for a file the
+        project's own layout says nothing about. Its neighbour `is_test_file`
+        is protected from exactly this, by a comment at a call site in
+        another layer; this question inherited the idiom without the
+        guarantee.
+        """
+        inside = tmp_path / "Vendor.docc" / "repo" / "src"
+        inside.mkdir(parents=True)
+        path = inside / "Engine.hxx"
+        path.write_text("inline int f() { return 1; }\n", encoding="utf-8")
+
+        assert self.adapter.carries_executable_code(
+            path, relative=Path("src/Engine.hxx")
+        ) is None, "an ancestor above the project root relaxed the gate"
+
+    def test_BUG_042_a_bundle_ancestor_the_project_owns_still_decides(self, tmp_path):
+        """The control. Fixing the spelling must not cost the working rule."""
+        path = tmp_path / "checkout" / "Heap.docc" / "Overview.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("payload", encoding="utf-8")
+        assert self.adapter.carries_executable_code(
+            path, relative=Path("Heap.docc/Overview.md")
+        ) is False
+
+    def test_BUG_042_without_a_relative_spelling_the_directory_rule_abstains(
+        self, tmp_path
+    ):
+        """No project-relative spelling means no trustworthy ancestor list.
+
+        `None` is the fail-safe answer — it relaxes nothing — and it is the
+        one the base contract demands when the adapter cannot tell. Guessing
+        from the absolute spelling is what this bug IS.
+        """
+        path = tmp_path / "Vendor.docc" / "repo" / "Overview.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("payload", encoding="utf-8")
+        assert self.adapter.carries_executable_code(path) is None
+
+    @pytest.mark.parametrize("suffix", [".hxx", ".ipp", ".inl", ".cp", ".c++"])
+    def test_BUG_042_the_unlisted_cxx_spellings_are_compiled_kinds(self, suffix):
+        """The other half that shrinks the exposed set, settled on its merits.
+
+        `_COMPILED_SUFFIXES` already holds `.h`, `.hpp` and `.hh` on the
+        reasoning that a header can carry inline code `xccov` attributes to
+        it. These five are the same claim in spellings the table missed, and
+        the table is checked FIRST, so an entry here can only ever answer
+        `None` — over-inclusion costs a spurious block, omission is what left
+        them reachable by the directory rule at all.
+
+        Asserted on the TABLE rather than on a call, because a call answers
+        `None` for them either way today — by falling off the end of every
+        rule rather than by being recognised. Those are different facts and
+        only one of them is the guarantee.
+        """
+        from invariant.adapters.swift_xcode import _COMPILED_SUFFIXES
+
+        assert suffix in _COMPILED_SUFFIXES
+
+
+class TestBUG041CoverageRowsAreNotSwiftOnly:
+    """`parse_coverage` extracted only `.swift` rows.
+
+    An Objective-C file that `xccov` genuinely measured, and genuinely has a
+    percentage for, was dropped by the parser — so it reached
+    `coverage.meets_floor` looking exactly like a file the run never measured.
+    The rule then correctly refused to relax over a compiled kind, and the gate
+    blocked permanently: no test the author could write would ever clear it.
+    Every layer downstream behaved correctly on the false picture it was handed,
+    which is why the fix belongs here and nowhere else.
+    """
+
+    from invariant.adapters.swift_xcode import SwiftXcodeAdapter
+
+    ADAPTER = SwiftXcodeAdapter()
+
+    #: The row shape is the one captured from a real `xccov view --report` run
+    #: in `TestSwiftCoverageCommand`. What is widened is the EXTENSION only —
+    #: the layout, the leading indent and the trailing `(covered/total)` are
+    #: unchanged, because nothing in that format is language-dependent.
+    MIXED = (
+        "    /Users/x/Heap/Frameworks/Intake/FileBytesIngester.swift"
+        "     56.25% (56/99)\n"
+        "    /Users/x/Heap/Frameworks/Intake/HeapLegacyIngest.m"
+        "          82.00% (41/50)\n"
+        "    /Users/x/Heap/Frameworks/Intake/HeapBridge.mm"
+        "              91.30% (21/23)\n"
+    )
+
+    def test_an_objective_c_row_survives_the_parser(self):
+        parsed = self.ADAPTER.parse_coverage(self.MIXED)
+        assert parsed.get("/Users/x/Heap/Frameworks/Intake/HeapLegacyIngest.m") == 82.0
+
+    def test_the_swift_row_beside_it_is_unchanged(self):
+        parsed = self.ADAPTER.parse_coverage(self.MIXED)
+        assert (
+            parsed["/Users/x/Heap/Frameworks/Intake/FileBytesIngester.swift"] == 56.25
+        )
+
+    def test_every_kind_the_adapter_calls_compiled_can_carry_a_row(self):
+        """The widening's source is the reviewed table, not a second list.
+
+        `_COMPILED_SUFFIXES` is what BUG_039 established as compiled and
+        measurable; reusing it is what stops a parallel pattern drifting from
+        it. Here the asymmetry runs the OPPOSITE way from the relaxation
+        question: a suffix listed for parsing that `xccov` never emits simply
+        matches nothing, while one omitted drops a real row — so the whole
+        table is used rather than a cautious subset of it.
+        """
+        from invariant.adapters.swift_xcode import _COMPILED_SUFFIXES
+
+        raw = "".join(
+            f"    /p/File{i}{suffix}    50.00% (1/2)\n"
+            for i, suffix in enumerate(sorted(_COMPILED_SUFFIXES))
+        )
+        parsed = self.ADAPTER.parse_coverage(raw)
+        assert len(parsed) == len(_COMPILED_SUFFIXES), sorted(parsed)
+
+    def test_a_resource_row_is_still_not_a_coverage_row(self):
+        """The parser stays an allowlist. A line that is not a measured
+        compiled file must not become one because it has a percentage on it."""
+        raw = (
+            "    /Users/x/Heap/Heap.app     78.00% (39/50)\n"
+            "    /Users/x/Heap/Info.plist   12.00% (3/25)\n"
+        )
+        assert self.ADAPTER.parse_coverage(raw) == {}
+
+
 
 
 class TestResultBundleCounts:
