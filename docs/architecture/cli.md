@@ -66,24 +66,76 @@ invariant assets list [--kind agent|command|skill]
     Every host asset: kind, whether the host can load it, and whether this
     library or the project owns it.
 
-invariant assets install [--kind ...] [--dry-run]
+invariant assets install [--kind ...] [--overwrite-local] [--dry-run]
     Reinstall library-shipped assets and nothing else. Not a flag on `init`:
     `init --force` rewrites the manifest, so routing a repair through it would
     trade a broken asset for a discarded enforcement configuration.
+
+    An asset you have EDITED is skipped and named. See "A managed file the
+    operator has edited" below. --overwrite-local asks for the shipped version
+    back; --dry-run enumerates every target, its divergence, and whether the
+    run would write it.
 
 invariant agents list
     Every library agent: installed or not, whether the host can load it, and
     which pipeline role it answers for.
 
-invariant agents install [--dry-run]
+invariant agents install [--overwrite-local] [--dry-run]
     Reinstall the library agents and nothing else. Deliberately not a flag on
     `init`: `init --force` rewrites the manifest, so routing an agent repair
     through it would trade a broken agent file for a discarded enforcement
-    configuration.
+    configuration. Same edit protection as `assets install`, and it matters
+    more here: this is the command `doctor` actually points people at.
 
 invariant config show [--provenance]
     Print resolved configuration and where each value came from.
 ```
+
+### A managed file the operator has edited
+
+Library assets are **managed** files: each carries a marker holding the digest
+of what was shipped, which is what makes divergence detectable at all. So
+"managed" reasonably means the library owns the bytes — and it does not,
+quite. The project already offers `agents.local` for project-owned agents, and
+an operator who edits a *shipped* one is saying something, usually "your
+version is nearly right".
+
+The resolution: **the library owns the shipped copy and the operator owns the
+installed one.** An install that would diverge from what is on disk is a
+question rather than a write.
+
+The marker is what separates the two divergences, and one function —
+`classify_installed` — is the only place that judgement is made:
+
+```mermaid
+graph TD
+    T["an installed asset"] --> E{"does its body still<br/>reconstruct to what we ship?"}
+    E -- yes --> C["current"]
+    E -- no --> M{"does its marker hold<br/>the digest we ship?"}
+    M -- "yes — it was ours,<br/>then it changed" --> L["edited locally — the operator's work"]
+    M -- "no — it records<br/>some other release" --> O["installed from an older version"]
+    L --> S["skipped, and NAMED"]
+    O --> W["rewritten; this is what<br/>the command exists for"]
+```
+
+That distinction was computed all along, rendered into a **failing** `doctor`
+check, and then ignored by the only command `doctor`'s output pointed at:
+`install_assets` overwrote every target unconditionally, with no `--force`, no
+per-asset skip, no backup, and a `--dry-run` that named nothing it would
+flatten. The knowledge needed to protect the edit existed; the code that acted
+on it did not (BUG_051).
+
+Three consequences are load-bearing:
+
+- **A skip is named, never counted.** The defect was an install reporting a
+  tidy total while a flattened file went unmentioned; a skip nobody can see is
+  the same fault with the opposite sign.
+- **The currency row says how to reverse it.** A locally edited asset is a
+  standing FAILED check, and it must not read as a demand to discard the edit —
+  so the row states that the edits are kept and names `--overwrite-local`.
+- **A target that already matches is still rewritten.** It costs nothing, and a
+  repair command reporting "installed 0" on a healthy project reads as a
+  failure. The one case withheld is the one where writing destroys work.
 
 ## Session
 

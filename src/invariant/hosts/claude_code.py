@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.errors import InvariantError
@@ -119,6 +120,91 @@ CHECK_AGENTS_CURRENT = "library agents current"
 #: Tools whose invocation means "a subagent ran". Recorded as pipeline
 #: evidence so the agent-role gates can read a fact instead of a claim.
 AGENT_TOOLS = {"Task", "Agent"}
+
+
+#: How an installed asset differs from what the library ships. These are the
+#: strings `doctor` has always printed; naming them keeps the classifier and
+#: its two readers from drifting apart about what a divergence IS.
+CURRENT = "current"
+ABSENT = "absent"
+LOCAL = "edited locally"
+OLDER = "installed from an older version"
+UNREADABLE = "unreadable"
+
+
+@dataclass
+class AssetPlan:
+    """What an install would do to one target."""
+
+    kind: str
+    identity: str
+    source: Path
+    target: Path
+    state: str
+    write: bool
+
+
+@dataclass
+class InstallResult:
+    """What an install DID, in three lists rather than one.
+
+    It used to return one list — every asset, all overwritten — and the command
+    printed "installed N asset(s)" with no mention that one of them had been
+    changed by hand. The three cases are different facts and the operator needs
+    the middle one most.
+    """
+
+    installed: list[str] = field(default_factory=list)
+    #: (label, why) for a target left alone because it is the operator's work.
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _currency_detail(stale: list[str], repair: str) -> str:
+    """The currency row's text, and — where an edit is the cause — what to do.
+
+    A locally edited asset is a persistent FAILED check, and it must not read
+    as a demand to discard the edit: the repair `doctor` names now leaves it
+    alone, so the row has to say both that the divergence is the operator's own
+    and how to reverse it if that is what they want. Without the second half
+    the operator is looking at a red row with no way to clear it.
+    """
+    if not stale:
+        return "all match the shipped version"
+    detail = ", ".join(stale)
+    if any(LOCAL in entry for entry in stale):
+        detail += (
+            f" — your edits are kept; {repair} --overwrite-local "
+            f"replaces them with the shipped version"
+        )
+    return detail
+
+
+def classify_installed(source: Path, target: Path) -> str:
+    """How ``target`` diverges from the ``source`` this library ships.
+
+    The one answer, read by `doctor` and by every install. It was written
+    inside `_stale_for` and lived only there, so the command `doctor`'s failure
+    points at — `assets install` — could not consult it and destroyed the very
+    edits this function had just identified as edits (BUG_051).
+
+    The discriminator is the marker digest. A file whose marker still records
+    the digest of what we ship, but whose body no longer reconstructs to it,
+    was changed AFTER we wrote it: that is the operator's work. A file whose
+    marker records some other digest is a copy of an older release, which is
+    nobody's work and is the case reinstalling exists for.
+    """
+    from . import assets
+
+    if not target.is_file():
+        return ABSENT
+    text = target.read_text(encoding="utf-8")
+    shipped = source.read_text(encoding="utf-8")
+    rebuilt = assets.reconstruct_source(text)
+    if rebuilt is None:
+        return UNREADABLE
+    if rebuilt == shipped:
+        return CURRENT
+    return LOCAL if assets.marker_digest(text) == digest_of(shipped) else OLDER
 
 
 def digest_of(body: str) -> str:
@@ -266,7 +352,20 @@ class ClaudeCodeHost:
         for source in sorted((DATA_DIR / "agents").glob("*.md")):
             self.install_agent(source, agents_dir / source.name)
 
-    def install_agent(self, source: Path, target: Path) -> None:
+    def install_agent(
+        self, source: Path, target: Path, overwrite_local: bool = False
+    ) -> str:
+        """Write one agent, and answer what was there before.
+
+        The return value is the divergence it found, so a caller can report a
+        file it left alone. Skipping a local edit here is the same decision
+        `install_assets` makes and for the same reason — a file in the
+        operator's repository is the operator's (BUG_051).
+        """
+        state = classify_installed(source, target)
+        if state is LOCAL and not overwrite_local:
+            return state
+
         body = source.read_text(encoding="utf-8")
         split = _split_frontmatter(body)
         if split is None:
@@ -282,6 +381,7 @@ class ClaudeCodeHost:
         target.write_text(
             "\n".join([FENCE, marker, *front, FENCE, rest]), encoding="utf-8"
         )
+        return state
 
     def _wire_settings(self) -> None:
         settings_path = self.claude_dir / "settings.json"
@@ -460,7 +560,7 @@ class ClaudeCodeHost:
                     (
                         f"library {kind.name}s current",
                         not stale,
-                        ", ".join(stale) if stale else "all match the shipped version",
+                        _currency_detail(stale, "invariant assets install"),
                     )
                 )
         return checks
@@ -476,6 +576,19 @@ class ClaudeCodeHost:
             )
         return sorted(p.stem for p in root.glob("*.md"))
 
+    def _sources_for(self, kind) -> list[Path]:
+        """The files this library ships of a kind, in a stable order."""
+        source_root = DATA_DIR / kind.directory
+        if not source_root.is_dir():
+            return []
+        if not kind.nested_file:
+            return sorted(source_root.glob("*.md"))
+        return sorted(
+            c / kind.nested_file
+            for c in source_root.iterdir()
+            if (c / kind.nested_file).is_file()
+        )
+
     def _stale_for(self, kind) -> list[str] | None:
         """Which shipped assets of this kind differ from what we ship.
 
@@ -483,40 +596,16 @@ class ClaudeCodeHost:
         every command is not drift, and reporting "0 stale" would imply this
         library had an opinion about files it never wrote.
         """
-        from . import assets
-
-        source_root = DATA_DIR / kind.directory
-        sources = (
-            sorted(source_root.glob("*.md"))
-            if not kind.nested_file
-            else sorted(
-                c / kind.nested_file
-                for c in source_root.iterdir()
-                if (c / kind.nested_file).is_file()
-            )
-            if source_root.is_dir()
-            else []
-        )
-        if not source_root.is_dir() or not sources:
+        sources = self._sources_for(kind)
+        if not sources:
             return None
 
         stale: list[str] = []
         for source in sources:
             identity = kind.identity(source)
-            target = self._target_for(kind, identity)
-            if not target.is_file():
-                stale.append(f"{identity} (absent)")
-                continue
-            text = target.read_text(encoding="utf-8")
-            shipped = source.read_text(encoding="utf-8")
-            rebuilt = assets.reconstruct_source(text)
-            if rebuilt is None:
-                stale.append(f"{identity} (unreadable)")
-            elif rebuilt != shipped:
-                if assets.marker_digest(text) == digest_of(shipped):
-                    stale.append(f"{identity} (edited locally)")
-                else:
-                    stale.append(f"{identity} (installed from an older version)")
+            state = classify_installed(source, self._target_for(kind, identity))
+            if state is not CURRENT:
+                stale.append(f"{identity} ({state})")
         return stale
 
     def _target_for(self, kind, identity: str) -> Path:
@@ -525,45 +614,87 @@ class ClaudeCodeHost:
             return base / identity / kind.nested_file
         return base / f"{identity}.md"
 
-    def install_assets(self, only: str | None = None) -> list[str]:
-        """Install every library-shipped asset, or one kind of them."""
+    def plan_assets(self, only: str | None = None, overwrite_local: bool = False):
+        """What an install would do to each target, before it does any of it.
+
+        Separated from the doing so that ``--dry-run`` can enumerate. It used
+        to return before any per-file work and print "would reinstall library
+        assets", which names nothing it would flatten — the one thing a dry run
+        of a destructive command is for (BUG_051).
+        """
         from . import assets
 
-        installed: list[str] = []
+        plan: list[AssetPlan] = []
         for kind in assets.KINDS:
             if only and kind.name != only:
                 continue
-            source_root = DATA_DIR / kind.directory
-            if not source_root.is_dir():
-                continue
-            sources = (
-                sorted(source_root.glob("*.md"))
-                if not kind.nested_file
-                else sorted(
-                    c / kind.nested_file
-                    for c in source_root.iterdir()
-                    if (c / kind.nested_file).is_file()
-                )
-            )
-            for source in sources:
+            for source in self._sources_for(kind):
                 identity = kind.identity(source)
                 target = self._target_for(kind, identity)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                body = source.read_text(encoding="utf-8")
-                try:
-                    target.write_text(
-                        assets.render_managed(body, digest_of(body)), encoding="utf-8"
+                state = classify_installed(source, target)
+                # Everything but a local edit is written, including a target
+                # that already matches: rewriting an identical file costs
+                # nothing, and a repair command that reports "installed 0"
+                # on a healthy project reads as a failure. The ONE case that
+                # is withheld is the one where writing would destroy work.
+                plan.append(
+                    AssetPlan(
+                        kind=kind.name,
+                        identity=identity,
+                        source=source,
+                        target=target,
+                        state=state,
+                        write=not (state is LOCAL and not overwrite_local),
                     )
-                except ValueError as exc:
-                    raise InvariantError(
-                        f"{kind.name} {identity!r} has no YAML frontmatter starting "
-                        f"on line 1. The host identifies it by that block; a file "
-                        f"without one is copied into place and then silently "
-                        f"ignored, so installing it would look like success and "
-                        f"produce nothing."
-                    ) from exc
-                installed.append(f"{kind.name}:{identity}")
-        return installed
+                )
+        return plan
+
+    def install_assets(
+        self, only: str | None = None, overwrite_local: bool = False
+    ) -> InstallResult:
+        """Install library-shipped assets, leaving the operator's edits alone.
+
+        A file in the operator's repository is the operator's. This library may
+        say "that differs from what I ship" — it already does, per asset, and
+        it can tell an edit apart from a stale copy — and it may not silently
+        revert one. It used to overwrite every target unconditionally while
+        holding exactly the knowledge that would have protected the edit, and
+        `doctor` reported such a file as a FAILED check, so the repair the tool
+        recommended was the destructive one (BUG_051).
+
+        The tension is real and is settled rather than dodged: these are
+        MANAGED files with a digest marker, so "managed" reasonably means the
+        library owns the bytes. But the project already offers `agents.local`
+        for project-owned agents, and an operator who edits a shipped one is
+        saying something — usually "your version is nearly right". So the
+        library owns the SHIPPED copy and the operator owns the INSTALLED one,
+        and an install that would diverge from what is on disk is a question
+        rather than a write.
+        """
+        from . import assets
+
+        result = InstallResult()
+        for step in self.plan_assets(only=only, overwrite_local=overwrite_local):
+            label = f"{step.kind}:{step.identity}"
+            if not step.write:
+                result.skipped.append((label, step.state))
+                continue
+            step.target.parent.mkdir(parents=True, exist_ok=True)
+            body = step.source.read_text(encoding="utf-8")
+            try:
+                step.target.write_text(
+                    assets.render_managed(body, digest_of(body)), encoding="utf-8"
+                )
+            except ValueError as exc:
+                raise InvariantError(
+                    f"{step.kind} {step.identity!r} has no YAML frontmatter starting "
+                    f"on line 1. The host identifies it by that block; a file "
+                    f"without one is copied into place and then silently "
+                    f"ignored, so installing it would look like success and "
+                    f"produce nothing."
+                ) from exc
+            result.installed.append(label)
+        return result
 
     def agent_checks(self) -> list[tuple[str, bool, str]]:
         """Two questions, kept apart on purpose.
@@ -592,15 +723,14 @@ class ClaudeCodeHost:
             if problem:
                 unloadable.append(f"{source.stem} ({problem})")
 
-            shipped = source.read_text(encoding="utf-8")
-            reconstructed = _reconstruct_source(text)
-            if reconstructed is None:
-                stale.append(f"{source.stem} (unreadable)")
-            elif reconstructed != shipped:
-                if _marker_digest(text) == digest_of(shipped):
-                    stale.append(f"{source.stem} (edited locally)")
-                else:
-                    stale.append(f"{source.stem} (installed from an older version)")
+            # One classifier, shared with `_stale_for` and with every install.
+            # It used to be written out here as well, which is how the two
+            # readers could have come to disagree about what an edit IS — and
+            # the install path, which had no classifier at all, destroyed the
+            # files this one identifies (BUG_051).
+            state = classify_installed(source, target)
+            if state is not CURRENT:
+                stale.append(f"{source.stem} ({state})")
 
         return [
             (
@@ -615,7 +745,7 @@ class ClaudeCodeHost:
             (
                 CHECK_AGENTS_CURRENT,
                 not stale,
-                ", ".join(stale) if stale else "all match the shipped version",
+                _currency_detail(stale, "invariant agents install"),
             ),
         ]
 

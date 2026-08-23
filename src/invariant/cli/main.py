@@ -39,6 +39,12 @@ _UNSET = object()
 # -- output helpers ----------------------------------------------------
 
 
+#: How the operator asks for the shipped version back. Printed wherever an
+#: install leaves a file alone, because a skip the operator cannot reverse is
+#: only half an improvement on a write they could not prevent.
+_OVERWRITE_LOCAL_HINT = "  pass --overwrite-local to replace them with the shipped version"
+
+
 def emit(args, payload: dict, text: str = "") -> int:
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
@@ -611,20 +617,59 @@ def cmd_assets_install(args) -> int:
     host = ClaudeCodeHost(ctx.manifest.root)
 
     if args.dry_run:
-        return emit(args, {"dry_run": True}, "would reinstall library assets")
+        plan = host.plan_assets(only=args.kind, overwrite_local=args.overwrite_local)
+        lines = [f"would install into {host.claude_dir}:"]
+        for step in plan:
+            verb = "install" if step.write else "SKIP   "
+            lines.append(f"  {verb} {step.kind}:{step.identity} ({step.state})")
+        if any(not step.write for step in plan):
+            lines.append(_OVERWRITE_LOCAL_HINT)
+        return emit(
+            args,
+            {
+                "dry_run": True,
+                "plan": [
+                    {
+                        "kind": s.kind,
+                        "identity": s.identity,
+                        "state": s.state,
+                        "write": s.write,
+                        "target": str(s.target),
+                    }
+                    for s in plan
+                ],
+            },
+            "\n".join(lines),
+        )
 
-    installed = host.install_assets(only=args.kind)
+    result = host.install_assets(only=args.kind, overwrite_local=args.overwrite_local)
     failures = [
         (label, detail)
         for label, ok, detail in host.asset_checks()
         if not ok and "loadable" in label
     ]
-    lines = [f"installed {len(installed)} asset(s)"] + [f"  {i}" for i in installed]
+    lines = [f"installed {len(result.installed)} asset(s)"]
+    lines += [f"  {i}" for i in result.installed]
+    # Named, never counted. The whole defect was an install that reported a
+    # tidy total while a file it had flattened went unmentioned; a skip nobody
+    # can see is the same fault with the opposite sign.
+    for label, why in result.skipped:
+        lines.append(f"  skipped {label} ({why})")
+    if result.skipped:
+        lines.append(_OVERWRITE_LOCAL_HINT)
     for label, detail in failures:
         lines.append(f"  STILL BROKEN — {label}: {detail}")
     if not failures:
         lines.append("  reload the host's configuration for it to pick them up")
-    emit(args, {"installed": installed, "loadable": not failures}, "\n".join(lines))
+    emit(
+        args,
+        {
+            "installed": result.installed,
+            "skipped": [{"asset": a, "why": w} for a, w in result.skipped],
+            "loadable": not failures,
+        },
+        "\n".join(lines),
+    )
     return EXIT_OK if not failures else 1
 
 
@@ -671,33 +716,67 @@ def cmd_agents_install(args) -> int:
     from ..hosts.claude_code import (
         CHECK_AGENTS_LOADABLE,
         DATA_DIR,
+        LOCAL,
         ClaudeCodeHost,
+        classify_installed,
     )
 
     ctx = Context()
     host = ClaudeCodeHost(ctx.manifest.root)
     agents_dir = host.claude_dir / "agents"
     sources = sorted((DATA_DIR / "agents").glob("*.md"))
+    states = {
+        s.stem: classify_installed(s, agents_dir / s.name) for s in sources
+    }
+    protected = [
+        stem
+        for stem, state in states.items()
+        if state is LOCAL and not args.overwrite_local
+    ]
 
     if args.dry_run:
+        lines = [f"would install into {agents_dir}:"]
+        for source in sources:
+            state = states[source.stem]
+            verb = "SKIP     " if source.stem in protected else "install  "
+            lines.append(f"  {verb} {source.stem} ({state})")
+        if protected:
+            lines.append(_OVERWRITE_LOCAL_HINT)
         return emit(
             args,
-            {"would_install": [s.stem for s in sources], "into": str(agents_dir)},
-            "\n".join(
-                [f"would install into {agents_dir}:"] + [f"  {s.stem}" for s in sources]
-            ),
+            {
+                "would_install": [
+                    s.stem for s in sources if s.stem not in protected
+                ],
+                "would_skip": protected,
+                "into": str(agents_dir),
+            },
+            "\n".join(lines),
         )
 
     agents_dir.mkdir(parents=True, exist_ok=True)
+    installed = []
     for source in sources:
-        host.install_agent(source, agents_dir / source.name)
+        host.install_agent(
+            source, agents_dir / source.name, overwrite_local=args.overwrite_local
+        )
+        if source.stem not in protected:
+            installed.append(source.stem)
 
     checks = {label: (ok, detail) for label, ok, detail in host.agent_checks()}
     ok, detail = checks[CHECK_AGENTS_LOADABLE]
-    lines = [f"installed {len(sources)} agent(s) into {agents_dir}", f"  {detail}"]
+    lines = [f"installed {len(installed)} agent(s) into {agents_dir}"]
+    lines += [f"  skipped {stem} ({LOCAL})" for stem in protected]
+    if protected:
+        lines.append(_OVERWRITE_LOCAL_HINT)
+    lines.append(f"  {detail}")
     if ok:
         lines.append("  reload the host's configuration for it to pick them up")
-    emit(args, {"installed": [s.stem for s in sources], "loadable": ok}, "\n".join(lines))
+    emit(
+        args,
+        {"installed": installed, "skipped": protected, "loadable": ok},
+        "\n".join(lines),
+    )
     return EXIT_OK if ok else 1
 
 
@@ -1586,6 +1665,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--kind", choices=kinds)
     q.set_defaults(func=cmd_assets_list)
     q = aset.add_parser("install", help="reinstall library-shipped assets")
+    q.add_argument(
+        "--overwrite-local",
+        action="store_true",
+        help="replace assets you have edited; without it they are skipped and named",
+    )
     q.add_argument("--kind", choices=kinds)
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_assets_install)
@@ -1594,6 +1678,11 @@ def build_parser() -> argparse.ArgumentParser:
     agents.add_parser("list", help="installed agents and whether the host can load them"
                       ).set_defaults(func=cmd_agents_list)
     q = agents.add_parser("install", help="reinstall the library agents")
+    q.add_argument(
+        "--overwrite-local",
+        action="store_true",
+        help="replace agents you have edited; without it they are skipped and named",
+    )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_agents_install)
 

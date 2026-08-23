@@ -543,3 +543,137 @@ class TestDoctorSurvivesTheManifestItIsThereToDiagnose:
         rows = {c["check"]: c for c in payload(capsys)["checks"]}
         assert rows["manifest valid"]["ok"] is False
         assert "privacy_clean" in rows["manifest valid"]["detail"]
+
+
+# -- AUTH-03: the operator's own files are the operator's ---------------
+
+
+class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
+    """BUG_051. `ClaudeCodeHost._stale_for` distinguishes `(edited locally)`
+    from `(installed from an older version)` — it KNOWS which divergences are
+    the operator's own work. `install_assets` consulted none of that and
+    overwrote every target unconditionally: no `--force`, no per-asset skip, no
+    backup, and a `--dry-run` that named nothing it would flatten.
+
+    And the tool routed people into it. `doctor` reports a locally edited agent
+    as a FAILED check, so the repair it recommends was the destructive one.
+    """
+
+    def edit_installed(self, project, name="feature-architect", mark="# project note"):
+        target = project / ".claude" / "agents" / f"{name}.md"
+        target.write_text(
+            target.read_text(encoding="utf-8") + f"\n{mark}\n", encoding="utf-8"
+        )
+        return target
+
+    def test_a_local_edit_survives_a_reinstall(self, project, capsys):
+        run("init", "--name", "demo")
+        target = self.edit_installed(project)
+        capsys.readouterr()
+
+        assert run("assets", "install") == 0
+        assert "# project note" in target.read_text(encoding="utf-8")
+
+    def test_the_skip_is_named_rather_than_silent(self, project, capsys):
+        run("init", "--name", "demo")
+        self.edit_installed(project)
+        capsys.readouterr()
+
+        run("assets", "install")
+        text = out(capsys)
+        assert "feature-architect" in text
+        assert "edited locally" in text
+        assert "--overwrite-local" in text
+
+    def test_overwrite_local_is_how_you_ask_for_the_shipped_version(
+        self, project, capsys
+    ):
+        run("init", "--name", "demo")
+        target = self.edit_installed(project)
+        capsys.readouterr()
+
+        assert run("assets", "install", "--overwrite-local") == 0
+        assert "# project note" not in target.read_text(encoding="utf-8")
+
+    def test_a_stale_asset_is_still_repaired_without_asking(self, project, capsys):
+        """The case the command exists for. An OLD installed copy carries a
+        digest that does not match what it holds, so it is not the operator's
+        work and reinstalling it is the repair, not a loss.
+        """
+        run("init", "--name", "demo")
+        target = project / ".claude" / "agents" / "feature-architect.md"
+        text = target.read_text(encoding="utf-8")
+        target.write_text(
+            text.replace("invariant:managed", "invariant:managed digest=deadbeef")
+            if "invariant:managed" in text
+            else text,
+            encoding="utf-8",
+        )
+        capsys.readouterr()
+        run("assets", "install")
+        assert run("doctor", "--json") in (0, 1)
+
+    def test_dry_run_enumerates_what_it_would_do_to_each_file(self, project, capsys):
+        """It returned before any per-file work, so it could not name what it
+        would flatten — the one thing a dry run of a destructive command is for.
+        """
+        run("init", "--name", "demo")
+        self.edit_installed(project)
+        capsys.readouterr()
+
+        assert run("assets", "install", "--dry-run") == 0
+        text = out(capsys)
+        assert "feature-architect" in text
+        assert "edited locally" in text
+
+    def test_dry_run_writes_nothing(self, project, capsys):
+        run("init", "--name", "demo")
+        target = self.edit_installed(project)
+        before = target.read_text(encoding="utf-8")
+        capsys.readouterr()
+
+        run("assets", "install", "--dry-run", "--overwrite-local")
+        assert target.read_text(encoding="utf-8") == before
+
+    def test_agents_install_protects_the_same_edit(self, project, capsys):
+        """`agents install` is the command `doctor` actually points people at."""
+        run("init", "--name", "demo")
+        target = self.edit_installed(project)
+        capsys.readouterr()
+
+        run("agents", "install")
+        assert "# project note" in target.read_text(encoding="utf-8")
+
+    def test_agents_install_dry_run_names_the_edited_one(self, project, capsys):
+        run("init", "--name", "demo")
+        self.edit_installed(project)
+        capsys.readouterr()
+
+        run("agents", "install", "--dry-run")
+        assert "edited locally" in out(capsys)
+
+    def test_doctor_no_longer_points_at_a_destructive_repair(self, project, capsys):
+        """The routing half of the defect. `doctor` reports a locally edited
+        agent as FAILED, so its advice is what the operator follows — and that
+        advice used to be the command that discarded the edit. It now leaves
+        the edit alone, and the row says so and says how to reverse it.
+        """
+        run("init", "--name", "demo")
+        self.edit_installed(project)
+        capsys.readouterr()
+
+        run("doctor", "--json")
+        rows = {c["check"]: c for c in payload(capsys)["checks"]}
+        detail = rows["library agents current"]["detail"]
+        assert "edited locally" in detail
+        assert "your edits are kept" in detail
+        assert "--overwrite-local" in detail
+
+    def test_a_missing_asset_is_installed_with_no_ceremony(self, project, capsys):
+        run("init", "--name", "demo")
+        target = project / ".claude" / "agents" / "bug-reproducer.md"
+        target.unlink()
+        capsys.readouterr()
+
+        run("assets", "install")
+        assert target.is_file()
