@@ -324,6 +324,20 @@ def standdown_in_force(
     Deriving it is the point. A stand-down nobody remembers to lift is
     indistinguishable from having uninstalled the tool, and an expiry that
     depends on a later command running is an expiry that does not happen.
+
+    Granting one with no pipeline running records ``pipeline_started`` as
+    ``None`` — there is nothing yet to pin it to — and that used to be read as
+    "ends the moment any pipeline exists", which ended it at `pipeline start`
+    itself rather than at the finish the CLI's own message promises
+    (`invariant standdown` prints "lifts when a pipeline starts and
+    finishes"). A hold thrown for unrelated work almost always leads straight
+    into starting the pipeline that work needed, so expiring on start rather
+    than finish undid the grant before anything ran under it, silently: no
+    denial pointed at the hold lapsing, because as far as the operator could
+    tell nothing had lapsed yet. The fix treats "no pipeline yet" as WAITING,
+    not as scoped-and-satisfied: once a pipeline does start, it becomes the one
+    this hold rides, on the same terms as a hold granted while one was already
+    running.
     """
     record = (session or {}).get("standdown")
     if not record:
@@ -331,15 +345,22 @@ def standdown_in_force(
     if str(record.get("until")) == "session":
         return record
 
-    # Scoped to the pipeline that was current when it was granted. A different
-    # pipeline, no pipeline, or a finished one all end it — starting fresh work
-    # under an enforcement hole thrown for the last task is exactly the drift
-    # the shortest-useful-scope default exists to prevent.
+    # Scoped to the pipeline that was current when it was granted — or, if
+    # none was, to whichever pipeline starts next. A different pipeline than
+    # the one it is bound to, or none where one is required, ends it.
     started = record.get("pipeline_started")
-    if started is None:
-        return record if pipeline is None else None
-    if not pipeline or pipeline.get("started") != started:
+    if started is not None and (not pipeline or pipeline.get("started") != started):
         return None
+    if started is None and pipeline is None:
+        # Still nothing to ride. The hold waits rather than expiring, because
+        # a stand-down granted for work outside any pipeline is granted
+        # exactly so the pipeline that work leads into does not reopen the
+        # gates it was meant to hold.
+        return record
+
+    # Either matched by timestamp, or granted with none running and one now
+    # exists: `pipeline` is the one this hold rides, until IT reaches a
+    # terminal state.
     if pipeline.get("finished") is not None:
         return None
     terminal = _terminal_states(

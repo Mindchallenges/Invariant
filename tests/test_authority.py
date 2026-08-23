@@ -785,6 +785,31 @@ class TestAStandDownHoldsEveryGateReversibly(HookHarness):
         self.hook("pre-tool-use", self.edit(project / "app.py"))
         assert self.decision(capsys)["permissionDecision"] == "deny"
 
+    def test_granted_with_no_pipeline_running_holds_through_the_first_one(
+        self, project, capsys
+    ):
+        """Granted before any pipeline exists, `pipeline_started` is recorded
+        as `None` — there is no pipeline yet to pin it to. The CLI's own
+        message for exactly this case promises it 'lifts when a pipeline
+        starts and finishes', not the instant one starts. `standdown_in_force`
+        used to read a pipeline's mere EXISTENCE as the end of the hold, so
+        the very next `pipeline start` — the ordinary next step after standing
+        down for unrelated work — silently re-armed enforcement before any
+        work happened under it."""
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "why", "--id", sid)
+        capsys.readouterr()
+
+        run("pipeline", "start")
+        capsys.readouterr()
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys).get("permissionDecision") != "deny"
+
+        run("pipeline", "advance", "committed", "--force", "--reason", "done")
+        capsys.readouterr()
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys)["permissionDecision"] == "deny"
+
     def test_until_session_outlives_the_pipeline(self, project, capsys):
         sid = self.setup(project, capsys)
         run("pipeline", "start")
