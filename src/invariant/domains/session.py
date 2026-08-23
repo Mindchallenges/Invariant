@@ -14,6 +14,7 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -117,6 +118,15 @@ class Session:
     #: consumed by the next evaluation of that rule at a hook, and consuming it
     #: moves a record into `overrides` above.
     pending_overrides: list[dict] = field(default_factory=list)
+    #: Enforcement held for an INTERVAL rather than for a call, or ``None``.
+    #:
+    #: The other half of the position. `pending_overrides` above answers "let
+    #: this call through"; this answers "stop asking for the next while", and
+    #: they are different wants even though they share a seam. Carries the
+    #: reason, the scope that ends it, and the ids explicitly folded in — see
+    #: `core.rules.standdown_in_force`, which derives whether it still holds
+    #: rather than trusting a flag somebody has to remember to clear.
+    standdown: dict | None = None
     heartbeat: float = 0.0
     #: The usage watermark at registration (ADR-002 D3). The earlier reading
     #: the first state's spend is subtracted from; ``None`` where it could not
@@ -750,6 +760,68 @@ class SessionDomain:
         session.overrides.append(spent)
         self._save(session)
         return spent
+
+    # -- stand-down ----------------------------------------------------
+
+    def stand_down(
+        self,
+        session_id: str,
+        reason: str,
+        until: str = "pipeline",
+        include: Sequence[str] = (),
+        pipeline_started: float | None = None,
+    ) -> Session:
+        """Hold every gate, reversibly, without editing project policy.
+
+        The want this exists for is not convenience. A tool that cannot be told
+        to stand down for one task gets uninstalled during that task, and what
+        returns afterwards is usually nothing. The README already argues the
+        adjacent half — *"a gate that fights legitimate exceptions gets the
+        whole tool switched off"* — and this is the supported, recorded version
+        of what an operator improvises instead. Improvised it leaves no record;
+        this leaves one.
+
+        The routes that looked like this were not it. `loose` is an observation
+        mode and still blocks; `INVARIANT_DISABLE` takes exact ids with no
+        wildcard and does not reach a hook mid-session, because the hook
+        subprocess inherits the environment the host was launched with; and a
+        manifest edit is permanent by construction — a temporary policy change
+        living in committed configuration either lands in a commit by accident
+        or quietly becomes the project's real policy.
+        """
+        if not reason or not reason.strip():
+            raise UsageError(
+                "standing enforcement down requires --reason. This is the one "
+                "state that must never be discoverable only by noticing that "
+                "nothing is stopping you."
+            )
+        if until not in ("pipeline", "session"):
+            raise UsageError(
+                f"--until takes 'pipeline' or 'session', not {until!r}"
+            )
+        for rule_id in include:
+            if get_rule(rule_id) is None:
+                raise UsageError(
+                    f"no rule {rule_id!r}; 'invariant rules list' shows them all"
+                )
+
+        session = self.require(session_id)
+        session.standdown = {
+            "reason": reason.strip(),
+            "until": until,
+            "include": sorted(set(include)),
+            "pipeline_started": pipeline_started if until == "pipeline" else None,
+            "granted": self.clock(),
+        }
+        self._save(session)
+        return session
+
+    def stand_up(self, session_id: str) -> Session:
+        """Lift a stand-down. Idempotent — lifting nothing is not an error."""
+        session = self.require(session_id)
+        session.standdown = None
+        self._save(session)
+        return session
 
     def record_push(
         self,

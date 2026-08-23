@@ -299,7 +299,62 @@ def rules_for_event(event: str) -> list[RuleSpec]:
     return [spec for spec in all_rules() if event in spec.events]
 
 
+#: Rules a blanket stand-down does NOT cover unless the operator names them.
+#:
+#: One entry, and it earns it: ``privacy.clean`` is the only gate whose failure
+#: cannot be undone after the fact. Nothing un-writes an identifier out of a
+#: published history. This library has already argued that case twice — the
+#: `loose` profile keeps it blocking, and so does the README's opinions section
+#: — so going past it stays a separate sentence the operator wrote, rather than
+#: a side effect of a switch thrown for an unrelated reason.
+HELD_OUT_OF_STANDDOWN = frozenset({"privacy.clean"})
+
+
+def standdown_in_force(
+    session: Mapping[str, Any] | None, pipeline: Mapping[str, Any] | None
+) -> Mapping[str, Any] | None:
+    """The stand-down governing this evaluation, if one still holds.
+
+    Pure, and asked on every evaluation rather than stored as a flag somebody
+    has to remember to clear. Expiry is DERIVED from the state the scope names:
+    a stand-down scoped to a pipeline dies when that pipeline reaches a
+    terminal state or is replaced, and one scoped to the session lives until
+    the session ends or the operator lifts it.
+
+    Deriving it is the point. A stand-down nobody remembers to lift is
+    indistinguishable from having uninstalled the tool, and an expiry that
+    depends on a later command running is an expiry that does not happen.
+    """
+    record = (session or {}).get("standdown")
+    if not record:
+        return None
+    if str(record.get("until")) == "session":
+        return record
+
+    # Scoped to the pipeline that was current when it was granted. A different
+    # pipeline, no pipeline, or a finished one all end it — starting fresh work
+    # under an enforcement hole thrown for the last task is exactly the drift
+    # the shortest-useful-scope default exists to prevent.
+    started = record.get("pipeline_started")
+    if started is None:
+        return record if pipeline is None else None
+    if not pipeline or pipeline.get("started") != started:
+        return None
+    if pipeline.get("finished") is not None:
+        return None
+    terminal = _terminal_states(
+        load_pipeline_machine,
+        None,
+        str(pipeline.get("methodology") or "") or None,
+    )
+    if terminal and str(pipeline.get("state") or "") in terminal:
+        return None
+    return record
+
+
 def evaluate(rule_ids: Iterable[str], ctx: RuleContext) -> list[Evaluated]:
+    held = standdown_in_force(ctx.session, ctx.pipeline)
+    included = set((held or {}).get("include") or ())
     results: list[Evaluated] = []
     for rule_id in rule_ids:
         spec = _REGISTRY.get(rule_id)
@@ -319,6 +374,20 @@ def evaluate(rule_ids: Iterable[str], ctx: RuleContext) -> list[Evaluated]:
             continue
         if level is Level.OFF:
             results.append(Evaluated(rule_id, level, Verdict.na("disabled")))
+            continue
+        if held and (rule_id not in HELD_OUT_OF_STANDDOWN or rule_id in included):
+            # A skip and not a pass, deliberately: a block-level rule renders
+            # this as `[skip:BLOCK]`, which is on the default verdict stream
+            # rather than behind --verbose. Enforcement being held is news
+            # about the project's own enforcement, which is exactly the class
+            # of fact `skipped_blocking` exists to surface.
+            results.append(
+                Evaluated(
+                    rule_id,
+                    level,
+                    Verdict.na(f"stood down — {held.get('reason', 'no reason given')}"),
+                )
+            )
             continue
         try:
             verdict = spec.fn(ctx)

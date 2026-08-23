@@ -18,7 +18,12 @@ from pathlib import Path
 
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
 from ..core.manifest import MANIFEST_RELPATH, Manifest
-from ..core.rules import RuleContext, all_rules, evaluate
+from ..core.rules import (
+    HELD_OUT_OF_STANDDOWN,
+    RuleContext,
+    all_rules,
+    evaluate,
+)
 from ..core.store import JsonStore
 from ..domains.pipeline import PipelineDomain, describe_run, summarise
 from ..domains.session import SessionDomain
@@ -843,6 +848,12 @@ def cmd_session_status(args) -> int:
     # Loud, and above the fold. A held override is enforcement the operator
     # turned off and may well have forgotten; the whole reason it is a recorded
     # grant rather than a flag is that it can be seen and withdrawn.
+    if session.standdown:
+        held = session.standdown
+        text.append(
+            f"  STOOD DOWN  {held['reason']} "
+            f"(until this {held['until']} ends; invariant standdown --clear)"
+        )
     for grant in session.pending_overrides:
         text.append(
             f"  override   {grant['rule']} — {grant['reason']} "
@@ -888,6 +899,53 @@ def cmd_override(args) -> int:
         f"  spending it is recorded on this session; withdraw it with "
         f"--clear",
     )
+
+
+def cmd_standdown(args) -> int:
+    """Hold every gate for an interval, reversibly, with the hold recorded.
+
+    The per-call sibling is `invariant override`. They share a seam and are not
+    the same want: one is "let this call through", the other is "stop asking
+    for the next while".
+    """
+    ctx = Context()
+    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+
+    if args.clear:
+        updated = ctx.sessions.stand_up(session.id)
+        return emit(args, updated.to_dict(), "enforcement is back on")
+
+    pipeline = ctx.pipelines.current(session.id)
+    updated = ctx.sessions.stand_down(
+        session.id,
+        args.reason,
+        until=args.until,
+        include=args.include or (),
+        pipeline_started=pipeline.started if pipeline else None,
+    )
+    record = updated.standdown
+    ends = (
+        "when this session ends"
+        if record["until"] == "session"
+        else (
+            "when this pipeline finishes"
+            if pipeline
+            else "when a pipeline starts and finishes"
+        )
+    )
+    held_out = sorted(HELD_OUT_OF_STANDDOWN - set(record["include"]))
+    lines = [
+        f"enforcement STOOD DOWN — {record['reason']}",
+        f"  lifts {ends}, or on: invariant standdown --clear",
+    ]
+    if held_out:
+        lines.append(
+            "  still enforced: "
+            + ", ".join(held_out)
+            + "  (name it with --include to fold it in)"
+        )
+    lines.append("  every turn will say so until it lifts")
+    return emit(args, updated.to_dict(), "\n".join(lines))
 
 
 def cmd_session_transition(args) -> int:
@@ -1947,6 +2005,26 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--clear", action="store_true", help="withdraw an unspent grant")
     q.add_argument("--id")
     q.set_defaults(func=cmd_override)
+
+    q = sub.add_parser(
+        "standdown",
+        help="hold every gate for an interval, reversibly, with the hold recorded",
+    )
+    q.add_argument("--reason", help="required unless --clear")
+    q.add_argument(
+        "--until",
+        choices=("pipeline", "session"),
+        default="pipeline",
+        help="what lifts it; the default is the shortest scope that is useful",
+    )
+    q.add_argument(
+        "--include",
+        action="append",
+        help="fold a held-out rule in; repeatable (privacy.clean is the only one)",
+    )
+    q.add_argument("--clear", action="store_true", help="lift it now")
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_standdown)
 
     q = sub.add_parser("context")
     q.add_argument("--id", help="the session to report on, when the directory cannot say")

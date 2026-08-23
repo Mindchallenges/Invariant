@@ -174,6 +174,7 @@ The session record carries two, and the difference between them is tense.
 |---|---|---|
 | `overrides` | overrides that have been **spent** | a forced transition, a structural edge walked deliberately, a one-shot token consumed at a hook |
 | `pending_overrides` | grants nothing has spent **yet** | `invariant override <rule> --reason` |
+| `standdown` | enforcement held for an **interval** | `invariant standdown --reason` — see below |
 
 `overrides` is the audit trail and has always existed. `pending_overrides` is
 the half that was missing, and it exists because of where the gates that stop
@@ -206,6 +207,36 @@ that spent it, so the compliance record shows a gate passed deliberately rather
 than a gate that quietly did not fire. An unspent grant prints in
 `session status`, because a held override is enforcement the operator turned off
 and may well have forgotten.
+
+### Standing enforcement down
+
+`Session.standdown` is the third of these fields and the only one that is a
+state rather than a list. It answers the want the other two cannot: *stop
+asking for the next while*.
+
+None of the routes that looked like this were it. `loose` is an observation
+mode and still blocks `session.no_edit_in_main_checkout` and `privacy.clean`,
+correctly. `INVARIANT_DISABLE` takes exact ids with no wildcard and no `all`,
+and an environment variable does not reach a hook mid-session anyway — the hook
+subprocess inherits what the host was launched with. What was left was editing
+committed project policy for the duration of one task, which either lands in a
+commit by accident or quietly becomes the project's real policy (IDEA_003).
+
+Three properties are what make it a control rather than a hole:
+
+- **Expiry is derived, not stored.** `core.rules.standdown_in_force` recomputes
+  on every evaluation whether the hold still applies, from the pipeline the
+  scope names. Nothing has to run for it to lapse, which matters because an
+  expiry that depends on a later command running is an expiry that does not
+  happen. The default scope is the shortest useful one — the current pipeline.
+- **`privacy.clean` is held out unless named.** It is the one gate whose
+  failure cannot be undone after the fact; nothing un-writes an identifier out
+  of a published history. Folding it in costs `--include privacy.clean`, a
+  separate sentence the operator wrote.
+- **It is loud on every turn.** `build_context` puts it above the lifecycle
+  lines, and each held rule reports `stood down — <reason>` rather than
+  vanishing — so a held gate reads as a `[skip:BLOCK]` on the default verdict
+  stream rather than as a pass.
 
 ### Host binding
 

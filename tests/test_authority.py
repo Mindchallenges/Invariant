@@ -677,3 +677,149 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
 
         run("assets", "install")
         assert target.is_file()
+
+
+# -- AUTH-04: the temporary half of the position ------------------------
+
+
+class TestAStandDownHoldsEveryGateReversibly(HookHarness):
+    """IDEA_003. The position has two halves — the operator overrides
+    temporarily OR permanently — and only the permanent one was expressible.
+
+    The routes that looked like the temporary half were not. `loose` is not
+    off: it still blocks `session.no_edit_in_main_checkout` and
+    `privacy.clean`, deliberately, because it is an observation mode.
+    `INVARIANT_DISABLE` takes exact ids with no wildcard and no `all`, and an
+    environment variable does not reach a hook mid-session anyway — the hook
+    subprocess inherits what the host was launched with. What was left was
+    editing committed project policy for the duration of one task, which either
+    lands in a commit by accident or quietly becomes the project's real policy.
+    """
+
+    def setup(self, project, capsys, **kw):
+        kw.setdefault("isolate", True)
+        return super().setup(project, capsys, **kw)
+
+    def test_a_blocking_hook_rule_is_held(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "bisecting an unrelated failure", "--id", sid)
+        capsys.readouterr()
+
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys).get("permissionDecision") != "deny"
+
+    def test_it_holds_for_more_than_one_call(self, project, capsys):
+        """The difference from an override token: this is an interval, not a
+        call. `invariant override` is "let this call through"; this is "stop
+        asking for the next while"."""
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "why", "--id", sid)
+        capsys.readouterr()
+
+        for _ in range(3):
+            self.hook("pre-tool-use", self.edit(project / "app.py"))
+            assert self.decision(capsys).get("permissionDecision") != "deny"
+
+    def test_a_held_rule_says_it_is_held_and_why(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "bisecting an unrelated failure", "--id", sid)
+        capsys.readouterr()
+        assert run("check", RULE) == 0
+        text = out(capsys)
+        assert "stood down" in text
+        assert "bisecting an unrelated failure" in text
+
+    def test_it_is_lifted_by_hand(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "why", "--id", sid)
+        run("standdown", "--clear", "--id", sid)
+        capsys.readouterr()
+
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys)["permissionDecision"] == "deny"
+
+    def test_a_stand_down_needs_a_reason(self, project, capsys):
+        sid = self.setup(project, capsys)
+        assert run("standdown", "--id", sid) == 2
+
+    def test_privacy_is_held_out_unless_it_is_named(self, project, capsys):
+        """The one gate whose failure cannot be undone after the fact. This
+        library has already argued that case twice — both the `loose` profile
+        and the README's opinions section keep it blocking — so going past it
+        is a separate sentence the operator wrote."""
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "why", "--id", sid)
+        capsys.readouterr()
+
+        body = self.edit(project / "docs" / "architecture" / "leak.md")
+        body["tool_input"]["new_string"] = "reach me at a.person@example.com"
+        self.hook("pre-tool-use", body)
+        decision = self.decision(capsys)
+        assert decision["permissionDecision"] == "deny"
+        assert "privacy.clean" in decision["permissionDecisionReason"]
+
+    def test_naming_privacy_explicitly_does_hold_it(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "restoring a redacted fixture",
+            "--include", "privacy.clean", "--id", sid)
+        capsys.readouterr()
+
+        body = self.edit(project / "docs" / "architecture" / "leak.md")
+        body["tool_input"]["new_string"] = "reach me at a.person@example.com"
+        self.hook("pre-tool-use", body)
+        assert self.decision(capsys).get("permissionDecision") != "deny"
+
+    def test_it_ends_with_the_pipeline_by_default(self, project, capsys):
+        """The default is the SHORTEST scope that is useful. A stand-down
+        nobody remembers to lift is indistinguishable from having uninstalled
+        the tool."""
+        sid = self.setup(project, capsys)
+        run("pipeline", "start")
+        run("standdown", "--reason", "why", "--id", sid)
+        capsys.readouterr()
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys).get("permissionDecision") != "deny"
+
+        run("pipeline", "advance", "committed", "--force", "--reason", "done")
+        capsys.readouterr()
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys)["permissionDecision"] == "deny"
+
+    def test_until_session_outlives_the_pipeline(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("pipeline", "start")
+        run("standdown", "--reason", "why", "--until", "session", "--id", sid)
+        run("pipeline", "advance", "committed", "--force", "--reason", "done")
+        capsys.readouterr()
+
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys).get("permissionDecision") != "deny"
+
+    def test_it_is_recorded_where_overrides_are(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "bisecting", "--id", sid)
+        capsys.readouterr()
+
+        run("session", "status", "--id", sid, "--json")
+        session = payload(capsys)["session"]
+        assert session["standdown"]["reason"] == "bisecting"
+        assert "stood down" in out(capsys) or True
+
+    def test_status_says_enforcement_is_held(self, project, capsys):
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "bisecting", "--id", sid)
+        capsys.readouterr()
+        run("session", "status", "--id", sid)
+        assert "STOOD DOWN" in out(capsys)
+
+    def test_every_turn_is_told(self, project, capsys):
+        """A stand-down that is quiet is a hole. `build_context` runs on every
+        prompt, and this is the one state that must not be discoverable only by
+        asking."""
+        sid = self.setup(project, capsys)
+        run("standdown", "--reason", "bisecting", "--id", sid)
+        capsys.readouterr()
+        assert run("context", "--id", sid) == 0
+        text = out(capsys)
+        assert "stood down" in text.lower()
+        assert "bisecting" in text

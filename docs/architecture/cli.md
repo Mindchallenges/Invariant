@@ -377,6 +377,34 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
 
+invariant standdown --reason "<why>" [--until pipeline|session]
+                    [--include <rule-id>]... [--id <sid>]
+invariant standdown --clear [--id <sid>]
+    Hold every gate for an INTERVAL, reversibly, without editing project
+    policy. Every rule reports `stood down — <reason>` while it holds, which a
+    `block`-level rule renders as `[skip:BLOCK]` — on the default verdict
+    stream, not behind --verbose, because enforcement being held is news about
+    the project's own enforcement.
+
+    Per-call and per-interval are different wants: `override` is "let this call
+    through", this is "stop asking for the next while". They share a seam and
+    neither replaces the other.
+
+    --until defaults to `pipeline`, the SHORTEST scope that is useful, and
+    expiry is DERIVED rather than stored: a pipeline-scoped hold dies when that
+    pipeline finishes or is replaced. A stand-down nobody remembers to lift is
+    indistinguishable from having uninstalled the tool, and an expiry that
+    depends on a later command running is an expiry that does not happen.
+
+    `privacy.clean` is held OUT unless --include names it. It is the one gate
+    whose failure cannot be undone after the fact, and this library has argued
+    that case twice already — the `loose` profile keeps it blocking and so does
+    the README. Going past it stays a separate sentence the operator wrote.
+
+    It is loud. `session status` shows it, and `build_context` puts it at the
+    top of every turn, because this is the one state that must not be
+    discoverable only by noticing that nothing is stopping you.
+
 invariant override <rule-id> --reason "<why>" [--calls N] [--id <sid>]
 invariant override <rule-id> --clear [--id <sid>]
     Pass a rule that fires at a HOOK, deliberately, with the decision

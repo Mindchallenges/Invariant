@@ -36,7 +36,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.errors import InvariantError
-from ..core.rules import EDIT_TOOLS, evaluate_event
+from ..core.rules import (
+    EDIT_TOOLS,
+    HELD_OUT_OF_STANDDOWN,
+    evaluate_event,
+    standdown_in_force,
+)
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
 
@@ -1286,12 +1291,35 @@ def build_context(ctx, greeting: bool = False) -> str:
 
     lines.append(f"invariant — session {session.id} ({session.name}) is {session.state}")
 
+    pipeline = ctx.pipelines.current(session.id)
+
+    # First, above everything, on every turn. A stand-down is enforcement the
+    # operator switched off, and the whole reason it is a recorded state rather
+    # than an improvised manifest edit is that it can be seen — so the turn
+    # that runs under one has to be told, not left to notice that nothing is
+    # stopping it. It is the only line here that reports an absence of
+    # enforcement rather than a position in a lifecycle.
+    held = standdown_in_force(
+        session.to_dict(), pipeline.to_dict() if pipeline else None
+    )
+    if held:
+        folded = sorted(set(held.get("include") or ()))
+        still = sorted(HELD_OUT_OF_STANDDOWN - set(folded))
+        lines.append(
+            f"  ENFORCEMENT IS STOOD DOWN — {held.get('reason', 'no reason given')}"
+        )
+        lines.append(
+            f"    every gate reports as stood down until this "
+            f"{held.get('until', 'pipeline')} ends"
+            + (f"; still enforced: {', '.join(still)}" if still else "")
+        )
+        lines.append("    put it back with: invariant standdown --clear")
+
     machine = ctx.sessions.machine
     legal = machine.next_states(session.state)
     if legal:
         lines.append(f"  session may go to: {', '.join(legal)}")
 
-    pipeline = ctx.pipelines.current(session.id)
     if pipeline is None:
         lines.append(
             "  no pipeline running — start one with 'invariant pipeline start "
