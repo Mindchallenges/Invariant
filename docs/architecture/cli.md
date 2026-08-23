@@ -52,6 +52,44 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     manifest without --force; prints a diff of what it would change with
     --dry-run.
 
+invariant uninstall [--remove-assets] [--remove-manifest] [--dry-run]
+    Remove the hook shims, unwire the entries this library added to the host
+    settings file, and SAY WHAT IS LEFT BEHIND.
+
+    The inverse of `init`, and it exists for the reason `init` does not need
+    one stated: adoption was one command and withdrawal was hand surgery —
+    delete each shim, then hand-edit the JSON `_wire_settings` merged its
+    entries into, and know which entries were the library's. Miss one and the
+    shim still fires; it then finds no `invariant` on PATH and exits silently
+    BY DESIGN, so the leftover is invisible until it is not. The right to stop
+    using a tool is part of authority over one's own project (IDEA_004).
+
+    Two properties matter more than the command existing:
+
+    * **It removes only what it wrote.** `_wire_settings` recognises its own
+      entries by the shim path; removal is the same test, in one function, so
+      an install that recognises its entries and a removal that does not is
+      impossible to write. Everything else in the settings file is left exactly
+      as found, and an emptied event list is deleted rather than left as `[]`.
+      Malformed JSON is REFUSED rather than overwritten — the same care
+      `_wire_settings` takes, and more so: there a bad parse costs the operator
+      their wiring, here it would cost them the whole file as the last thing
+      the tool ever did to their project.
+
+    * **It never deletes the operator's data.** Sessions, work items, memories,
+      architecture docs and the manifest survive by default, so uninstalling is
+      not a decision about the backlog. An asset the operator has EDITED
+      survives even `--remove-assets`, by the same rule `assets install`
+      follows. `--dry-run` enumerates before anything moves, which is not a
+      nicety here: what a removal takes away cannot be got back by running it
+      again.
+
+    A COMPLETE removal stops reading as broken. `doctor`'s shim check used to
+    offer `hooks install` for any absence, pushing back toward the state the
+    operator was leaving; where every shim is gone it now says "not installed"
+    and names `invariant init` as the way back. A HALF removal is still
+    reported as broken, because it is.
+
 invariant doctor
     Check the installation: manifest valid, shims present and executable, host
     settings wired, state root writable, adapter commands resolvable, memory

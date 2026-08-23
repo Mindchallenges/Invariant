@@ -823,3 +823,166 @@ class TestAStandDownHoldsEveryGateReversibly(HookHarness):
         text = out(capsys)
         assert "stood down" in text.lower()
         assert "bisecting" in text
+
+
+# -- AUTH-05: the authority to leave ------------------------------------
+
+
+class TestUninstallRemovesWhatInitInstalled:
+    """IDEA_004. Adoption is one command; withdrawal was hand surgery.
+
+    Delete each `.claude/hooks/invariant-*.sh`, then hand-edit the JSON that
+    `_wire_settings` merged its entries INTO — the operator's own settings
+    file, so it cannot simply be deleted — and know which entries were the
+    library's. Miss one and the shim still fires; the shim then finds no
+    `invariant` on PATH and exits silently BY DESIGN, so the leftover is
+    invisible until it is not. `doctor` reports a half-removal as broken and
+    offers `hooks install`, pushing back toward the state being left.
+
+    The right to stop using a tool is part of authority over one's own project,
+    and it was the part this library made hardest.
+    """
+
+    def settings(self, project):
+        return json.loads(
+            (project / ".claude" / "settings.json").read_text(encoding="utf-8")
+        )
+
+    def test_the_shims_are_gone(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        assert run("uninstall") == 0
+        assert not list((project / ".claude" / "hooks").glob("invariant-*.sh"))
+
+    def test_the_wiring_is_gone(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall")
+        assert "invariant-" not in json.dumps(self.settings(project))
+
+    def test_it_removes_only_what_it_wrote(self, project, capsys):
+        """`_wire_settings` merges into the operator's own file. Removal is the
+        same match it uses to recognise its own entries, and anything else is
+        left exactly as found."""
+        run("init", "--name", "demo")
+        path = project / ".claude" / "settings.json"
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        settings["hooks"].setdefault("PreToolUse", []).append(
+            {"matcher": "*", "hooks": [{"type": "command", "command": "./mine.sh"}]}
+        )
+        settings["permissions"] = {"allow": ["Bash(ls:*)"]}
+        path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        capsys.readouterr()
+
+        run("uninstall")
+        after = self.settings(project)
+        assert after["permissions"] == {"allow": ["Bash(ls:*)"]}
+        assert "./mine.sh" in json.dumps(after["hooks"])
+
+    def test_an_emptied_event_list_does_not_linger(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall")
+        assert self.settings(project).get("hooks", {}) == {}
+
+    def test_the_manifest_survives_by_default(self, project, capsys):
+        """Uninstalling is not a decision about the backlog."""
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall")
+        assert (project / MANIFEST_RELPATH).is_file()
+
+    def test_the_agents_survive_by_default(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall")
+        assert list((project / ".claude" / "agents").glob("*.md"))
+
+    def test_what_is_left_behind_is_named(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall")
+        text = out(capsys)
+        assert "leaves" in text
+        assert "invariant.yaml" in text
+
+    def test_removing_the_manifest_is_asked_for_explicitly(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall", "--remove-manifest")
+        assert not (project / MANIFEST_RELPATH).is_file()
+
+    def test_removing_the_assets_is_asked_for_explicitly(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        run("uninstall", "--remove-assets")
+        assert not list((project / ".claude" / "agents").glob("*.md"))
+
+    def test_dry_run_enumerates_and_moves_nothing(self, project, capsys):
+        run("init", "--name", "demo")
+        capsys.readouterr()
+        assert run("uninstall", "--dry-run") == 0
+        text = out(capsys)
+        assert "would remove" in text
+        assert "invariant-pre-tool-use.sh" in text
+        assert (project / ".claude" / "hooks" / "invariant-pre-tool-use.sh").is_file()
+        assert "invariant-" in json.dumps(self.settings(project))
+
+    def test_a_locally_edited_asset_is_never_removed(self, project, capsys):
+        """The same rule as `assets install`: the operator's own work is not
+        this command's to discard, even when the operator asked for the assets
+        to go."""
+        run("init", "--name", "demo")
+        target = project / ".claude" / "agents" / "feature-architect.md"
+        target.write_text(
+            target.read_text(encoding="utf-8") + "\n# project note\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        run("uninstall", "--remove-assets")
+        assert target.is_file()
+        assert "edited locally" in out(capsys)
+
+    def test_malformed_settings_are_refused_rather_than_overwritten(
+        self, project, capsys
+    ):
+        """The same care `_wire_settings` takes, from the other direction."""
+        run("init", "--name", "demo")
+        path = project / ".claude" / "settings.json"
+        path.write_text("{not json", encoding="utf-8")
+        capsys.readouterr()
+
+        assert run("uninstall") == 2
+        assert path.read_text(encoding="utf-8") == "{not json"
+
+    def test_uninstalling_twice_is_not_an_error(self, project, capsys):
+        run("init", "--name", "demo")
+        run("uninstall")
+        capsys.readouterr()
+        assert run("uninstall") == 0
+
+    def test_doctor_stops_pushing_back_toward_the_state_being_left(
+        self, project, capsys
+    ):
+        """A half-removal used to read as broken, with `hooks install` offered
+        as the repair. A COMPLETE removal must not read as broken at all."""
+        run("init", "--name", "demo")
+        run("uninstall")
+        capsys.readouterr()
+
+        run("doctor", "--json")
+        rows = {c["check"]: c for c in payload(capsys)["checks"]}
+        assert "not installed" in rows["hook shims installed"]["detail"]
+        assert "invariant init" in rows["hook shims installed"]["detail"]
+
+    def test_a_half_removal_is_still_reported_as_broken(self, project, capsys):
+        """Because it IS. One leftover shim still fires, and the shim exits
+        silently when it finds no binary — which is the invisible failure the
+        command exists to prevent."""
+        run("init", "--name", "demo")
+        (project / ".claude" / "hooks" / "invariant-stop.sh").unlink()
+        capsys.readouterr()
+
+        run("doctor", "--json")
+        rows = {c["check"]: c for c in payload(capsys)["checks"]}
+        assert rows["hook shims installed"]["ok"] is False

@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core.errors import InvariantError
+from ..core.errors import InvariantError, UsageError
 from ..core.rules import (
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
@@ -162,6 +162,17 @@ class InstallResult:
     installed: list[str] = field(default_factory=list)
     #: (label, why) for a target left alone because it is the operator's work.
     skipped: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _IS_OURS(entry) -> bool:
+    """Is this settings entry one this library wrote?
+
+    The shim path is the identity, and it is the SAME test `_wire_settings`
+    uses to avoid writing a duplicate. One test, both directions: an install
+    that recognises its own entries and a removal that does not must be
+    impossible to write.
+    """
+    return "/.claude/hooks/invariant-" in json.dumps(entry)
 
 
 def _currency_detail(stale: list[str], repair: str) -> str:
@@ -389,16 +400,7 @@ class ClaudeCodeHost:
         return state
 
     def _wire_settings(self) -> None:
-        settings_path = self.claude_dir / "settings.json"
-        settings = {}
-        if settings_path.is_file():
-            try:
-                settings = json.loads(settings_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise InvariantError(
-                    f".claude/settings.json is not valid JSON ({exc}); fix it "
-                    f"before running init, so nothing here overwrites your work"
-                ) from exc
+        settings = self._read_settings()
 
         hooks = settings.setdefault("hooks", {})
         for event, host_event in EVENTS.items():
@@ -413,7 +415,151 @@ class ClaudeCodeHost:
                 entry["matcher"] = "*"
             entries.append(entry)
 
+        settings_path = self.claude_dir / "settings.json"
         settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+    # -- removal -------------------------------------------------------
+    #
+    # The inverse of `install_hooks`, and it exists for the same reason that
+    # method does: the operator's authority over their own project includes the
+    # authority to leave. Adoption was one command and withdrawal was hand
+    # surgery — delete each shim, then hand-edit the JSON `_wire_settings`
+    # merged its entries INTO, and know which entries were the library's. Miss
+    # one and the shim still fires; it then finds no binary on PATH and exits
+    # silently by design, so the leftover is invisible until it is not
+    # (IDEA_004).
+
+    def plan_uninstall(
+        self, remove_assets: bool = False, remove_manifest: bool = False
+    ) -> dict:
+        """Everything an uninstall would touch, before it touches any of it.
+
+        Split from the doing so `--dry-run` can enumerate. Removal is the one
+        operation whose dry run is not a nicety: what it takes away cannot be
+        got back by running it again.
+        """
+        from . import assets
+
+        hooks_dir = self.claude_dir / "hooks"
+        shims = sorted(
+            hooks_dir / f"invariant-{event}.sh"
+            for event in EVENTS
+            if (hooks_dir / f"invariant-{event}.sh").is_file()
+        )
+
+        settings, wired = self._read_settings(), []
+        for host_event, entries in (settings.get("hooks") or {}).items():
+            for entry in entries:
+                if _IS_OURS(entry):
+                    wired.append(host_event)
+
+        asset_files: list[Path] = []
+        protected: list[str] = []
+        if remove_assets:
+            for kind in assets.KINDS:
+                for source in self._sources_for(kind):
+                    identity = kind.identity(source)
+                    target = self._target_for(kind, identity)
+                    if not target.is_file():
+                        continue
+                    if classify_installed(source, target) is LOCAL:
+                        protected.append(f"{kind.name}:{identity}")
+                    else:
+                        asset_files.append(target)
+
+        manifest = self.root / ".claude" / "invariant.yaml"
+        return {
+            "shims": shims,
+            "wired": sorted(set(wired)),
+            "assets": asset_files,
+            "protected": protected,
+            "manifest": manifest if remove_manifest and manifest.is_file() else None,
+        }
+
+    def uninstall(
+        self, remove_assets: bool = False, remove_manifest: bool = False
+    ) -> dict:
+        """Remove what this library wrote, and only that.
+
+        Two properties matter more than the command existing:
+
+        * **It removes only what it wrote.** `_wire_settings` recognises its own
+          entries by the shim path; removal is the same match, and anything else
+          in the settings file is left exactly as found. The same care that
+          method takes with malformed JSON — refuse rather than overwrite —
+          applies here, and more so: there it would cost the operator their
+          hook wiring, here it would cost them the whole file on the way out.
+
+        * **It never deletes the operator's data.** Sessions, work items,
+          memories, architecture docs and the manifest survive by default, so
+          uninstalling is not a decision about the backlog. An asset the
+          operator has EDITED survives even `--remove-assets`, by the same rule
+          `install_assets` follows: their work is not this command's to discard.
+        """
+        plan = self.plan_uninstall(
+            remove_assets=remove_assets, remove_manifest=remove_manifest
+        )
+
+        for path in plan["shims"]:
+            path.unlink()
+        self._unwire_settings()
+        for path in plan["assets"]:
+            path.unlink()
+            # A skill lives in its own directory; take the directory with it
+            # once nothing is left in it, and never if something is.
+            parent = path.parent
+            if parent != self.claude_dir and parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        if plan["manifest"] is not None:
+            plan["manifest"].unlink()
+
+        hooks_dir = self.claude_dir / "hooks"
+        if hooks_dir.is_dir() and not any(hooks_dir.iterdir()):
+            hooks_dir.rmdir()
+        return plan
+
+    def _read_settings(self) -> dict:
+        settings_path = self.claude_dir / "settings.json"
+        if not settings_path.is_file():
+            return {}
+        try:
+            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            # Refuse, never overwrite. This file is the operator's, and this
+            # library is a guest in it: on the way IN a bad parse would cost
+            # them their hook wiring, and on the way OUT it would cost them the
+            # whole file as the last thing the tool ever did to their project.
+            raise UsageError(
+                f".claude/settings.json is not valid JSON ({exc}); fix it "
+                f"first, so nothing here overwrites your work"
+            ) from exc
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _unwire_settings(self) -> None:
+        settings_path = self.claude_dir / "settings.json"
+        if not settings_path.is_file():
+            return
+        settings = self._read_settings()
+        hooks = settings.get("hooks")
+        if not isinstance(hooks, dict):
+            return
+
+        for host_event in list(hooks):
+            entries = hooks.get(host_event)
+            if not isinstance(entries, list):
+                continue
+            kept = [entry for entry in entries if not _IS_OURS(entry)]
+            # An emptied list is removed rather than left as `[]`. A leftover
+            # empty key is the visible residue of a tool that claimed to be
+            # gone, which is the impression this command exists not to leave.
+            if kept:
+                hooks[host_event] = kept
+            else:
+                del hooks[host_event]
+
         settings_path.write_text(
             json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -428,7 +574,14 @@ class ClaudeCodeHost:
         # gets left alone, because that rewrites the manifest and nobody trades
         # a project's configuration for a hook.
         detail = f"{len(EVENTS) - len(missing)}/{len(EVENTS)}"
-        if missing:
+        if len(missing) == len(EVENTS):
+            # Nothing is half-gone: this is a project that uninstalled, or one
+            # that never installed. Offering `hooks install` here pushed back
+            # toward the state the operator was leaving, which is not a repair
+            # (IDEA_004). Naming `init` states the way back without pretending
+            # a deliberate removal is damage.
+            detail = "not installed — run 'invariant init' to set this project up"
+        elif missing:
             detail += (
                 f" — missing: {', '.join(missing)}. Repair with: invariant hooks install"
             )

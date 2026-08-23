@@ -570,6 +570,71 @@ def cmd_hooks_install(args) -> int:
     )
 
 
+def cmd_uninstall(args) -> int:
+    """Remove what `init` installed, and say what is being left behind.
+
+    The right to stop using a tool is part of the operator's authority over
+    their own project, and it was the part this library made hardest: adoption
+    is one command, withdrawal was hand surgery over a settings file the
+    library had merged itself into. A tool that is easy to adopt and awkward to
+    remove is asking for a trust it has not earned yet (IDEA_004).
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    ctx = Context(required=False)
+    root = ctx.manifest.root if ctx.manifest.path.is_file() else ctx.cwd
+    host = ClaudeCodeHost(root)
+
+    plan = host.plan_uninstall(
+        remove_assets=args.remove_assets, remove_manifest=args.remove_manifest
+    )
+    if not args.dry_run:
+        host.uninstall(
+            remove_assets=args.remove_assets, remove_manifest=args.remove_manifest
+        )
+
+    verb = "would remove" if args.dry_run else "removed"
+    lines = [f"{verb} {len(plan['shims'])} hook shim(s) from .claude/hooks/"]
+    lines += [f"    {p.name}" for p in plan["shims"]]
+    lines.append(
+        f"{verb} invariant's entries from .claude/settings.json"
+        + (f"  ({', '.join(plan['wired'])})" if plan["wired"] else "")
+        + "  — yours are untouched"
+    )
+    if plan["assets"]:
+        lines.append(f"{verb} {len(plan['assets'])} library asset(s)")
+    for label in plan["protected"]:
+        lines.append(f"  kept    {label} (edited locally — your work, not ours)")
+    if plan["manifest"] is not None:
+        lines.append(f"{verb} {plan['manifest'].name}")
+
+    # Named, always. What survives is the operator's data, and a removal that
+    # does not say what it left behind invites the reader to assume it took
+    # everything — which is the opposite of the guarantee being made.
+    lines.append("leaves")
+    if plan["manifest"] is None:
+        lines.append("    .claude/invariant.yaml            (--remove-manifest to drop it)")
+    if not args.remove_assets:
+        lines.append("    .claude/agents/, commands/, skills/  (--remove-assets to drop them)")
+    lines.append("    the state directory, with its session records")
+    lines.append("    work items, memories and architecture docs")
+    if not args.dry_run:
+        lines.append("run 'invariant init' to come back; nothing above was destroyed")
+
+    return emit(
+        args,
+        {
+            "dry_run": args.dry_run,
+            "shims": [str(p) for p in plan["shims"]],
+            "wired": plan["wired"],
+            "assets": [str(p) for p in plan["assets"]],
+            "kept": plan["protected"],
+            "manifest": str(plan["manifest"]) if plan["manifest"] else None,
+        },
+        "\n".join(lines),
+    )
+
+
 def cmd_assets_list(args) -> int:
     """Every host asset, what kind it is, whether it loads, and who owns it."""
     from ..hosts import assets as A
@@ -1710,6 +1775,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     sub.add_parser("doctor", help="check the installation").set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser(
+        "uninstall", help="remove the shims and settings entries init installed"
+    )
+    p.add_argument("--remove-assets", action="store_true",
+                   help="also remove library agents, commands and skills")
+    p.add_argument("--remove-manifest", action="store_true",
+                   help="also remove .claude/invariant.yaml")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_uninstall)
 
     # agents — repair without touching the manifest, which is why this is not
     # a flag on `init`.
