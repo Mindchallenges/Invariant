@@ -50,6 +50,18 @@ methodology:
                                # aside. Empty by default — excluding anything from
                                # a floor is a policy decision, and it belongs in a
                                # diff someone can review.
+    non_source: []             # globs the project declares are NOT code. A
+                               # different question from coverage_exclude, and the
+                               # pair is easy to confuse: that one means "measured,
+                               # but not held to the floor"; this one means "no run
+                               # in this project could produce a row for it at
+                               # all", and is applied where the built-in prose and
+                               # config suffixes are — before the missing-row
+                               # check, not after it. For versioned design
+                               # bundles, fixtures, vendored assets. Every match is
+                               # named in the verdict with the pattern that spent
+                               # it, because this is the project asserting
+                               # something the engine cannot check.
     coverage_baseline: null    # path to a recorded per-file shortfall the floor is
                                # RATCHETED against. One entry per line,
                                # `<repo-relative-path> <pct>`, `#` comments and

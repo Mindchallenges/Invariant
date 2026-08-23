@@ -175,11 +175,25 @@ DEFAULTS: dict[str, Any] = {
         # and no record at all fails exactly as it did before. Null by
         # default, because the relaxation must rest on evidence somebody
         # wrote down rather than on the absence of any.
+        # `non_source` is a list of glob patterns the project declares are not
+        # code — versioned design bundles, fixtures, vendored assets. A
+        # DIFFERENT question from `coverage_exclude`, and the pair is easy to
+        # confuse: that one means "measured, but not held to the floor" and is
+        # applied after the missing-row check on purpose, so that suppressing
+        # a path from the reporter cannot buy a pass. This one means "no run in
+        # this project could produce a row for it at all", and is applied where
+        # the built-in documentation suffixes are. Nothing in the manifest
+        # could say that, so a project versioning design bundles beside the
+        # code they specify had a blocking gate with no local fix and no work
+        # that could clear it. Empty by default and every match named in the
+        # verdict with the pattern that spent it: this is the project asserting
+        # something the engine cannot check.
         "gates": {
             "coverage_min": 90,
             "coverage_scope": "touched",
             "coverage_exclude": [],
             "coverage_baseline": None,
+            "non_source": [],
         },
     },
     "enforcement": {"profile": "standard", "rules": {}},

@@ -1475,6 +1475,10 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         touched_set = _changed_set(ctx)
         changed = {_relative_to_any(path, roots) for path in touched_set.paths}
         source_changed = {p for p in changed if not _looks_like_docs(p)}
+        source_changed, declared_non_source = _excluded_as_declared_non_source(
+            ctx, source_changed
+        )
+        excluded += declared_non_source
 
         # Whether anything here is MEASURABLE is a different question from
         # whether anything was measured, and only the first is answerable
@@ -1550,7 +1554,13 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
         # a gate no test can clear, and a gate no test can clear is one people
         # route around. Only the second is set aside, only on positive
         # evidence, and every file set aside is NAMED below.
-        excluded, unmatched = _explain_absent_rows(ctx, unmatched, roots)
+        # Extended, not rebound. This used to assign over `excluded`, which
+        # was harmless only because nothing had been added to it yet — and
+        # stopped being harmless the moment a declared non-source path was
+        # (see above). A set-aside that vanishes from the verdict is the
+        # vacuous green this rule spends most of its length preventing.
+        newly_excluded, unmatched = _explain_absent_rows(ctx, unmatched, roots)
+        excluded.extend(newly_excluded)
         set_aside = _excluded_detail(excluded)
 
         if not touched and unmatched:
@@ -2380,6 +2390,18 @@ def _explain_absent_rows(
     excluded: list[str] = []
     unexplained: list[str] = []
     for rel in missing:
+        # A DIRECTORY is positive evidence, not an absence. `session files add`
+        # accepts a path ending in `/`, so a declared bundle reaches the
+        # changed set as a bare directory path — and `_first_existing` asks
+        # `is_file()`, which made it indistinguishable from a misspelt file:
+        # absent, undeletable, unexplainable, blocking forever. No coverage
+        # reporter names a directory in a row, and the files inside one reach
+        # this gate on their own through git, so setting it aside loses no
+        # coverage of anything.
+        directory = _first_existing_dir(rel, roots)
+        if directory is not None:
+            excluded.append(f"{rel} (a directory; a coverage row names a file)")
+            continue
         located = _first_existing(rel, roots)
         if located is None:
             # Absence alone proves nothing — a misspelt path is absent too.
@@ -2431,6 +2453,54 @@ def _explain_absent_rows(
         else:
             unexplained.append(rel)
     return excluded, unexplained
+
+
+def _excluded_as_declared_non_source(
+    ctx: RuleContext, source_changed: set[str]
+) -> tuple[set[str], list[str]]:
+    """Hold out paths the project has declared are not source code at all.
+
+    A different question from `coverage_exclude`, and the two are not
+    interchangeable — which is the whole reason this key exists.
+    `coverage_exclude` means "measured, but not held to the floor", and it is
+    applied AFTER the missing-row check deliberately, so that suppressing a
+    path from the reporter cannot buy a pass through that door. Nothing in the
+    manifest could say the earlier thing: "this path is not code, and no run
+    in this project could ever produce a row for it". A consuming project
+    versioning design bundles beside the code they specify had a blocking gate
+    with no local fix and no work that could clear it, which is the family this
+    library treats as an engine defect rather than as a configuration problem.
+
+    Held out HERE, where the built-in documentation suffixes are held out, and
+    not among the exclusions further down. The distinction is the same one
+    `_explain_absent_rows` draws: this is a claim about what the path IS, which
+    belongs before the gate starts asking what was measured about it.
+
+    Every held-out path is NAMED in the verdict, with the pattern that spent
+    it. An exclusion nobody can see is indistinguishable from a gate that did
+    not run, and this one is a project's own policy rather than a fact the
+    engine established — so the reader is owed both halves.
+    """
+    patterns = ctx.manifest.get("methodology.gates.non_source") or []
+    if not patterns:
+        return source_changed, []
+
+    kept: set[str] = set()
+    excluded: list[str] = []
+    for rel in sorted(source_changed):
+        matched = next(
+            (
+                p
+                for p in patterns
+                if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, f"{p}/*")
+            ),
+            None,
+        )
+        if matched is None:
+            kept.add(rel)
+        else:
+            excluded.append(f"{rel} (non_source {matched!r})")
+    return kept, excluded
 
 
 def _excluded_by_manifest_globs(
@@ -2787,6 +2857,18 @@ def _first_existing(rel: str, roots: Iterable[Path]) -> tuple[Path, Path] | None
     return None
 
 
+def _first_existing_dir(rel: str, roots: list[Path]) -> Path | None:
+    """The first root under which ``rel`` names a directory, if any."""
+    for root in roots:
+        candidate = Path(root) / rel
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:  # pragma: no cover - an unreadable mount
+            continue
+    return None
+
+
 def _ecosystem_adapters(ctx: RuleContext) -> list[Adapter]:
     return [get_adapter(eco) for eco in ctx.manifest.ecosystems]
 
@@ -2899,7 +2981,35 @@ def _same_file(declared: str, measured: str) -> bool:
 
 #: Paths whose coverage nobody measures. Counting them as "changed source"
 #: would make the no-overlap check fire on a docs-only edit.
-_UNMEASURED_SUFFIXES = (".md", ".rst", ".txt", ".yaml", ".yml", ".json", ".toml")
+#:
+#: Ecosystem-independent by construction, and that is the admission price. Each
+#: entry is a kind no coverage reporter produces a row for in ANY ecosystem —
+#: prose, configuration, markup, stylesheets, vector art. A kind that is real
+#: source somewhere does not belong here however clearly it is an asset in the
+#: project in front of you: `.jsx` is production code with real rows under a
+#: Node reporter, and listing it would silently exempt it there. That case is
+#: the project's to declare, through `methodology.gates.non_source`.
+#:
+#: `.html`, `.css` and `.svg` were added for a Swift project that versions
+#: design bundles next to the code they specify. The report proposed putting
+#: them in the Xcode adapter's resource allowlist instead; they are here
+#: because that allowlist is about kinds an Xcode *resource build step*
+#: consumes, and the adapter already declines to hold documentation suffixes
+#: for the reason that applies unchanged — the same judgement written down in
+#: two layers is the duplication that drifts.
+_UNMEASURED_SUFFIXES = (
+    ".md",
+    ".rst",
+    ".txt",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".toml",
+    ".html",
+    ".htm",
+    ".css",
+    ".svg",
+)
 
 
 def _looks_like_docs(path: str) -> bool:

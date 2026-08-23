@@ -3083,14 +3083,20 @@ class TestFilesThatCannotHaveACoverageRow:
     adapter that cannot tell leaves the block exactly where it was.
     """
 
-    def ctx_for(self, ctx_factory, coverage, declared, ecosystems=("swift",)):
+    def ctx_for(
+        self, ctx_factory, coverage, declared, ecosystems=("swift",), gates=None
+    ):
         write_manifest(
             ctx_factory.main,
             {
                 "version": 1,
                 "project": {"name": "demo", "ecosystems": list(ecosystems)},
                 "methodology": {
-                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "touched",
+                        **(gates or {}),
+                    }
                 },
             },
         )
@@ -3420,6 +3426,177 @@ class TestFilesThatCannotHaveACoverageRow:
         verdict = self.verdict(ctx)
         assert not verdict.ok
         assert "Misspelt.swift" in verdict.detail
+
+class TestANonSourceAssetCommittedBesideCodeDoesNotBlock:
+    """A design bundle versioned next to the code it specifies.
+
+    Reported from a consuming project: a Swift repo versions Claude Design
+    bundles under `design/<feature>/`, and a session that commits one alongside
+    code cannot advance past `reviewing`. `coverage.meets_floor` blocked on the
+    bundle's `.html`, on four `.jsx` files, and on the bundle DIRECTORY itself,
+    which had been named in the session's declared file set.
+
+    Every one of those is a file no coverage reporter in this project could
+    ever produce a row for, so no test anybody could write would clear the
+    gate — the family this library treats as an engine defect. What it is NOT
+    is a case for relaxing what the gate demands of code: each of the three
+    causes below is answered with positive evidence, at the layer that has it.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared, gates=None, ecosystems=("swift",)):
+        return TestFilesThatCannotHaveACoverageRow.ctx_for(
+            self, ctx_factory, coverage, declared, ecosystems=ecosystems, gates=gates
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def write(self, ctx_factory, relpath, body):
+        path = ctx_factory.wt / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    MEASURED = "Heap/Intake/FileBytesIngester.swift"
+    LIVE = "struct A { func f() { g() } }"
+    BUNDLE = "design/heap-v2/origins-wall-tag-filter"
+
+    def measured_row(self, ctx_factory):
+        return {str(ctx_factory.wt / self.MEASURED): 100.0}
+
+    def setup_bundle(self, ctx_factory):
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, f"{self.BUNDLE}/Origins Wall.html", "<html></html>\n")
+        self.write(ctx_factory, f"{self.BUNDLE}/style.css", "body { color: red }\n")
+        self.write(ctx_factory, f"{self.BUNDLE}/icon.svg", "<svg/>\n")
+        self.write(ctx_factory, f"{self.BUNDLE}/src/ow-kit.jsx", "export const a = 1\n")
+
+    # -- cause 1: markup and style kinds nobody measures, anywhere ---------
+
+    def test_markup_and_style_assets_are_not_changed_source(self, ctx_factory):
+        """`.html`, `.css` and `.svg` join `.md` and `.json` in core/rules.
+
+        Answered here rather than in the Xcode adapter, which is where the
+        report suggested it. `_RESOURCE_SUFFIXES` is an allowlist of kinds an
+        *Xcode resource build step* consumes, and the adapter's own note says
+        documentation and configuration suffixes are deliberately absent from
+        it because `core/rules` already holds them out for every ecosystem —
+        "the same judgement written down in two layers is the duplication that
+        drifts". A stylesheet is not an Xcode concept and is not measured by
+        any coverage tool in any ecosystem, which is exactly the claim
+        `_UNMEASURED_SUFFIXES` makes.
+        """
+        self.setup_bundle(ctx_factory)
+        for asset in ("Origins Wall.html", "style.css", "icon.svg"):
+            verdict = self.verdict(
+                self.ctx_for(
+                    ctx_factory,
+                    self.measured_row(ctx_factory),
+                    [self.MEASURED, f"{self.BUNDLE}/{asset}"],
+                )
+            )
+            assert verdict.ok, f"{asset}: {verdict.message}"
+
+    # -- cause 2: a DIRECTORY in the declared set --------------------------
+
+    def test_a_declared_directory_is_not_a_missing_coverage_row(self, ctx_factory):
+        """A directory cannot earn a row and its absence is not evidence of one.
+
+        `session files add` accepts a path ending in `/`, and a declared
+        directory reaches the changed set as a bare path. `_first_existing`
+        asks `is_file()`, so a directory looked exactly like a misspelt file —
+        absent, undeletable, unexplainable — and blocked forever. That it
+        EXISTS and is a directory is positive evidence of the same kind the
+        other set-aside branches demand, not a relaxation of them: the files
+        inside it reach the changed set on their own through git.
+        """
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.BUNDLE]
+            )
+        )
+        assert verdict.ok, verdict.message
+        assert self.BUNDLE in (verdict.detail or ""), "the directory was set aside silently"
+
+    # -- cause 3: a kind that IS source somewhere, declared not-source here -
+
+    def test_a_jsx_file_still_blocks_a_project_that_has_not_said_otherwise(
+        self, ctx_factory
+    ):
+        """The control that keeps cause 3 from being a global relaxation.
+
+        `.jsx` is real source with real coverage rows in a Node project. Adding
+        it to `_UNMEASURED_SUFFIXES` would silently exempt production code in
+        every such project — the mistake `carries_executable_code`'s contract
+        forbids outright. So the engine keeps blocking, and the project says.
+        """
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, f"{self.BUNDLE}/src/ow-kit.jsx"],
+            )
+        )
+        assert not verdict.ok
+        assert "ow-kit.jsx" in verdict.detail
+
+    def test_a_project_can_declare_a_path_not_source_and_is_then_believed(
+        self, ctx_factory
+    ):
+        """`methodology.gates.non_source` — the key that was missing.
+
+        `coverage_exclude` cannot answer this and is not meant to: it means
+        "measured, but not held to the floor", and it is applied AFTER the
+        missing-row check on purpose, so that suppressing a path from the
+        reporter cannot buy a pass through that door. The question a design
+        bundle asks is the earlier one — "is this source at all" — which no
+        manifest key could express, which is why the consuming project could
+        not fix it locally and had to report it.
+        """
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, f"{self.BUNDLE}/src/ow-kit.jsx"],
+                gates={"non_source": ["design/**"]},
+            )
+        )
+        assert verdict.ok, verdict.message
+
+    def test_a_declared_non_source_path_is_named_in_the_verdict(self, ctx_factory):
+        """Never silently. An exclusion nobody can see is indistinguishable
+        from a gate that did not run, and this one is a project's own policy —
+        the reader is entitled to see which pattern spent it."""
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, f"{self.BUNDLE}/src/ow-kit.jsx"],
+                gates={"non_source": ["design/**"]},
+            )
+        )
+        assert "ow-kit.jsx" in (verdict.detail or "")
+        assert "design/**" in (verdict.detail or "")
+
+    def test_non_source_does_not_reach_a_path_it_does_not_match(self, ctx_factory):
+        """The blast radius is the pattern's, and no wider."""
+        self.setup_bundle(ctx_factory)
+        self.write(ctx_factory, "Heap/Intake/Unmeasured.swift", self.LIVE)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+                gates={"non_source": ["design/**"]},
+            )
+        )
+        assert not verdict.ok
+        assert "Unmeasured.swift" in verdict.detail
+
 
 class TestABinaryAssetHasNoExecutableLinesToMeasure:
     """A committed binary file was a question every set-aside branch refused.

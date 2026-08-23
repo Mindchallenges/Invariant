@@ -246,6 +246,22 @@ both run AFTER the no-row check so neither can hide a path-spelling mismatch,
 and both name what they set aside in the verdict. An exclusion nobody can see
 is indistinguishable from a gate that did not run.
 
+That ordering is deliberate and it left a question nothing could answer. "Not
+held to the floor" presumes a row exists to hold; a path that is not code at
+all fails one step earlier, at the missing-row check, where `coverage_exclude`
+by construction cannot reach it. The engine answers that itself wherever it can
+— prose, configuration, markup, stylesheets and vector art are held out of the
+changed-source set for every ecosystem, and an adapter reporting a file
+inert or a reporter's configured scope excluding it are both positive evidence.
+What none of those reaches is a kind that is real source SOMEWHERE and an asset
+HERE: a Swift project versioning Claude Design bundles beside the code they
+specify was blocked by `coverage.meets_floor` on their `.jsx`, on the bundle
+directory itself, and on markup, with no manifest key that could say so and no
+test anybody could write to clear it. `methodology.gates.non_source` is that
+key. It is the project asserting what the engine cannot check, so it is applied
+where the built-in suffixes are, it is empty by default, and every path it
+holds out is named in the verdict with the pattern that spent it.
+
 A third lever answers a question neither of those can: the floor is right for
 new code and wrong for old. A file months below it blocks a two-line, fully
 covered, net-negative edit, so the gate refuses precisely the change that
