@@ -416,3 +416,130 @@ class TestAcknowledgementReachesTheHookSurface(HookHarness):
 
         self.hook("pre-tool-use", self.edit(Path(worktree) / "app.py"))
         assert "pipeline.started_before_edit" not in out(capsys)
+
+
+# -- AUTH-02: an override that says out loud whether it took ------------
+
+
+class TestAnUnknownRuleIdIsRefusedAtLoad:
+    """BUG_050. An override is an exercise of the operator's authority: it
+    either takes effect or it says out loud that it did not.
+
+    `Manifest.validate()` parsed each enforcement VALUE and never looked at the
+    KEY, and `rule_level()` answers WARN for anything absent — so
+    `privacy_clean: off` written beside a real `privacy.clean` loaded without
+    error, left the real rule at BLOCK, and showed a provenance entry for the
+    typo that read as though the override had taken. `doctor` was green.
+
+    The library already holds the correct instinct twice: `core.rules.evaluate`
+    fails loudly on a gate naming a rule that does not exist, and AUD-08 added
+    exactly this check for a mistyped methodology. Neither was extended to the
+    ids an operator uses to exercise authority — the one place where a silent
+    no-op costs the most.
+    """
+
+    def build(self, tmp_path, rules):
+        from invariant.core.manifest import Manifest
+
+        return Manifest.from_raw(
+            {
+                "project": {"name": "x", "ecosystems": ["python"]},
+                "enforcement": {"profile": "standard", "rules": rules},
+            },
+            root=tmp_path,
+            path=tmp_path / MANIFEST_RELPATH,
+            env={},
+        )
+
+    def test_a_real_id_still_loads(self, tmp_path):
+        m = self.build(tmp_path, {"privacy.clean": "off"})
+        assert m.rule_level("privacy.clean") is Level.OFF
+
+    def test_an_underscore_for_a_dot_is_refused(self, tmp_path):
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError, match="privacy_clean"):
+            self.build(tmp_path, {"privacy_clean": "off"})
+
+    def test_the_refusal_names_the_id_the_operator_meant(self, tmp_path):
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError, match="privacy.clean"):
+            self.build(tmp_path, {"privacy_clean": "off"})
+
+    def test_a_typo_three_characters_off_is_answered_with_the_real_one(self, tmp_path):
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError, match="docs.read_architecture"):
+            self.build(tmp_path, {"docs.read_arcitecture": "off"})
+
+    def test_an_id_resembling_nothing_is_still_refused(self, tmp_path):
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError, match="not.a.rule"):
+            self.build(tmp_path, {"not.a.rule": "block"})
+
+    def test_the_real_rule_beside_the_typo_is_not_quietly_left_blocking(self, tmp_path):
+        """The shape of the damage: the operator disabled nothing and was told
+        nothing, and the gate they meant to relax kept stopping them."""
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError):
+            self.build(tmp_path, {"privacy.clean": "off", "privacy_clean": "off"})
+
+
+class TestAMistypedEscapeHatchWarnsRatherThanWedging:
+    """`INVARIANT_DISABLE` is reached in a hurry, by someone already blocked.
+    Refusing to load the whole manifest because one token was mistyped would
+    wedge exactly that caller, so here it is loud on stderr and proceeds.
+    """
+
+    def build(self, tmp_path, disable):
+        from invariant.core.manifest import Manifest
+
+        return Manifest.from_raw(
+            {"project": {"name": "x", "ecosystems": ["python"]}},
+            root=tmp_path,
+            path=tmp_path / MANIFEST_RELPATH,
+            env={"INVARIANT_DISABLE": disable},
+        )
+
+    def test_a_real_id_is_disabled(self, tmp_path, capsys):
+        m = self.build(tmp_path, "privacy.clean")
+        assert m.rule_level("privacy.clean") is Level.OFF
+
+    def test_a_mistyped_id_does_not_wedge_the_load(self, tmp_path, capsys):
+        m = self.build(tmp_path, "privacy.klean,docs.read_architecture")
+        assert m.rule_level("docs.read_architecture") is Level.OFF
+
+    def test_a_mistyped_id_is_loud(self, tmp_path, capsys):
+        self.build(tmp_path, "privacy.klean,docs.read_architecture")
+        err = capsys.readouterr().err
+        assert "privacy.klean" in err
+        assert "privacy.clean" in err
+
+    def test_the_mistyped_id_does_not_reach_the_resolved_map(self, tmp_path, capsys):
+        m = self.build(tmp_path, "privacy.klean")
+        assert "privacy.klean" not in m.data["enforcement"]["rules"]
+        assert "enforcement.rules.privacy.klean" not in m.provenance
+
+
+class TestDoctorSurvivesTheManifestItIsThereToDiagnose:
+    """`doctor` is the command someone runs when the manifest is wrong, and it
+    resolved the manifest before it could report anything — so a refusal at
+    load took out the one command that would explain it.
+    """
+
+    def test_doctor_reports_an_unloadable_manifest_as_a_failed_check(
+        self, project, capsys
+    ):
+        assert run("init", "--name", "demo") == 0
+        path = project / MANIFEST_RELPATH
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body.setdefault("enforcement", {})["rules"] = {"privacy_clean": "off"}
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+
+        assert run("doctor", "--json") == 1
+        rows = {c["check"]: c for c in payload(capsys)["checks"]}
+        assert rows["manifest valid"]["ok"] is False
+        assert "privacy_clean" in rows["manifest valid"]["detail"]

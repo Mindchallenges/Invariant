@@ -57,6 +57,11 @@ invariant doctor
     settings wired, state root writable, adapter commands resolvable, memory
     index current. One line per check, exit 1 if any fails.
 
+    A manifest that will not LOAD is one of those checks and not a reason to
+    stop: this is the command someone runs because the manifest is wrong, and
+    it used to resolve the manifest before it could report anything, so a
+    refusal at load took out the one command that would explain it (BUG_050).
+
 invariant assets list [--kind agent|command|skill]
     Every host asset: kind, whether the host can load it, and whether this
     library or the project owns it.

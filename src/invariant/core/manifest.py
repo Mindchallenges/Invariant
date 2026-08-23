@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import os
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -76,6 +77,38 @@ class Level(str, Enum):
                 f"{value!r} is not a valid enforcement level; use one of: "
                 + ", ".join(level.value for level in cls)
             ) from None
+
+
+def _unknown_rule(rule_id: str) -> bool:
+    """Is this id absent from the rule registry?
+
+    A deferred import, and it has to be: `core.rules` imports this module, so
+    a top-level one is a cycle. That is the whole reason the check was not
+    here already, and it is a solvable reason.
+
+    The registry is the complete answer, not a partial one. A methodology may
+    name any id it likes as a gate, but an id with no registered rule already
+    FAILS at evaluation — there is no path by which a project legitimately
+    carries a rule this build does not know about.
+    """
+    from .rules import get_rule
+
+    return get_rule(rule_id) is None
+
+
+def _did_you_mean(rule_id: str) -> str:
+    """The registered id nearest to what was typed, where there is one.
+
+    A typo three characters off should be answered with the id the operator
+    meant. Where nothing is close the message says nothing rather than
+    proposing an unrelated rule, which would be a worse kind of confident.
+    """
+    from difflib import get_close_matches
+
+    from .rules import all_rules
+
+    near = get_close_matches(rule_id, [spec.id for spec in all_rules()], n=1, cutoff=0.6)
+    return f"; did you mean {near[0]!r}?" if near else ""
 
 
 DEFAULTS: dict[str, Any] = {
@@ -340,7 +373,22 @@ class Manifest:
             self.provenance["paths.state"] = "env:INVARIANT_STATE_ROOT"
 
         if disabled := env.get("INVARIANT_DISABLE"):
+            # Loud, and NOT a refusal. This variable is an escape hatch reached
+            # in a hurry by somebody who is already blocked; refusing to load
+            # the whole manifest because one token was mistyped would wedge
+            # exactly that caller. It used to do neither — a token naming no
+            # rule was written straight into the map and silently did nothing,
+            # so `privacy.klean,docs.read_architecture` disabled the second and
+            # ignored the first without a word (BUG_050).
             for rule_id in (r.strip() for r in disabled.split(",") if r.strip()):
+                if _unknown_rule(rule_id):
+                    print(
+                        f"invariant: INVARIANT_DISABLE names {rule_id!r}, which "
+                        f"is not a rule{_did_you_mean(rule_id)}. It was ignored; "
+                        f"the rule you meant is still enforced.",
+                        file=sys.stderr,
+                    )
+                    continue
                 self.data["enforcement"]["rules"][rule_id] = Level.OFF.value
                 self.provenance[f"enforcement.rules.{rule_id}"] = "env:INVARIANT_DISABLE"
 
@@ -350,8 +398,34 @@ class Manifest:
                 f"manifest version {self.data['version']} is not supported by "
                 f"this release, which understands version 1"
             )
+        # Both halves of every entry. The VALUE has always been parsed; the KEY
+        # was never checked against anything, and `rule_level()` answers WARN
+        # for an id it does not hold — so an override naming a rule that does
+        # not exist loaded without error, did nothing, and showed a provenance
+        # entry that read as though it had taken (BUG_050).
+        #
+        # An override is the one control this library hands back, so a silent
+        # no-op here costs more than anywhere else. The instinct is already in
+        # the codebase twice: `core.rules.evaluate` fails loudly on a gate
+        # naming a rule that does not exist, because "a gate naming a rule that
+        # does not exist would otherwise pass silently forever", and AUD-08
+        # added exactly this check for a mistyped methodology. Neither had been
+        # extended to the ids an operator uses to exercise authority.
+        #
+        # Refused at load rather than warned: a manifest is read on every
+        # command, so a warning here is printed hundreds of times and read none
+        # of them. The escape-hatch case that must NOT be refused is
+        # `INVARIANT_DISABLE`, and it is handled in `_apply_env` above.
         for rule_id, level in self.data["enforcement"]["rules"].items():
             Level.parse(level)  # raises with a useful message
+            if _unknown_rule(rule_id):
+                raise ManifestError(
+                    f"enforcement.rules names {rule_id!r}, which is not a rule "
+                    f"this build carries{_did_you_mean(rule_id)}.\n"
+                    f"  An override that names nothing is silently discarded, "
+                    f"and the rule you meant keeps enforcing.\n"
+                    f"  'invariant rules list' shows every id."
+                )
         scope = self.data["privacy"]["scope"]
         if not isinstance(scope, list):
             raise ManifestError("privacy.scope must be a list")

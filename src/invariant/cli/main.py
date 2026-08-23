@@ -16,8 +16,8 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from ..core.errors import GateFailure, InvariantError, UsageError
-from ..core.manifest import Manifest
+from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
+from ..core.manifest import MANIFEST_RELPATH, Manifest
 from ..core.rules import RuleContext, all_rules, evaluate
 from ..core.store import JsonStore
 from ..domains.pipeline import PipelineDomain, describe_run, summarise
@@ -424,8 +424,23 @@ def cmd_init(args) -> int:
 def cmd_doctor(args) -> int:
     from ..hosts.claude_code import ClaudeCodeHost
 
-    ctx = Context(required=False)
     checks: list[tuple[str, bool, str]] = []
+
+    # `doctor` is the command someone runs BECAUSE the manifest is wrong, and
+    # it used to resolve the manifest before it could report anything — so a
+    # manifest that refuses to load took out the one command that would explain
+    # it, and the operator got a single line from the argument parser's error
+    # path instead of a diagnosis. Enumerating problems is this command's whole
+    # job; being stopped by the first one is the opposite of it (BUG_050).
+    try:
+        ctx = Context(required=False)
+    except ManifestError as exc:
+        path = Manifest.find_root(Path.cwd())
+        checks = [
+            ("manifest present", True, str((path or Path.cwd()) / MANIFEST_RELPATH)),
+            ("manifest valid", False, str(exc)),
+        ]
+        return _report_checks(args, checks)
 
     manifest_exists = ctx.manifest.path.is_file()
     checks.append(("manifest present", manifest_exists, str(ctx.manifest.path)))
@@ -505,6 +520,10 @@ def cmd_doctor(args) -> int:
                  f"{len(report.problems())} problem(s)")
             )
 
+    return _report_checks(args, checks)
+
+
+def _report_checks(args, checks: list[tuple[str, bool, str]]) -> int:
     lines = [
         f"  {'ok ' if ok else 'FAIL'}  {label:<28} {detail}" for label, ok, detail in checks
     ]

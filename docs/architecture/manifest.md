@@ -447,7 +447,7 @@ project: { name: example, ecosystems: [python] }
 
 `Manifest.validate()` runs on every load and refuses, with a named reason: an
 unsupported `version`, an unparseable enforcement level (`block`, `ask`, `warn`
-or `off`), a non-list
+or `off`), an `enforcement.rules` KEY naming no registered rule, a non-list
 `privacy.scope`, an unknown `items.backend`, and — because several gates used
 to skip, silently and non-blocking, exactly when this was mistyped (AUD-08) —
 a `methodology.pipeline` that names no shipped or `extra_machines` machine.
@@ -456,6 +456,42 @@ right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it
 (`pipeline.complete`, `session.work_would_be_stranded`) rather than being
 stepped past.
+
+### An override either takes effect or says it did not
+
+The rule ids in `enforcement.rules` are checked against the registry, and a key
+naming nothing is a **refusal at load** carrying the nearest real id.
+
+Only the *value* used to be parsed. `rule_level()` answers `warn` for any id it
+does not hold, so `privacy_clean: off` written beside a real `privacy.clean`
+loaded without error, left the real rule at `block`, and showed a provenance
+entry for the typo that read as though the override had taken. `doctor` was
+green; `rules list` shows only real rules, so the discarded key appeared
+nowhere (BUG_050).
+
+This is the library's own central claim pointed at its own configuration.
+*"Non-compliance is silent"* is the failure it exists to remove, and a
+discarded override is that failure aimed at the operator instead of at the
+agent — in the one place it costs most, because an override is the single
+control this library hands back. The instinct was already written down twice:
+`core.rules.evaluate` fails loudly on a gate naming a rule that does not exist,
+*"A gate naming a rule that does not exist would otherwise pass silently
+forever"*, and AUD-08 added exactly this check for a mistyped methodology.
+
+Three properties of the check are deliberate:
+
+- **Refused at load, not warned.** A manifest is read on every command, so a
+  warning here is printed hundreds of times and read none of them.
+- **`INVARIANT_DISABLE` warns instead, and proceeds.** It is an escape hatch
+  reached in a hurry by someone already blocked; refusing to load the whole
+  manifest because one token was mistyped would wedge exactly that caller. The
+  unknown token is dropped, named on stderr with the nearest real id, and the
+  rest of the list applies.
+- **`doctor` survives it.** `doctor` is the command someone runs *because* the
+  manifest is wrong, and it resolved the manifest before it could report
+  anything — so a refusal at load took out the one command that would explain
+  it. An unloadable manifest is now a failed `manifest valid` row carrying the
+  reason.
 
 One consequence worth naming: editing `methodology.pipeline` mid-pipeline does
 **not** retune the pipeline already running. The methodology is recorded on
@@ -473,6 +509,11 @@ For any value, later wins:
 4. Enforcement profile (for rule levels only)
 5. Explicit manifest values
 6. Environment overrides (`INVARIANT_*`), for one-off escapes
+
+Layers 5 and 6 are where the operator exercises authority, and they are held to
+a different standard than the rest because of it: a rule id either resolves or
+is refused by name. See "An override either takes effect or says it did not"
+above.
 
 `invariant config show` prints the fully resolved configuration with the
 provenance of each value, because "why is this rule blocking me" must be
