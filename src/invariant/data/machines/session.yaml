@@ -51,3 +51,6 @@ states:
     description: Worktree and branch removed, session deregistered.
   abandoned:
     description: Ended without merging. The record is kept as evidence.
+    # Reaching it is ungated: the exit gates of the state being left exist to
+    # protect the merge, and this is the edge that does not reach it (BUG_037).
+    roles: [abandon]

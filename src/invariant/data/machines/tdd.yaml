@@ -7,6 +7,13 @@ description: >
 initial: designing
 terminal: [committed, abandoned]
 
+# Gates are written on the state they are a precondition OF, not on the state
+# whose work they follow. `reviewing` used to carry the ship gates as its exit
+# set, and every edge out of it was held to them — so a review that discovered
+# more TDD was owed could not go back and write the failing test without first
+# satisfying gates on a change the reviewer had just judged unfinished
+# (BUG_037). The retreats and the abandonment are ungated; landing is not.
+
 states:
   designing:
     description: Understand the change against the architecture docs.
@@ -14,21 +21,33 @@ states:
     next: [red, abandoned]
   red:
     description: A test that fails on the reported symptom, before any fix.
-    exit_gates: [test.new_test_fails]
     next: [green, abandoned]
   green:
     description: The smallest change that makes the failing test pass.
-    exit_gates: [test.all_pass]
+    # You may not start making it pass until it has failed. Written as green's
+    # precondition rather than red's exit condition so that `red -> abandoned`
+    # — giving up before a repro exists — is not held to it.
+    entry_gates: [test.new_test_fails]
     next: [refactor, reviewing, abandoned]
   refactor:
     description: Clean up under a green suite. Touched it, own it.
-    exit_gates: [test.all_pass]
+    # "Clean up UNDER A GREEN SUITE" is the whole claim of this state, so the
+    # suite being green is its entry condition. That also holds the edge back
+    # from reviewing, which is right: a reviewer returning work to refactor is
+    # not returning it to a broken build.
+    entry_gates: [test.all_pass]
     next: [reviewing, red, abandoned]
   reviewing:
     description: Review, coverage, docs, and privacy before committing.
     roles: [review]
-    exit_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+    # A review reads a green suite. What it does NOT read is a finished change,
+    # which is why the rest of the old exit set moved to `committed`.
+    entry_gates: [test.all_pass]
     next: [committed, red, refactor, abandoned]
   committed:
     description: Committed locally. Pushing is a session-level event, not this.
-  abandoned: {}
+    roles: [landing]
+    entry_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]

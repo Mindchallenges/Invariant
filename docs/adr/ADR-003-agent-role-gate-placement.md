@@ -115,6 +115,24 @@ project-authored machine with a design state and no review state does lose it,
 and that is the documented consequence of choosing a methodology with no
 review boundary.
 
+**Amendment (BUG_037): the gates hang off `landing`, not `review`.** D2's
+conclusion is unchanged and this is not a reopening of it — the gate still
+guards `reviewing → committed`, evaluated at the same moment with the same
+obligation. What changed is the mechanism, because attaching them as the review
+state's EXIT gates made them fire on every edge out of review, retreats
+included. `reviewing → red` and `reviewing → refactor` are declared legal by
+`tdd` and were refused by `agents.review_agent_ran`, so a review that found
+more work owed had to satisfy ship gates on a change it had just judged
+unfinished. That is the same BUG_002 shape D2 invokes above, produced by D2's
+own implementation.
+
+They are now the ENTRY gates of the state carrying the `landing` role. The
+paragraph above about a machine that loses the gate acquires a companion and a
+guard: a pipeline machine declaring a `review` state and no `landing` state is
+now REFUSED at load rather than silently ungated, because unlike the design
+role — which `chore` omits deliberately — there is no reading of "no landing
+state" that means "this methodology lands nothing".
+
 ### D3 — `agents.design_agent_ran` stays a distinct rule from `agents.review_agent_ran`
 
 Both now hang off the same state's exit, so collapsing them into one rule that
@@ -164,7 +182,11 @@ override is a record of what happened and is not rewritten by a later decision.
 
 A methodology with a design role and no review role silently loses the design
 gate. Accepted under D2, and the gate-naming test in `test_machines.py` does
-not catch it because it asserts over shipped machines only.
+not catch it because it asserts over shipped machines only. Since BUG_037 the
+adjacent omission — a `review` role with no `landing` role — is refused at
+load rather than accepted silently; the design-role case above is deliberately
+NOT given the same treatment, because omitting a design state is a statement
+`chore` makes on purpose.
 
 ## Alternatives considered
 

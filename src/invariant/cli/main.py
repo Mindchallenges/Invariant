@@ -1353,12 +1353,43 @@ def cmd_pipeline_status(args) -> int:
 def cmd_pipeline_gates(args) -> int:
     ctx = Context()
     session = ctx.require_session()
-    verdicts = ctx.pipelines.evaluate_gates(
-        session.id, target=args.state, session=session.to_dict(), cwd=ctx.cwd
+    if args.state:
+        verdicts = ctx.pipelines.evaluate_gates(
+            session.id, target=args.state, session=session.to_dict(), cwd=ctx.cwd
+        )
+        text = "\n".join(v.render() for v in verdicts) or "no gates on this transition"
+        text += f"\n\n{summarise(verdicts)}"
+        return emit(args, {"gates": verdicts_payload(verdicts)}, text)
+
+    # No target named: report per destination rather than as one list. Since
+    # the gates moved onto the outcomes they protect (BUG_037) the edges out of
+    # a state no longer owe the same things, and a flat list would say a review
+    # state owes the ship gates while hiding that the retreats owe none of
+    # them — which is the misreading the bug was reported as.
+    by_target = ctx.pipelines.evaluate_gates_by_destination(
+        session.id, session=session.to_dict(), cwd=ctx.cwd
     )
-    text = "\n".join(v.render() for v in verdicts) or "no gates on this transition"
-    text += f"\n\n{summarise(verdicts)}"
-    return emit(args, {"gates": verdicts_payload(verdicts)}, text)
+    blocks = []
+    for target, verdicts in by_target.items():
+        rendered = "\n".join("  " + v.render() for v in verdicts) or "  (ungated)"
+        blocks.append(f"to {target}:\n{rendered}")
+    flat = [v for verdicts in by_target.values() for v in verdicts]
+    seen: dict[str, object] = {}
+    for verdict in flat:
+        seen.setdefault(verdict.rule_id, verdict)
+    text = "\n".join(blocks) or "no transitions from here"
+    text += f"\n\n{summarise(list(seen.values()))}"
+    return emit(
+        args,
+        {
+            "by_destination": {
+                target: verdicts_payload(verdicts)
+                for target, verdicts in by_target.items()
+            },
+            "gates": verdicts_payload(list(seen.values())),
+        },
+        text,
+    )
 
 
 def cmd_pipeline_advance(args) -> int:

@@ -43,12 +43,23 @@ class TestShippedMachines:
 
 
 class TestDocsFirstInjection:
-    def test_every_pipeline_with_a_review_state_gets_the_update_gate(self, make_manifest):
-        for methodology in ("tdd", "bugfix", "spec-first", "chore"):
+    def test_every_pipeline_with_a_landing_state_gets_the_update_gate(
+        self, make_manifest
+    ):
+        """It rides `landing`, not `review`, and as an ENTRY gate.
+
+        On the review state's exit it fired on every edge out of review, so a
+        review that found the change unfinished was asked to update the
+        architecture docs as the price of going back to finish it (BUG_037).
+        On the landing state's entry it fires at the same moment for the same
+        edge, and on no other.
+        """
+        for methodology in ("tdd", "bugfix", "spec-first", "chore", "docs"):
             m = make_manifest({"methodology": {"pipeline": methodology}})
             machine = load_pipeline_machine(m)
-            exit_ = {g for s in machine.states.values() for g in s.exit_gates}
-            assert "docs.updated" in exit_, methodology
+            landing = machine.states_with_role("landing")
+            assert landing, methodology
+            assert "docs.updated" in machine.state(landing[0]).entry_gates, methodology
 
     def test_every_pipeline_with_a_design_state_gets_the_read_gate(self, make_manifest):
         for methodology in ("tdd", "bugfix", "spec-first"):
@@ -87,7 +98,8 @@ class TestDocsFirstInjection:
         entry = {g for s in machine.states.values() for g in s.entry_gates}
         exit_ = {g for s in machine.states.values() for g in s.exit_gates}
         assert "docs.read_architecture" not in entry
-        assert "docs.updated" in exit_
+        assert "docs.read_architecture" not in exit_
+        assert "docs.updated" in entry
 
     def test_the_shipped_files_do_not_declare_them_themselves(self):
         # Docs-first is core policy, applied centrally. If a methodology file
@@ -98,7 +110,44 @@ class TestDocsFirstInjection:
             assert "docs.read_architecture" not in text
 
     def test_injection_targets_roles_not_names(self):
-        assert set(DOCS_FIRST_GATES) == {"design", "review"}
+        assert set(DOCS_FIRST_GATES) == {"design", "landing"}
+
+    def test_a_review_state_without_a_landing_state_is_refused(self, make_manifest, tmp_path):
+        """The omission this injection could otherwise make silently.
+
+        A role nothing carries injects nothing. That is correct for `design` —
+        `chore` declares none deliberately — and unacceptable for `landing`,
+        whose gates are the ones ADR-001 D12 says a methodology cannot opt out
+        of. Forgetting the role would drop them with nothing to report it.
+        """
+        machine_dir = tmp_path / "machines"
+        machine_dir.mkdir()
+        (machine_dir / "forgetful.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "id": "forgetful",
+                    "kind": "pipeline",
+                    "initial": "doing",
+                    "terminal": ["done"],
+                    "states": {
+                        "doing": {"next": ["checking"]},
+                        "checking": {"roles": ["review"], "next": ["done"]},
+                        "done": {},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        m = make_manifest(
+            {
+                "methodology": {
+                    "pipeline": "forgetful",
+                    "extra_machines": [str(machine_dir)],
+                }
+            }
+        )
+        with pytest.raises(ManifestError, match="no 'landing' state"):
+            load_pipeline_machine(m)
 
     def test_a_machine_without_the_roles_is_unaffected(self, make_manifest):
         m = make_manifest({"methodology": {"pipeline": "none"}})
@@ -111,18 +160,33 @@ class TestAgentRoleGates:
 
     def test_both_are_attached_to_the_tdd_pipeline(self, make_manifest):
         machine = load_pipeline_machine(make_manifest({}))
-        exit_ = {g for s in machine.states.values() for g in s.exit_gates}
-        assert {"agents.design_agent_ran", "agents.review_agent_ran"} <= exit_
-
-    def test_they_are_exit_gates_not_entry_gates(self, make_manifest):
-        # A pipeline starts in its design state; an entry gate there could
-        # never fail, which is how the docs-first gate was inert once already.
-        machine = load_pipeline_machine(make_manifest({}))
         entry = {g for s in machine.states.values() for g in s.entry_gates}
-        assert not {g for g in entry if g.startswith("agents.")}
+        assert {"agents.design_agent_ran", "agents.review_agent_ran"} <= entry
+
+    def test_they_are_the_landing_states_entry_gates(self, make_manifest):
+        """Entry gates on the LANDING state, which is not the same relaxation
+        as an entry gate on the state the agent works in.
+
+        The original reasoning holds and is why they are not on the design
+        state: a pipeline starts there, so an entry gate there could never
+        fail. What changed is which state carries them. `agents.*_ran` turns on
+        evidence produced when an agent RETURNS, so the earliest boundary a
+        different actor drives is the landing edge — and writing them as the
+        landing state's entry condition is ADR-003 D2's own sentence, "the gate
+        guards landing", made true of the machine rather than only of the
+        prose. As the review state's EXIT set they also fired on every retreat
+        out of review, which is BUG_037.
+        """
+        machine = load_pipeline_machine(make_manifest({}))
+        landing = machine.states_with_role("landing")[0]
+        assert {"agents.design_agent_ran", "agents.review_agent_ran"} <= set(
+            machine.state(landing).entry_gates
+        )
+        exit_ = {g for s in machine.states.values() for g in s.exit_gates}
+        assert not {g for g in exit_ if g.startswith("agents.")}
 
     def test_injection_targets_roles_not_names(self):
-        assert set(AGENT_ROLE_GATES) == {"review"}
+        assert set(AGENT_ROLE_GATES) == {"landing"}
 
     def test_the_design_gate_does_not_sit_on_the_design_state(self, make_manifest):
         """ADR-003 D1 — a gate an agent clears by RETURNING cannot guard the
@@ -139,17 +203,24 @@ class TestAgentRoleGates:
         assert "agents.design_agent_ran" not in machine.state(design).exit_gates
         assert "agents.design_agent_ran" not in machine.state(design).entry_gates
 
-    def test_both_agent_gates_sit_on_the_review_state(self, make_manifest):
+    def test_both_agent_gates_guard_the_landing_edge(self, make_manifest):
         """The earliest boundary driven by a DIFFERENT actor.
 
         `reviewing -> committed` is advanced by the review agent, which the
         parent dispatches only after the design agent returned — so the design
-        agent's dispatch is on record by then (ADR-003 D1).
+        agent's dispatch is on record by then (ADR-003 D1). What this pins is
+        that EDGE, evaluated the way a transition evaluates it, rather than the
+        state the gates happen to hang off: the gates moved from the review
+        state's exit set to the landing state's entry set (BUG_037) and the
+        edge's obligation is unchanged, which is the whole claim of that move.
         """
+        from invariant.domains.pipeline import PipelineDomain
+
         machine = load_pipeline_machine(make_manifest({}))
         review = machine.states_with_role("review")[0]
-        assert "agents.design_agent_ran" in machine.state(review).exit_gates
-        assert "agents.review_agent_ran" in machine.state(review).exit_gates
+        landing = machine.states_with_role("landing")[0]
+        gates = set(PipelineDomain.gates_for(None, review, landing, machine))
+        assert {"agents.design_agent_ran", "agents.review_agent_ran"} <= gates
 
     def test_the_docs_read_gate_stays_on_the_design_state(self, make_manifest):
         """ADR-003 D1's limit. The design agent satisfies docs-first by
@@ -200,6 +271,162 @@ class TestAgentRoleGates:
             rules = yaml.safe_load(path.read_text())["rules"]
             assert rules["agents.design_agent_ran"] == "warn", profile
             assert rules["agents.review_agent_ran"] == "warn", profile
+
+
+class TestBUG037ABackwardEdgeIsNotGatedByTheShipGates:
+    """A gate belongs to the edge it protects, not to the state it hangs off.
+
+    `reviewing` advertised four successors and refused two of them, because its
+    exit gates — the ones that exist to permit SHIPPING — were evaluated on
+    every edge out of it including the retreats. A review that discovers more
+    work is owed then had to choose between satisfying ship gates on a change
+    the reviewer had just judged unfinished, and doing that work in the wrong
+    state. Both routes ended at `--force`, which is the outcome this library
+    treats as the defect rather than as the escape.
+    """
+
+    LANDING = {
+        "tdd": ("reviewing", "committed"),
+        "bugfix": ("verifying", "committed"),
+        "spec-first": ("reviewing", "committed"),
+        "chore": ("reviewing", "committed"),
+        "docs": ("reviewing", "committed"),
+    }
+
+    #: What each review state may retreat TO, and exactly what that edge owes.
+    #:
+    #: Spelled per edge rather than as "retreats are ungated", because that
+    #: broader claim is not the principle and would be wrong. The principle is
+    #: that a gate belongs to the destination it protects — so spec-first's
+    #: `reviewing -> implementing` legitimately carries `docs.updated`, which
+    #: is not a ship gate there but implementing's own precondition: this
+    #: methodology's premise is that a written spec exists before code follows
+    #: it. It is satisfiable on that edge (the spec was written to get to
+    #: review at all), which is the property that separates a real precondition
+    #: from the wedge BUG_037 is about.
+    RETREATS = {
+        "tdd": {"red": set(), "refactor": {"test.all_pass"}},
+        "bugfix": {"fixing": {"test.new_test_fails"}},
+        "spec-first": {"implementing": {"docs.updated"}},
+        "chore": {"doing": set()},
+        "docs": {"drafting": set()},
+    }
+
+    #: The gates that exist to permit LANDING. None of these may fire on a
+    #: retreat, whatever else does.
+    SHIP_GATES = {
+        "coverage.meets_floor",
+        "docs.diagrams_current",
+        "agents.design_agent_ran",
+        "agents.review_agent_ran",
+        "privacy.clean",
+    }
+
+    def gates(self, make_manifest, methodology, source, target):
+        from invariant.domains.pipeline import PipelineDomain
+
+        machine = load_pipeline_machine(make_manifest({}), methodology)
+        return PipelineDomain.gates_for(None, source, target, machine)
+
+    @pytest.mark.parametrize("methodology", sorted(LANDING))
+    def test_the_ship_gates_still_guard_the_landing_edge(
+        self, make_manifest, methodology
+    ):
+        """The half that must not be lost. Moving a gate off the retreat is
+        only correct if it still fires on the edge it was written for."""
+        review, landing = self.LANDING[methodology]
+        gates = set(self.gates(make_manifest, methodology, review, landing))
+        assert "privacy.clean" in gates, methodology
+        assert "docs.updated" in gates, methodology
+        assert "agents.review_agent_ran" in gates, methodology
+
+    @pytest.mark.parametrize("methodology", sorted(RETREATS))
+    def test_a_retreat_from_review_carries_no_ship_gate(
+        self, make_manifest, methodology
+    ):
+        review, _ = self.LANDING[methodology]
+        for target in self.RETREATS[methodology]:
+            gates = set(self.gates(make_manifest, methodology, review, target))
+            assert not gates & self.SHIP_GATES, (
+                f"{methodology}: {review} -> {target} owes {sorted(gates)}"
+            )
+
+    @pytest.mark.parametrize("methodology", sorted(RETREATS))
+    def test_a_retreat_owes_exactly_its_destinations_preconditions(
+        self, make_manifest, methodology
+    ):
+        """The other half, and the one that keeps this from being a relaxation.
+
+        Asserting only that ship gates are absent would pass on a machine that
+        had lost every gate. Each retreat's whole gate set is pinned, so a
+        precondition dropped by accident shows here rather than at the next
+        session that skips it.
+        """
+        review, _ = self.LANDING[methodology]
+        for target, expected in self.RETREATS[methodology].items():
+            gates = set(self.gates(make_manifest, methodology, review, target))
+            assert gates == expected, f"{methodology}: {review} -> {target}"
+
+    @pytest.mark.parametrize("methodology", sorted(LANDING))
+    def test_abandoning_is_never_gated(self, make_manifest, methodology):
+        """Abandoning is the deliberate way out. Holding it to the gates that
+        permit landing means the only way to stop is to finish first, and the
+        route people actually take from there is `--force`.
+
+        Asserted from EVERY state, not only the review one. The review state's
+        exit set emptied as a side effect of moving the ship gates, which would
+        make this pass for the wrong reason; the design state still has an exit
+        gate — the injected docs-first read — and `triaging -> abandoned` was
+        refused by it until the abandon role was honoured.
+        """
+        machine = load_pipeline_machine(make_manifest({}), methodology)
+        for state in machine.states:
+            if "abandoned" not in machine.next_states(state):
+                continue
+            assert not self.gates(make_manifest, methodology, state, "abandoned"), (
+                f"{methodology}: {state} -> abandoned"
+            )
+
+    #: Edges that carried no gate BEFORE this change and must still carry none.
+    #: Moving a gate to the destination it protects can silently make a
+    #: previously free edge expensive — `chore`'s `doing` had no exit set at
+    #: all, so putting `test.all_pass` on `reviewing`'s entry would have
+    #: demanded a test run to START reviewing a dependency bump, which is how
+    #: `chore` becomes useless and people reach for `none`. Caught by the suite
+    #: rather than by review; pinned so the next rearrangement is caught too.
+    #: Spelled as the exact expected set, not as "empty", because `drafting`
+    #: carries the injected docs-first read gate and always has — the claim is
+    #: that these edges owe what they owed, not that they owe nothing.
+    ALREADY_FREE = [
+        ("chore", "doing", "reviewing", set()),
+        ("docs", "drafting", "reviewing", {"docs.read_architecture"}),
+        ("bugfix", "reproducing", "not_reproducible", set()),
+    ]
+
+    @pytest.mark.parametrize("methodology,source,target,expected", ALREADY_FREE)
+    def test_an_edge_that_was_never_gated_did_not_become_gated(
+        self, make_manifest, methodology, source, target, expected
+    ):
+        assert set(self.gates(make_manifest, methodology, source, target)) == expected
+
+    def test_BUG_037_a_no_repro_outcome_is_not_gated_by_a_failing_test(
+        self, make_manifest
+    ):
+        """Found while fixing this, in the same shape and worth its own claim.
+
+        `bugfix` gated `reproducing -> not_reproducible` with
+        `test.new_test_fails`, because that was `reproducing`'s exit gate. The
+        destination IS "no failing test could be produced", so the gate was
+        unsatisfiable by definition on the one edge that means it — and the
+        machine's own description calls that outcome "a real outcome, not a
+        failure of the attempt".
+        """
+        assert not self.gates(
+            make_manifest, "bugfix", "reproducing", "not_reproducible"
+        )
+        assert "test.new_test_fails" in self.gates(
+            make_manifest, "bugfix", "reproducing", "fixing"
+        )
 
 
 class TestSessionMachine:

@@ -7,6 +7,10 @@ description: >
 initial: designing
 terminal: [committed, abandoned]
 
+# Every gate here is written as a precondition of the state it guards, so that
+# the backward edges this methodology declares — and it declares one out of
+# almost every state — are actually walkable (BUG_037).
+
 states:
   designing:
     description: Understand the problem against the architecture docs.
@@ -14,14 +18,21 @@ states:
     next: [specified, abandoned]
   specified:
     description: A written spec exists and has been reviewed.
-    exit_gates: [docs.updated]
     next: [implementing, designing, abandoned]
   implementing:
-    exit_gates: [test.all_pass]
+    # A spec that has been written down is what implementing follows. Held
+    # here rather than on `specified`'s exit so that `specified -> designing`,
+    # going back because the spec turned out to be wrong, is not gated by the
+    # spec being finished.
+    entry_gates: [docs.updated]
     next: [reviewing, specified, abandoned]
   reviewing:
     roles: [review]
-    exit_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+    entry_gates: [test.all_pass]
     next: [committed, implementing, abandoned]
-  committed: {}
-  abandoned: {}
+  committed:
+    roles: [landing]
+    entry_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]

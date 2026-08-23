@@ -19,7 +19,7 @@ from typing import Any
 from ..adapters import get_adapter
 from ..core.errors import GateFailure, InvariantError, TransitionError, UsageError
 from ..core.fsm import Machine
-from ..core.machines import load_pipeline_machine
+from ..core.machines import ABANDON_ROLE, load_pipeline_machine
 from ..core.manifest import Level
 from ..core.rules import (
     Evaluated,
@@ -306,16 +306,56 @@ class PipelineDomain:
     def gates_for(
         self, source: str, target: str | None, machine: Machine | None = None
     ) -> list[str]:
-        """Exit gates of the state being left, plus entry gates of the one entered.
+        """What ONE edge owes: the source's exit gates plus the target's entry gates.
 
         ``machine`` is the machine the states belong to — for a running
         pipeline, :meth:`machine_for`'s answer, not the manifest default.
+
+        With no ``target`` this answers about *leaving* the state and nothing
+        else, which since BUG_037 is a much smaller set than it used to be:
+        the gates that permit an outcome now hang off that outcome, so a review
+        state's own exit set is usually empty. Callers asking "what is owed
+        here" want :meth:`gates_by_destination`, not this with ``None``.
         """
         machine = machine or self.machine
+        if target and ABANDON_ROLE in machine.state(target).roles:
+            # Giving up owes nothing that landing owes. Every exit gate on the
+            # state being left exists to protect an OUTCOME, and abandonment is
+            # the outcome where there is none to protect — the work is being
+            # dropped. Holding it to them means the only supported way to stop
+            # is to finish first, and what people actually do from there is
+            # `--force`, which is the outcome this library treats as its own
+            # defect (BUG_037). The destination's own entry gates still apply:
+            # if a machine wants to demand something before abandoning, that is
+            # where it says so.
+            return list(machine.state(target).entry_gates)
         gates = list(machine.state(source).exit_gates) if source else []
         if target:
             gates += [g for g in machine.state(target).entry_gates if g not in gates]
         return gates
+
+    def gates_by_destination(
+        self, source: str, machine: Machine | None = None
+    ) -> dict[str, list[str]]:
+        """Every legal edge out of ``source``, and what each of them owes.
+
+        The question `invariant context` and `invariant pipeline gates` are
+        really asking. They used to ask :meth:`gates_for` with no target, which
+        was a fair paraphrase while every gate hung off the state being left —
+        one set applied to every edge, so naming the edge added nothing. That
+        stopped being true when the gates moved to the outcomes they protect
+        (BUG_037), and it was never quite true anyway: `reviewing` advertised
+        four successors and refused two of them, and nothing in "gates owed
+        here" said which two.
+
+        Ordered as the machine declares its successors, so the forward edge
+        reads first.
+        """
+        machine = machine or self.machine
+        return {
+            target: self.gates_for(source, target, machine)
+            for target in machine.next_states(source)
+        }
 
     def evaluate_gates(
         self,
@@ -324,8 +364,25 @@ class PipelineDomain:
         session: dict | None = None,
         cwd: Path | None = None,
     ) -> list[Evaluated]:
+        """Verdicts for one edge, or for everything reachable from here.
+
+        With a ``target`` this is the edge's own obligation, which is what a
+        transition evaluates. Without one it is the UNION over every legal
+        destination — because the alternative, after BUG_037 moved the gates
+        onto the outcomes they protect, is that `pipeline gates` in a review
+        state reports nothing owed right up until the advance refuses. A gate
+        that only appears at the moment it blocks is the shape this library
+        exists to remove. :meth:`evaluate_gates_by_destination` says which edge
+        each verdict belongs to.
+        """
         pipeline = self.require(session_id)
-        gate_ids = self.gates_for(pipeline.state, target, self.machine_for(pipeline))
+        machine = self.machine_for(pipeline)
+        if target is None:
+            gate_ids: list[str] = []
+            for edge_gates in self.gates_by_destination(pipeline.state, machine).values():
+                gate_ids += [g for g in edge_gates if g not in gate_ids]
+        else:
+            gate_ids = self.gates_for(pipeline.state, target, machine)
         ctx = RuleContext(
             manifest=self.manifest,
             cwd=Path(cwd or Path.cwd()),
@@ -333,6 +390,33 @@ class PipelineDomain:
             pipeline=pipeline.to_dict(),
         )
         return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
+
+    def evaluate_gates_by_destination(
+        self,
+        session_id: str,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> dict[str, list[Evaluated]]:
+        """The same verdicts as :meth:`evaluate_gates`, attributed to their edges.
+
+        Evaluated ONCE over the union and then distributed, rather than per
+        destination: several edges share a gate, and a rule that shells out to
+        git would otherwise run once per edge — and, worse, could answer
+        differently between two of them and produce a report that contradicts
+        itself.
+        """
+        pipeline = self.require(session_id)
+        machine = self.machine_for(pipeline)
+        verdicts = {
+            v.rule_id: v
+            for v in self.evaluate_gates(session_id, session=session, cwd=cwd)
+        }
+        return {
+            target: [verdicts[g] for g in gates if g in verdicts]
+            for target, gates in self.gates_by_destination(
+                pipeline.state, machine
+            ).items()
+        }
 
     def acknowledge(self, session_id: str, rule_id: str, reason: str) -> Pipeline:
         """Record a deliberate decision to proceed against an advisory gate.

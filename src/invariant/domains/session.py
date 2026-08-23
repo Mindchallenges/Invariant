@@ -22,7 +22,7 @@ from typing import Any
 from ..core import git
 from ..core.errors import GateFailure, StateError, TransitionError, UsageError
 from ..core.fsm import Machine
-from ..core.machines import load_session_machine
+from ..core.machines import ABANDON_ROLE, load_session_machine
 from ..core.rules import Evaluated, RuleContext, evaluate, get_rule
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore
@@ -1052,8 +1052,19 @@ class SessionDomain:
         # the structural check has already refused it or been deliberately
         # forced past; failing HERE would wedge the one route out (AUD-01's
         # class of harm). The known side's gates still run.
+        # An abandon destination takes only its OWN entry gates, matching
+        # `PipelineDomain.gates_for`. The exit gates of the state being left
+        # exist to protect the merge, and this is the edge that never reaches
+        # it — holding it to them makes finishing the precondition of stopping
+        # (BUG_037).
+        try:
+            abandoning = ABANDON_ROLE in self.machine.state(target).roles
+        except UsageError:
+            abandoning = False
+        sources = [] if abandoning else [(session.state, "exit_gates")]
+
         gate_ids: list[str] = []
-        for state_id, which in ((session.state, "exit_gates"), (target, "entry_gates")):
+        for state_id, which in [*sources, (target, "entry_gates")]:
             try:
                 declared = getattr(self.machine.state(state_id), which)
             except UsageError:

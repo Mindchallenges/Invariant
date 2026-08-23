@@ -1568,17 +1568,29 @@ def build_context(ctx, greeting: bool = False) -> str:
         else:
             lines.append(f"  may advance to: {', '.join(nxt) or '(terminal)'}")
 
+        # Owed PER DESTINATION. "may advance to: committed, red, refactor,
+        # abandoned" followed by one undifferentiated list of owed gates is
+        # what made BUG_037 read as an engine that contradicts itself: two of
+        # those four were refused by gates that exist to permit shipping, and
+        # nothing said which two. Now that the gates hang off the outcomes they
+        # protect, the projection can say it.
         try:
-            verdicts = ctx.pipelines.evaluate_gates(
+            by_target = ctx.pipelines.evaluate_gates_by_destination(
                 session.id, session=session.to_dict(), cwd=ctx.cwd
             )
         except InvariantError:
-            verdicts = []
-        owed = [v for v in verdicts if not v.verdict.ok and not v.verdict.skipped]
-        if owed:
-            lines.append("  gates currently owed here:")
+            by_target = {}
+        free = []
+        for target, verdicts in by_target.items():
+            owed = [v for v in verdicts if not v.verdict.ok and not v.verdict.skipped]
+            if not owed:
+                free.append(target)
+                continue
+            lines.append(f"  owed to reach {target}:")
             for verdict in owed:
                 lines.append(f"    - {verdict.rule_id}: {verdict.verdict.message}")
+        if free:
+            lines.append(f"  reachable with nothing owed: {', '.join(free)}")
 
     if session.push_count:
         lines.append(f"  pushes used: {session.push_count} (the barrier allows one)")

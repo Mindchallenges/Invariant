@@ -13,7 +13,19 @@ states:
     next: [reviewing, abandoned]
   reviewing:
     roles: [review]
-    exit_gates: [test.all_pass, privacy.clean]
+    # No entry gate, deliberately, and unlike the other methodologies. `doing`
+    # never had an exit gate, so entering review here has never required a test
+    # run — this methodology is for work with nothing to test, and demanding a
+    # green suite to START reviewing a dependency bump is how `chore` becomes
+    # useless and people reach for `none`. `test.all_pass` is still owed to
+    # LAND, exactly as it was when it sat on this state's exit set.
+    #
+    # `reviewing -> doing` is ungated: sending mechanical work back for more
+    # mechanical work is not landing anything (BUG_037).
     next: [committed, doing, abandoned]
-  committed: {}
-  abandoned: {}
+  committed:
+    roles: [landing]
+    entry_gates: [test.all_pass, privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]

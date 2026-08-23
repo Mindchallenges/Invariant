@@ -10,7 +10,7 @@ terminal: [committed, not_reproducible, abandoned]
 
 # `reproducing` IS the red state; it is named for what it proves rather than
 # for its colour. Declaring it here is what makes `test.new_test_fails` — the
-# gate this machine names as that state's exit condition — satisfiable from
+# gate this machine names as the precondition of `fixing` — satisfiable from
 # this machine at all (BUG_030).
 red_phase: reproducing
 
@@ -21,19 +21,30 @@ states:
     next: [reproducing, abandoned]
   reproducing:
     description: One test that fails on the reported symptom.
-    exit_gates: [test.new_test_fails]
     next: [fixing, not_reproducible, abandoned]
   not_reproducible:
     description: >
       The symptom could not be reproduced. This is a real outcome, not a
       failure of the attempt — recording it stops the next session repeating it.
+
+      Reaching it is deliberately ungated. `test.new_test_fails` used to sit on
+      `reproducing`'s exit and therefore fired here too, which asked for a
+      failing test as the price of recording that no failing test could be
+      written — unsatisfiable by definition on the one edge that means it
+      (BUG_037).
   fixing:
-    exit_gates: [test.all_pass]
+    # The proof of red is the precondition of fixing, not the price of leaving
+    # the state that produced it.
+    entry_gates: [test.new_test_fails]
     next: [verifying, abandoned]
   verifying:
     description: Confirm the fix addresses the reported symptom, not a neighbour.
     roles: [review]
-    exit_gates: [test.all_pass, privacy.clean]
+    entry_gates: [test.all_pass]
     next: [committed, fixing, abandoned]
-  committed: {}
-  abandoned: {}
+  committed:
+    roles: [landing]
+    entry_gates: [test.all_pass, privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]

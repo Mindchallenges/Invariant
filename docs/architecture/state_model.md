@@ -28,34 +28,68 @@ states:
     next: [red, abandoned]
   red:
     description: A failing test that fails on the reported symptom.
-    exit_gates: [test.new_test_fails]
     next: [green, abandoned]
   green:
     description: Minimum change that makes the failing test pass.
-    exit_gates: [test.all_pass]
+    entry_gates: [test.new_test_fails]
     next: [refactor, reviewing, abandoned]
   refactor:
     description: Clean up under a green suite.
-    exit_gates: [test.all_pass]
+    entry_gates: [test.all_pass]
     next: [reviewing, red, abandoned]
   reviewing:
     description: Review, coverage, docs, and privacy before committing.
-    roles: [review]          # docs.updated and the agent-role gates attach here
-    exit_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+    roles: [review]
+    entry_gates: [test.all_pass]
     next: [committed, red, refactor, abandoned]
   committed:
     description: Work is committed locally. Pushing is a session-level event.
-  abandoned: {}
+    roles: [landing]         # docs.updated and the agent-role gates attach here
+    entry_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+  abandoned:
+    roles: [abandon]         # reaching it is ungated
 ```
 
 Every state, edge, gate and role above is quoted from the shipped `tdd.yaml`;
-only the descriptions are abridged, and the two `#` notes are added here. The
+only the descriptions are abridged, and the three `#` notes are added here. The
 structure is the part a reader checks against the engine, so the structure is
 the part that is verbatim. Note what it does **not** contain: no
 `docs.updated`, no `agents.*`. Those attach centrally
-from the `design` and `review` roles, so forking a methodology cannot silently
+from the `design` and `landing` roles, so forking a methodology cannot silently
 drop them — a rule the suite pins, and a rule an inline example that declared
 them would teach people to break.
+
+**A gate belongs to the outcome it protects, not to the state whose work
+precedes it.** Almost every gate above is an ENTRY gate, and that is the
+correction rather than a stylistic preference. Written as exit gates they fired
+on every edge out of the state, and a state's edges do not all go the same
+place: `reviewing` advertises four successors, two of which are retreats. A
+review that discovered more TDD was owed was refused the retreat by
+`coverage.meets_floor` and `agents.review_agent_ran` — gates that exist to
+permit *shipping* — so the choice was to satisfy ship gates on a change the
+reviewer had just judged unfinished, or to do the work in the wrong state. Both
+routes ended at `--force` (BUG_037).
+
+Read the machine as preconditions and it comes out right on its own: you may
+not start making a test pass until it has failed (`green`), may not clean up
+except under a green suite (`refactor`), may not land without coverage, docs
+and privacy (`committed`). The retreats then carry what their *destination*
+needs, which is usually nothing, and always something the session can actually
+produce from where it stands.
+
+Two roles exist to carry this. **`landing`** marks the state a finished change
+lands in, and is where the gates a methodology cannot opt out of are injected —
+a pipeline machine that declares a `review` state and no `landing` state is
+refused at load, because a role nothing carries injects nothing and the
+omission would otherwise be invisible. **`abandon`** marks a state whose meaning
+is that the work is being dropped; an edge into one takes only that state's own
+entry gates, since the exit gates of the state being left all exist to protect
+an outcome and this is the edge with no outcome to protect. Holding it to them
+made finishing the precondition of stopping.
+
+The remaining exit gate is the docs-first read, and it stays one for the reason
+below: a pipeline starts in its design state, so as an entry gate there it
+could never fail.
 
 Fields:
 
@@ -67,7 +101,9 @@ Fields:
   structural validity, not policy.
 - **`entry_gates`** / **`exit_gates`** — rule ids that must return clean before
   the state is entered or left. Whether a failing gate *blocks* or merely
-  *warns* is policy, resolved from the manifest at evaluation time.
+  *warns* is policy, resolved from the manifest at evaluation time. Prefer
+  entry gates: see the note above on which of the two a given obligation
+  actually is.
 - **`red_phase`** — optional; which of this machine's states does
   proof-of-red. Only a machine declaring `test.new_test_fails` needs it, and
   only when that state is not literally called `red`.
@@ -450,11 +486,11 @@ Shipped methodologies:
 
 `docs-first` is not in this list because it is not a methodology (D12). It is a
 pair of gates the engine injects into whichever methodology is configured:
-`docs.read_architecture` leaving the design state, `docs.updated` leaving
-review. A methodology cannot opt out of it; a project can only retune the
-gates' level, and even that is discouraged.
+`docs.read_architecture` leaving the design state, `docs.updated` entering the
+landing state. A methodology cannot opt out of it; a project can only retune
+the gates' level, and even that is discouraged.
 
-Two details that are load-bearing rather than incidental:
+Details that are load-bearing rather than incidental:
 
 - **The read gate is an exit gate, not an entry gate.** A pipeline starts *in*
   its design state, so an entry gate there would be evaluated before any work
@@ -545,8 +581,8 @@ Four properties, each deliberate:
   records a dispatch when the subagent *returns*, so a design agent driving its
   own pipeline can never have its own dispatch on record before it advances out
   of designing. Placed there the gate was unsatisfiable for the one actor it
-  names, and `--force` was the only route past it. The review state's exit is
-  the earliest boundary a *different* actor drives, which is what makes the
+  names, and `--force` was the only route past it. The landing edge is the
+  earliest boundary a *different* actor drives, which is what makes the
   evidence available. The cost — the gate guards landing rather than leaving
   design — is accepted in ADR-003 D2. Contrast `docs.read_architecture`, which
   stays on the design state's exit because a read is recorded the moment it
@@ -554,11 +590,20 @@ Four properties, each deliberate:
 
   The actor route weakens this premise and is recorded as doing so, rather
   than quietly acted on: an actor reading IS available while the agent is still
-  running, exactly like a docs read, so the reason the gate sits on the review
-  state no longer holds for a design agent that drives its own pipeline. It
+  running, exactly like a docs read, so the reason the gate sits at the review
+  boundary no longer holds for a design agent that drives its own pipeline. It
   still holds for one dispatched into a pipeline it does not act in. Moving the
   gate is an ADR-003 D2 decision and has not been made here; what has changed
   is that it is now a choice rather than a constraint.
+
+  Where these gates HANG has since changed, and it is not that decision. They
+  were the review state's exit gates and are now the landing state's entry
+  gates. On `reviewing → committed` — the edge ADR-003 D2 is about — the moment
+  and the obligation are identical; what stopped is their firing on
+  `reviewing → red` and `reviewing → refactor`, which are not landing anything
+  (BUG_037). D2's own sentence is "the gate guards landing rather than leaving
+  design"; this is that sentence made true of the machine as well as of the
+  prose.
 
 - **Advisory in every shipped profile, including `strict`.** The engine can
   prove an agent *ran*; it cannot prove one was *needed*. A one-line fix made

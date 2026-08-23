@@ -38,8 +38,15 @@ states:
       it fires on a structural change, and a methodology declaring itself
       documentation is declaring there is none. `docs.updated` stays, because
       this pipeline's whole subject is the docs.
+
+      `reviewing -> drafting` is ungated. A read-back that finds more writing to
+      do is not landing anything, and holding the retreat to the gate that
+      permits the landing is what sends people to --force (BUG_037).
     roles: [review]
-    exit_gates: [privacy.clean]
     next: [committed, drafting, abandoned]
-  committed: {}
-  abandoned: {}
+  committed:
+    roles: [landing]
+    entry_gates: [privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]
