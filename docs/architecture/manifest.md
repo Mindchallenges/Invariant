@@ -457,6 +457,86 @@ Two consequences of the test being structural, both deliberate:
 The schemeless `www.` form and the scp-style `user@host:path` a git remote is
 written in are separate arms and are unaffected by any of the above.
 
+### What `ip_addresses` flags
+
+`links` is the pattern whose concept is easiest to state too broadly. This one
+is the pattern whose concept is easiest to mistake for a *syntax*: **an address,
+and not merely four numbers with dots between them.** A dotted quad is a shape
+many things wear, and a release plan that numbers its rows four levels deep
+wears it exactly — `#10.14.6.1` is four integers, every one at or below 255.
+Measured in one consuming project's corpus: 55 matches across three documents,
+zero of them addresses (BUG_053).
+
+Nothing was broken in the regex, which is the part worth stating plainly. The
+pattern matched what it said it matched. What was wrong was its breadth,
+against this module's own standing instruction — *a noisy privacy gate is one
+that gets disabled wholesale rather than tuned* — and the report is that
+sentence coming true: the project had begun suppressing the false matches with
+exemption markers, and because a marker reaches to the end of its block
+(BUG_045), 58 lines were exempt from a blocking gate to silence four findings.
+
+Two things settle a candidate locally, and only two:
+
+```mermaid
+graph TD
+    Q["four dotted octets"] --> L{"is it part of a<br/>LONGER dotted run?"}
+    L -- yes --> N["not an address"]
+    L -- no --> M{"is a reference marker<br/>written hard against it?"}
+    M -- "#, § or ¶ with no space" --> N
+    M -- "no marker, or a space after one" --> A["an address"]
+```
+
+- **Length.** A run of more than four segments is not an address. `\b` could
+  not see this: the dot that follows a longer run *satisfies* a word boundary,
+  so a five-segment row number yielded its first four segments as a finding.
+  This half is structural and is not a judgement call. The guard is spelled
+  around the digit rather than around the dot — reject a trailing `.` only when
+  a digit follows it — because a trailing dot with nothing after it is how
+  prose ends a sentence, and the other spelling would have cost every address
+  written at the end of one.
+- **A reference marker, written with no space.** `#`, `§` or `¶` hard against
+  the digits marks the number as a row or a section. **Adjacency is the whole
+  of the rule**, and it is what keeps this narrow: a marker with a space after
+  it opens a heading or a shell comment, either of which may be quoting a real
+  address, so a spaced marker leaves the finding standing. The test is anchored
+  to the text immediately left of the match rather than searched over the whole
+  line, which makes it strictly tighter than the `_TIME_FALSE_ALARM` precedent
+  it is modelled on.
+
+Worked both ways, in the documentation ranges RFC 5737 reserves. This block
+needs the exemption marker for the reason every example here needs one: a
+document about what an address looks like cannot state it without writing one
+down, and the must-MATCH column is address-shaped by construction.
+
+<!-- invariant: allow-privacy -->
+
+| written as | verdict | why |
+|---|---|---|
+| `#10.14.6.1` | not an address | a marker, hard against the digits |
+| `#10.14.6.1.2` | not an address | five segments; the marker is not needed |
+| `1.2.3.4.5` | not an address | five segments, settled by length alone |
+| `192.0.2.10` | an address | nothing local argues otherwise |
+| `# 192.0.2.10` | an address | the space makes the `#` a heading, not a number |
+| `reachable at 192.0.2.10.` | an address | the trailing dot ends the sentence |
+| `192.0.2.444` | not an address | `444` is not an octet |
+| `v1.2.3.4` | not an address | held by the boundary before the run |
+
+**The accepted residue, stated rather than discovered later.** A four-segment
+row number written BARE — in a table cell, a field name, a section title — is
+indistinguishable from an address by any local rule, and this pattern still
+flags it. That is the same call `links` makes about a reverse-DNS identifier:
+where the text cannot tell two things apart, this gate errs noisy rather than
+silent. A project that needs those quiet has `privacy.allow`; teaching the
+engine a project-declared row-id shape is a separate decision and is not
+folded in here.
+
+**`_IPV4` is shared, and the guards are not.** The octet grammar has one
+spelling because two patterns need the same notion of an IP literal — this one,
+and `links` asking whether a URI's authority is one. The narrowing lives on the
+`ip_addresses` entry alone: under a scheme, the authority position has already
+proved the number is an address, and a guard that reached `_IPV4` would have
+cost `links` a real class of finding to fix a false one here.
+
 ### The exemption marker, and how far it reaches
 
 Every gate needs an escape hatch for the case it gets wrong, and this one is a

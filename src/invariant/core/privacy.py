@@ -72,7 +72,19 @@ PATTERNS: dict[str, Pattern[str]] = {
     # A home path that embeds a username. The generic prefixes alone are fine.
     "home_paths": re.compile(r"(?:/Users|/home)/(?!$)[A-Za-z0-9][A-Za-z0-9._-]*"),
     "emails": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    "ip_addresses": re.compile(rf"\b{_IPV4}\b"),
+    # An address, and not merely four numbers with dots between them. The
+    # guards are on THIS entry rather than in `_IPV4`, which `links` shares:
+    # there a scheme has already proved the authority is an address, and a
+    # narrowing that reached it would cost a real class of finding.
+    #
+    # `(?<![\w.])` keeps the word boundary that stops `v1.2.3.4` reading as
+    # an address, and adds the dot that `\b` could not see: a four-segment
+    # run preceded by one is the TAIL of a longer number, not an address.
+    # `(?!\.?\d)` is the same test on the other end, and is spelled around
+    # the digit rather than around the dot on purpose — a trailing dot with
+    # nothing after it is how prose ends a sentence, and rejecting that
+    # would have cost every address written at the end of one (BUG_053).
+    "ip_addresses": re.compile(rf"(?<![\w.]){_IPV4}(?!\.?\d)"),
     "tokens": re.compile(
         r"\b(?:gh[pousr]_[A-Za-z0-9]{16,}"
         r"|sk-[A-Za-z0-9-]{20,}"
@@ -161,6 +173,25 @@ _TIME_FALSE_ALARM = re.compile(
     r"\b(?:took|elapsed|duration|ratio|version|v\d|timeout|ETA|of\s+\d)\b", re.I
 )
 
+#: A number introduced by a reference marker is a row or a section, not an
+#: address. A release plan numbering its rows four levels deep writes
+#: `#10.14.6.1`, which is a valid dotted quad, and the gate fired on the plan's
+#: own numbering — 55 matches in one consuming project's corpus, none of them
+#: an address (BUG_053).
+#:
+#: ADJACENCY is the whole of the rule, and it is what keeps this narrow. A
+#: marker with a space after it opens a heading or a shell comment, and either
+#: may be quoting a real address; only a marker written hard against the digits
+#: is numbering something. Anchored to the text immediately left of the MATCH
+#: rather than searched over the whole line, which is strictly tighter than the
+#: `_TIME_FALSE_ALARM` precedent it is modelled on.
+#:
+#: Deliberately not covered: a row number written BARE, in a table cell or a
+#: field name. Nothing local distinguishes it from an address, and this pattern
+#: errs noisy rather than silent where that is true — the same call `links`
+#: makes about a reverse-DNS identifier.
+_ROW_NUMBER_REFERENCE = re.compile(r"[#\u00a7\u00b6]$")
+
 #: Addresses that are non-identifying by construction. A no-reply address is not
 #: a way to reach a person, and the git co-author trailer carrying one is a
 #: convention every agent-assisted repository uses — so flagging it means the
@@ -212,6 +243,10 @@ class PrivacyScanner:
                     if any(allowed in raw for allowed in self.allow):
                         continue
                     if name == "emails" and _NON_IDENTIFYING_ADDRESS.search(raw):
+                        continue
+                    if name == "ip_addresses" and _ROW_NUMBER_REFERENCE.search(
+                        line[: match.start()]
+                    ):
                         continue
                     findings.append(
                         Finding(

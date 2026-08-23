@@ -352,6 +352,202 @@ class TestLinksNameANetworkHost:
         assert self.flagged("git@host.invalid:org/repo.git")
 
 
+class TestIpAddressesAreAddressesAndNotRowNumbers:
+    """BUG_053: four numbers with dots between them are not automatically an
+    address.
+
+    Reported from a consuming project whose release plan numbers its rows four
+    levels deep. ``#10.14.6.1`` is a valid dotted quad — four integers, every
+    one at or below 255 — so the gate fired on the plan's own numbering: 55
+    matches across three files, none of them an address. The pattern was doing
+    exactly what it said, which is why the fix is a NARROWING and not a repair
+    of a broken regex.
+
+    Two things settle a candidate locally, and the corpora below are built one
+    per thing rather than from the literal strings that were observed. A list
+    of the observed values would pin those instances and say nothing about the
+    class.
+
+    1. **Length.** A run of more than four dotted segments is not an address.
+       ``\\b`` did not see this, because the dot that follows a longer run
+       satisfies it — ``1.2.3.4.5`` yielded ``1.2.3.4``. Structural, and not a
+       judgement call.
+    2. **A reference marker.** ``#``, ``§`` or ``¶`` written immediately
+       against the number marks it as a row or section reference. Adjacency is
+       the whole of it: ``# 10.0.0.1`` with a space is a comment or a heading
+       that may well be quoting an address, and stays a finding.
+
+    What is NOT settled, deliberately: a four-segment row number written BARE,
+    in a table cell or a field name, is indistinguishable from an address by
+    any local rule, and this pattern still flags it. That is the residue, not
+    an oversight — see the entry.
+
+    Fixture note: the must-match corpus uses the documentation ranges RFC 5737
+    reserves (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) and the private
+    ranges, never a real routable address. A privacy suite whose fixtures are
+    real addresses is a privacy leak, which is this file's convention already.
+    """
+
+    #: The markers that mark a number as a reference to a numbered thing.
+    ROW_MARKERS: ClassVar = ("#", "§", "¶")
+
+    #: Four-level row numbers, in the shape the report measured. Every one is
+    #: a valid dotted quad; none is an address.
+    ROW_NUMBERS: ClassVar = (
+        "10.14.6.1",
+        "10.14.6.2",
+        "10.14.6.3",
+        "10.14.4.4",
+        "10.14.4.6",
+        "10.14.4.9",
+        "4.2.1.3",
+        "1.1.1.1",
+    )
+
+    #: Dotted runs longer than four segments. Settled by length alone, so no
+    #: marker is needed and none is written — this is the half that was wrong
+    #: even for a reader who accepts every bare quad as an address.
+    LONGER_RUNS: ClassVar = (
+        "1.2.3.4.5",
+        "10.14.6.1.2",
+        "10.14.6.1.2.7",
+        "192.0.2.10.1",
+        "0.0.0.0.0",
+    )
+
+    #: Genuine addresses. The must-match direction, without which the whole
+    #: class passes by deleting the pattern.
+    ADDRESSES: ClassVar = (
+        "192.0.2.10",
+        "198.51.100.7",
+        "203.0.113.255",
+        "192.168.1.44",
+        "10.0.0.1",
+        "172.16.31.9",
+        "255.255.255.0",
+        "0.0.0.0",
+    )
+
+    #: The axis that is NOT the test. Each corpus is crossed with these, so a
+    #: verdict that tracked the surrounding prose rather than the number would
+    #: show up as a whole row of failures. The sentence-final form is here on
+    #: purpose: the length guard is written to reject a trailing ``.`` only
+    #: when a digit follows it, and a full stop is how prose ends.
+    CONTEXTS: ClassVar = (
+        "{}",
+        "host {}",
+        "the box at {} answered",
+        "reachable at {}.",
+        "({})",
+        "see {} for the rest",
+        "| {} | a table cell |",
+    )
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner()
+
+    def flagged(self, text):
+        return "ip_addresses" in patterns(self.scanner.scan_text(text))
+
+    # -- the corpora are non-empty ------------------------------------
+    #
+    # "examined nothing" and "found nothing" are the same green otherwise.
+
+    def test_every_corpus_is_non_empty(self):
+        assert len(self.ROW_MARKERS) == 3
+        assert len(self.ROW_NUMBERS) >= 8
+        assert len(self.LONGER_RUNS) >= 5
+        assert len(self.ADDRESSES) >= 8
+        assert len(self.CONTEXTS) >= 7
+
+    # -- direction 1: a row number is not an address -------------------
+
+    def test_a_marked_row_number_is_not_an_address_in_any_context(self):
+        checked = 0
+        leaked = []
+        for marker in self.ROW_MARKERS:
+            for number in self.ROW_NUMBERS:
+                for context in self.CONTEXTS:
+                    checked += 1
+                    text = context.format(f"{marker}{number}")
+                    if self.flagged(text):
+                        leaked.append(text)
+        expected = len(self.ROW_MARKERS) * len(self.ROW_NUMBERS) * len(self.CONTEXTS)
+        assert checked == expected
+        assert leaked == []
+
+    def test_a_run_longer_than_four_segments_is_not_an_address(self):
+        checked = 0
+        leaked = []
+        for run in self.LONGER_RUNS:
+            for context in self.CONTEXTS:
+                checked += 1
+                text = context.format(run)
+                if self.flagged(text):
+                    leaked.append(text)
+        assert checked == len(self.LONGER_RUNS) * len(self.CONTEXTS)
+        assert leaked == []
+
+    def test_a_marked_longer_run_is_not_an_address_either(self):
+        # Both guards on one string: neither may depend on the other's absence.
+        leaked = [
+            f"{marker}{run}"
+            for marker in self.ROW_MARKERS
+            for run in self.LONGER_RUNS
+            if self.flagged(f"{marker}{run}")
+        ]
+        assert leaked == []
+
+    def test_the_reported_release_plan_line_is_clean(self):
+        assert not self.flagged("* #10.14.6.1 — fold the dashboard into the plan")
+
+    # -- direction 2: an address is still an address -------------------
+
+    def test_every_address_is_still_flagged_in_every_context(self):
+        checked = 0
+        missed = []
+        for address in self.ADDRESSES:
+            for context in self.CONTEXTS:
+                checked += 1
+                text = context.format(address)
+                if not self.flagged(text):
+                    missed.append(text)
+        assert checked == len(self.ADDRESSES) * len(self.CONTEXTS)
+        assert missed == []
+
+    def test_a_marker_earlier_on_the_line_does_not_excuse_an_address(self):
+        # The narrowing is adjacency, not "the line contains a hash". A
+        # heading and a shell comment both open with one, and an address
+        # quoted under either is still an address.
+        assert self.flagged("# the jump box answers on 192.0.2.10")
+        assert self.flagged("#### Hosts: 198.51.100.7 is the relay")
+
+    def test_a_space_after_the_marker_does_not_excuse_an_address(self):
+        assert self.flagged("# 192.0.2.10")
+
+    def test_a_row_number_and_an_address_on_one_line_are_judged_separately(self):
+        found = self.scanner.scan_text("#10.14.6.1 deploys to 192.0.2.10 tonight")
+        assert [f.raw for f in found if f.pattern == "ip_addresses"] == ["192.0.2.10"]
+
+    # -- neighbours the narrowing must not have moved ------------------
+
+    def test_a_version_string_is_still_not_an_address(self):
+        # Held by the word boundary before the run, which the length guard
+        # replaces rather than drops.
+        assert not self.flagged("v1.2.3.4")
+        assert not self.flagged("version 1.2.3")
+
+    def test_an_octet_that_is_too_long_is_not_an_address(self):
+        assert not self.flagged("192.0.2.444")
+
+    def test_the_links_pattern_still_reads_an_ip_authority(self):
+        # `_IPV4` is SHARED, and the guards go on the `ip_addresses` entry
+        # alone. A scheme already proves its authority is an address, so
+        # narrowing there would have cost `links` a real class of finding.
+        assert "links" in patterns(self.scanner.scan_text("see http://192.0.2.10/x"))
+        assert "links" in patterns(self.scanner.scan_text("see http://192.0.2.10:8443/x"))
+
+
 class TestExemptionMarkerScope:
     """BUG_045: the marker has to be usable from a comment that owns its line.
 
