@@ -16,6 +16,27 @@ This audit is narrow on purpose. It asks one question — *who decides* — and
 says nothing about whether the gates are correct, which is
 [the mission audit](mission-audit-2026-08.md)'s subject.
 
+## Resolution
+
+All six recommendations were carried out in the session that followed this
+audit, against `a01077b`. This section records what landed; the findings below
+are left as written, because an audit rewritten to match its own fixes stops
+being evidence of what was true.
+
+| Finding | Landed as | Shape of the fix |
+|---|---|---|
+| AUTH-01 | `Level.ASK` + `invariant override` | `ask` delivers to the human at `pre-tool-use` and stops work everywhere else; a granted token passes one call at any hook and appends to `session.overrides`. `acknowledge`'s misdirecting refusal and the acknowledgement's blindness to hooks were fixed in the same change |
+| AUTH-02 | refusal at manifest load | an `enforcement.rules` key naming no rule is refused with the nearest real id; `INVARIANT_DISABLE` warns and proceeds; `doctor` survives an unloadable manifest |
+| AUTH-03 | `classify_installed` + `--overwrite-local` | the classifier is lifted out of `_stale_for` and read by every install; a locally edited asset is skipped and named; `--dry-run` enumerates |
+| AUTH-04 | `invariant standdown` | every gate held for a derived interval, `privacy.clean` held out unless named, announced on every turn |
+| AUTH-05 | `invariant uninstall` | removes only what it wrote, never the operator's data, and `doctor` stops offering the repair that would undo it |
+| Rec. 5 | ADR-001 **D25** | the position stated as a decision, with the README's "You are the authority" table as its public face |
+
+The scorecard above the fixes read four Pass, three Failed, two Missing. It now
+reads Pass throughout, and D25 is the row a future feature is checked against —
+the question being not "is this gate too strict" but "what does the operator
+type to proceed anyway, and where does that decision get written down".
+
 ## Verdict
 
 **The override machinery is complete on the surface reached through the CLI

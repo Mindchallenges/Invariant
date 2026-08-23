@@ -112,6 +112,7 @@ rejected and why.
 | D22 | A hazard declares whether it can bend a measurement **upward**; unclassified means it can | Treat all hazards alike; annotate everything | Bent low and bent high are not symmetrical failures. A measurement bent low blocks work that was fine — visible, annoying, self-correcting, because being blocked is what sends someone to look. A measurement bent high passes work that was never covered, silently, and nobody looks. So the first is annotated into the verdict and the second blocks. The default for an unclassified hazard is "can overstate", because a hazard added without thought would otherwise inherit "annotate" and go quiet. |
 | D23 | Coverage paths resolve against the **session's worktree** first, with suffix matching behind it, and an unmatched changed file **fails** | Resolve against the repository root only; match leniently and pass on what matched | An isolated session has two roots: state lives in the main checkout because worktrees share one `.git`, while compilation happens in the worktree, so measured paths carry the worktree prefix while hooks run from the checkout. Stripping the root the rule happens to see removes nothing and the intersection is empty for a reason unrelated to coverage — invisible in a single-checkout repo, which is why it survived until a session isolated. Suffix matching backs it up, and is deliberately paired with failing on a partial intersection: a loose matcher's bug produces partial overlaps rather than empty ones, and answering only for the files it matched would report a pass for the ones it never found. |
 | D24 | The privacy **exemption marker is block-scoped** when it owns its line, and line-scoped when it does not | Keep it same-line only; let it exempt the next line; let it exempt the rest of the file or section | Same-line only is unusable in the markup the gate mostly scans: `privacy.scope` defaults to prose, and reStructuredText and Markdown have no inline comment, so the marker had to be written into the prose and rendered into the published output — six of them shipped that way in one consuming project. The next line is not enough either, because RST will not let a comment stand next to what it covers: mid-paragraph it splits the paragraph, between list items it ends the list, and the real cases are mid-block every time. The rest of the file or section was rejected for the reason the hatch is dangerous at all — a marker is where a real leak gets parked, so its cover must be something a reviewer reading the diff can see the end of. Two adjacent blocks is the smallest reach that covers the shapes prose actually takes, and exempting a whole file costs a marker on every block of it. |
+| D25 | **The operator is the final authority, and may override any rule temporarily or permanently.** Every gate carries a route past it, and every route past it is recorded | Leave the position as behaviour and infer it; make the engine the last word on a project it does not own | This was the strongest opinion in the codebase that had never been written down, and the cost of that was measurable: the override machinery was complete on the surface reached through the CLI and absent on the surface that actually stops an agent. Twelve rules evaluate at hooks, and a blocking verdict there was final — no flag, no marker, no prompt, no recorded exception — while `--force --reason` existed on every transition. Nothing caught it, because there was no stated position for a review to check a feature against; the doctrine existed as one sentence about one gate ("Every gate needs an escape hatch for the case it gets wrong") and as a pattern a reader had to infer from `--force --reason`, fail-open hooks, and "any of these can be dropped to warn or off". Stated as a decision, it has three parts, and each has a mechanism. **Permanently**: profiles pin nothing and `enforcement.rules` overrides every level — and an override naming no rule is REFUSED rather than discarded, because a control handed back that silently does nothing is worse than one never offered. **Temporarily**: `ask` puts the human in the loop where there is one, `invariant override` passes one call at a hook, `invariant standdown` holds every gate for an interval. **Entirely**: `invariant uninstall` is the inverse of `init`, because the authority to leave is part of the authority. Two constraints bound it rather than qualify it — every route past a gate is RECORDED, since an override that leaves no trace is indistinguishable from the gate never having run; and `privacy.clean` is the one gate a blanket route must NAME to pass, because nothing un-writes an identifier out of a published history. |
 
 ## Consequences
 
@@ -127,10 +128,20 @@ The state store is a new thing that can wedge, so it needs recovery commands
 afterthoughts.
 
 **Accepted risk.** A state machine can be *wrong* — it can insist on a
-transition that does not fit a real situation. The mitigation is D10 and D11
-together: any rule can be dropped to `warn` or `off` in the manifest without
-forking the library. A rule that a project keeps overriding is a bug report
-against the default, and the override is the evidence.
+transition that does not fit a real situation. The mitigation is D10, D11 and
+D25 together: any rule can be dropped to `warn` or `off` in the manifest
+without forking the library, passed once at the surface it fires on, or held
+for an interval. A rule that a project keeps overriding is a bug report against
+the default, and the override — recorded, always — is the evidence.
+
+D25 is the one to check a new feature against, and it is written down because
+it was not. The failure it names is not "a gate was too strict"; it is a gate
+shipped with **no route past it at all**, on a surface nobody thought of as a
+surface. The question to ask of anything that can refuse work is: what does the
+operator type to proceed anyway, and where does that decision get written down?
+A feature with no answer to the second half is as much a defect as one with no
+answer to the first — a silent hole and a locked door are the two ways to take
+authority away, and this library must ship neither.
 
 ## Notes
 

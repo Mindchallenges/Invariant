@@ -113,6 +113,39 @@ Most of this library is mechanism. Three things are policy, taken deliberately:
 Any of these can be dropped to `warn` or `off` in the manifest. A rule you keep
 overriding is a bug report against the default.
 
+## You are the authority
+
+The engine exists to make an agent deterministic. It does not exist to make
+decisions about your repository over your objection. **Every gate has a route
+past it, and every route past it is recorded** (ADR-001 D25).
+
+| You want to | Type |
+|---|---|
+| change policy permanently | `enforcement.rules` in the manifest — a level per rule |
+| be asked instead of stopped | set that rule to `ask`; the call comes to you |
+| pass one gate, once | `invariant override <rule> --reason '<why>'` |
+| pass a transition gate, once | `... --force --reason '<why>'` |
+| stop being asked for a while | `invariant standdown --reason '<why>'` |
+| stop using the tool | `invariant uninstall` |
+
+Two things bound that rather than qualify it.
+
+**Every route leaves a record.** A forced transition, a spent override token
+and a stand-down all land on the session record with the reason you gave. An
+override that leaves no trace is indistinguishable from the gate never having
+run, and the whole point of the library is that the difference is visible.
+
+**`privacy.clean` is the one gate a blanket route must name.** `standdown`
+holds every other rule; folding this one in costs `--include privacy.clean`. It
+is the only gate whose failure cannot be undone after the fact — nothing
+un-writes an identifier out of a published history — so going past it stays a
+separate sentence you wrote.
+
+And when a rule you meant to relax names nothing, you are told. An
+`enforcement.rules` key that matches no rule is refused at load with the
+nearest real id, rather than accepted and silently discarded. A control handed
+back that quietly does nothing is worse than one never offered.
+
 ## Extending it
 
 - **A methodology** is a YAML state machine — states, transitions, and gates.
