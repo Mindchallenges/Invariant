@@ -467,6 +467,52 @@ class TestDocsRules:
         ctx = ctx_factory(pipeline={"evidence": {"docs_read": [str(ctx_factory.main / "README.md")]}})
         assert not only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
 
+    def test_BUG_046_a_worktree_doc_read_satisfies_the_gate_from_the_main_checkout(
+        self, ctx_factory
+    ):
+        """The half of BUG_046 that closes the gate against every legal move.
+
+        The recording step only ever stores the WORKTREE spelling while
+        sessions are live — a main-checkout path resolves by guess and is
+        dropped by the `proven` guard, which is BUG_028's rule and stays. So
+        when the CLI runs from the main checkout, a docs root taken from the
+        tree the CLI is standing in accepts none of the paths the recorder is
+        able to write, and no read the agent can perform satisfies the gate.
+        """
+        doc = ctx_factory.wt / "docs" / "architecture" / "overview.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, pipeline={"evidence": {"docs_read": [str(doc)]}}
+        )
+        assert only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_BUG_046_a_main_checkout_doc_read_satisfies_the_gate_from_a_worktree(
+        self, ctx_factory
+    ):
+        """The mirror image, which is how this presented as two contradictory
+        bugs: the same read is accepted or refused purely on where the CLI was
+        invoked from. One document, two spellings, one verdict owed."""
+        doc = ctx_factory.main / "docs" / "architecture" / "overview.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt, pipeline={"evidence": {"docs_read": [str(doc)]}}
+        )
+        assert only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_BUG_046_a_doc_in_a_different_repository_still_does_not_count(
+        self, ctx_factory, tmp_path
+    ):
+        """The control on the widening above, and the reason it is narrow.
+
+        Accepting any tree OF THIS REPOSITORY is the fix; accepting any path
+        that happens to end in `docs/architecture/…` would be a different rule
+        with no evidence behind it. A neighbouring checkout is not this
+        project's docs however the path is spelled.
+        """
+        foreign = tmp_path / "elsewhere" / "docs" / "architecture" / "overview.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("# Not ours\n", encoding="utf-8")
+        ctx = ctx_factory(pipeline={"evidence": {"docs_read": [str(foreign)]}})
+        assert not only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
     def test_source_change_without_a_doc_change_fails(self, ctx_factory):
         wt = ctx_factory.wt
         (wt / "app.py").write_text("code", encoding="utf-8")

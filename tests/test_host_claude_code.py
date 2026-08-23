@@ -639,9 +639,20 @@ class TestReadIsAttributedByItsPath:
 
     def post(self, world, payload, cwd=None, host_session_id=None):
         """Fire PostToolUse the way a host does — from wherever it is standing."""
+        self.post_returning(
+            world, payload, cwd=cwd, host_session_id=host_session_id
+        )
+
+    def post_returning(self, world, payload, cwd=None, host_session_id=None):
+        """As :meth:`post`, and hand back what the hook told the agent.
+
+        Kept apart rather than folded in, because most tests here are about
+        what was RECORDED and one class of them (BUG_046) is about what was
+        SAID when nothing could be.
+        """
         from invariant.cli.main import Context
 
-        ClaudeCodeHost(world["project"])._post_tool_use(
+        return ClaudeCodeHost(world["project"])._post_tool_use(
             payload,
             Context(
                 cwd=cwd or world["project"],
@@ -655,12 +666,17 @@ class TestReadIsAttributedByItsPath:
         pipeline = world["pipelines"].current(session_id)
         return list(pipeline.evidence.get(key, [])) if pipeline else []
 
-    def read_gate(self, world):
-        """What `invariant pipeline gates` would report, run in the worktree."""
+    def read_gate(self, world, cwd=None):
+        """What `invariant pipeline gates` would report from a given tree.
+
+        ``cwd`` defaults to the worktree, which is where a session's own gate
+        run happens. It is a parameter because BUG_046 is precisely about the
+        verdict depending on which of the session's two trees asked.
+        """
         from invariant.core.manifest import Manifest
         from invariant.core.rules import RuleContext, evaluate
 
-        worktree = world["worktree"]
+        worktree = cwd or world["worktree"]
         rule_ctx = RuleContext(
             manifest=Manifest.load(worktree),
             cwd=worktree,
@@ -879,6 +895,95 @@ class TestReadIsAttributedByItsPath:
 
         assert self.evidence(world, world["owner"], "agents_run") == []
         assert self.evidence(world, world["peer"], "agents_run") == []
+
+    # -- BUG_046 -------------------------------------------------------
+    #
+    # The same harness, one question further on. The tests above ask WHICH
+    # session a read is recorded against. These ask what happens when the
+    # answer is "none of them provably" — the case that wedges the docs gate,
+    # because the drop is the only half of the exchange the agent can see and
+    # it looks exactly like not having read anything.
+
+    def test_BUG_046_a_dropped_docs_read_is_reported_rather_than_swallowed(
+        self, two_live_sessions
+    ):
+        """An unproven read of an architecture doc must say it was discarded.
+
+        With two sessions live and the hook firing from the shared checkout
+        owning neither, the main-checkout copy of the doc resolves to nobody
+        (``ambiguous``) and the row is dropped. Dropping it is CORRECT and
+        stays — writing evidence on a guess is BUG_028. The defect is the
+        silence: ``docs.read_architecture`` is block-level, so the agent meets
+        this at a gate that says "no architecture doc has been read", with no
+        way to tell a discarded read from an absent one, and the gate's own
+        remedy line is the thing it just did.
+        """
+        world = two_live_sessions
+        response = self.post_returning(
+            world,
+            {"tool_name": "Read", "tool_input": {"file_path": str(world["shared_doc"])}},
+            host_session_id=None,
+        )
+
+        assert self.evidence(world, world["owner"], "docs_read") == [], (
+            "the read was recorded on a guess, which is the BUG_028 regression "
+            "this entry forbids"
+        )
+        text = response.get("hookSpecificOutput", {}).get("additionalContext", "")
+        assert "NOT recorded" in text, "the drop was silent"
+        assert "docs.read_architecture" in text, (
+            "the note does not name the gate that will read this absence"
+        )
+
+    def test_BUG_046_an_unproven_read_of_an_ordinary_file_stays_silent(
+        self, two_live_sessions
+    ):
+        """The note is for evidence, not for every read in the project.
+
+        `Read` fires on every file an agent opens. A note on each unattributed
+        one would be noise on the ordinary case — an ungoverned turn in a
+        governed repository — and noise is how a real signal stops being read.
+        Only a read that WOULD have been evidence for a blocking gate speaks.
+        """
+        world = two_live_sessions
+        ordinary = world["project"] / "README.md"
+        ordinary.write_text("# Demo\n", encoding="utf-8")
+        assert self.post_returning(
+            world,
+            {"tool_name": "Read", "tool_input": {"file_path": str(ordinary)}},
+            host_session_id=None,
+        ) == {}
+
+    def test_BUG_046_a_proven_read_records_and_says_nothing(self, two_live_sessions):
+        """The control: the working route is unchanged and stays quiet."""
+        world = two_live_sessions
+        assert self.post_returning(
+            world,
+            {"tool_name": "Read", "tool_input": {"file_path": str(world["doc"])}},
+        ) == {}
+        assert self.evidence(world, world["owner"], "docs_read") == [str(world["doc"])]
+
+    def test_BUG_046_the_gate_is_satisfiable_from_the_checkout_the_cli_stands_in(
+        self, two_live_sessions
+    ):
+        """The composition, end to end — the property the entry actually owes.
+
+        Mechanism 1 means only the worktree spelling is ever recorded;
+        mechanism 2 used to mean the gate accepted only the spelling belonging
+        to the tree the CLI ran in. Run from the main checkout the two accepted
+        sets were disjoint, so no read the agent could perform satisfied the
+        gate. Neither half is a defect read alone, which is why this is pinned
+        as one test on the composition rather than as two.
+        """
+        world = two_live_sessions
+        self.post(
+            world,
+            {"tool_name": "Read", "tool_input": {"file_path": str(world["doc"])}},
+        )
+        assert self.read_gate(world, cwd=world["project"]).ok, (
+            "the only spelling the recorder can write is refused by the gate "
+            "when the CLI runs from the main checkout"
+        )
 
 
 class TestBUG028TheAgentThatCreatedThePipelineIsInIt:

@@ -365,6 +365,21 @@ None`. Enforcement and display still use step 5: telling somebody where they
 probably are is a fair use of a guess, and recording a fact against them is
 not.
 
+**What may not be recorded may still have to be said.** The `proven` rule
+decides what gets written; it does not decide what may be left unsaid. A
+session has two copies of every file — the shared checkout's and its
+worktree's — and only the worktree spelling identifies the reader, so a docs
+read aimed at the shared checkout while several sessions are live resolves at
+step 5 or lower and is discarded. Discarding it is correct. Its **silence** was
+not: `docs.read_architecture` is block-level, and a discarded read and an
+absent one produced the same verdict and the same remedy line, so the advice
+the gate gave back was the action that had just been thrown away (BUG_046). An
+unproven read of an architecture doc now reports the drop in the turn it
+happened, on the same reasoning as an unrecordable dispatch — and with the same
+restraint, since `Read` fires on everything an agent opens: only a read that
+would have been evidence speaks, and only when a governed session exists to
+hear it. An ungoverned turn stays silent.
+
 **A proof of identity is not a proof of place**, and an actor row needs both.
 Step 2 deliberately outranks step 3 — who is acting beats where the bytes land
 — so it answers identically for an architect writing inside its own worktree
@@ -454,6 +469,18 @@ Two details that are load-bearing rather than incidental:
   formatter pass makes `chore` useless and pushes people to `none`, which drops
   every gate. A narrower rule that gets used beats a broader one that gets
   bypassed.
+- **A document has as many spellings as the repository has trees, and the read
+  gate accepts all of them.** An isolated session holds two copies of
+  `docs/architecture/overview.md`, and the two steps a read must survive used
+  to prefer opposite ones: recording keeps only the spelling that identified
+  the reader, which is the worktree's, while matching resolved its docs root
+  from whichever tree the CLI was invoked in. Run from the shared checkout the
+  two accepted sets were disjoint — a `block` gate closed against every read
+  the track could perform (BUG_046). Matching now reduces to the docs
+  directory of *every* working tree of this repository, so the verdict no
+  longer depends on where the question was asked from. It stops there: another
+  checkout's `docs/architecture` is not this project's, however alike the paths
+  look.
 - **An exit gate is asked its question after the commit.** Anything evaluated
   on leaving a state runs when that state's work is, by construction, already
   committed, so a gate that asks "what changed" by reading the working tree

@@ -1147,7 +1147,17 @@ def _docs_read_architecture(ctx: RuleContext) -> Verdict:
             fixes=(f"create {_rel(docs_root, _repo_root(ctx))} and describe the layers",),
         )
     read = [Path(p) for p in ctx.evidence("docs_read", []) or []]
-    inside = [p for p in read if _is_within(p, docs_root)]
+    # Every tree of this repository, not only the one the CLI is standing in.
+    # A session has two copies of each document and the recording step can
+    # only ever write the WORKTREE spelling while sessions are live — a
+    # main-checkout path resolves by guess and is dropped by the `proven`
+    # guard, which is BUG_028's rule and is not the thing to change. Testing
+    # against the caller's own tree therefore made the two accepted sets
+    # disjoint whenever the gate was run from the main checkout: no read the
+    # agent could perform satisfied it, and the remedy line advised the read
+    # that had just been discarded (BUG_046).
+    roots = docs_roots(ctx.manifest, ctx.cwd)
+    inside = [p for p in read if any(_is_within(p, root) for root in roots)]
     if inside:
         return Verdict.clean(f"{len(inside)} architecture doc(s) read")
     return Verdict.fail(
@@ -2124,13 +2134,71 @@ def _repo_root(ctx: RuleContext) -> Path:
 
 
 def _docs_root(ctx: RuleContext) -> Path:
-    """The docs directory inside the working tree the rule is running against."""
+    """The docs directory inside the working tree the rule is running against.
+
+    The one this run's messages name, and the one `docs.updated` resolves its
+    changed paths against — both are questions about the tree in hand. Asking
+    whether a RECORDED path is a doc is a different question, because that
+    path was spelled by whichever tree the reader was in; use
+    :func:`docs_roots` for it.
+    """
     configured = ctx.manifest.path_for("docs")
     try:
         relative = configured.relative_to(ctx.manifest.root)
     except ValueError:
         return configured  # an absolute path outside the project: use as given
     return (_repo_root(ctx) / relative).resolve()
+
+
+def docs_roots(manifest: Manifest, cwd: Path) -> list[Path]:
+    """The docs directory in every working tree of this repository.
+
+    One document, as many absolute spellings as the repository has trees. Which
+    spelling gets RECORDED is decided by the attribution route — a read inside
+    a worktree names that worktree — and which one gets ACCEPTED used to be
+    decided by where the CLI happened to be standing. Those two answers are
+    disjoint in the ordinary isolated-session case, which is how
+    `docs.read_architecture` became a blocking gate with no legal move
+    (BUG_046). Reducing both ends to the same set is the fix; widening what
+    counts as evidence is not, so the set is the trees of THIS repository and
+    stops there. A neighbouring checkout's `docs/architecture` is not this
+    project's, however alike the two paths look.
+
+    Takes the manifest and a directory rather than a :class:`RuleContext`, so
+    the recording side in ``hosts/`` can ask the same question the reading side
+    asks. Two definitions of "is this an architecture doc" is exactly the
+    disjointness this fixes.
+    """
+    configured = manifest.path_for("docs")
+    try:
+        relative = configured.relative_to(manifest.root)
+    except ValueError:
+        # An absolute path outside the project: there is one copy by
+        # construction, so there is nothing to spell two ways.
+        return [configured]
+
+    bases: list[Path | None] = [git.toplevel(cwd), manifest.root]
+    bases += [w.path for w in git.worktrees(cwd)]
+    roots: list[Path] = []
+    for base in bases:
+        if base is None:
+            continue
+        try:
+            root = (Path(base) / relative).resolve()
+        except OSError:  # pragma: no cover - a resolve that cannot answer
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def is_architecture_doc(manifest: Manifest, cwd: Path, target: Path | str) -> bool:
+    """Would a read of ``target`` be evidence for ``docs.read_architecture``?
+
+    The recording side's copy of the reading side's question, asked through the
+    same helper so the two cannot drift apart.
+    """
+    return any(_is_within(Path(target), root) for root in docs_roots(manifest, cwd))
 
 
 def _is_outside_project(ctx: RuleContext, target: Path | None) -> bool:

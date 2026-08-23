@@ -40,6 +40,7 @@ from ..core.rules import (
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
     evaluate_event,
+    is_architecture_doc,
     standdown_in_force,
 )
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
@@ -1131,6 +1132,15 @@ class ClaudeCodeHost:
         # (BUG_028).
         resolution = ctx.resolution_for_payload(payload)
         session = resolution.session
+
+        # Ordered before the `session is None` return below, because a read
+        # that resolved to NOBODY is the case that wedges the docs gate and it
+        # still has somebody to tell: `ambiguous` means several live sessions
+        # were candidates, which is not the ungoverned turn that return is
+        # about (BUG_046).
+        if tool == "Read":
+            return self._record_docs_read(tool_input, resolution, ctx)
+
         if session is None:
             # Nobody is identifiable, so there is nothing to record and nobody
             # to tell. Deliberately silent: an ungoverned turn in a governed
@@ -1139,12 +1149,6 @@ class ClaudeCodeHost:
             return {}
 
         try:
-            if tool == "Read":
-                target = tool_input.get("file_path")
-                if target and resolution.proven:
-                    ctx.pipelines.record_docs_read(session.id, str(target))
-                return {}
-
             agent_type = tool_input.get("subagent_type")
             if not agent_type:
                 return {}
@@ -1171,6 +1175,61 @@ class ClaudeCodeHost:
             # than a gate missing one data point.
             pass
         return {}
+
+    def _record_docs_read(self, tool_input: dict, resolution, ctx) -> dict:
+        """Record a Read as docs evidence, or say why it was not.
+
+        The recording condition is `proven`, and stays `proven`. A row written
+        on a guess is how a foreign session's work came to clear a blocking
+        gate (BUG_028), and relaxing it on the `docs_read` key would be that
+        regression by another door.
+
+        What was wrong is the other half. `docs.read_architecture` is
+        block-level, and while sessions are live the MAIN-CHECKOUT spelling of
+        a document resolves to nobody in particular — so the read the agent
+        just performed is discarded, and the gate then reports "no architecture
+        doc has been read in this pipeline" with a remedy line advising the
+        very action that was thrown away. Nothing told the two apart: a
+        discarded read and an absent one looked identical from inside, which is
+        the difference between a session that reports a bug and one that argues
+        with the engine (BUG_046). This is `record_agent_run`'s lesson one
+        branch over — a drop a blocking gate will read as absence gets said out
+        loud.
+
+        Silent for an ordinary file, and that restraint is the point. `Read`
+        fires on everything an agent opens, so a note on every unattributed one
+        would be noise on the common case rather than signal on the rare one.
+        Only a read that WOULD have been evidence speaks, and only when there
+        is a governed session to say it to.
+        """
+        target = tool_input.get("file_path")
+        if not target:
+            return {}
+
+        if resolution.proven:
+            try:
+                ctx.pipelines.record_docs_read(resolution.session.id, str(target))
+            except InvariantError:
+                # Evidence is a side effect; see the dispatch branch above.
+                pass
+            return {}
+
+        if resolution.session is None and not resolution.candidates:
+            # `none`: no session was registered anywhere near this call. An
+            # ungoverned read in a governed repository is ordinary and has no
+            # gate waiting for it.
+            return {}
+
+        try:
+            if not is_architecture_doc(ctx.manifest, ctx.cwd, target):
+                return {}
+        except InvariantError:  # pragma: no cover - manifest already loaded
+            return {}
+
+        return _context_response(
+            "PostToolUse",
+            _UNRECORDED_DOCS_READ.format(path=target, how=resolution.how),
+        )
 
     def _record_acting_agent(self, payload: dict, ctx) -> None:
         """Record the agent the HOST says is making this call.
@@ -1287,6 +1346,22 @@ _UNPROVEN_DISPATCH = (
     "on work that never happened.\n"
     "  try: run the dispatch from inside the session's worktree, name that "
     "worktree in the brief, or set INVARIANT_SESSION_ID"
+)
+
+_UNRECORDED_DOCS_READ = (
+    "invariant — this read was NOT recorded as evidence for "
+    "docs.read_architecture. {path} is an architecture doc, but nothing in "
+    "this call proved WHICH session read it (resolved by {how!r}, which is a "
+    "guess, not an identification), and evidence is never written on a guess: "
+    "a pipeline that receives another session's reading clears a blocking gate "
+    "on work it did not do.\n"
+    "  the gate is block-level and will report this as 'no architecture doc "
+    "has been read in this pipeline'. That is a DISCARDED read, not an absent "
+    "one — reading it again by the same path will not change the verdict.\n"
+    "  try: read the copy inside your session's own worktree, which is the "
+    "spelling that identifies the reader (`invariant context` names it). A "
+    "session with no worktree yet gets one with `invariant session isolate "
+    "--execute`."
 )
 
 _UNRECORDED_DISPATCH = (

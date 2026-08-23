@@ -344,6 +344,16 @@ now an explicit normalisation obligation rather than an implied one, which is
 what a second agent host would need in order to be written at all. The
 restatement is recorded as ADR-003 D4.
 
+The arrow runs the other way too, and one case makes it load-bearing. When a
+host adapter DECIDES something a rule will later re-decide, the question has to
+be asked through the rule's own helper rather than reimplemented next to it.
+`_post_tool_use` needs to know whether a `Read` it is about to discard would
+have been evidence for `docs.read_architecture`, so it calls
+`core.rules.is_architecture_doc` — the same function the gate matches with.
+Two local answers to "is this an architecture doc" is exactly the disjointness
+BUG_046 was: two steps preferring opposite spellings of one file, with a
+`block` gate closed against every read the track could perform in between.
+
 The contract has been widened once since, deliberately and for the same class
 of reason. `agent_type` — the acting agent, which Claude Code stamps on every
 hook payload including a subagent's own — was added because a subagent that
