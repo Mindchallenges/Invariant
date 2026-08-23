@@ -2,9 +2,21 @@
 id: IDEA_003
 type: idea
 title: A stand-down switch — one temporary, reversible way to hold every gate
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: null
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: null
+  forced: false
 area: core/rules
 severity: medium
 priority: high

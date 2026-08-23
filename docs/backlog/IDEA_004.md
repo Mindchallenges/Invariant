@@ -2,9 +2,21 @@
 id: IDEA_004
 type: idea
 title: invariant uninstall — a first-class way to remove what init installed
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: null
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: null
+  forced: false
 area: hosts/claude_code
 severity: low
 priority: medium
