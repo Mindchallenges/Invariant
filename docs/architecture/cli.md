@@ -434,6 +434,13 @@ invariant standdown --clear [--id <sid>]
     indistinguishable from having uninstalled the tool, and an expiry that
     depends on a later command running is an expiry that does not happen.
 
+    Granted while NO pipeline is running, it WAITS for the next one and then
+    rides it to its finish. "No pipeline yet" is not a scope already satisfied
+    — standing down for work outside a pipeline is usually done precisely so
+    that the pipeline that work leads into does not reopen the gates the hold
+    was thrown for. Reading a pipeline's mere existence as the end of the hold
+    ended it at `pipeline start`, before anything ran under it (BUG_052).
+
     `privacy.clean` is held OUT unless --include names it. It is the one gate
     whose failure cannot be undone after the fact, and this library has argued
     that case twice already — the `loose` profile keeps it blocking and so does

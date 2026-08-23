@@ -228,7 +228,10 @@ Three properties are what make it a control rather than a hole:
   on every evaluation whether the hold still applies, from the pipeline the
   scope names. Nothing has to run for it to lapse, which matters because an
   expiry that depends on a later command running is an expiry that does not
-  happen. The default scope is the shortest useful one — the current pipeline.
+  happen. The default scope is the shortest useful one — the current pipeline,
+  or, where none is running yet, the next one to start: a hold thrown for work
+  outside a pipeline waits rather than expiring, because expiring on `pipeline
+  start` would undo it before anything ran under it (BUG_052).
 - **`privacy.clean` is held out unless named.** It is the one gate whose
   failure cannot be undone after the fact; nothing un-writes an identifier out
   of a published history. Folding it in costs `--include privacy.clean`, a
