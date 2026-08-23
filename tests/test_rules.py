@@ -1391,6 +1391,391 @@ class TestCommitMessageForms:
         assert verdict.ok and not verdict.skipped
 
 
+class TestPrivacyScreensTheIndexTheCommitNames:
+    """BUG_048 — see docs/backlog/BUG_048.md.
+
+    ``_is_git_commit`` reads ``git -C <other> commit`` as a commit, correctly,
+    and nothing downstream of that decision consulted the ``-C``. So the gate
+    screened ``ctx.cwd``'s index and vouched for a commit made somewhere else:
+    a PASS asserting a scan of blobs that have no relation to what lands.
+
+    The pair below is what pins the MIS-TARGET rather than the absence of a
+    scan — one commit whose leak is in the named tree, one whose leak is in
+    the tree the rule used to read instead.
+    """
+
+    def test_BUG_048_a_leak_staged_in_the_named_tree_is_screened(self, ctx_factory):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/other.md")
+        # ``main``'s index is clean, so every path the old code could reach is
+        # empty: a pass here is a pass over nothing.
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload(f"git -C {wt} commit -m 'a doc'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "privacy.clean vouched for a commit whose staged content it never "
+            f"read: {verdict.message!r}"
+        )
+        assert "docs/architecture/other.md" in verdict.message + verdict.detail
+
+    def test_the_index_of_the_tree_not_named_is_not_read(self, ctx_factory):
+        """The control. The leak is staged where the rule USED to look, and
+        the commit is made somewhere else — so naming it would be reporting a
+        scan of a tree this commit does not touch."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(main, "docs/architecture/here.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/here.md")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload(f"git -C {wt} commit -m 'a doc'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert "docs/architecture/here.md" not in verdict.message + verdict.detail
+
+    def test_repeated_dash_c_is_cumulative(self, ctx_factory):
+        """``-C`` is repeatable and its paths compose, each relative to the
+        last. A parser that takes the first and stops resolves the wrong tree
+        — and, being one directory up, usually a real one."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/other.md")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(f"git -C {wt.parent} -C {wt.name} commit -m 'a doc'"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and "docs/architecture/other.md" in (
+            verdict.message + verdict.detail
+        )
+
+    def test_a_dash_c_before_a_global_config_option_is_still_found(self, ctx_factory):
+        """``-c <name>=<value>`` takes a separate value. A scan that treated
+        that value as the subcommand would stop looking and miss the ``-C``
+        after it."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/other.md")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(f"git -c commit.gpgsign=false -C {wt} commit -m 'x'"),
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_the_chained_spelling_resolves_the_commits_own_invocation(
+        self, ctx_factory
+    ):
+        """``git add -A && git -C <other> commit`` is the spelling agents
+        actually emit (BUG_027). A reader that stopped at the first subcommand
+        would resolve the ``add``'s directory and hand it to the commit."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(f"git add -A && git -C {wt} add -A && git -C {wt} commit -m 'x'"),
+        )
+        # The rule reads the index, so stage it the way the command would.
+        stage(wt, "docs/architecture/other.md")
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and "docs/architecture/other.md" in (
+            verdict.message + verdict.detail
+        )
+
+    def test_a_redirection_on_a_neighbouring_invocation_does_not_fail_the_commit(
+        self, ctx_factory
+    ):
+        """``--git-dir`` is refused where it redirects the COMMIT. On a
+        neighbouring ``rev-parse`` it names a repository the commit is not
+        made in, and failing there would refuse a commit over a question
+        nobody asked."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/clean.md", "nothing personal here")
+        stage(main, "docs/architecture/clean.md")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(
+                "git --git-dir=/elsewhere/.git rev-parse HEAD && git commit -m 'a doc'"
+            ),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and "docs/architecture/clean.md" in verdict.message
+
+    def test_a_dash_c_naming_no_directory_fails_closed(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=bash_payload("git -C /nope/not/here commit -m 'a doc'"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "-C" in verdict.detail
+
+    def test_an_empty_dash_c_leaves_the_directory_where_it_is(self, ctx_factory):
+        """``git -C ""`` is git's own no-op spelling. Reading it as an
+        unresolvable redirection would fail a commit that redirects nothing."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git -C '' commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and "docs/architecture/new.md" in (
+            verdict.message + verdict.detail
+        )
+
+    def test_git_dir_and_work_tree_fail_closed_naming_themselves(self, ctx_factory):
+        """The same class of redirection, not followed. A verdict naming the
+        option it will not follow beats a clean scan of the wrong tree."""
+        for option in ("--git-dir=/elsewhere/.git", "--work-tree /elsewhere"):
+            ctx = ctx_factory(
+                cwd=ctx_factory.main,
+                payload=bash_payload(f"git {option} commit -m 'a doc'"),
+            )
+            verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped, option
+            assert option.split("=")[0].split()[0] in verdict.detail, option
+
+    def test_a_dash_f_message_resolves_against_the_named_tree(self, ctx_factory):
+        """``-C`` changes git's directory before anything else, so a relative
+        ``-F`` name is spelled against the NAMED tree. Reading it against
+        ``ctx.cwd`` scans an unrelated file and passes."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        (wt / "msg.txt").write_text("mail a.person@example.com\n", encoding="utf-8")
+        (main / "msg.txt").write_text("nothing sensitive\n", encoding="utf-8")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload(f"git -C {wt} commit -F msg.txt")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_commit_in_a_repository_outside_the_project_says_so(
+        self, ctx_factory, tmp_path
+    ):
+        """Privacy scope is spelled against THIS project, so it describes no
+        path of an unrelated checkout. The answer is neither a refusal of work
+        this project does not govern — the position ``_is_outside_project``
+        already takes — nor a silent pass: the message is still scanned, and
+        the verdict SAYS the content was not. A pass that names the message
+        route and stays quiet about the content route is the exact reading
+        BUG_048 filed against.
+        """
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        run(["git", "init", "-q", "-b", "master"], other)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=bash_payload(f"git -C {other} commit -m 'a doc'"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+        assert "commit message" in verdict.message
+        assert "was not screened" in verdict.detail and "outside" in verdict.detail
+
+    def test_an_outside_commit_carrying_no_message_abstains_visibly(
+        self, ctx_factory, tmp_path
+    ):
+        """With nothing scanned at all the abstention IS the verdict, and it
+        is a skip rather than a pass (BUG_020)."""
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        run(["git", "init", "-q", "-b", "master"], other)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git -C {other} commit")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "outside the project" in verdict.message
+
+    def test_a_plain_commit_still_reads_the_working_directory(self, ctx_factory):
+        """The no-redirection path is unchanged: BUG_027's fix keeps working."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a doc'"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+
+def commit(cwd, message="wip"):
+    run(["git", "commit", "-qm", message], cwd)
+
+
+class TestPrivacyScreensTheReviewBoundary:
+    """BUG_047 — see docs/backlog/BUG_047.md.
+
+    ``privacy.clean`` is named as an exit gate in six machines and screened
+    nothing in any of them: a transition evaluates it with an empty payload,
+    so ``tool_name`` is ``""``, ``is_edit`` is ``False``, and no command is
+    present to be a commit. Every route it had needed a payload a transition
+    does not have.
+
+    The subject at that boundary is what this session would put into its base
+    branch — the branch's own commits, plus what is still in the index and the
+    working tree. That is ``_changed_set``, the union three other end-of-phase
+    gates already read (BUG_012), and reading it through the same helper is
+    what stops a fifth rule asking the question a fifth way.
+    """
+
+    def test_BUG_047_a_leak_committed_on_the_branch_blocks_the_review(
+        self, ctx_factory
+    ):
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/leak.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/leak.md")
+        commit(wt, "a doc")
+        # No payload: this is the shape a transition hands the rule.
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.skipped, (
+            "privacy.clean abstained at the review boundary it is named to "
+            f"guard: {verdict.message!r}"
+        )
+        assert not verdict.ok and "docs/architecture/leak.md" in (
+            verdict.message + verdict.detail
+        ), (
+            "privacy.clean passed a review whose branch carries personal data "
+            f"into docs/architecture/leak.md: {verdict.message!r}"
+        )
+
+    def test_a_leak_not_yet_committed_blocks_the_review_too(self, ctx_factory):
+        """The index and the working tree are in the subject as well: a review
+        that passes because the leak is not committed YET passes a leak."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/pending.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/pending.md")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_modification_to_a_tracked_file_is_in_the_subject(self, ctx_factory):
+        """The working-tree leg, with nothing staged and nothing committed."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/overview.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_clean_branch_names_what_it_read(self, ctx_factory):
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/clean.md", "nothing personal here")
+        stage(wt, "docs/architecture/clean.md")
+        commit(wt, "a doc")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+        assert "docs/architecture/clean.md" in verdict.message
+
+    def test_a_branch_touching_nothing_in_scope_says_that(self, ctx_factory):
+        wt = ctx_factory.wt
+        shell_write(wt, "src/thing.py", "x = 1")
+        stage(wt, "src/thing.py")
+        commit(wt, "code")
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "privacy": {"scope": ["docs"]}},
+        )
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "privacy scope" in verdict.message
+
+    def test_an_unestablished_changed_set_fails_closed(self, ctx_factory):
+        """No base recorded, nothing declared: the branch's commits cannot be
+        read. An unanswered question is not a pass — the same refusal
+        ``docs.updated`` and ``coverage.meets_floor`` already give here."""
+        ctx = ctx_factory(cwd=ctx_factory.wt, session={"branch": "session/x"})
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "could not be established" in verdict.message
+
+    def test_a_deleted_path_is_not_read_as_unscannable(self, ctx_factory):
+        """A path the branch REMOVES is in the changed set and has no content
+        to read. Failing closed on it would refuse every review that deleted a
+        document."""
+        wt = ctx_factory.wt
+        run(["git", "rm", "-q", "docs/architecture/overview.md"], wt)
+        commit(wt, "drop the overview")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok or verdict.skipped
+
+    def test_bytes_that_do_not_decode_are_counted_as_looked_at(self, ctx_factory):
+        """The same answer the commit route gives a binary blob: nothing that
+        can leak in TEXT form. Counted as scanned, so committing a diagram is
+        not a gate no review can clear."""
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "diagram.md").write_bytes(b"\xff\xfe\x00chart")
+        stage(wt, "docs/architecture/diagram.md")
+        commit(wt, "a diagram")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+        assert "docs/architecture/diagram.md" in verdict.message
+
+    def test_a_scoped_path_that_cannot_be_read_fails_closed(self, ctx_factory):
+        """The one gate whose subject cannot be recovered afterwards. An
+        unreadable file in scope is an unanswered question, not a pass."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/sealed.md", "nothing personal here")
+        stage(wt, "docs/architecture/sealed.md")
+        commit(wt, "a doc")
+        target = wt / "docs" / "architecture" / "sealed.md"
+        target.chmod(0o000)
+        try:
+            ctx = ctx_factory(
+                cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+            )
+            verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        finally:
+            target.chmod(0o644)
+        assert not verdict.ok and not verdict.skipped
+        assert "could not be scanned" in verdict.message
+
+    def test_a_declared_directory_is_not_an_unreadable_file(self, ctx_factory):
+        """A declared file set may name a directory. It holds no text of its
+        own, so it is skipped rather than failed closed."""
+        wt = ctx_factory.wt
+        ctx = ctx_factory(
+            cwd=wt,
+            session={
+                "branch": "session/x",
+                "base": "master",
+                "files": ["docs/architecture"],
+            },
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+
+    def test_an_untracked_file_is_not_in_the_subject(self, ctx_factory):
+        """Stated as a limit rather than left to be discovered. Nothing
+        untracked goes into the base branch; the moment it is added the index
+        carries it here, and the commit boundary screens it either way."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/scratch.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+        # ...and the moment it is staged, it is.
+        stage(wt, "docs/architecture/scratch.md")
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_tool_call_is_still_judged_as_a_tool_call(self, ctx_factory):
+        """The transition route is additive. A payload present means a hook,
+        and the hook routes are untouched."""
+        ctx = ctx_factory(cwd=ctx_factory.main, payload={"tool_name": "Read"})
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+
 class TestPrivacyScopeCoversTheSecondCopies:
     """AUD-15: the scope prefixes came from paths.docs and paths.memory only.
 

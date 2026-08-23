@@ -1756,6 +1756,11 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
     # "everything in scope was clean" are different facts, and reporting the
     # first as the second is how a gate comes to look green while inert.
     scanned: list[str] = []
+    # Something the gate deliberately did NOT read, on a call where it read
+    # something else. Carried onto the verdict rather than dropped, because a
+    # PASS that names one route and stays silent about the route it abstained
+    # on is the shape of defect this rule keeps producing (BUG_001, BUG_020).
+    notes: list[str] = []
 
     if ctx.is_edit:
         target = ctx.target_path
@@ -1767,11 +1772,58 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
     command = str(ctx.tool_input.get("command", "")) if ctx.tool_name == "Bash" else ""
     committing = _is_git_commit(command)
 
+    # WHICH repository the commit is being made in. `-C` and its relatives
+    # move it, and until BUG_048 nothing downstream of `_is_git_commit` asked
+    # — so the gate read `ctx.cwd`'s index and vouched for a commit landing
+    # somewhere else. Resolved before either half runs, because both halves
+    # spell a path against it: the index the staged blobs come from, and the
+    # directory a relative `-F` message file is read from.
+    commit_cwd, redirection = (
+        _git_command_cwd(command, ctx.cwd) if committing else (ctx.cwd, None)
+    )
+    if redirection:
+        return Verdict.fail(
+            "the repository this commit is made in could not be resolved",
+            detail=redirection
+            + " A verdict naming the option it will not follow is the honest "
+            "floor here; a clean scan of the wrong tree is not.",
+            fixes=(
+                "commit from that repository's own directory",
+                (
+                    "or record the exception: invariant override privacy.clean "
+                    "--reason '<why>'"
+                ),
+            ),
+        )
+    # A tree this project does not own. Privacy scope is spelled
+    # project-relative (`_in_privacy_scope`), so it describes no path in
+    # there: scanning would report a scan of nothing. This abstains rather
+    # than refusing for the reason `_is_outside_project` exists at all — a
+    # rule that blocks work in an unrelated checkout is one a project turns
+    # off, and turning it off turns it off for the project it was meant to
+    # govern. The abstention is stated on the verdict, so it is not a silent
+    # pass either.
+    foreign = committing and _is_outside_project(ctx, commit_cwd)
+
+    # A transition hands this rule an EMPTY payload: no tool name, no edit, no
+    # command to be a commit. `privacy.clean` is named as an exit gate by six
+    # machines and every one of its routes needed a payload it does not have
+    # there, so as a review-boundary gate it screened nothing at all
+    # (BUG_047). What the boundary is actually about is the work this session
+    # would put into its base branch.
+    if not ctx.payload:
+        reviewable, refusal = _review_boundary_content_in_scope(ctx, scope)
+        if refusal is not None:
+            return refusal
+        for path, text in reviewable:
+            scanned.append(path)
+            findings.extend(scanner.scan_text(text, path=Path(path)))
+
     if "commit_messages" in scope:
         message = ctx.extra.get("commit_message")
         problem = None
         if not message and ctx.tool_name == "Bash":
-            message, problem = _extract_commit_message(command, cwd=ctx.cwd)
+            message, problem = _extract_commit_message(command, cwd=commit_cwd)
         if problem:
             # Fail closed, per the do-not-relax convention every other
             # unanswerable question here follows (AUD-07/08): a message this
@@ -1785,8 +1837,14 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
             scanned.append("commit message")
             findings.extend(scanner.scan_text(message))
 
-    if committing or ctx.extra.get("committing"):
-        staged, problem = _staged_content_in_scope(ctx, scope)
+    if foreign:
+        notes.append(
+            f"The staged content was not screened: this commit is made in "
+            f"{commit_cwd}, a repository outside this project, and privacy "
+            f"scope names paths of this one."
+        )
+    elif committing or ctx.extra.get("committing"):
+        staged, problem = _staged_content_in_scope(ctx, scope, commit_cwd)
         if problem:
             return Verdict.fail(
                 "the staged content could not be scanned",
@@ -1802,17 +1860,24 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
             scanned.append(path)
             findings.extend(scanner.scan_text(text, path=Path(path)))
 
+    aside = " ".join(notes)
     if not scanned:
-        return Verdict.na(_privacy_screened_nothing(ctx, committing=committing))
+        return Verdict.na(
+            _privacy_screened_nothing(ctx, committing=committing, foreign=foreign),
+            detail=aside,
+        )
     if not findings:
-        return Verdict.clean(f"scanned {', '.join(scanned)}: no matches")
+        return Verdict.clean(
+            f"scanned {', '.join(scanned)}: no matches", detail=aside
+        )
 
     shown = "; ".join(f.describe() for f in findings[:6])
     return Verdict.fail(
         f"{len(findings)} personal-data match(es) in content being written down",
         detail=shown
         + ". Matches are shown redacted on purpose: a report that quotes what "
-        "it found is a second copy of it.",
+        "it found is a second copy of it."
+        + (f" {aside}" if aside else ""),
         fixes=(
             "describe by characteristics rather than identity",
             "resolve operational identifiers at runtime instead of writing them down",
@@ -3153,9 +3218,15 @@ def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
 
 
 def _staged_content_in_scope(
-    ctx: RuleContext, scope: set[str]
+    ctx: RuleContext, scope: set[str], repo: Path | None = None
 ) -> tuple[list[tuple[str, str]], str | None]:
     """What this commit would put into history, for the paths scope covers.
+
+    ``repo`` is the repository the commit is being made IN, which is not
+    always the one the call is standing in: `git -C <other> commit` names a
+    different index, and asking `ctx.cwd` for it screened one tree while
+    vouching for a commit into another (BUG_048). The caller resolves it,
+    because deciding it needs the whole command, not just the paths.
 
     Screening at the COMMIT is what makes the gate independent of the route
     that wrote the file. ``_edit_content`` can only read a payload an edit
@@ -3177,14 +3248,15 @@ def _staged_content_in_scope(
     the one gate here whose subject cannot be recovered afterwards, because
     nothing un-writes an identifier out of a published history.
     """
-    listed = git.staged_files(ctx.cwd, exclude_deleted=True)
+    repo = Path(repo) if repo is not None else ctx.cwd
+    listed = git.staged_files(repo, exclude_deleted=True)
     if listed is None:
         return [], (
-            f"git could not list what is staged in {ctx.cwd}, so the content "
+            f"git could not list what is staged in {repo}, so the content "
             "this commit would put into history could not be read."
         )
 
-    root = git.toplevel(ctx.cwd) or ctx.manifest.root
+    root = git.toplevel(repo) or ctx.manifest.root
     found: list[tuple[str, str]] = []
     for rel in listed:
         # Staged paths are spelled against the repository toplevel, so they
@@ -3192,7 +3264,7 @@ def _staged_content_in_scope(
         # in a subdirectory names the same blobs.
         if not _in_privacy_scope(ctx, Path(root) / rel, scope):
             continue
-        blob = git.staged_blob(ctx.cwd, str(rel))
+        blob = git.staged_blob(repo, str(rel))
         if blob is None:
             return [], (
                 f"{rel} is staged and inside privacy scope, and its staged "
@@ -3210,7 +3282,88 @@ def _staged_content_in_scope(
     return found, None
 
 
-def _privacy_screened_nothing(ctx: RuleContext, *, committing: bool) -> str:
+def _review_boundary_content_in_scope(
+    ctx: RuleContext, scope: set[str]
+) -> tuple[list[tuple[str, str]], Verdict | None]:
+    """What this session would put into its base branch, for the scoped paths.
+
+    The review boundary asks a different question from the commit boundary,
+    and that is why it needs its own reader. A commit is one act with one
+    index; a review is a claim about a whole branch, and by the time it is
+    made the work is committed by construction — so the index, the one thing
+    ``_staged_content_in_scope`` can see, is normally empty there. That is how
+    this gate came to be named by six machines and screen nothing in any of
+    them (BUG_047).
+
+    The subject is therefore the union three other end-of-phase gates already
+    read: the branch's own commits against its base, plus the index and the
+    working tree for what is not committed yet, plus whatever the session
+    declared. That union is ``_changed_set``, and reading it through the same
+    helper is the point — BUG_012 was one insight implemented in one rule and
+    not propagated to the three beside it, and a fifth spelling of the same
+    query is how that recurs.
+
+    Content is read from the working tree, which is what the merge publishes.
+    A path the branch ADDED and later REMOVED still sits in the branch's
+    history and is not read here; it was screened at the commit that added it,
+    which is the boundary that could still refuse it.
+
+    Returns ``(pairs, refusal)``. ``refusal`` is a verdict rather than a
+    string because the two ways this question goes unanswered are different
+    facts with different fixes, and flattening them would cost the reader the
+    one thing that tells them what to do.
+    """
+    changed = _changed_set(ctx)
+    if not changed.answerable:
+        # Never a skip: a gate reporting an unanswerable query as "nothing to
+        # check" is BUG_012 reintroduced, and here it would be reintroduced on
+        # the one gate whose subject cannot be recovered afterwards.
+        return [], _unestablished_changed_set(changed)
+
+    root = _repo_root(ctx)
+    found: list[tuple[str, str]] = []
+    for path in changed.paths:
+        absolute = path if Path(path).is_absolute() else Path(root) / path
+        if not _in_privacy_scope(ctx, absolute, scope):
+            continue
+        try:
+            found.append((_rel(absolute, Path(root)), absolute.read_text("utf-8")))
+        except (FileNotFoundError, IsADirectoryError):
+            # Removed by this change, so nothing of it lands in the merged
+            # tree. Failing closed here would refuse every review that deleted
+            # a document — the same reason `staged_files` grows an
+            # `exclude_deleted`. A DIRECTORY joins it: a declared file set may
+            # name one, and a directory holds no text of its own to leak.
+            continue
+        except UnicodeDecodeError:
+            # Bytes that do not decode carry nothing that can leak in TEXT
+            # form, the answer `PrivacyScanner.scan_file` already gives a
+            # binary file. Counted as looked at, so committing a diagram is
+            # not a gate no review can clear.
+            found.append((_rel(absolute, Path(root)), ""))
+        except OSError as exc:
+            return [], Verdict.fail(
+                "content this session would merge could not be scanned",
+                detail=(
+                    f"{_rel(absolute, Path(root))} is inside privacy scope and "
+                    f"could not be read ({exc.strerror or exc}). An unanswered "
+                    "question is not a pass, and nothing un-writes an "
+                    "identifier out of a published history."
+                ),
+                fixes=(
+                    "invariant privacy scan <path>",
+                    (
+                        "or record the exception: invariant override "
+                        "privacy.clean --reason '<why>'"
+                    ),
+                ),
+            )
+    return found, None
+
+
+def _privacy_screened_nothing(
+    ctx: RuleContext, *, committing: bool, foreign: bool = False
+) -> str:
     """Why this call was not screened, in a sentence that is true OF IT.
 
     One sentence — "nothing in privacy scope was written here" — used to be
@@ -3223,8 +3376,15 @@ def _privacy_screened_nothing(ctx: RuleContext, *, committing: bool) -> str:
     """
     if ctx.is_edit:
         return "nothing in privacy scope was written here"
+    if foreign:
+        return "not screened: this commit is made in a repository outside the project"
     if committing:
         return "no staged path in this commit is inside privacy scope"
+    if not ctx.payload:
+        base = str((ctx.session or {}).get("base") or "the base branch")
+        return (
+            f"no path this session would put into {base} is inside privacy scope"
+        )
     if ctx.tool_name == "Bash":
         return (
             "not screened: a shell command is not read as it runs — what it "
@@ -3288,6 +3448,104 @@ def _is_git_commit(command: str) -> bool:
         if PurePosixPath(token).name == "git":
             saw_git = True
     return False
+
+
+#: git options that take their value as the NEXT token and are not `-C`.
+#: They have to be listed only so the scan steps over their value: a bare
+#: word is otherwise read as the subcommand, and `git -c commit.gpgsign=false
+#: -C <other> commit` would stop at the config pair and never see the `-C`.
+_GIT_VALUE_OPTIONS = frozenset({"-c", "--namespace", "--exec-path", "--super-prefix"})
+
+#: Redirections of the same class as `-C` that this rule will NOT follow.
+#: Resolving them means reproducing git's own gitdir/worktree pairing, and a
+#: half-right resolution here reports a scan of a tree nobody asked about —
+#: the exact failure being fixed. Naming the option and failing closed is the
+#: honest floor (AUD-09).
+_GIT_LAYOUT_OPTIONS = frozenset({"--git-dir", "--work-tree"})
+
+
+def _git_command_cwd(command: str, cwd: Path) -> tuple[Path, str | None]:
+    """The directory the ``git commit`` in this command actually runs in.
+
+    Returns ``(directory, problem)``. ``problem`` is set when the commit
+    redirects git somewhere this will not follow, and the caller fails closed
+    on it.
+
+    Read per INVOCATION rather than per command, because the command is
+    routinely more than one: ``git add -A && git -C <other> commit -m …`` is
+    the chained spelling agents actually emit, and a reader that stopped at
+    the first subcommand would resolve the ``add``'s directory and hand it to
+    the commit. Only the invocation that commits decides, which is also what
+    keeps ``--git-dir`` on a neighbouring ``rev-parse`` from failing a commit
+    it has nothing to do with.
+
+    ``-C`` is REPEATABLE and cumulative within one invocation, each path
+    resolved against the one before — ``git -C a -C b`` runs in ``a/b``. A
+    reader that took the first and stopped would land one directory up, which
+    is usually a real directory with a real index, so the mistake produces a
+    confident scan of the wrong tree rather than an error anyone notices.
+
+    Only git's OWN options are read, which is why each scan stops at the
+    subcommand: ``commit -C <commit>`` reuses another commit's message and has
+    nothing to do with directories, and a reader that kept going would take it
+    for one.
+    """
+    tokens = _shell_tokens(command)
+    index = 0
+    while index < len(tokens):
+        if PurePosixPath(tokens[index]).name != "git":
+            index += 1
+            continue
+        index += 1
+        resolved = Path(cwd)
+        refusal: str | None = None
+        while index < len(tokens):
+            token = tokens[index]
+            head = token.split("=", 1)[0]
+            if head in _GIT_LAYOUT_OPTIONS:
+                # Held, not returned yet: it only matters if this invocation
+                # turns out to be the commit.
+                refusal = refusal or (
+                    f"{head} points git at a repository this scan does not "
+                    "follow, so the content this commit would put into "
+                    "history could not be read."
+                )
+                index += 2 if "=" not in token else 1
+                continue
+            if token == "-C":
+                following = tokens[index + 1] if index + 1 < len(tokens) else ""
+                if not following:
+                    # Nothing to resolve against. Reachable only at the very
+                    # end of the command — where no subcommand follows, so
+                    # this invocation is not the commit — and for the literal
+                    # `-C ""`, which git itself reads as no change of
+                    # directory. Both mean: leave the directory where it is.
+                    break
+                candidate = Path(following)
+                resolved = (
+                    candidate if candidate.is_absolute() else resolved / candidate
+                )
+                index += 2
+                continue
+            if token in _GIT_VALUE_OPTIONS:
+                index += 2
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            break  # the subcommand: what follows belongs to it, not to git
+        if index >= len(tokens) or tokens[index] != "commit":
+            continue  # some other invocation in the chain; keep looking
+        if refusal:
+            return resolved, refusal
+        if not resolved.is_dir():
+            return resolved, (
+                f"-C names {str(resolved)!r}, which is not a directory at scan "
+                "time, so the content this commit would put into history could "
+                "not be read."
+            )
+        return resolved, None
+    return Path(cwd), None
 
 
 def _extract_commit_message(command: str, cwd: Path | None = None) -> tuple[str, str | None]:

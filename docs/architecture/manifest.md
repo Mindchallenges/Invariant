@@ -267,6 +267,10 @@ graph TD
     P --> C
     C --> S["scan what is STAGED,<br/>path by path, against privacy.scope"]
     S --> H["history"]
+    H --> V{"the review boundary"}
+    U --> V
+    V --> B["scan what this branch would put into its base<br/>— its commits, its index, its working tree"]
+    B --> M["the base branch"]
 ```
 
 The commit is the boundary that makes the answer route-independent: nothing in
@@ -281,7 +285,8 @@ enumerate them. Five properties of that scan are deliberate:
 - **`privacy.scope` decides which staged paths are read**, by the same
   project-relative prefix rules as an edit's target. A commit typed in a
   subdirectory names the same blobs, because staged paths are spelled against
-  the repository toplevel.
+  the repository toplevel — but a commit that *redirects git* does not, and
+  the two look alike until you ask which index. See below.
 - **A staged set or a staged blob that cannot be read FAILS**, in the same
   do-not-relax convention as `-F` on an unreadable message (AUD-09). This is
   the one gate whose subject cannot be recovered after the fact.
@@ -292,6 +297,50 @@ enumerate them. Five properties of that scan are deliberate:
   give a binary file. A commit containing a diagram is not a gate no change
   can clear.
 
+#### Which index — a subdirectory and a `-C` are not the same case
+
+A commit typed in a subdirectory and a commit typed as `git -C <other> commit`
+both run somewhere other than where the hook is standing, and only the first
+one names the same blobs. `-C` changes git's working directory for the invoked
+command, so it names a *different repository's index*; the gate read `ctx.cwd`'s
+and vouched for the commit anyway, reporting a scan of blobs with no relation
+to what was landing (BUG_048). The message half had the smaller version of the
+same blindness: a relative `-F` name resolved against the wrong directory.
+
+So the repository is resolved from the command before either half runs:
+
+```mermaid
+graph TD
+    K["git … commit"] --> R{"does the command<br/>redirect git?"}
+    R -- "no" --> W["the call's own directory"]
+    R -- "-C, repeatable<br/>and cumulative" --> D["resolve each against<br/>the one before"]
+    R -- "--git-dir / --work-tree" --> F["FAIL, naming the option<br/>it will not follow"]
+    D --> O{"inside this project?"}
+    W --> S["scan that index"]
+    O -- yes --> S
+    O -- "no — an unrelated checkout" --> A["scan the MESSAGE;<br/>say the content was not"]
+```
+
+Three properties of that resolution are deliberate:
+
+- **`-C` is repeatable and its paths are cumulative**, each resolved against
+  the one before, so `git -C a -C b` runs in `a/b`. A reader that took the
+  first and stopped would land one directory up — usually a real directory
+  with a real index, which makes the mistake a confident scan rather than an
+  error anyone notices.
+- **`--git-dir` and `--work-tree` are not followed, and say so.** Resolving
+  them means reproducing git's own gitdir/worktree pairing, and a half-right
+  resolution reports a scan of a tree nobody asked about — the failure being
+  fixed. Naming the option and failing closed is the honest floor (AUD-09).
+- **A commit into a repository outside this project abstains rather than
+  refusing.** `privacy.scope` is spelled project-relative, so it describes no
+  path in an unrelated checkout and a scan there would report a scan of
+  nothing. Refusing instead is what makes a project turn the rule off — which
+  turns it off for the project it was meant to govern (`_is_outside_project`).
+  The commit *message* is still scanned, and the verdict states that the
+  content was not: a pass naming one route and silent about the other is the
+  reading the bug was filed against.
+
 The skip sentences were rewritten in the same change, because the false one is
 what let the gap survive a long session unnoticed. Each route now states the
 limit that actually applies to it: an edit outside scope still says nothing in
@@ -300,6 +349,54 @@ that is not a commit says it is not read as it runs and that what it writes is
 screened when it is committed. A skip and a pass are different facts, and a
 skip that misstates its own reason is the harder of the two to notice
 (BUG_020).
+
+### The third point: the review boundary
+
+`privacy.clean` is named by six machines at that boundary — as `session`'s
+exit gate on `reviewed`, and as the entry gate of the landing state
+`committed` in `tdd`, `bugfix`, `spec-first`, `docs` and `chore` — and for a
+long time it screened nothing in any of them. Which side of the edge it sits
+on moved with BUG_037 and does not matter here: both are evaluated on a
+TRANSITION, and a transition evaluates a rule with an **empty payload** — no
+tool name, no edit, no command that could be a commit. Every route the gate
+had needed a payload a transition does not have, so the gate that the review
+boundary advertises as its privacy check had never read a byte there
+(BUG_047). Its abstention was at
+least *visible* by then — a block-level skip renders as `[skip:BLOCK]` and is
+counted apart (BUG_020) — but visible inertness is still inertness.
+
+A review asks a different question from a commit, which is why it needs its own
+subject rather than the commit's. A commit is one act with one index; a review
+is a claim about a whole branch, and by the time the claim is made the work is
+committed by construction — so the index, the only thing the commit route can
+see, is normally empty there. The subject is therefore **everything this
+session would put into its base branch**:
+
+- the branch's own commits against its base (`git.branch_files`),
+- the index and the working tree, for what is not committed yet,
+- and whatever file set the session declared.
+
+That union is `_changed_set`, the same one `docs.updated`,
+`docs.diagrams_current` and `coverage.meets_floor` already read at their own
+end-of-phase gates. Reading it through the one helper is the point rather than
+an economy: BUG_012 was a single insight implemented in one rule and not
+propagated to the three beside it, and a fifth spelling of the same query is
+how that recurs. It carries the refusal with it — when no base is recorded,
+nothing was declared, and the branch's commits cannot be read, the changed set
+is *unestablished* and the gate FAILS rather than skipping, because an
+unanswered question is not a negative answer.
+
+Three limits are deliberate, and stated because a control's edges are the part
+a reader has to be able to see. Content is read from the **working tree**,
+which is what the merge publishes; a path the branch added and later removed
+still sits in the branch's history and is not re-read here, having been
+screened at the commit that added it — the boundary that could still have
+refused it. A path that no longer exists is skipped rather than failed closed,
+so a review that deleted a document is not a gate nobody can clear. And a file
+that is **untracked** — never staged, never committed — is in none of the three
+sources, which is correct rather than a hole: nothing untracked goes into the
+base branch, and the moment it is added the index carries it here and the
+commit boundary screens it.
 
 **Deliberately unchanged:** `session.isolated_before_edit`,
 `session.no_edit_in_main_checkout` and `pipeline.started_before_edit` share the

@@ -127,6 +127,16 @@ whose staged content cannot be read FAILS, because this is the one gate whose
 subject cannot be recovered afterwards. Nothing un-writes an identifier out of
 a published history.
 
+The dependency carries two later corrections of the same shape, both of them
+about asking git the RIGHT question rather than a plausible one. `git -C
+<other> commit` names a different repository's index, and the gate read the
+call's own and vouched for the commit anyway, so the repository is now resolved
+from the command before either half of the rule runs (BUG_048). And a
+transition hands the rule an empty payload, so at the review boundary named by
+six machines it had no subject at all and screened nothing — it now reads what
+this session would put into its base branch, through the same `_changed_set`
+union three other end-of-phase gates already use (BUG_047).
+
 **Dependency rule:** arrows point down and never back up. `core/` knows
 nothing about hosts or the CLI. `adapters/` know their ecosystem and nothing
 about state. `hosts/` know their agent host, implement the protocols `core/`
