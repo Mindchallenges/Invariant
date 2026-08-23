@@ -22,7 +22,7 @@ from ..core import git
 from ..core.errors import GateFailure, StateError, TransitionError, UsageError
 from ..core.fsm import Machine
 from ..core.machines import load_session_machine
-from ..core.rules import Evaluated, RuleContext, evaluate
+from ..core.rules import Evaluated, RuleContext, evaluate, get_rule
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore
 
@@ -102,7 +102,21 @@ class Session:
     files: list[str] = field(default_factory=list)
     push_count: int = 0
     history: list[dict] = field(default_factory=list)
+    #: Overrides that have been SPENT — a forced transition, a structural edge
+    #: walked deliberately, or a one-shot token consumed at a hook. The audit
+    #: trail. Silent is not an option the API has.
     overrides: list[dict] = field(default_factory=list)
+    #: Overrides the operator has GRANTED and nothing has spent yet: one entry
+    #: per rule, carrying the reason and how many calls are left on it.
+    #:
+    #: This is the appeal that reaches the delivery surface. Every gate the
+    #: CLI evaluates could already be passed with `--force --reason`, and the
+    #: gates that actually stop an agent are not evaluated by the CLI — twelve
+    #: rules fire from hooks, where a blocking verdict was final: no flag, no
+    #: marker, no prompt, no recorded exception (BUG_049). A grant here is
+    #: consumed by the next evaluation of that rule at a hook, and consuming it
+    #: moves a record into `overrides` above.
+    pending_overrides: list[dict] = field(default_factory=list)
     heartbeat: float = 0.0
     #: The usage watermark at registration (ADR-002 D3). The earlier reading
     #: the first state's spend is subtracted from; ``None`` where it could not
@@ -638,6 +652,104 @@ class SessionDomain:
                 session.files.append(path)
         self._save(session)
         return session
+
+    # -- one-shot overrides -------------------------------------------
+    #
+    # The appeal that reaches a hook. Everything the CLI evaluates already had
+    # one — `session transition --force`, `pipeline advance --force`, `item
+    # transition --force`, each appending an override to the record. The gates
+    # that actually stop an agent are not evaluated by the CLI: seven rules
+    # fire at `pre-tool-use` and five at `stop`, and a blocking verdict there
+    # was final, with the only relief a permanent edit to project policy made
+    # mid-task to get past a single call (BUG_049).
+    #
+    # Deliberately a GRANT and not a flag. A tool call carries no arguments the
+    # operator can add and no environment a running host will re-read, so the
+    # override has to be written down before the call and found by it — which
+    # also means it cannot be spent without leaving a record, and that is the
+    # property that makes it an override rather than a hole.
+
+    def grant_override(
+        self, session_id: str, rule_id: str, reason: str, calls: int = 1
+    ) -> Session:
+        """Let the next ``calls`` evaluations of ``rule_id`` at a hook through."""
+        if not reason or not reason.strip():
+            raise UsageError(
+                "an override requires --reason. An override with no stated "
+                "reason is indistinguishable from the gate never having run, "
+                "which is the thing this library exists to remove."
+            )
+        if get_rule(rule_id) is None:
+            # The same loudness `core.rules.evaluate` already applies to a gate
+            # naming a rule that does not exist, for the same reason: a typo
+            # here is an authority the operator believes they exercised and did
+            # not (BUG_050 is this fault at the configuration layer).
+            raise UsageError(
+                f"no rule {rule_id!r}; 'invariant rules list' shows them all"
+            )
+        if calls < 1:
+            raise UsageError("--calls must be at least 1")
+
+        session = self.require(session_id)
+        session.pending_overrides = [
+            o for o in session.pending_overrides if o.get("rule") != rule_id
+        ]
+        session.pending_overrides.append(
+            {
+                "rule": rule_id,
+                "reason": reason.strip(),
+                "calls": int(calls),
+                "granted": self.clock(),
+            }
+        )
+        self._save(session)
+        return session
+
+    def clear_override(self, session_id: str, rule_id: str | None = None) -> Session:
+        """Withdraw an unspent grant, or all of them."""
+        session = self.require(session_id)
+        session.pending_overrides = (
+            []
+            if rule_id is None
+            else [o for o in session.pending_overrides if o.get("rule") != rule_id]
+        )
+        self._save(session)
+        return session
+
+    def consume_override(
+        self, session_id: str, rule_id: str, surface: str
+    ) -> dict | None:
+        """Spend one call of a grant for ``rule_id``, or answer ``None``.
+
+        Spending it appends to ``overrides`` — the same list a forced
+        transition writes to — so the compliance record shows a gate that was
+        passed deliberately rather than a gate that quietly did not fire.
+        """
+        session = self.get(session_id)
+        if session is None:
+            return None
+        grant = next(
+            (o for o in session.pending_overrides if o.get("rule") == rule_id), None
+        )
+        if grant is None:
+            return None
+
+        remaining = int(grant.get("calls", 1)) - 1
+        if remaining > 0:
+            grant["calls"] = remaining
+        else:
+            session.pending_overrides.remove(grant)
+
+        spent = {
+            "rule": rule_id,
+            "reason": grant.get("reason", "overridden"),
+            "surface": surface,
+            "one_shot": True,
+            "remaining": max(0, remaining),
+        }
+        session.overrides.append(spent)
+        self._save(session)
+        return spent
 
     def record_push(
         self,

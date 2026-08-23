@@ -21,7 +21,13 @@ from ..core.errors import GateFailure, InvariantError, TransitionError, UsageErr
 from ..core.fsm import Machine
 from ..core.machines import load_pipeline_machine
 from ..core.manifest import Level
-from ..core.rules import Evaluated, RuleContext, Verdict, evaluate, get_rule
+from ..core.rules import (
+    Evaluated,
+    RuleContext,
+    apply_acknowledgements,
+    evaluate,
+    get_rule,
+)
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore
 
@@ -326,49 +332,15 @@ class PipelineDomain:
             session=session,
             pipeline=pipeline.to_dict(),
         )
-        return self._apply_acknowledgements(pipeline, evaluate(gate_ids, ctx))
-
-    def _apply_acknowledgements(
-        self, pipeline: Pipeline, verdicts: list[Evaluated]
-    ) -> list[Evaluated]:
-        """Turn an acknowledged advisory failure into a recorded skip.
-
-        Not a silencer. The reason travels with the verdict and shows in
-        ``pipeline status``, so "considered and declined" stops being
-        indistinguishable from "never read" — which is the real defect a
-        repeating warning has, more than the repetition is.
-        """
-        acknowledged = pipeline.evidence.get("acknowledged") or {}
-        if not acknowledged:
-            return verdicts
-
-        out: list[Evaluated] = []
-        for evaluated in verdicts:
-            reason = acknowledged.get(evaluated.rule_id)
-            if (
-                reason
-                and not evaluated.verdict.ok
-                and evaluated.level is not Level.BLOCK
-            ):
-                out.append(
-                    Evaluated(
-                        evaluated.rule_id,
-                        evaluated.level,
-                        Verdict.na(f"acknowledged — {reason}"),
-                    )
-                )
-            else:
-                out.append(evaluated)
-        return out
+        return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
 
     def acknowledge(self, session_id: str, rule_id: str, reason: str) -> Pipeline:
         """Record a deliberate decision to proceed against an advisory gate.
 
-        Refused for blocking gates. Allowing it there would make ``block`` and
-        ``warn`` the same level with different spelling, and the whole design
-        rests on those being different: a blocking gate is dealt with, or
-        overridden on the transition itself where the override is recorded
-        against that transition rather than standing for the rest of the run.
+        Refused for a gate that stops work. Allowing it there would make
+        ``block`` and ``warn`` the same level with different spelling, and the
+        whole design rests on those being different: an enforced gate is dealt
+        with, or overridden where the override is recorded.
         """
         if not reason or not reason.strip():
             raise UsageError(
@@ -377,18 +349,22 @@ class PipelineDomain:
                 "thing this is designed not to be."
             )
 
-        if get_rule(rule_id) is None:
+        spec = get_rule(rule_id)
+        if spec is None:
             raise UsageError(
                 f"no rule {rule_id!r}; 'invariant rules list' shows them all"
             )
 
         level = self.manifest.rule_level(rule_id)
-        if level is Level.BLOCK:
+        if level in (Level.BLOCK, Level.ASK):
+            try:
+                machine = self.machine_for(self.require(session_id))
+            except InvariantError:
+                machine = self.machine
             raise UsageError(
-                f"{rule_id} blocks in this project and cannot be acknowledged.\n"
-                f"  Satisfy it, or record a deliberate override on the "
-                f"transition itself:\n"
-                f"    invariant pipeline advance <state> --force --reason '<why>'"
+                f"{rule_id} {level.value}s in this project and cannot be "
+                f"acknowledged.\n"
+                + _override_routes(rule_id, spec.events, machine)
             )
         if level is Level.OFF:
             raise UsageError(f"{rule_id} is off in this project; nothing to acknowledge")
@@ -816,6 +792,47 @@ class PipelineDomain:
             self._path(session_id),
             {"current": pipeline.to_dict(), "completed": completed},
         )
+
+
+def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) -> str:
+    """The commands that can actually pass THIS rule, and only those.
+
+    This message is the one place in the library where overriding a gate that
+    stops work is discussed, and it used to name `pipeline advance --force`
+    unconditionally. For a rule that fires on a TOOL CALL there is no
+    transition to force — the block happened at `pre-tool-use` or at `stop` —
+    so the single piece of advice on offer pointed at a command that could not
+    help, which is worse than saying there is no override (AUTH-01).
+
+    Both halves are checked against what is actually true here rather than
+    assumed. A rule can be both — `privacy.clean` fires on an edit AND guards
+    this machine's `reviewing` exit — and a rule can be neither: `docs.updated`
+    guards a state of `spec-first` and of no other shipped methodology, so in a
+    `tdd` project the advice to force a transition names a transition that does
+    not exist. Where neither route is real the message says so, which is the
+    one answer the old text could never give.
+    """
+    routes = []
+    if events:
+        routes.append(
+            f"    invariant override {rule_id} --reason '<why>'\n"
+            f"      (it fires on {', '.join(events)}; one call, then it is spent)"
+        )
+    if rule_id in machine.gate_ids():
+        routes.append(
+            "    invariant pipeline advance <state> --force --reason '<why>'\n"
+            f"      (it gates a state of the {machine.id!r} pipeline)"
+        )
+    if not routes:
+        return (
+            f"  Nothing can override it here: it fires at no host event and "
+            f"gates no state of\n  the {machine.id!r} pipeline. Satisfy it, or "
+            f"change its level in the manifest."
+        )
+    return (
+        "  Satisfy it, or record a deliberate override — where it is RECORDED:\n"
+        + "\n".join(routes)
+    )
 
 
 def describe_run(record: dict) -> str:

@@ -658,7 +658,16 @@ class ClaudeCodeHost:
         rule_ctx = ctx.rule_context(payload=payload)
         verdicts = evaluate_event("stop", rule_ctx)
 
-        blocking = [v for v in verdicts if v.blocks]
+        # `ask` cannot reach this surface — the host discards a question asked
+        # at the end of a turn — so an ask-level verdict blocks here like any
+        # other. The one-shot token is the appeal that does reach it, and it is
+        # why the token exists alongside the ask level rather than instead of
+        # it (AUTH-01).
+        blocking, spent = _spend_overrides(
+            [v for v in verdicts if v.blocks], rule_ctx, ctx, surface="stop"
+        )
+        notices = [_override_notice(v, record) for v, record in spent]
+
         if blocking:
             return {
                 "decision": "block",
@@ -666,10 +675,10 @@ class ClaudeCodeHost:
                 + "\n".join(v.render() for v in blocking),
             }
 
-        warning = [v for v in verdicts if v.warns]
-        if warning:
+        notices += [v.render() for v in verdicts if v.warns]
+        if notices:
             # Advisory here means advisory: surfaced, and the turn still ends.
-            return {"systemMessage": "\n".join(v.render() for v in warning)}
+            return {"systemMessage": "\n".join(notices)}
         return {}
 
     def _bind_started_session(self, payload: dict, ctx) -> None:
@@ -745,25 +754,48 @@ class ClaudeCodeHost:
         return {}
 
     def _pre_tool_use(self, payload: dict, ctx) -> dict:
+        """The surface where the operator meets the tool, and the only one with
+        a human in the loop.
+
+        Three decisions leave here, not two. The host's contract has carried
+        ``ask`` alongside ``allow`` and ``deny`` all along — it routes the call
+        to the human with the reason attached — and this library only ever
+        emitted ``deny``, so the human was never offered the choice on a gate
+        the project might want to be asked about rather than stopped by. That
+        is a delivery question, which is the axis ``Level`` already exists on
+        (AUTH-01).
+
+        A ``deny`` still has an appeal, because ``ask`` is not one: an
+        ask-level rule is one the project chose to soften, and the operator
+        cannot soften a rule from inside the call it is refusing. A one-shot
+        override granted beforehand is spent here, and spending it is recorded.
+        """
         rule_ctx = ctx.rule_context(payload=payload)
         verdicts = evaluate_event("pre-tool-use", rule_ctx)
 
-        blocking = [v for v in verdicts if v.blocks]
-        warning = [v for v in verdicts if v.warns]
+        asking = [v for v in verdicts if v.asks]
+        denying, spent = _spend_overrides(
+            [v for v in verdicts if v.blocks and not v.asks],
+            rule_ctx,
+            ctx,
+            surface="pre-tool-use",
+        )
+        notices = [_override_notice(v, record) for v, record in spent]
+        notices += [v.render() for v in verdicts if v.warns]
 
-        if blocking:
-            reason = "\n".join(v.render() for v in blocking)
+        if denying or asking:
+            stopped = denying or asking
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
+                    "permissionDecision": "deny" if denying else "ask",
+                    "permissionDecisionReason": "\n".join(
+                        v.render() for v in stopped
+                    ),
                 }
             }
-        if warning:
-            return _context_response(
-                "PreToolUse", "\n".join(v.render() for v in warning)
-            )
+        if notices:
+            return _context_response("PreToolUse", "\n".join(notices))
         return {}
 
     def _post_tool_use(self, payload: dict, ctx) -> dict:
@@ -986,6 +1018,52 @@ _SESSION_START = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+start\b")
 #: The identifier `session start` prints. Parsed rather than guessed, so the
 #: binding names the session that command actually created.
 _STARTED_ID = re.compile(r"session\s+([0-9a-z]+)\s+\(")
+
+
+def _spend_overrides(stopped, rule_ctx, ctx, *, surface: str):
+    """Let a granted one-shot override past the verdicts that would stop a call.
+
+    Returns the verdicts still stopping it, and the ones an override paid for
+    paired with the record of that payment. Consumption happens HERE, at the
+    delivery surface, and never inside ``core.rules.evaluate``: a rule is a
+    question about the world and asking it must not change the world. It is
+    also why the token is spent only where the verdict actually stops
+    something — an override burnt by a rule that was passing anyway would be
+    gone by the time the operator needed it.
+    """
+    if not stopped or not rule_ctx.session:
+        return list(stopped), []
+
+    session_id = rule_ctx.session.get("id")
+    if not session_id:
+        return list(stopped), []
+
+    remaining, spent = [], []
+    for verdict in stopped:
+        record = ctx.sessions.consume_override(
+            session_id, verdict.rule_id, surface=surface
+        )
+        if record is None:
+            remaining.append(verdict)
+        else:
+            spent.append((verdict, record))
+    return remaining, spent
+
+
+def _override_notice(verdict, record: dict) -> str:
+    """What a spent override says out loud, in the turn that spent it.
+
+    Loud on purpose. The override is recorded on the session either way, and a
+    record nobody reads until afterwards is not the same as being told now that
+    a gate one relies on has just been stood aside for this call.
+    """
+    left = record.get("remaining", 0)
+    tail = f"{left} call(s) left" if left else "spent"
+    return (
+        f"[override] {verdict.rule_id}: passed deliberately — "
+        f"{record.get('reason', 'overridden')} ({tail})\n"
+        f"        it would have said: {verdict.verdict.message}"
+    )
 
 
 def _bind_started_session_id(response: str) -> str | None:

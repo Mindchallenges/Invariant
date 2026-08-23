@@ -124,7 +124,7 @@ class TestEnforcementResolution:
 
     def test_invalid_level_is_rejected_with_the_valid_ones(self, tmp_path):
         write_manifest(tmp_path, {"enforcement": {"rules": {"privacy.clean": "shout"}}})
-        with pytest.raises(ManifestError, match="block, warn, off"):
+        with pytest.raises(ManifestError, match="block, ask, warn, off"):
             Manifest.load(tmp_path)
 
 

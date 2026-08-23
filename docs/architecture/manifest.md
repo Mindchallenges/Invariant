@@ -67,6 +67,7 @@ enforcement:
   rules:                       # per-rule overrides on top of the profile
     session.own_file_set_only: block
     memory.index_current: warn
+    privacy.clean: ask         # block | ask | warn | off — see "Levels" below
 
 session:
   exempt_paths: [".claude/*", ".claude/**", "MEMORY.md"]
@@ -110,6 +111,86 @@ agents:
 host:
   kind: claude_code
 ```
+
+### Levels, and where each one can be delivered
+
+A level is **how a verdict is delivered, not a property of the rule's logic**.
+That is what makes D10 and D11 compose: a project retunes policy without
+touching code.
+
+| Level | At `pre-tool-use` | At `stop`, at a transition, in `invariant check` |
+|---|---|---|
+| `block` | the call is denied | work stops |
+| `ask` | the call goes to the **human**, with the verdict as its reason | work stops |
+| `warn` | the verdict is injected as context; the call proceeds | reported; nothing stops |
+| `off` | the rule does not run | the rule does not run |
+
+`ask` is the newest and the one with a seam worth stating. The agent host's
+permission contract has always carried an *ask* decision alongside allow and
+deny — it routes the call to the operator with the reason attached — and this
+library only ever emitted `deny`, so a rule the project wanted to be *asked*
+about had two settings, "stop the work" and "say nothing" (AUTH-01).
+
+Its second row is the important one. **An `ask` delivered where there is
+nobody to ask stops the work.** The `stop` hook's output is a decision the host
+acts on, not a question it can put to anyone; a transition gate is evaluated by
+a CLI command that may be running unattended. Passing there would mean a level
+whose enforcement silently depended on which surface happened to evaluate it,
+and this library's standing asymmetry decides that case: a spurious block is
+visible and self-correcting, a silent pass is neither. What reaches those
+surfaces instead is the override token below.
+
+### The override token, and why it is a grant rather than a flag
+
+Every gate the CLI evaluates can be passed deliberately — `session transition
+--force --reason`, `pipeline advance --force --reason`, `item transition
+--force --reason` — and each appends an override to the record. For a long time
+the gates that actually stop an agent could not be: seven rules fire at
+`pre-tool-use` and five at `stop`, and a blocking verdict there was final. No
+flag, no marker, no prompt, no recorded exception. The only relief was editing
+committed project policy, mid-task, to get past a single call (BUG_049).
+
+```
+invariant override <rule.id> --reason '<why>' [--calls N]
+invariant override <rule.id> --clear
+```
+
+It is a **grant written down before the call**, and it has to be, because a
+tool call is not a command the operator types: it carries no argument they can
+add, and no environment a running host will re-read — a hook subprocess
+inherits the environment the host was launched with, which is why
+`INVARIANT_DISABLE` cannot reach one mid-session.
+
+```mermaid
+graph TD
+    V["a verdict that stops the call"] --> A{"level"}
+    A -- "ask, at pre-tool-use" --> H["the human decides, in band"]
+    A -- "ask, anywhere else" --> S["work stops"]
+    A -- block --> G{"an unspent grant<br/>for this rule?"}
+    S --> G
+    G -- no --> D["denied — the verdict is the reason"]
+    G -- yes --> P["one call passes; the grant is spent"]
+    P --> R["appended to session.overrides:<br/>rule, reason, surface"]
+```
+
+Four properties are deliberate:
+
+- **Spending it is recorded**, in the same `overrides` list a forced transition
+  writes to, naming the rule, the reason and the surface. An override that
+  leaves no trace is indistinguishable from the gate never having run.
+- **It is spent only where the verdict actually stops something.** A token
+  burnt by a rule that was passing anyway would be gone at the moment the
+  operator needed it.
+- **It is consumed at the delivery surface, never inside `core/rules`.** A rule
+  is a question about the world, and asking it must not change the world.
+- **An unspent grant is loud** — `session status` prints it above the fold,
+  because a held override is enforcement the operator turned off and may well
+  have forgotten.
+
+`ask` and the token are not alternatives. `ask` puts the human in the loop at
+`pre-tool-use` and reaches nothing else; the token reaches `stop` too and
+leaves a record, which a host-side approval does not — a human approval arrives
+back through the host and is not observable to this library at all.
 
 ### Declared stores are writable stores
 
@@ -365,7 +446,8 @@ project: { name: example, ecosystems: [python] }
 ## Validation
 
 `Manifest.validate()` runs on every load and refuses, with a named reason: an
-unsupported `version`, an unparseable enforcement level, a non-list
+unsupported `version`, an unparseable enforcement level (`block`, `ask`, `warn`
+or `off`), a non-list
 `privacy.scope`, an unknown `items.backend`, and — because several gates used
 to skip, silently and non-blocking, exactly when this was mistyped (AUD-08) —
 a `methodology.pipeline` that names no shipped or `extra_machines` machine.

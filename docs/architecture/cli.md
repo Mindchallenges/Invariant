@@ -163,9 +163,21 @@ invariant pipeline coverage
 
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
-    reports as skipped, carrying that reason, for the rest of the pipeline.
-    Refused for blocking gates: satisfy those, or record an override on the
-    transition with `advance --force --reason`.
+    reports as skipped, carrying that reason, for the rest of the pipeline —
+    at a transition AND at a hook. The acknowledgement used to be read only by
+    `PipelineDomain.evaluate_gates`, so a warn-level rule bound to a host event
+    repeated on every tool call for the life of the run with the
+    acknowledgement recorded and inert (AUTH-01). Both routes now read one
+    function, `core.rules.apply_acknowledgements`.
+
+    Refused for a gate that stops work — `block` or `ask`. Satisfy those, or
+    override them, and the refusal now names only the routes that can actually
+    reach THIS rule: `invariant override` where it fires at a hook,
+    `advance --force --reason` where it gates a state of the pipeline being
+    run, both where both are true, and neither-plus-a-reason where neither is.
+    It used to name `advance --force` unconditionally, which for a rule that
+    fired on a tool call pointed at a command that could not help — worse than
+    saying there is no override.
 
 invariant session adopt <host-id> [--id <id>] [--force]
     Bind a host session to an invariant session. Normally automatic; needed by
@@ -307,7 +319,33 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
                                  to no particular event.
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
+
+invariant override <rule-id> --reason "<why>" [--calls N] [--id <sid>]
+invariant override <rule-id> --clear [--id <sid>]
+    Pass a rule that fires at a HOOK, deliberately, with the decision
+    recorded. The next N evaluations of that rule at `pre-tool-use` or `stop`
+    are let through; spending one appends to the session's `overrides` — the
+    same list a forced transition writes to — naming the rule, the reason and
+    the surface. An unspent grant shows in `session status`.
+
+    This is the appeal for the surface the operator actually meets. Everything
+    the CLI evaluates already had one; the twelve rules that fire from hooks
+    did not, and a blocking verdict there was final, with the only relief a
+    permanent edit to project policy made mid-task to get past a single call
+    (BUG_049).
+
+    A GRANT, not a flag, because there is nothing for a flag to be on: a tool
+    call carries no argument the operator can add and no environment a running
+    host will re-read. `--reason` is required for the same reason `--force`
+    requires one — an override with no stated reason is indistinguishable from
+    the gate never having run.
 ```
+
+**A rule set to `ask` is not overridden by this and does not need to be.** At
+`pre-tool-use` an `ask` verdict is delivered to the human as the host's `ask`
+decision, which is the override, in band, with the verdict as its reason. At
+every other surface there is nobody to ask, so it stops the work and the token
+is what passes it. See `manifest.md` § Levels.
 
 ## State maintenance
 

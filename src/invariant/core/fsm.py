@@ -194,6 +194,20 @@ class Machine:
     def states_with_role(self, role: str) -> tuple[str, ...]:
         return tuple(s.id for s in self.states.values() if role in s.roles)
 
+    def gate_ids(self) -> frozenset[str]:
+        """Every rule this machine names as a gate, on any state, either side.
+
+        Asked by anything that has to answer "is there a transition here that
+        could be forced past this rule". Advice that names a command which
+        cannot reach the rule it is about is worse than advice that says there
+        is no route (AUTH-01).
+        """
+        return frozenset(
+            gate
+            for state in self.states.values()
+            for gate in state.entry_gates + state.exit_gates
+        )
+
     # -- gate injection ------------------------------------------------
 
     def inject_gates(

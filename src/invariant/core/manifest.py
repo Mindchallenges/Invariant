@@ -34,9 +34,25 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 class Level(str, Enum):
-    """How a rule's verdict is delivered. Not a property of the rule's logic."""
+    """How a rule's verdict is delivered. Not a property of the rule's logic.
+
+    ``ASK`` is the level that puts a human back in the loop. The agent host's
+    permission contract carries an *ask* decision alongside allow and deny, and
+    for a long time this library only ever emitted deny — so a rule whose
+    failure the operator might legitimately want to wave through had exactly
+    two settings, "stop the work" and "say nothing" (BUG_049/AUTH-01).
+
+    It is delivered as an ask only where there is somebody to ask: the
+    ``pre-tool-use`` surface. Everywhere else — the ``stop`` surface, a
+    transition gate, ``invariant check`` — an ``ask`` verdict STOPS the work,
+    in the same do-not-relax convention the rest of the engine uses. A
+    spurious block is visible and self-correcting; a silent pass is neither.
+    The one-shot override token (``invariant override``) is the appeal that
+    reaches those surfaces.
+    """
 
     BLOCK = "block"
+    ASK = "ask"
     WARN = "warn"
     OFF = "off"
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -1618,7 +1619,12 @@ class TestStopDeliversTheCloseoutDemand:
 
         def rule_context(self, payload=None):
             self.seen_payload = payload
-            return payload
+            # A real RuleContext, because `_stop` now reads `.session` off it
+            # to look for a granted one-shot override (AUTH-01). `None` here
+            # is the honest value for a doubled context that owns no session,
+            # and it is what makes these cases about DELIVERY alone — the
+            # override path is exercised end to end in `test_authority.py`.
+            return SimpleNamespace(session=None, payload=payload or {})
 
     def evaluate_to(self, monkeypatch, verdicts):
         monkeypatch.setattr(claude_code, "evaluate_event", lambda event, ctx: verdicts)

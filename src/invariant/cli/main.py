@@ -742,10 +742,53 @@ def cmd_session_status(args) -> int:
     ]
     if pipeline:
         text.append(f"  pipeline   {pipeline.methodology} in {pipeline.state}")
+    # Loud, and above the fold. A held override is enforcement the operator
+    # turned off and may well have forgotten; the whole reason it is a recorded
+    # grant rather than a flag is that it can be seen and withdrawn.
+    for grant in session.pending_overrides:
+        text.append(
+            f"  override   {grant['rule']} — {grant['reason']} "
+            f"({grant.get('calls', 1)} call(s) left)"
+        )
     return emit(
         args,
         {"session": session.to_dict(), "pipeline": pipeline.to_dict() if pipeline else None},
         "\n".join(text),
+    )
+
+
+def cmd_override(args) -> int:
+    """Grant, or withdraw, a one-shot pass for a rule that fires at a hook.
+
+    Deliberately a top-level command rather than a flag on something. There is
+    nothing for it to be a flag ON: the call it covers is a tool call the agent
+    host makes, which carries no arguments the operator can add and no
+    environment a running host will re-read. The grant has to exist before the
+    call and be found by it (BUG_049).
+    """
+    ctx = Context()
+    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+
+    if args.clear:
+        updated = ctx.sessions.clear_override(session.id, args.rule)
+        return emit(
+            args,
+            updated.to_dict(),
+            f"withdrew any unspent override for {args.rule}",
+        )
+
+    updated = ctx.sessions.grant_override(
+        session.id, args.rule, args.reason, calls=args.calls
+    )
+    level = ctx.manifest.rule_level(args.rule).value
+    return emit(
+        args,
+        updated.to_dict(),
+        f"override granted for {args.rule} ({level} in this project)\n"
+        f"  reason: {args.reason}\n"
+        f"  good for {args.calls} call(s) at a hook, then it is spent\n"
+        f"  spending it is recorded on this session; withdraw it with "
+        f"--clear",
     )
 
 
@@ -1785,6 +1828,17 @@ def build_parser() -> argparse.ArgumentParser:
     q = sub.add_parser("hook")
     q.add_argument("event")
     q.set_defaults(func=cmd_hook)
+
+    q = sub.add_parser(
+        "override",
+        help="pass a rule that fires at a hook, once, with the decision recorded",
+    )
+    q.add_argument("rule")
+    q.add_argument("--reason", help="required unless --clear")
+    q.add_argument("--calls", type=int, default=1, help="how many calls it covers")
+    q.add_argument("--clear", action="store_true", help="withdraw an unspent grant")
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_override)
 
     q = sub.add_parser("context")
     q.add_argument("--id", help="the session to report on, when the directory cannot say")

@@ -166,6 +166,47 @@ they are being asked: a transition *entering* `merged` or `pushed` carries the
 `merging` / `pushing` context, so those gates judge the machine transition
 rather than parsing an empty command string and abstaining.
 
+### The two override lists
+
+The session record carries two, and the difference between them is tense.
+
+| Field | Holds | Written by |
+|---|---|---|
+| `overrides` | overrides that have been **spent** | a forced transition, a structural edge walked deliberately, a one-shot token consumed at a hook |
+| `pending_overrides` | grants nothing has spent **yet** | `invariant override <rule> --reason` |
+
+`overrides` is the audit trail and has always existed. `pending_overrides` is
+the half that was missing, and it exists because of where the gates that stop
+an agent actually live. Every gate the CLI evaluates could already be passed
+with `--force --reason`; twelve rules are evaluated by *hooks*, and a blocking
+verdict there was final — no flag, no marker, no prompt, no recorded exception
+(BUG_049). A hook fires on a tool call, which carries no argument the operator
+can add and no environment a running host will re-read, so the appeal has to be
+something written down **before** the call and found by it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> granted: invariant override <rule> --reason
+    granted --> granted: a call that rule did not stop
+    granted --> spent: the call it was granted for
+    granted --> withdrawn: invariant override <rule> --clear
+    spent --> [*]
+    withdrawn --> [*]
+```
+
+The self-loop is the property worth stating: a grant is consumed only where the
+verdict **actually stops the call**. A token burnt by a rule that was passing
+anyway would be gone at the moment the operator needed it. Consumption happens
+in the host adapter, at the delivery surface, and never inside
+`core.rules.evaluate` — a rule is a question about the world, and asking it must
+not change the world.
+
+Spending one appends to `overrides` with the rule, the reason and the surface
+that spent it, so the compliance record shows a gate passed deliberately rather
+than a gate that quietly did not fire. An unspent grant prints in
+`session status`, because a held override is enforcement the operator turned off
+and may well have forgotten.
+
 ### Host binding
 
 A host session and an invariant session are **1:1**. The binding is what makes

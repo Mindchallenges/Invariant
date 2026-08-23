@@ -28,4 +28,5 @@ adr/ADR-002-session-telemetry
 :caption: Audits
 
 audits/mission-audit-2026-08
+audits/authority-audit-2026-08
 ```

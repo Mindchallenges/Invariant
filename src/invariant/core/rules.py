@@ -137,6 +137,17 @@ class RuleSpec:
     fn: Callable[["RuleContext"], Verdict]
 
 
+#: How each level prints when it is the part that decides whether work stops.
+#: `block` shouts because it ends the turn; `ask` does not, because the answer
+#: is a question the reader is about to be asked rather than a refusal.
+_MARKER = {
+    Level.BLOCK: "BLOCK",
+    Level.ASK: "ask",
+    Level.WARN: "warn",
+    Level.OFF: "off",
+}
+
+
 @dataclass(frozen=True)
 class Evaluated:
     rule_id: str
@@ -145,8 +156,26 @@ class Evaluated:
 
     @property
     def blocks(self) -> bool:
+        """Work stops here unless something deliberate intervenes.
+
+        ``ask`` counts. It is a softer DELIVERY, not a softer verdict: at
+        ``pre-tool-use`` the host routes the call to a human, and at every
+        other surface there is no human in that loop, so the fail-closed
+        answer is the only honest one. Callers that can actually ask somebody
+        separate the two with :attr:`asks`; everyone else treats an
+        unanswered ask as a stop (AUTH-01).
+        """
         return (
-            self.level is Level.BLOCK
+            self.level in (Level.BLOCK, Level.ASK)
+            and not self.verdict.ok
+            and not self.verdict.skipped
+        )
+
+    @property
+    def asks(self) -> bool:
+        """This verdict stops the work, and a human may release it in band."""
+        return (
+            self.level is Level.ASK
             and not self.verdict.ok
             and not self.verdict.skipped
         )
@@ -167,9 +196,11 @@ class Evaluated:
         level, so on its own it cannot separate "an advisory gate did not
         apply" from "a gate this project blocks on did not apply". Only the
         second is worth a reader's attention on the default path, and the
-        delivery layer is the one that owns that distinction.
+        delivery layer is the one that owns that distinction. ``ask`` is an
+        enforced level by the same test — a rule the project asks about going
+        inert is news for the same reason.
         """
-        return self.level is Level.BLOCK and self.verdict.skipped
+        return self.level in (Level.BLOCK, Level.ASK) and self.verdict.skipped
 
     def render(self) -> str:
         """One line per verdict, led by what HAPPENED.
@@ -185,13 +216,11 @@ class Evaluated:
             # The level rides along on a blocking skip for the same reason it
             # leads on a failure: it is the part that tells the reader whether
             # something they rely on just stopped applying.
-            marker = "skip:BLOCK" if self.skipped_blocking else "skip"
+            marker = f"skip:{_MARKER[self.level]}" if self.skipped_blocking else "skip"
         elif self.verdict.ok:
             marker = "ok"
         else:
-            marker = {Level.BLOCK: "BLOCK", Level.WARN: "warn", Level.OFF: "off"}[
-                self.level
-            ]
+            marker = _MARKER[self.level]
         lines = [f"[{marker}] {self.rule_id}: {self.verdict.message}"]
         if self.verdict.detail:
             lines.append(f"        {self.verdict.detail}")
@@ -303,7 +332,55 @@ def evaluate(rule_ids: Iterable[str], ctx: RuleContext) -> list[Evaluated]:
 
 
 def evaluate_event(event: str, ctx: RuleContext) -> list[Evaluated]:
-    return evaluate([spec.id for spec in rules_for_event(event)], ctx)
+    return apply_acknowledgements(ctx.pipeline, evaluate(
+        [spec.id for spec in rules_for_event(event)], ctx
+    ))
+
+
+def apply_acknowledgements(
+    pipeline: Mapping[str, Any] | None, verdicts: list[Evaluated]
+) -> list[Evaluated]:
+    """Turn an acknowledged advisory failure into a recorded skip.
+
+    Not a silencer. The reason travels with the verdict and shows wherever the
+    verdict shows, so "considered and declined" stops being indistinguishable
+    from "never read" — which is the real defect a repeating warning has, more
+    than the repetition is.
+
+    It lives here rather than in ``domains/pipeline`` because it was written
+    there and only ever ran there: hooks reach the registry through
+    :func:`evaluate_event`, which never consulted the evidence, so a warn-level
+    rule bound to a HOST EVENT could not be acknowledged into silence at all —
+    it repeated on every tool call for the life of the run, with the
+    acknowledgement recorded and inert (AUTH-01). One function, both routes.
+
+    A ``block``-level verdict is never acknowledged, and neither is an ``ask``:
+    both are levels the project chose in order to be stopped, and letting an
+    acknowledgement past them would make every level the same one spelled
+    differently (ADR-001 D20). Their appeal is ``invariant override``.
+    """
+    acknowledged = ((pipeline or {}).get("evidence") or {}).get("acknowledged") or {}
+    if not acknowledged:
+        return verdicts
+
+    out: list[Evaluated] = []
+    for evaluated in verdicts:
+        reason = acknowledged.get(evaluated.rule_id)
+        if (
+            reason
+            and not evaluated.verdict.ok
+            and evaluated.level not in (Level.BLOCK, Level.ASK)
+        ):
+            out.append(
+                Evaluated(
+                    evaluated.rule_id,
+                    evaluated.level,
+                    Verdict.na(f"acknowledged — {reason}"),
+                )
+            )
+        else:
+            out.append(evaluated)
+    return out
 
 
 # -- session rules -----------------------------------------------------
