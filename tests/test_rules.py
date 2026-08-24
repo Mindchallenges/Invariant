@@ -1776,6 +1776,120 @@ class TestPrivacyScreensTheReviewBoundary:
         assert verdict.skipped and "not screened" in verdict.message
 
 
+class TestPrivacyScreensWhatTheMergeWouldPublish:
+    """The review boundary reads content from the working tree, and at
+    ``session merge`` that is the wrong tree.
+
+    ``session merge`` must run from the MAIN checkout — merging inside the
+    branch's own worktree merges it into itself and exits zero. So by the time
+    this gate runs, ``_repo_root`` is the main checkout, whose working tree
+    still holds the PRE-merge text. The fixed text exists only in the session
+    branch's commit, which the merge has not published yet.
+
+    For most sessions the two agree and nothing is wrong. It bites exactly the
+    session that REMOVES a violation from a tracked file: the gate re-reads the
+    copy being replaced, finds the very text the branch fixes, and refuses. The
+    remediation the gate exists to encourage is the one thing it cannot pass.
+    """
+
+    def _leak_on_master_fixed_on_the_branch(self, ctx_factory):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        rel = "docs/architecture/overview.md"
+        # The violation is PRE-EXISTING: it is on master before the session.
+        shell_write(main, rel, "contact a.person@example.com")
+        stage(main, rel)
+        commit(main, "a doc that leaks")
+        # The branch takes it, then fixes it.
+        run(["git", "merge", "-q", "master"], wt)
+        shell_write(wt, rel, "contact the maintainer")
+        stage(wt, rel)
+        commit(wt, "stop leaking")
+        return rel
+
+    def test_a_branch_that_FIXES_a_leak_can_be_merged(self, ctx_factory):
+        rel = self._leak_on_master_fixed_on_the_branch(ctx_factory)
+        # The shape `session merge` hands the rule: no payload, run from the
+        # main checkout, with the session naming the files it touched.
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            session={"branch": "session/x", "base": "master", "files": [rel]},
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok, (
+            "privacy.clean refused a merge whose branch REMOVES the personal "
+            "data it is refusing over — it read the main checkout's "
+            f"pre-merge copy instead of what the merge publishes: "
+            f"{verdict.message!r} {verdict.detail!r}"
+        )
+
+    def test_a_branch_that_ADDS_a_leak_is_still_refused(self, ctx_factory):
+        """The must-fail direction. A reader that stops consulting the working
+        tree must not become a reader that stops refusing."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        rel = "docs/architecture/added.md"
+        shell_write(wt, rel, "contact a.person@example.com")
+        stage(wt, rel)
+        commit(wt, "a doc that leaks")
+        ctx = ctx_factory(
+            cwd=main,
+            session={"branch": "session/x", "base": "master", "files": [rel]},
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "privacy.clean passed a merge that publishes personal data: "
+            f"{verdict.message!r}"
+        )
+
+    def test_the_branch_is_the_subject_even_when_no_files_are_declared(
+        self, ctx_factory
+    ):
+        """The other half of the same defect, and the one that fails OPEN.
+
+        ``_changed_set`` asks ``git.branch_files(cwd, base)``, which runs
+        ``base...HEAD``. From the main checkout HEAD *is* the base, so it
+        returns an empty list — not ``None``, so ``answerable`` stays true and
+        the emptiness is silent. The declared file set is then the only
+        surviving source of paths, and a project that declares none is
+        screened over nothing at every merge it ever makes.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        rel = "docs/architecture/added.md"
+        shell_write(wt, rel, "contact a.person@example.com")
+        stage(wt, rel)
+        commit(wt, "a doc that leaks")
+        ctx = ctx_factory(
+            cwd=main,
+            # No `files`: the session declared nothing, which is the default
+            # for a project that has not acquired the habit.
+            session={"branch": "session/x", "base": "master", "files": []},
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "privacy.clean screened nothing at a merge that publishes "
+            f"personal data, because it asked master what master changed: "
+            f"{verdict.message!r}"
+        )
+
+    def test_inside_the_worktree_the_working_tree_is_still_screened(
+        self, ctx_factory
+    ):
+        """The review boundary proper is unchanged: there the working tree IS
+        what the merge will publish, and uncommitted work must still be read.
+        """
+        wt = ctx_factory.wt
+        rel = "docs/architecture/overview.md"
+        shell_write(wt, rel, "contact a.person@example.com")
+        stage(wt, rel)
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "an uncommitted leak in the session worktree stopped being "
+            f"screened: {verdict.message!r}"
+        )
+
+
 class TestPrivacyScopeCoversTheSecondCopies:
     """AUD-15: the scope prefixes came from paths.docs and paths.memory only.
 

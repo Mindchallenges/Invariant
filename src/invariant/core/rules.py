@@ -2155,7 +2155,15 @@ def _changed_set(ctx: RuleContext) -> _ChangedSet:
     """
     declared = [Path(p) for p in (ctx.session or {}).get("files") or []]
     base = str((ctx.session or {}).get("base") or "")
-    committed = git.branch_files(ctx.cwd, base)
+    # Which tip carries the work is not always HEAD. `session merge` runs from
+    # the MAIN checkout, where HEAD is the base itself, so `base...HEAD` is
+    # empty and — being a list rather than None — reads as the answer "nothing
+    # changed" rather than as a question that could not be asked. Every gate
+    # sharing this union then screens nothing at exactly the boundary that
+    # publishes the work. Name the branch when we are not standing on it.
+    branch = str((ctx.session or {}).get("branch") or "")
+    tip = branch if branch and git.current_branch(ctx.cwd) != branch else "HEAD"
+    committed = git.branch_files(ctx.cwd, base, tip)
     seen: dict[str, Path] = {}
     for path in [*git.changed_files(ctx.cwd), *(committed or []), *declared]:
         seen[str(path)] = Path(path)
@@ -3303,7 +3311,21 @@ def _review_boundary_content_in_scope(
     not propagated to the three beside it, and a fifth spelling of the same
     query is how that recurs.
 
-    Content is read from the working tree, which is what the merge publishes.
+    Content is read from whichever tree the merge would actually publish, and
+    those are two different trees at two different boundaries. Inside the
+    session's own worktree — the review proper — that is the working tree,
+    which is why uncommitted work is screened here at all. But `session merge`
+    must run from the MAIN checkout (merging inside the branch's own worktree
+    merges it into itself and exits zero), and there the working tree still
+    holds the PRE-merge text. Reading it would re-read the copy the merge is
+    about to REPLACE.
+
+    For most sessions the two agree. It bites exactly the session that REMOVES
+    a violation from a tracked file: the gate finds the very text the branch
+    fixes and refuses, so the remediation this gate exists to encourage is the
+    one thing it could never pass. When the checkout is not on the session's
+    branch, the branch tip is therefore the subject.
+
     A path the branch ADDED and later REMOVED still sits in the branch's
     history and is not read here; it was screened at the commit that added it,
     which is the boundary that could still refuse it.
@@ -3321,10 +3343,25 @@ def _review_boundary_content_in_scope(
         return [], _unestablished_changed_set(changed)
 
     root = _repo_root(ctx)
+    # The branch tip is the subject only when this checkout is NOT on it —
+    # i.e. the merge case. In the session's own worktree the working tree is
+    # what the merge publishes, uncommitted work included, and reading the tip
+    # there would stop screening exactly what the review boundary is for.
+    branch = str((ctx.session or {}).get("branch") or "")
+    publishes = branch if branch and git.current_branch(ctx.cwd) != branch else ""
     found: list[tuple[str, str]] = []
     for path in changed.paths:
         absolute = path if Path(path).is_absolute() else Path(root) / path
         if not _in_privacy_scope(ctx, absolute, scope):
+            continue
+        if publishes:
+            text = git.file_at(ctx.cwd, publishes, _rel(absolute, Path(root)))
+            # `None` is "not readable at that revision", which for a path in
+            # the changed set means the branch does not carry it — deleted, or
+            # never there. Nothing of it lands in the merged tree, so it is
+            # skipped for the same reason a missing file is below.
+            if text is not None:
+                found.append((_rel(absolute, Path(root)), text))
             continue
         try:
             found.append((_rel(absolute, Path(root)), absolute.read_text("utf-8")))

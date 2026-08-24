@@ -184,8 +184,8 @@ def changed_files(cwd: Path, since: str | None = None) -> list[Path]:
     return sorted(seen.values(), key=str)
 
 
-def branch_files(cwd: Path, base: str) -> list[Path] | None:
-    """Paths touched by commits on this branch since ``base``.
+def branch_files(cwd: Path, base: str, tip: str = "HEAD") -> list[Path] | None:
+    """Paths touched by commits on ``tip`` since ``base``.
 
     ``changed_files`` answers for the working tree and the index, which is the
     right question while work is in progress and the wrong one afterwards: a
@@ -202,10 +202,15 @@ def branch_files(cwd: Path, base: str) -> list[Path] | None:
     """
     if not base:
         return None
+    # ``tip`` defaults to HEAD because the caller is normally standing in the
+    # branch's own worktree. It is passed explicitly when it is not: from the
+    # main checkout at merge time HEAD *is* the base, and `base...HEAD` is
+    # empty — an answer indistinguishable from "this branch changed nothing".
+    #
     # Three dots: the merge base, not the tip. Diffing against the tip
     # attributes every commit the base gained since the branch left to this
     # branch, which on a busy base branch is most of the project.
-    code, out, _ = _run(["diff", "--name-only", f"{base}...HEAD"], cwd)
+    code, out, _ = _run(["diff", "--name-only", f"{base}...{tip}"], cwd)
     if code != 0:
         return None
     return [Path(p) for p in out.splitlines() if p]
