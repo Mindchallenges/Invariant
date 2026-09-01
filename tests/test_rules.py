@@ -3760,6 +3760,47 @@ class TestFilesThatCannotHaveACoverageRow:
         verdict = self.verdict(ctx)
         assert verdict.ok, verdict.message
 
+    def test_a_deleted_file_the_main_checkout_still_holds_is_set_aside(
+        self, ctx_factory
+    ):
+        """The reported case: a pure-deletion change could not clear the gate.
+
+        The sibling above passes even without the fix, because its file exists
+        in NO root — so `_first_existing` returns None and the deletion branch
+        is reached by luck of absence. Reality is not that tidy: a session
+        worktree deletes the file and commits, while the MAIN checkout still
+        carries it until the merge lands. `_first_existing` searches every
+        root, finds that stale copy, and the deletion branch is never reached
+        — so the gate demanded a coverage row for a file the change had
+        REMOVED, which no run could ever produce. A retirement deleting two
+        source files was blocked by a gate no test could clear.
+
+        Absence therefore has to be judged in the tree the CHANGE produced,
+        not in whichever root still happens to hold a copy.
+        """
+        gone = "Heap/Intake/OldRunner.swift"
+        self.write(ctx_factory, gone, self.LIVE)
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "add both"], ctx_factory.wt)
+        (ctx_factory.wt / gone).unlink()
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "remove one"], ctx_factory.wt)
+
+        # The one line that distinguishes this from the sibling above: the
+        # main checkout has not merged the branch, so it still holds the file.
+        stale = ctx_factory.main / gone
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text(self.LIVE, encoding="utf-8")
+
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, gone]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        # Named, not silently swallowed — the rule's own transparency rule.
+        assert "deleted by this change" in verdict.detail
+
     def test_a_file_still_present_is_not_treated_as_deleted(self, ctx_factory):
         """The deletion check must read the diff, not the absence of a row."""
         self.write(ctx_factory, self.MEASURED, self.LIVE)

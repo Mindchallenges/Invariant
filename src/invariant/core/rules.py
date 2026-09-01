@@ -2460,9 +2460,31 @@ def _explain_absent_rows(
     deleted_forms = [_relative_to_any(path, roots) for path in deleted]
     adapters = _ecosystem_adapters(ctx)
 
+    # Absence has to be judged in the tree the CHANGE produced, and that is not
+    # any of `roots`. The MAIN checkout still carries a file the session branch
+    # deleted right up until the merge lands, so `_first_existing` below finds
+    # that stale copy, `located` is not None, and the deletion branch is never
+    # reached — a change whose whole point is REMOVING a file could not clear
+    # this gate, which is exactly the "gate no test can clear" the caller's own
+    # comment warns about. Judging absence in the session worktree fixes it
+    # while keeping the soundness `git.deleted_files` asks of every caller: its
+    # commit leg also reports a path deleted and later RESTORED, and such a path
+    # is present here, so it stays unexplained rather than being set aside.
+    change_root = _session_worktree(ctx)
+
     excluded: list[str] = []
     unexplained: list[str] = []
     for rel in missing:
+        # Asked FIRST, because the question it settles is not "where is this
+        # file" but "did this change remove it", and only the second can be
+        # answered once another root still holds a copy.
+        if (
+            change_root is not None
+            and not (change_root / rel).exists()
+            and any(_same_file(rel, form) for form in deleted_forms)
+        ):
+            excluded.append(f"{rel} (deleted by this change)")
+            continue
         # A DIRECTORY is positive evidence, not an absence. `session files add`
         # accepts a path ending in `/`, so a declared bundle reaches the
         # changed set as a bare directory path — and `_first_existing` asks
