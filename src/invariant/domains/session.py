@@ -655,11 +655,66 @@ class SessionDomain:
         self._advance(session, target, reason=reason, force=force, cwd=cwd)
         return session
 
+    #: Longer than any path this could name. macOS caps a path at 1024 bytes
+    #: and Linux at 4096, so a string past the larger bound is not a path that
+    #: was mistyped — it is not a path at all.
+    _PATH_MAX = 4096
+
     def add_files(self, session_id: str, paths: list[str]) -> Session:
         session = self.require(session_id)
         for path in paths:
+            self._reject_if_not_a_path(path)
             if path not in session.files:
                 session.files.append(path)
+        self._save(session)
+        return session
+
+    def _reject_if_not_a_path(self, path: str) -> None:
+        """Refuse a string that cannot name a file, before it is written down.
+
+        A declared set is only useful if every entry can be opened, and an
+        entry that cannot is worse than a missing one: `privacy.clean` unions
+        this list in at the review boundary, fails to scan the impossible
+        entry, and blocks the merge on a path nobody can delete — the CLI
+        offering `add` and, until now, no way back.
+
+        The observed cause was shell word-splitting: `session files add $FILES`
+        unquoted under zsh, which does NOT split on whitespace, so 48 paths
+        arrived as ONE argument. That is why the length bound is the check and
+        a space is not — a filename may legitimately contain spaces, while
+        nothing on any supported platform may exceed PATH_MAX.
+        """
+        if not path or not path.strip():
+            raise UsageError(
+                "a declared path cannot be empty. An empty entry scans as "
+                "nothing and blocks as something."
+            )
+        if "\n" in path or "\r" in path:
+            raise UsageError(
+                f"a declared path cannot contain a newline (got {len(path)} "
+                "characters). This is usually a command substitution that "
+                "produced a list where one path was expected."
+            )
+        if len(path) > self._PATH_MAX:
+            raise UsageError(
+                f"a declared path cannot exceed {self._PATH_MAX} characters "
+                f"(got {len(path)}). Under zsh an unquoted $VAR does NOT "
+                "word-split, so a whole file list arrives as a single "
+                "argument. Quote the expansion, or pass the paths as "
+                "separate arguments: invariant session files add a.py b.py"
+            )
+
+    def remove_files(self, session_id: str, paths: list[str]) -> Session:
+        """Drop declared paths. The way back from a bad `add`.
+
+        `add` without `remove` meant a session could record a path it could
+        never un-record, and the only routes left were editing the state file
+        by hand — which the engine correctly refuses — or an override, which
+        spends a gate's credibility on a typo.
+        """
+        session = self.require(session_id)
+        wanted = set(paths)
+        session.files = [f for f in session.files if f not in wanted]
         self._save(session)
         return session
 

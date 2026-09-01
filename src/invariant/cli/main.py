@@ -1036,6 +1036,16 @@ def cmd_session_files(args) -> int:
         ctx.sessions.require(args.id) if getattr(args, "id", None)
         else ctx.require_session()
     )
+    if args.action == "remove":
+        before = len(session.files)
+        updated = ctx.sessions.remove_files(session.id, args.paths)
+        dropped = before - len(updated.files)
+        return emit(
+            args,
+            updated.to_dict(),
+            f"dropped {dropped} entry(ies); {len(updated.files)} file(s) "
+            f"declared for session {updated.id}",
+        )
     updated = ctx.sessions.add_files(session.id, args.paths)
     return emit(
         args,
@@ -1889,7 +1899,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_session_transition)
 
     q = session.add_parser("files")
-    q.add_argument("action", choices=["add"])
+    # `remove` exists because `add` can record a path that cannot be opened,
+    # and a declared set with no way back blocks the review boundary on an
+    # entry nobody can delete.
+    q.add_argument("action", choices=["add", "remove"])
     q.add_argument("paths", nargs="+")
     q.add_argument("--id")
     q.set_defaults(func=cmd_session_files)

@@ -202,6 +202,49 @@ class TestSessionDomain:
         domain.add_files(session.id, ["a.py", "b.py"])
         assert domain.add_files(session.id, ["a.py", "c.py"]).files == ["a.py", "b.py", "c.py"]
 
+    def test_a_word_split_accident_is_refused_rather_than_recorded(self, m):
+        """The observed case: 48 paths arrived as ONE argument.
+
+        `session files add $FILES` unquoted under zsh does NOT word-split, so
+        the whole list was written down as a single 2,189-character entry. It
+        can never be opened, `privacy.clean` unions the declared set in at the
+        review boundary, and the merge then blocked on a path nobody could
+        delete. Refusing the write is the only place this is cheap.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        joined = " ".join(f"src/file{i}.py" for i in range(300))
+        assert len(joined) > 4096
+        with pytest.raises(UsageError) as excinfo:
+            domain.add_files(session.id, [joined])
+        # The message has to name the CAUSE, not just the symptom - the next
+        # person hits this from a shell, not from the library.
+        assert "word-split" in str(excinfo.value)
+        assert domain.require(session.id).files == []
+
+    def test_a_legitimate_path_with_spaces_is_still_accepted(self, m):
+        """Length is the check; a space is not.
+
+        A filename may legitimately contain spaces, so rejecting on whitespace
+        would refuse real paths to catch a shell accident. Only the PATH_MAX
+        bound distinguishes them.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        assert domain.add_files(session.id, ["docs/My Design Notes.md"]).files == [
+            "docs/My Design Notes.md"
+        ]
+
+    def test_files_can_be_removed_again(self, m):
+        """`add` without `remove` left no way back from a bad entry."""
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.add_files(session.id, ["a.py", "b.py", "c.py"])
+        assert domain.remove_files(session.id, ["b.py"]).files == ["a.py", "c.py"]
+        # Removing something absent is not an error - the caller's goal is the
+        # end state, and failing here would punish a retry.
+        assert domain.remove_files(session.id, ["nope.py"]).files == ["a.py", "c.py"]
+
     def test_repair_marks_a_vanished_worktree_abandoned(self, m):
         import shutil
 
