@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import git
+from ..core import plan as plan_reader
 from ..core.errors import GateFailure, StateError, TransitionError, UsageError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_session_machine
@@ -98,9 +99,43 @@ class Session:
     #: Set when the host session that owned this one ended. The record stays —
     #: it is the evidence of what happened — but a session whose host is gone
     #: is nobody's current session and must stop competing for attribution.
+    #:
+    #: Spent, not final. A spent binding is exactly the state
+    #: :meth:`SessionDomain.resume` picks up from, and replacing it is not the
+    #: hand-over ADR-001 D19 forbids: nobody is on the other end to have a
+    #: pipeline taken away from them.
     host_ended: bool = False
+    #: How many times a host session picked this one up. The count of
+    #: :meth:`SessionDomain.resume` calls that succeeded, which is how many
+    #: agent-host sessions this one has outlived.
+    resumed_count: int = 0
+    #: Every host session this one was bound to BEFORE the current one, oldest
+    #: first. Provenance, so that a record spanning four Claude sessions can
+    #: say which four.
+    #:
+    #: The *current* binding is ``host_session_id`` and is deliberately not
+    #: repeated here: one fact in two places makes "which one is live" a
+    #: question about list position. A legacy record seeds this list from the
+    #: scalar the first time the binding moves, so nothing has to be migrated
+    #: for a session to acquire its own history.
+    hosts: list[str] = field(default_factory=list)
     base: str = "master"
     files: list[str] = field(default_factory=list)
+    #: The deliverable set this session owes, in the order it was recorded.
+    #: ``[{"n": int, "title": str, "done": bool, "done_at": float | None}]``.
+    #:
+    #: A field rather than a file. It is per-session, it is read on the same
+    #: turn as the state it qualifies, and it is small — so a second document
+    #: would buy a second thing to keep consistent and a second thing to lose.
+    #: ``core/plan`` holds every question asked of it; this domain holds the
+    #: mutations.
+    plan: list[dict] = field(default_factory=list)
+    #: When the plan last MOVED. Deliberately **not** ``heartbeat``: that field
+    #: anchors the per-transition ``elapsed`` telemetry (ADR-002 D3), so
+    #: stamping it on a checklist edit would silently shorten the next
+    #: transition's recorded duration — an edit to the record of what a state
+    #: cost, made by an operation that is not a transition at all.
+    plan_touched: float = 0.0
     push_count: int = 0
     history: list[dict] = field(default_factory=list)
     #: Overrides that have been SPENT — a forced transition, a structural edge
@@ -159,11 +194,44 @@ class Session:
         except OSError:
             return False
 
+    # -- the plan, read through the one module that owns the questions --
+    #
+    # Four one-line properties rather than four call sites doing the
+    # arithmetic. `plan_complete` is the reason: an empty plan is *unplanned*
+    # rather than finished, a later increment switches an entire mode on that,
+    # and the obvious inline spelling (`done == total`) gets it backwards for
+    # exactly the case that matters.
+
+    @property
+    def plan_total(self) -> int:
+        return plan_reader.progress(self.plan).total
+
+    @property
+    def plan_open(self) -> list[dict]:
+        """The deliverables still owed, in the order they were recorded."""
+        return list(plan_reader.progress(self.plan).remaining)
+
+    @property
+    def plan_done_count(self) -> int:
+        return plan_reader.progress(self.plan).done
+
+    @property
+    def plan_complete(self) -> bool:
+        """Every recorded deliverable is done, and there is at least one."""
+        return plan_reader.progress(self.plan).complete
+
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Session":
+        """Load a record, including one written before half these fields were.
+
+        Unknown keys are filtered and every field has a default, so this is
+        what makes a new field cost no migration: an old document loads with an
+        empty plan, no recorded hosts and a zero resume count, and behaves
+        exactly as it did.
+        """
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in raw.items() if k in known})
 
@@ -332,6 +400,50 @@ class SessionDomain:
             return Resolution(None, "ambiguous", tuple(candidates))
         return Resolution(None, "none")
 
+    def resolve_name(self, query: str) -> tuple[Session | None, list[Session]]:
+        """Find a session by the thing a human would type.
+
+        A ladder, first hit wins, and each rung is narrower than the one below
+        so that an exact answer is never beaten by a fuzzy one:
+
+        1. an exact session **id**;
+        2. an exact **name** — which carries the id, so it is unique;
+        3. a **bare slug** — the name without its id, which is what somebody
+           reading a task list would type;
+        4. a unique **name prefix**.
+
+        Returns ``(session, [])`` on a hit, ``(None, candidates)`` when a rung
+        matched more than one, and ``(None, [])`` when nothing matched.
+        Ambiguity is handed back rather than raised because this is also the
+        lookup a *display* caller uses, and it must be able to describe the
+        situation without failing; the caller that needs a refusal builds one
+        from :func:`name_ambiguity_message`.
+
+        Rungs 2 to 4 are scoped to :meth:`live`, because a torn-down session is
+        not something to resume by name. Rung 1 is **not**, deliberately: an id
+        that names a finished session should be told it is finished, and "no
+        session 'abcd1234'" is a worse answer than "that one was torn down".
+        """
+        if not query:
+            return None, []
+
+        by_id = self.get(query)
+        if by_id is not None:
+            return by_id, []
+
+        live = self.live()
+        for rung in (
+            lambda s: s.name == query,
+            lambda s: s.name == qualified_name(query, s.id),
+            lambda s: s.name.startswith(query),
+        ):
+            hits = [s for s in live if rung(s)]
+            if len(hits) == 1:
+                return hits[0], []
+            if len(hits) > 1:
+                return None, hits
+        return None, []
+
     def by_worktree_containing(self, path: Path | str) -> Session | None:
         """The live session whose worktree contains ``path``, deepest first."""
         try:
@@ -454,15 +566,26 @@ class SessionDomain:
         """
         session = self.require(session_id)
 
+        # `and not session.host_ended` narrows this by one clause, and the
+        # clause is the whole session-outlives-its-host feature. A binding
+        # whose host has ENDED is spent: there is nobody on the other end to
+        # have a pipeline, an evidence trail or a file set taken away from
+        # them, so replacing it is not the hand-over this refusal exists to
+        # prevent. Only a LIVE binding is.
         if (
             not force
             and session.host_session_id
+            and not session.host_ended
             and session.host_session_id != host_session_id
         ):
             raise UsageError(
-                f"session {session.id} is already bound to another host "
-                f"session. Rebinding would hand over its pipeline and file "
-                f"set; pass force to do it deliberately."
+                f"session {session.id} is bound to a LIVE host session. "
+                f"Rebinding would hand over its pipeline and file set to an "
+                f"owner that never did the work; pass force to do it "
+                f"deliberately.\n"
+                f"  A binding whose host has ENDED is spent, and picking the "
+                f"session up again is not that hand-over:\n"
+                f"    invariant session resume {session.name}"
             )
 
         if not force:
@@ -473,7 +596,31 @@ class SessionDomain:
                     f"({other.name}). One host session, one invariant session."
                 )
 
+        return self._bind_host(session, host_session_id)
+
+    def _bind_host(self, session: Session, host_session_id: str) -> Session:
+        """Write the binding. The one place any route does it.
+
+        Extracted so that :meth:`adopt_host_session` and :meth:`resume` cannot
+        disagree about what binding a host *means*, because two of the three
+        things it does are easy to leave out and expensive to leave out:
+
+        * **``host_ended`` is cleared.** :meth:`by_host_session` filters on it,
+          so a session whose binding was replaced while the flag was still set
+          resolves to nobody for every subsequent hook in the new host — the
+          session would be picked up and instantly unaddressable.
+        * **The outgoing id is kept.** A record spanning several host sessions
+          should be able to say which ones. The list seeds itself from the
+          scalar the first time the binding moves, so a legacy record acquires
+          its own history without a migration, and an id already in the list is
+          not appended twice: how *many* times the session was picked up is
+          ``resumed_count``'s question, not this list's.
+        """
+        outgoing = session.host_session_id
+        if outgoing and outgoing != host_session_id and outgoing not in session.hosts:
+            session.hosts.append(outgoing)
         session.host_session_id = host_session_id
+        session.host_ended = False
         self._save(session)
         self._register(session)
         return session
@@ -491,6 +638,163 @@ class SessionDomain:
         if session is None:
             return None
         session.host_ended = True
+        self._save(session)
+        self._register(session)
+        return session
+
+    # -- outliving a host session --------------------------------------
+
+    def resumable(self, cwd: Path | None = None) -> list[Session]:
+        """Sessions waiting to be picked up by a new host session.
+
+        The **exact complement** of :meth:`attributable`'s host-ended
+        exclusion. That method answers "who could be calling right now", and a
+        session whose host is gone is definitely not the caller; this one
+        answers "what did somebody put down here", and only a session whose
+        host is gone qualifies. The two lists are disjoint by construction and
+        that is the point of writing this from :meth:`live` rather than
+        widening ``attributable`` with a flag: widening it would make every
+        caller of the attribution path — the hooks that decide whether an edit
+        is allowed — start seeing candidates that are provably not them, which
+        is the ambiguity the 1:1 binding exists to remove.
+
+        The other two filters remove candidates that are not really on offer.
+        A **stranded** session has no worktree to work in. A session registered
+        somewhere else is somebody else's; ``origin`` is compared the same way
+        :meth:`origin_candidates` compares it, so "here" means the same thing
+        in both.
+
+        Ordered by when the session last MOVED — the later of the plan's last
+        edit and the last transition — because the useful default when a list
+        is offered is the thing most recently put down.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        out = [
+            s
+            for s in self.live()
+            if s.host_ended
+            and not s.is_stranded
+            and s.origin
+            and _contains(Path(s.origin), cwd)
+        ]
+        out.sort(key=lambda s: max(s.plan_touched, s.heartbeat), reverse=True)
+        return out
+
+    def resume(
+        self,
+        session_id: str,
+        host_session_id: str | None = None,
+        force: bool = False,
+    ) -> Session:
+        """Bind a new host session to work that is already under way.
+
+        The operation this whole increment exists for: a plan needing several
+        agent-host sessions runs on ONE invariant session, and merges once, at
+        the end. Without it the second host session starts a second session,
+        the plan forks, and two branches hold half the work each.
+
+        Resumption is never automatic. A host session that finds a resumable
+        session has not thereby claimed it — picking up somebody's unfinished
+        work is a decision with consequences (its pipeline state, its declared
+        file set and its branch all come along), so it is a command somebody
+        runs.
+
+        What it refuses, and why each refusal is a refusal rather than a
+        warning:
+
+        * **Torn down or abandoned.** There is nothing to resume. The record is
+          kept as evidence and the work, if any, is elsewhere.
+        * **Merged or pushed**, without ``force``. The deliverable set already
+          landed. Accumulating new commits onto a merged branch puts them
+          behind a spent ``push_barrier``, so they would be finished work with
+          no route out of the session that holds them.
+        * **Stranded.** The worktree is gone. The branch may still hold the
+          commits, so this says so rather than offering a cleanup that would
+          discard them.
+        * **Bound to a live host.** That is the hand-over ADR-001 D19 forbids,
+          and resume must not become a back door to it.
+        * **The resuming host already owns a live session.** One host session,
+          one invariant session — the same rule :meth:`start` enforces, in the
+          same shape, because arriving at it by a different command does not
+          make it a different rule.
+        """
+        host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        session = self.require(session_id)
+
+        if session.state in {"torn_down", "abandoned"}:
+            raise UsageError(
+                f"session {session.name} is {session.state}; there is nothing "
+                f"to resume — start a new one with "
+                f"'invariant session start <task-name>'"
+            )
+        if session.state in {"merged", "pushed"} and not force:
+            raise UsageError(
+                f"session {session.name} is {session.state}: its deliverable "
+                f"set already landed.\n"
+                f"  Accumulating onto a merged branch puts those commits "
+                f"behind a spent push_barrier, with no route out of this "
+                f"session.\n"
+                f"  Start a new session for the next piece of work, or pass "
+                f"force if this really is the same one."
+            )
+        if session.is_stranded:
+            raise UsageError(
+                f"session {session.name} recorded a worktree that is no longer "
+                f"on disk:\n"
+                f"  {session.worktree}\n"
+                f"  The branch {session.branch or '(none recorded)'} may still "
+                f"hold the work; 'invariant session reap' abandons the session "
+                f"only once the branch is gone too."
+            )
+        if (
+            not force
+            and session.host_session_id
+            and not session.host_ended
+            and session.host_session_id != host_session_id
+        ):
+            raise UsageError(
+                f"session {session.name} is bound to a LIVE host session. "
+                f"Resuming it would hand its pipeline and file set to an "
+                f"owner that never did the work — the hand-over the binding "
+                f"refuses everywhere else, and this must not be a back door "
+                f"to it. Wait for that host to end, or pass force to take it "
+                f"over deliberately."
+            )
+        if not force and host_session_id:
+            other = self.by_host_session(host_session_id)
+            if other is not None and other.id != session.id:
+                raise UsageError(
+                    f"this host session already owns session {other.id} "
+                    f"({other.name}, {other.state}).\n"
+                    f"  Finish it first: invariant session teardown --id "
+                    f"{other.id}\n"
+                    f"  Or end it deliberately: invariant session transition "
+                    f"abandoned --id {other.id} --force --reason '<why>'"
+                )
+
+        previous_host = session.host_session_id
+        if host_session_id:
+            self._bind_host(session, host_session_id)
+        # No host identifier to bind to: the record keeps its spent binding
+        # untouched. Clearing `host_ended` with a stale id would hand the
+        # session straight back to the host that ended, through
+        # `by_host_session`, and put it back into `attributable` for everyone
+        # else — the widening this method is careful not to do.
+
+        session.resumed_count += 1
+        # Recorded AFTER the rebind, so the row's `usage` watermark is read
+        # from the NEW host — the seam where the counter changes identity sits
+        # on a row that says it is a seam (ADR-002 D3, BUG_014).
+        now = self._note(
+            session,
+            "resumed",
+            extra={
+                "resumed": True,
+                "host": host_session_id,
+                "previous_host": previous_host,
+            },
+        )
+        session.plan_touched = now
         self._save(session)
         self._register(session)
         return session
@@ -536,8 +840,10 @@ class SessionDomain:
         session_id: str | None = None,
         base: str = "master",
         host_session_id: str | None = None,
+        force: bool = False,
     ) -> Session:
         host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        slug = _slug(name)
 
         # Checked before the identifier is settled, so the refusal explains the
         # real problem. Deriving the id from the host means a second attempt
@@ -562,6 +868,27 @@ class SessionDomain:
                     f"abandoned --id {existing.id} --force --reason '<why>'"
                 )
 
+        origin = str(git.toplevel(self.manifest.root) or self.manifest.root)
+
+        # The failure this whole feature exists to prevent: a plan silently
+        # forking into two sessions because the second Claude session started
+        # a fresh one under the same task name. A warning printed above a
+        # successful `start` is prose-as-control-flow — it does not stop the
+        # fork, and by the time anyone reads it there are two branches holding
+        # half the work each. So it refuses, in the same shape as the
+        # one-session-per-host refusal above: name the address, say what state
+        # it is in and how far along, give the command that picks it up, and
+        # offer the escape for a genuinely separate session.
+        #
+        # Scoped to RESUMABLE sessions, not to live ones. A name in use by a
+        # session somebody is currently working in is not a plan waiting to be
+        # picked up, and refusing there would block a second concurrent
+        # session on a related task for no reason.
+        if not force:
+            for candidate in self.resumable(cwd=Path(origin)):
+                if candidate.name == qualified_name(slug, candidate.id):
+                    raise UsageError(self._would_fork_a_plan_message(candidate))
+
         # Prefer the host's own short form as the identifier, so a session
         # registered by hand and one seen by a hook agree without being told.
         requested = session_id or os.environ.get("INVARIANT_SESSION_ID")
@@ -581,9 +908,12 @@ class SessionDomain:
         baseline, baseline_host = self._reading(host_session_id)
         session = Session(
             id=session_id,
-            name=_slug(name),
+            # Qualified HERE, after the identifier is settled — including on
+            # the uuid4 fallback path, where until this line there is no id to
+            # append.
+            name=qualified_name(slug, session_id),
             base=base,
-            origin=str(git.toplevel(self.manifest.root) or self.manifest.root),
+            origin=origin,
             host_session_id=host_session_id,
             heartbeat=self.clock(),
             usage_at_start=baseline,
@@ -592,6 +922,32 @@ class SessionDomain:
         self._save(session)
         self._register(session)
         return session
+
+    def _would_fork_a_plan_message(self, candidate: Session) -> str:
+        """What to do instead of starting a second session for one plan."""
+        lines = [
+            (
+                "a session for this task is already open and waiting for a "
+                "host session:"
+            ),
+            (
+                f"  {candidate.name}  [{candidate.state}]  "
+                f"{plan_reader.progress(candidate.plan).describe()}"
+            ),
+        ]
+        lines += [f"    {line}" for line in plan_reader.render_lines(candidate.plan)]
+        lines += [
+            (
+                "Its plan is the one this work belongs to. Pick it up rather "
+                "than forking it:"
+            ),
+            f"  invariant session resume {candidate.name}",
+            (
+                "If this really is a separate piece of work that happens to "
+                "share a name, add --force."
+            ),
+        ]
+        return "\n".join(lines)
 
     def isolation_plan(self, session: Session) -> dict[str, str]:
         """Where this session's worktree and branch would go.
@@ -702,6 +1058,121 @@ class SessionDomain:
                 "word-split, so a whole file list arrives as a single "
                 "argument. Quote the expansion, or pass the paths as "
                 "separate arguments: invariant session files add a.py b.py"
+            )
+
+    # -- the deliverables plan -----------------------------------------
+    #
+    # `plan_reopen` and `plan_remove` exist from day one, and that is a
+    # decision rather than completeness for its own sake. `session files add`
+    # shipped without a `remove`, and the result was a declared set with no way
+    # back: a path nobody could delete blocked the review boundary until the
+    # missing command was written (BUG_057). A `done` that cannot be undone is
+    # that bug one field over, against a gate that blocks a turn.
+
+    def plan_add(self, session_id: str, title: str) -> Session:
+        """Record a deliverable this session owes."""
+        session = self.require(session_id)
+        self._reject_if_not_a_deliverable(title)
+        session.plan.append(
+            {
+                "n": plan_reader.next_n(session.plan),
+                "title": title.strip(),
+                "done": False,
+                "done_at": None,
+            }
+        )
+        self._touch_plan(session, self.clock())
+        return session
+
+    def plan_done(self, session_id: str, n: int) -> Session:
+        """Mark deliverable ``n`` done."""
+        session = self.require(session_id)
+        entry = self._plan_entry(session, n)
+        now = self.clock()
+        # The moment it was FIRST finished. Marking a done entry done again is
+        # not an event, and re-stamping would quietly move the record of when
+        # the work actually landed.
+        if not entry.get("done"):
+            entry["done_at"] = now
+        entry["done"] = True
+        self._touch_plan(session, now)
+        return session
+
+    def plan_reopen(self, session_id: str, n: int) -> Session:
+        """Undo a `plan done`. The way back from marking the wrong number."""
+        session = self.require(session_id)
+        entry = self._plan_entry(session, n)
+        entry["done"] = False
+        entry["done_at"] = None
+        self._touch_plan(session, self.clock())
+        return session
+
+    def plan_remove(self, session_id: str, n: int) -> Session:
+        """Drop a deliverable. Its number is retired, never reissued."""
+        session = self.require(session_id)
+        self._plan_entry(session, n)
+        session.plan = [e for e in session.plan if e.get("n") != n]
+        self._touch_plan(session, self.clock())
+        return session
+
+    def _plan_entry(self, session: Session, n: int) -> dict:
+        """The RAW stored entry, so a caller can change it.
+
+        Deliberately not routed through ``core.plan.entries``, which hands back
+        copies: a mutation applied to a copy saves nothing and reports success.
+        """
+        for entry in session.plan:
+            if isinstance(entry, dict) and entry.get("n") == n:
+                return entry
+        known = ", ".join(str(e["n"]) for e in plan_reader.entries(session.plan))
+        raise UsageError(
+            f"no deliverable {n} in session {session.name}; this session has "
+            f"{known or 'no deliverables recorded'}"
+        )
+
+    def _touch_plan(self, session: Session, now: float) -> None:
+        """Stamp the plan's own clock and save. Never the heartbeat.
+
+        ``heartbeat`` anchors the per-transition ``elapsed`` telemetry, so
+        stamping it here would shorten the next transition's recorded duration
+        by however long the checklist edit happened to be after the last one —
+        a plan edit silently rewriting the record of what a *state* cost.
+
+        ``now`` is passed in rather than read here because each mutation must
+        take exactly one reading: two calls to a clock are two different times,
+        and an entry whose ``done_at`` and whose ``plan_touched`` disagree by a
+        few microseconds is a record with two answers to one question.
+        """
+        session.plan_touched = now
+        self._save(session)
+
+    def _reject_if_not_a_deliverable(self, title: str) -> None:
+        """Refuse a string that cannot name a deliverable.
+
+        The same three guards as :meth:`_reject_if_not_a_path`, and the same
+        bound, because the failure they catch belongs to the SHELL rather than
+        to the field: `session plan add $TITLES` unquoted under zsh does not
+        word-split, so a whole list arrives as one argument. A length bound
+        catches that where a space cannot — a deliverable may legitimately
+        contain spaces, and does.
+        """
+        if not title or not title.strip():
+            raise UsageError(
+                "a deliverable cannot be empty. An unnamed entry is a thing "
+                "the plan is waiting for that nobody can do."
+            )
+        if "\n" in title or "\r" in title:
+            raise UsageError(
+                f"a deliverable cannot contain a newline (got {len(title)} "
+                "characters). This is usually a command substitution that "
+                "produced a list where one title was expected."
+            )
+        if len(title) > self._PATH_MAX:
+            raise UsageError(
+                f"a deliverable cannot exceed {self._PATH_MAX} characters "
+                f"(got {len(title)}). Under zsh an unquoted $VAR does NOT "
+                "word-split, so a whole list arrives as a single argument. "
+                "Quote the expansion, or add the deliverables one at a time."
             )
 
     def remove_files(self, session_id: str, paths: list[str]) -> Session:
@@ -1182,27 +1653,61 @@ class SessionDomain:
                     "gates": [v.rule_id for v in blocking],
                 }
             )
-        # ADR-002 D3. The anchor is the heartbeat, which this domain already
-        # stamped on every transition — so `elapsed` costs no new stored field
-        # and no new clock time, and the entry itself carries a duration and a
-        # pair of counters rather than a time.
-        now = self.clock()
-        usage, usage_host = self._reading(session.host_session_id)
-        session.history.append(
-            {
-                "from": session.state,
-                "to": target,
-                "reason": reason,
-                "elapsed": max(0.0, now - session.heartbeat) if session.heartbeat else None,
-                "usage": usage,
-                "usage_host": usage_host,
-            }
-        )
+        self._note(session, reason, to=target)
         session.state = target
-        session.heartbeat = now
         self._save(session)
         self._register(session)
         return verdicts
+
+    def _note(
+        self,
+        session: Session,
+        reason: str | None,
+        extra: dict | None = None,
+        to: str | None = None,
+    ) -> float:
+        """One history row and one heartbeat. Returns the moment it stamped.
+
+        ADR-002 D3. The anchor is the heartbeat, which this domain already
+        stamped on every transition — so ``elapsed`` costs no new stored field
+        and no new clock time, and the entry carries a duration and a pair of
+        counters rather than a time.
+
+        ``to`` defaults to the state the session is already in, which is what a
+        **standstill** row is: something happened that the machine has no edge
+        for, and the record should say so where the durations are read from.
+        :meth:`resume` is the case. Routing that through
+        ``_advance(session, session.state)`` instead would evaluate the current
+        state's entry gates on something that is not an entry — from
+        ``isolated`` it would ask ``session.named_after_isolating`` about a
+        session that isolated days ago.
+
+        Two reasons a resume row is not decoration. It is where the usage
+        counter **changes identity**, and the row carries ``usage`` and
+        ``usage_host`` read from the new host, so the seam sits on a record
+        that says it is a seam. And it **absorbs the dormant interval**:
+        ``elapsed`` is wall time since the last stamp, so without a row here
+        the days between two host sessions land on the next real transition and
+        read as "this state took three days".
+
+        The moment is returned rather than re-read by the caller, because two
+        readings of a clock are two different times and a caller that also has
+        to record it must record the same one.
+        """
+        now = self.clock()
+        usage, usage_host = self._reading(session.host_session_id)
+        entry = {
+            "from": session.state,
+            "to": session.state if to is None else to,
+            "reason": reason,
+            "elapsed": max(0.0, now - session.heartbeat) if session.heartbeat else None,
+            "usage": usage,
+            "usage_host": usage_host,
+        }
+        entry.update(extra or {})
+        session.history.append(entry)
+        session.heartbeat = now
+        return now
 
     def _save(self, session: Session) -> None:
         self.store.ensure_root()
@@ -1231,8 +1736,10 @@ def ambiguity_message(candidates: list[Session]) -> str:
     last, and the command that creates that worktree is spelled out instead.
     """
     lines = [
-        f"{len(candidates)} live sessions were registered here and none of "
-        "their worktrees contains this directory:"
+        (
+            f"{len(candidates)} live sessions were registered here and none "
+            f"of their worktrees contains this directory:"
+        )
     ]
     for s in candidates:
         where = s.worktree or "(not isolated yet)"
@@ -1254,6 +1761,79 @@ def ambiguity_message(candidates: list[Session]) -> str:
     )
     lines.append("A session with no worktree gets one with:")
     lines.append("  invariant session isolate --execute --id <id>")
+    return "\n".join(lines)
+
+
+def qualified_name(slug: str, session_id: str) -> str:
+    """A name that is an address.
+
+    The id is appended to the task slug, so a session can be named by the thing
+    a human would type. Uniqueness then costs nothing to enforce, because it is
+    **structural**: ids are unique, therefore ``slug-id`` is unique, and there
+    is no collision check here because there is no collision to check for. The
+    rejected alternative was to keep bare slugs and refuse a duplicate, which
+    refuses the case this feature exists for — two sessions on one long task,
+    started weeks apart.
+
+    Idempotent, and that is load-bearing rather than tidy: the name people copy
+    back out of a greeting already carries the id, so
+    ``session resume add-widget-abcd1234`` must not produce
+    ``add-widget-abcd1234-abcd1234``.
+
+    Not folded into :func:`_slug`. That one is a pure normaliser with no access
+    to an identifier, and it runs before the id is settled — including on the
+    ``uuid4`` fallback path, where the id does not exist yet.
+    """
+    return slug if slug.endswith(f"-{session_id}") else f"{slug}-{session_id}"
+
+
+def name_matches(session_name: str, session_id: str, query: str) -> bool:
+    """Does a session answer to ``query`` by NAME?
+
+    :meth:`SessionDomain.resolve_name`'s ladder minus the parts that need the
+    live set: the full name, the bare slug, and a name prefix. Exported at
+    module level because a caller that has no session documents to scan still
+    has to ask — ``domains/stats`` joins on a name it read off a telemetry
+    record, and its records outlive the sessions that produced them.
+
+    It **flattens the ladder's precedence**, which the caller must handle: a
+    query matching three sessions at three different levels gets three ``True``
+    answers and no ranking. That is the honest shape for a predicate, and
+    :meth:`SessionDomain.resolve_name` is where a caller with the live set goes
+    for the ordered answer.
+    """
+    if not query or not session_name:
+        return False
+    if session_name == query:
+        return True
+    if session_id and session_name == qualified_name(query, session_id):
+        return True
+    return session_name.startswith(query)
+
+
+def name_ambiguity_message(candidates: list[Session]) -> str:
+    """How to name a session when a partial name cannot.
+
+    A sibling of :func:`ambiguity_message` rather than a reuse of it: that one
+    is about worktrees and origins — where the caller is standing and which
+    sessions were registered above it — and none of that transfers to a query
+    that simply matched more than one name.
+
+    Every candidate is printed with its full name, because the full name is the
+    answer: a name carries its id, so it is unambiguous by construction and the
+    remedy is to copy one of these lines.
+    """
+    lines = [f"that names {len(candidates)} sessions:"]
+    for s in candidates:
+        lines.append(
+            f"  {s.name}  [{s.state}]  {plan_reader.progress(s.plan).describe()}"
+        )
+    lines.append(
+        "Name one in full. A session name carries its id, so the full name "
+        "cannot be ambiguous:"
+    )
+    if candidates:
+        lines.append(f"  invariant session resume {candidates[0].name}")
     return "\n".join(lines)
 
 

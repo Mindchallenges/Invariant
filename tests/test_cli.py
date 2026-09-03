@@ -219,7 +219,9 @@ class TestSessionCommands:
         self.setup_project(project)
         run("session", "start", "add-widget")
         run("session", "status", "--json")
-        assert payload(capsys)["session"]["name"] == "add-widget"
+        # A session name carries its id, so the name is an address.
+        session = payload(capsys)["session"]
+        assert session["name"] == f"add-widget-{session['id']}"
 
     def test_status_with_no_session(self, project, capsys):
         self.setup_project(project)
@@ -511,7 +513,7 @@ class TestHookBridge:
         capsys.readouterr()
         run("session", "list", "--json")
         listed = payload(capsys)["sessions"]
-        target = next(s for s in listed if s["name"] == "second")["id"]
+        target = next(s for s in listed if s["name"].startswith("second-"))["id"]
 
         assert run("context", "--id", target) == 0
         text = out(capsys)
@@ -728,7 +730,8 @@ class EditHookHarness:
             run("session", "isolate", "--execute", "--id", sid)
         run("session", "list", "--json")
         for row in payload(capsys)["sessions"]:
-            worktrees[row["name"]] = row["worktree"]
+            # Keyed on the bare task slug; the recorded name carries the id.
+            worktrees[row["name"].rsplit("-", 1)[0]] = row["worktree"]
         return worktrees
 
     def hook(self, event, body):
@@ -813,7 +816,8 @@ class TestEditAttributionThroughTheHook(EditHookHarness):
 
         worktrees = self.setup(project, capsys)
         run("session", "list", "--json")
-        beta = [s for s in payload(capsys)["sessions"] if s["name"] == "beta"][0]
+        beta = [s for s in payload(capsys)["sessions"]
+                if s["name"].startswith("beta-")][0]
 
         ctx = Context(session_id=beta["id"], host_session_id="host-xyz")
         resolved = ctx.session_for_payload(
@@ -826,7 +830,8 @@ class TestEditAttributionThroughTheHook(EditHookHarness):
 
         worktrees = self.setup(project, capsys)
         run("session", "list", "--json")
-        alpha = [s for s in payload(capsys)["sessions"] if s["name"] == "alpha"][0]
+        alpha = [s for s in payload(capsys)["sessions"]
+                 if s["name"].startswith("alpha-")][0]
 
         ctx = Context(host_session_id="host-xyz")
         resolved = ctx.session_for_payload(
@@ -1310,7 +1315,8 @@ class TestAskingIsNotOwning(EditHookHarness):
 
     def owner_of(self, project, name, capsys):
         run("session", "list", "--json")
-        row = [s for s in payload(capsys)["sessions"] if s["name"] == name][0]
+        row = [s for s in payload(capsys)["sessions"]
+               if s["name"].startswith(f"{name}-")][0]
         state = json.loads(
             (project / ".git" / "invariant" / "state" / "sessions" / f"{row['id']}.json")
             .read_text(encoding="utf-8")

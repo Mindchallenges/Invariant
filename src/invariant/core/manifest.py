@@ -228,6 +228,20 @@ DEFAULTS: dict[str, Any] = {
         # project rather than about the session, so it belongs to whoever is
         # making that decision — not to whichever agent happened to finish last.
         "push": False,
+        # How long an OPEN plan may sit without moving before the closeout gate
+        # treats the branch as stranded rather than parked.
+        #
+        # A session that spans several agent-host sessions rests with commits
+        # on its branch by design — that is the whole point of a plan
+        # outliving one host — so "there is unmerged work here" stops being
+        # evidence of anything on its own. What still distinguishes the two
+        # cases is whether the plan is being WORKED: a parked session's
+        # deliverables move; an abandoned one's do not.
+        #
+        # Seven days, because the distinction being drawn is "paused over a
+        # weekend" against "abandoned", and a bound that cannot tell those
+        # apart is worse than none.
+        "plan_stale_days": 7,
     },
     # The markdown backend stores one file per item, so its path is a
     # directory. The json and sphinx_needs backends treat it as a single file.

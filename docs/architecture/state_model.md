@@ -158,6 +158,47 @@ Invariants this domain enforces:
 | `session.named_after_isolating` | Session has a task-derived name and color | warn |
 | `session.teardown_complete` | Worktree removed after push | warn |
 
+### What the record carries beyond the state
+
+Four fields exist so that a session can outlive the agent-host session that
+started it. None of them needs a migration: `Session.from_dict` filters unknown
+keys and every field has a default, so a document written before they existed
+loads with an empty plan, no recorded hosts and a zero resume count, and
+behaves exactly as it did.
+
+| Field | Holds | Read by |
+|---|---|---|
+| `plan` | The deliverable set this session owes, in the order it was recorded: `{"n", "title", "done", "done_at"}` per entry | `core/plan`, through four derived properties on the record |
+| `plan_touched` | When the plan last MOVED | the resumable ordering, and a later staleness check |
+| `resumed_count` | How many host sessions picked this one up | the report |
+| `hosts` | Every host session bound to it BEFORE the current one, oldest first | provenance |
+
+Three properties of that set are decisions rather than shape.
+
+**A deliverable's number is never reused.** `plan_add` takes `max(existing) + 1`
+rather than `len + 1`, so `plan done 3` means the same thing after a
+`plan remove` as it did before one. The cost is gaps in the sequence, which are
+cheap and visible; the alternative costs a command that acts on the wrong entry
+and looks like it worked.
+
+**`plan_reopen` and `plan_remove` exist from day one.** `session files add`
+shipped without a `remove`, and the result was a declared set with no way back
+— a path nobody could delete blocking the review boundary until the missing
+command was written (BUG_057). A `done` that cannot be undone is that defect one
+field over, against a gate that blocks a turn.
+
+**`plan_touched` is deliberately not `heartbeat`.** The heartbeat anchors the
+per-transition `elapsed` telemetry below, so stamping it on a checklist edit
+would shorten the next transition's recorded duration by however long the edit
+happened to be after the last one: a plan edit silently rewriting the record of
+what a *state* cost.
+
+The plan is a **field, not a file**. It is per-session, it is read on the same
+turn as the state it qualifies, and it is small, so a second document under
+"Storage layout" would buy a second thing to keep consistent and a second thing
+to lose. That section is unchanged by this: the layout is per-session JSON plus
+the locked registry, and the plan is part of the per-session JSON.
+
 `session.ff_merge_target` deserves its comment: merging a branch while standing
 inside that branch's own worktree merges it into itself and the follow-up push
 pushes an unchanged target. Both commands exit zero. The failure is invisible
@@ -290,9 +331,11 @@ brackets the exact call that registered the session, reading the new session's
 id out of that command's own output rather than guessing.
 
 Enforced in both directions. A host session that already owns a live session
-cannot start a second; a session bound to one host is not rebound to another
-without `--force`. Rebinding silently would hand a pipeline, its evidence and
-its declared file set to an owner that never did the work.
+cannot start a second; a session bound to a **live** host is not rebound to
+another without `--force`. Rebinding silently would hand a pipeline, its
+evidence and its declared file set to an owner that never did the work. A
+binding whose host has *ended* is spent rather than live, and replacing that one
+is a different operation — see "A session outlives its host" below.
 
 The binding is host-to-session and **never** host-to-worktree. Registering
 without isolating is legitimate — a device soak owns no code — so a session
@@ -317,6 +360,84 @@ a terminal closed would be the library doing the one thing it exists to
 prevent. `invariant session reap` abandons a stranded session only once its
 branch is gone too — a worktree can be removed while its branch still holds
 recoverable commits, so the narrow condition is the safe one.
+
+#### A session outlives its host
+
+A plan that needs several agent-host sessions runs on **one** invariant session
+and merges once, at the end. Without that, the second Claude session starts a
+second invariant session under the same task name, the plan forks, and two
+branches hold half the work each. The binding is what has to give, and the
+distinction that lets it give safely is between a binding that is **spent** and
+one that is **live**.
+
+| Binding | `host_session_id` | `host_ended` | May be replaced |
+|---|---|---|---|
+| Live | set | false | only with `--force` — this is the hand-over ADR-001 D19 forbids |
+| Spent | set | true | yes: `session resume`, or `session adopt` |
+| None | unset | — | yes |
+
+`SessionEnd` marks a binding spent, and a spent binding has nobody on the other
+end to have a pipeline, an evidence trail or a declared file set taken away from
+them. That is the whole of the argument: the refusal in `adopt_host_session`
+exists to stop work changing owner behind its owner's back, and there is no
+owner. So the refusal is narrowed by one clause rather than removed, it now says
+the binding is *live*, and it names `session resume` as the route for the other
+case.
+
+**The resumable set is the exact complement of the attributable one.**
+`attributable()` answers "who could be calling right now", and excludes a
+session whose host has ended because whoever is asking, it is not them.
+`resumable()` answers "what did somebody put down here", and admits only those.
+The two lists are disjoint by construction, which is why the predicate is
+written from `live()` rather than by widening `attributable` with a flag:
+widening it would make the hooks that decide whether an edit is allowed start
+seeing candidates that are provably not the caller, which is the ambiguity the
+1:1 binding exists to remove. Two further filters remove sessions that are not
+really on offer — a **stranded** one has no worktree to work in, and one
+registered elsewhere is somebody else's.
+
+**Resume replaces the binding; it never vacates it.** The tempting shortcut is
+to clear `host_session_id` and let the ordinary unbound path pick the session
+up. It is a defect, and the chain is worth writing down because every link is
+invisible from the line that would cause it: a vacated session rejoins
+`attributable()`; a *peer* host that owns nothing and had one origin candidate
+now has two; `resolve` answers `ambiguous`; `Context.rule_context` renders that
+as `session=None`; and `pre-tool-use` **denies** an unattributed edit. Resuming
+one session must not be able to refuse another session's tool call. For the same
+reason the write clears `host_ended`: `by_host_session` filters on it, so a
+session picked up with the flag still set resolves to nobody for every
+subsequent hook in its new host.
+
+**Resumption is never automatic.** A host session that finds a resumable
+session has not thereby claimed it. Picking up unfinished work brings a pipeline
+state, a declared file set and a branch along with it, so it is a decision
+somebody makes and a command somebody runs. What *is* automatic is the refusal
+in the other direction: `session start` refuses a task name whose resumable
+session is sitting right there, names the address and its progress, and gives
+the command that picks it up. A warning printed above a successful `start` would
+be prose-as-control-flow — it does not stop the fork, and by the time anyone
+reads it there are two branches. `--force` starts a genuinely separate session.
+
+Resume also refuses a **merged** or **pushed** session without `--force`: the
+deliverable set already landed, and accumulating new commits onto a merged
+branch puts them behind a spent `push_barrier`, which is finished work with no
+route out of the session holding it.
+
+**A name is an address.** `session start` appends the session id to the task
+slug, so the name a human types identifies exactly one session. Uniqueness is
+then structural rather than checked — ids are unique, therefore `slug-id` is —
+and the rejected alternative, keeping bare slugs and refusing a duplicate,
+refuses the case this feature exists for. Lookup is a ladder, first hit wins:
+exact id, exact name, bare slug, unique name prefix. Every rung but the first is
+scoped to live sessions; the first is not, so an id naming a torn-down session
+is told it is torn down rather than told it does not exist.
+
+**The resume is recorded in `history` as a standstill row** — same shape as a
+transition, with `from` equal to `to`. It is not decoration. It is where the
+usage counter changes identity, so the seam sits on a row that says it is a
+seam; and it absorbs the dormant interval, because `elapsed` is wall time since
+the last heartbeat and without this row the days between two host sessions land
+on the next real transition and read as "this state took three days".
 
 #### Teardown will not remove the ground under the caller
 

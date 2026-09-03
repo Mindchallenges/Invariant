@@ -51,10 +51,12 @@ class TestSessionDomain:
         domain = SessionDomain(m)
         session = domain.start("add-widget")
         assert session.state == "registered"
-        assert domain.get(session.id).name == "add-widget"
+        # The name carries the id: it is an address, not a label.
+        assert domain.get(session.id).name == f"add-widget-{session.id}"
 
     def test_name_is_slugified(self, m):
-        assert SessionDomain(m).start("Add The Widget").name == "add-the-widget"
+        session = SessionDomain(m).start("Add The Widget")
+        assert session.name == f"add-the-widget-{session.id}"
 
     def test_an_unnameable_session_is_refused(self, m):
         with pytest.raises(UsageError, match="at least one alphanumeric"):
@@ -847,7 +849,7 @@ class TestHostSessionAttribution:
         found = domain.current(
             cwd=m.root, host_session_id="bbbbbbbb-1111-2222-3333-44440615b555"
         )
-        assert found is not None and found.name == "beta"
+        assert found is not None and found.name.startswith("beta-")
 
     def test_resolution_works_from_any_directory(self, m, tmp_path):
         domain, _ = self.three_sessions(m)
@@ -857,7 +859,7 @@ class TestHostSessionAttribution:
                 strict=False,
                 host_session_id="cccccccc-1111-2222-3333-44441654f8b0",
             )
-            assert found is not None and found.name == "gamma", where
+            assert found is not None and found.name.startswith("gamma-"), where
 
     def test_the_short_id_is_the_LAST_eight_alphanumerics(self, m):
         # This project's own tooling has always derived worktree names that
@@ -1407,9 +1409,10 @@ class TestHostBindingIsOneToOne:
         assert domain.start("second", host_session_id="host-aaaa-1111")
 
     def test_rebinding_to_another_host_is_refused(self, m):
+        """A LIVE binding. A spent one is `session resume`'s to replace."""
         domain = SessionDomain(m)
         session = domain.start("work", host_session_id="host-aaaa-1111")
-        with pytest.raises(UsageError, match="already bound"):
+        with pytest.raises(UsageError, match="bound to a LIVE host session"):
             domain.adopt_host_session(session.id, "host-bbbb-2222")
 
     def test_rebinding_is_possible_deliberately(self, m):
@@ -2253,3 +2256,512 @@ class TestTheSuiteDoesNotInheritTheRecordersIdentity:
         pipelines.start(session.id)
         pipelines.run_tests(session.id, phase="red", cwd=m.root)
         assert os.environ["INVARIANT_SESSION_ID"] == "live-session"
+
+
+class TestSessionNamesAreAddresses:
+    """A name that does not identify a session is a name you cannot resume by.
+
+    The id is appended at `start`, after the identifier is settled, so
+    uniqueness is structural: ids are unique, therefore `slug-id` is. Nothing
+    checks for a collision because nothing can produce one.
+    """
+
+    def test_a_name_carries_the_id(self, m):
+        session = SessionDomain(m).start("add-widget", session_id="abcd1234")
+        assert session.name == "add-widget-abcd1234"
+
+    def test_the_slug_is_still_a_slug(self, m):
+        session = SessionDomain(m).start("Add The Widget", session_id="abcd1234")
+        assert session.name == "add-the-widget-abcd1234"
+
+    def test_qualifying_is_idempotent(self):
+        """The name people copy back out of a greeting already carries the id."""
+        from invariant.domains.session import qualified_name
+
+        assert qualified_name("add-widget", "abcd1234") == "add-widget-abcd1234"
+        assert qualified_name("add-widget-abcd1234", "abcd1234") == "add-widget-abcd1234"
+
+    def test_two_sessions_for_one_task_do_not_collide(self, m):
+        domain = SessionDomain(m)
+        first = domain.start("same", session_id="aaaa1111")
+        second = domain.start("same", session_id="bbbb2222", force=True)
+        assert first.name != second.name
+
+    def test_resolve_by_id(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("thing", session_id="abcd1234")
+        found, candidates = domain.resolve_name("abcd1234")
+        assert found is not None and found.id == session.id and candidates == []
+
+    def test_resolve_by_full_name(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("thing", session_id="abcd1234")
+        found, _ = domain.resolve_name("thing-abcd1234")
+        assert found is not None and found.id == session.id
+
+    def test_resolve_by_bare_slug(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("thing", session_id="abcd1234")
+        found, _ = domain.resolve_name("thing")
+        assert found is not None and found.id == session.id
+
+    def test_resolve_by_unique_prefix(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("a-long-task-name", session_id="abcd1234")
+        found, _ = domain.resolve_name("a-long")
+        assert found is not None and found.id == session.id
+
+    def test_an_ambiguous_prefix_hands_back_the_candidates(self, m):
+        domain = SessionDomain(m)
+        domain.start("shared-one", session_id="aaaa1111")
+        domain.start("shared-two", session_id="bbbb2222")
+        found, candidates = domain.resolve_name("shared")
+        assert found is None
+        assert {c.id for c in candidates} == {"aaaa1111", "bbbb2222"}
+
+    def test_an_ambiguous_bare_slug_hands_back_the_candidates(self, m):
+        """Two sessions for one task is exactly what `--force` produces."""
+        domain = SessionDomain(m)
+        domain.start("same", session_id="aaaa1111")
+        domain.start("same", session_id="bbbb2222", force=True)
+        found, candidates = domain.resolve_name("same")
+        assert found is None and len(candidates) == 2
+
+    def test_nothing_matches_is_not_an_ambiguity(self, m):
+        assert SessionDomain(m).resolve_name("nothing-like-this") == (None, [])
+        assert SessionDomain(m).resolve_name("") == (None, [])
+
+    def test_a_dead_session_still_resolves_by_id(self, m):
+        """So the refusal can name the state instead of saying 'no such session'."""
+        domain = SessionDomain(m)
+        session = domain.start("done", session_id="abcd1234")
+        session.state = "torn_down"
+        domain._save(session)
+        found, _ = domain.resolve_name("abcd1234")
+        assert found is not None and found.state == "torn_down"
+
+    def test_a_dead_session_is_not_reachable_by_name(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("done", session_id="abcd1234")
+        session.state = "abandoned"
+        domain._save(session)
+        assert domain.resolve_name("done") == (None, [])
+
+    def test_the_id_outranks_a_name_that_happens_to_match_it(self, m):
+        domain = SessionDomain(m)
+        by_id = domain.start("other", session_id="collide")
+        domain.start("collide", session_id="zzzz9999")
+        found, _ = domain.resolve_name("collide")
+        assert found is not None and found.id == by_id.id
+
+    def test_name_matches_is_exported_for_a_caller_with_no_live_set(self, m):
+        """`domains/stats` joins on a name it read off a record, not off disk."""
+        from invariant.domains.session import name_matches
+
+        assert name_matches("add-widget-abcd1234", "abcd1234", "add-widget-abcd1234")
+        assert name_matches("add-widget-abcd1234", "abcd1234", "add-widget")
+        assert name_matches("add-widget-abcd1234", "abcd1234", "add-wid")
+        assert not name_matches("add-widget-abcd1234", "abcd1234", "other")
+        assert not name_matches("add-widget-abcd1234", "abcd1234", "")
+
+    def test_the_ambiguity_message_names_every_candidate_and_the_way_out(self, m):
+        from invariant.domains.session import name_ambiguity_message
+
+        domain = SessionDomain(m)
+        domain.start("same", session_id="aaaa1111")
+        domain.start("same", session_id="bbbb2222", force=True)
+        _, candidates = domain.resolve_name("same")
+        text = name_ambiguity_message(candidates)
+        assert "same-aaaa1111" in text and "same-bbbb2222" in text
+        assert "invariant session resume" in text
+
+    def test_the_ambiguity_message_does_not_raise_on_an_empty_list(self):
+        """A message builder that raises while explaining a failure replaces
+        the diagnosis with a traceback about the diagnosis."""
+        from invariant.domains.session import name_ambiguity_message
+
+        assert "0 sessions" in name_ambiguity_message([])
+
+
+class TestTheDeliverablesPlan:
+    """The set a session owes, so that finishing is a fact rather than a feeling."""
+
+    def test_a_new_session_is_unplanned(self, m):
+        session = SessionDomain(m).start("work")
+        assert session.plan == []
+        assert session.plan_total == 0
+        assert session.plan_touched == 0.0
+
+    def test_a_record_written_before_the_field_existed_still_loads(self, m):
+        """No migration: `from_dict` filters unknown keys and every field has a
+        default, so an old record loads with an empty plan and behaves as it
+        did."""
+        legacy = {"id": "old12345", "name": "legacy", "state": "working"}
+        session = Session.from_dict(legacy)
+        assert session.plan == []
+        assert session.resumed_count == 0
+        assert session.hosts == []
+        assert session.plan_complete is False
+
+    def test_numbers_start_at_one_and_count_up(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "read the docs")
+        after = domain.plan_add(session.id, "write the tests")
+        assert [e["n"] for e in after.plan] == [1, 2]
+        assert [e["title"] for e in after.plan] == ["read the docs", "write the tests"]
+
+    def test_numbers_are_never_reused_after_a_removal(self, m):
+        """`plan done 3` means the same thing before and after a `plan remove`."""
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        for title in ("a", "b", "c"):
+            domain.plan_add(session.id, title)
+        domain.plan_remove(session.id, 2)
+        after = domain.plan_add(session.id, "d")
+        assert [e["n"] for e in after.plan] == [1, 3, 4]
+
+    def test_done_marks_and_stamps(self, m):
+        domain = SessionDomain(m, clock=lambda: 500.0)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        after = domain.plan_done(session.id, 1)
+        assert after.plan[0]["done"] is True
+        assert after.plan[0]["done_at"] == 500.0
+        assert after.plan_complete is True
+
+    def test_marking_a_done_entry_again_keeps_the_first_moment(self, m):
+        times = iter([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        first = domain.plan_done(session.id, 1).plan[0]["done_at"]
+        again = domain.plan_done(session.id, 1).plan[0]["done_at"]
+        assert again == first
+
+    def test_reopen_is_the_way_back(self, m):
+        """A `done` that cannot be undone is BUG_057 one field over."""
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        domain.plan_done(session.id, 1)
+        after = domain.plan_reopen(session.id, 1)
+        assert after.plan[0]["done"] is False
+        assert after.plan[0]["done_at"] is None
+        assert after.plan_complete is False
+
+    def test_remove_is_the_other_way_back(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        domain.plan_add(session.id, "b")
+        after = domain.plan_remove(session.id, 1)
+        assert [e["title"] for e in after.plan] == ["b"]
+
+    def test_an_unknown_number_names_what_does_exist(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        for call in (domain.plan_done, domain.plan_reopen, domain.plan_remove):
+            with pytest.raises(UsageError, match="no deliverable 9"):
+                call(session.id, 9)
+
+    def test_an_empty_title_is_refused(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        with pytest.raises(UsageError, match="cannot be empty"):
+            domain.plan_add(session.id, "   ")
+
+    def test_a_title_with_a_newline_is_refused(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        with pytest.raises(UsageError, match="newline"):
+            domain.plan_add(session.id, "a\nb")
+
+    def test_an_overlong_title_is_refused_with_the_zsh_explanation(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        with pytest.raises(UsageError, match="word-split"):
+            domain.plan_add(session.id, "x" * 5000)
+
+    def test_the_open_set_keeps_the_recorded_order(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        for title in ("a", "b", "c"):
+            domain.plan_add(session.id, title)
+        after = domain.plan_done(session.id, 2)
+        assert [e["title"] for e in after.plan_open] == ["a", "c"]
+        assert after.plan_done_count == 1
+
+    def test_every_mutation_moves_plan_touched(self, m):
+        times = iter([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work")
+        seen = []
+        for call in (
+            lambda: domain.plan_add(session.id, "a"),
+            lambda: domain.plan_done(session.id, 1),
+            lambda: domain.plan_reopen(session.id, 1),
+            lambda: domain.plan_remove(session.id, 1),
+        ):
+            seen.append(call().plan_touched)
+        assert seen == sorted(seen) and len(set(seen)) == len(seen)
+
+    def test_a_plan_mutation_never_touches_the_heartbeat(self, m):
+        """`heartbeat` anchors per-transition `elapsed`; stamping it on a
+        checklist edit would silently shorten the next transition's duration."""
+        times = iter([100.0, 200.0, 300.0, 400.0, 500.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work")
+        before = session.heartbeat
+        domain.plan_add(session.id, "a")
+        domain.plan_done(session.id, 1)
+        assert domain.get(session.id).heartbeat == before
+
+    def test_an_empty_plan_is_unplanned_rather_than_finished(self, m):
+        assert SessionDomain(m).start("work").plan_complete is False
+
+
+class TestResumingASessionThatOutlivedItsHost:
+    """One invariant session, several Claude sessions, one merge at the end."""
+
+    def ended(self, m, domain=None, name="work", host="host-aaaa-1111"):
+        domain = domain or SessionDomain(m)
+        session = domain.start(name, host_session_id=host)
+        domain.end_host_session(host)
+        return domain, domain.get(session.id)
+
+    # -- which sessions are on offer -----------------------------------
+
+    def test_a_host_ended_session_is_resumable(self, m):
+        domain, session = self.ended(m)
+        assert [s.id for s in domain.resumable(cwd=m.root)] == [session.id]
+
+    def test_a_live_session_is_not_resumable(self, m):
+        """The exact complement of `attributable`'s host-ended exclusion."""
+        domain = SessionDomain(m)
+        live = domain.start("live", host_session_id="host-aaaa-1111")
+        assert live.id not in {s.id for s in domain.resumable(cwd=m.root)}
+        assert live.id in {s.id for s in domain.attributable()}
+
+    def test_a_stranded_session_is_not_resumable(self, m):
+        import shutil
+
+        domain, session = self.ended(m)
+        domain.isolate(session.id, execute=True)
+        domain.end_host_session("host-aaaa-1111")
+        shutil.rmtree(domain.get(session.id).worktree)
+        assert domain.resumable(cwd=m.root) == []
+
+    def test_a_torn_down_session_is_not_resumable(self, m):
+        domain, session = self.ended(m)
+        session.state = "torn_down"
+        domain._save(session)
+        assert domain.resumable(cwd=m.root) == []
+
+    def test_resumable_is_scoped_to_where_the_session_was_registered(self, m, tmp_path):
+        domain, _ = self.ended(m)
+        assert domain.resumable(cwd=tmp_path) == []
+
+    def test_the_one_whose_plan_moved_last_is_offered_first(self, m):
+        times = iter([float(i) for i in range(1, 40)])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        older = domain.start("older", host_session_id="host-a")
+        domain.end_host_session("host-a")
+        newer = domain.start("newer", host_session_id="host-b")
+        domain.end_host_session("host-b")
+        domain.plan_add(older.id, "moved most recently")
+        assert [s.id for s in domain.resumable(cwd=m.root)] == [older.id, newer.id]
+
+    # -- picking one up -------------------------------------------------
+
+    def test_resume_rebinds_the_host_and_counts_the_pickup(self, m):
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        assert after.host_session_id == "host-bbbb-2222"
+        assert after.resumed_count == 1
+        assert after.hosts == ["host-aaaa-1111"]
+
+    def test_resume_replaces_the_binding_and_never_vacates_it(self, m):
+        """Clearing `host_ended` without setting a new id would put the session
+        back into `attributable()` for every host that owns nothing."""
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        assert after.host_ended is False
+        assert domain.by_host_session("host-bbbb-2222").id == session.id
+
+    def test_resume_does_not_widen_attributable(self, m):
+        """Resuming one session must not be able to refuse another's tool call.
+
+        A vacated binding rejoins `attributable()`; a peer host that owns
+        nothing then sees two origin candidates instead of one, `resolve`
+        answers `ambiguous`, `rule_context` renders `session=None`, and
+        `pre-tool-use` DENIES an unattributed edit.
+        """
+        domain = SessionDomain(m)
+        mine = domain.start("mine", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        peer = domain.start("peer")
+
+        domain.resume(mine.id, host_session_id="host-cccc-3333")
+
+        resolution = domain.resolve(cwd=m.root, host_session_id="host-bbbb-2222")
+        assert resolution.how == "origin"
+        assert resolution.session is not None and resolution.session.id == peer.id
+
+    def test_resume_is_recorded_as_a_standstill_row(self, m):
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        entry = after.history[-1]
+        assert entry["from"] == entry["to"] == after.state
+        assert entry["resumed"] is True
+        assert entry["host"] == "host-bbbb-2222"
+        assert entry["previous_host"] == "host-aaaa-1111"
+
+    def test_resume_absorbs_the_dormant_interval(self, m):
+        """Without this row, the days between two host sessions land on the
+        next real transition and read as 'this state took three days'."""
+        times = iter([10.0, 100_000.0, 100_001.0, 100_002.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        assert after.history[-1]["elapsed"] == pytest.approx(99_990.0)
+        assert after.heartbeat == 100_000.0
+
+    def test_resume_moves_plan_touched(self, m):
+        domain = SessionDomain(m, clock=lambda: 777.0)
+        _, session = self.ended(m, domain=SessionDomain(m, clock=lambda: 1.0))
+        assert domain.resume(session.id, host_session_id="host-b").plan_touched == 777.0
+
+    def test_resume_without_a_host_leaves_the_spent_binding_alone(self, m, monkeypatch):
+        """Nothing to bind to. Clearing `host_ended` with a stale id would let
+        `by_host_session` hand the session back to the host that ended."""
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+        domain, session = self.ended(m)
+        after = domain.resume(session.id)
+        assert after.resumed_count == 1
+        assert after.host_ended is True
+        assert domain.by_host_session("host-aaaa-1111") is None
+
+    # -- what resume refuses --------------------------------------------
+
+    def test_a_torn_down_session_cannot_be_resumed(self, m):
+        domain, session = self.ended(m)
+        session.state = "torn_down"
+        domain._save(session)
+        with pytest.raises(UsageError, match="nothing to resume"):
+            domain.resume(session.id, host_session_id="host-b")
+
+    def test_a_merged_session_is_refused_without_force(self, m):
+        domain, session = self.ended(m)
+        session.state = "merged"
+        domain._save(session)
+        with pytest.raises(UsageError, match="push_barrier|already landed"):
+            domain.resume(session.id, host_session_id="host-b")
+
+    def test_a_merged_session_can_be_resumed_deliberately(self, m):
+        domain, session = self.ended(m)
+        session.state = "merged"
+        domain._save(session)
+        assert domain.resume(session.id, host_session_id="host-b", force=True)
+
+    def test_a_stranded_session_names_its_worktree_and_its_branch(self, m):
+        import shutil
+
+        domain, session = self.ended(m)
+        domain.isolate(session.id, execute=True)
+        worktree = domain.get(session.id).worktree
+        shutil.rmtree(worktree)
+        with pytest.raises(UsageError) as exc:
+            domain.resume(session.id, host_session_id="host-b")
+        assert worktree in str(exc.value)
+        assert "session reap" in str(exc.value)
+
+    def test_a_live_binding_elsewhere_is_refused(self, m):
+        """ADR-001 D19 forbids the hand-over; resume is not a back door to it."""
+        domain = SessionDomain(m)
+        session = domain.start("live", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="LIVE host session"):
+            domain.resume(session.id, host_session_id="host-bbbb-2222")
+
+    def test_a_live_binding_can_be_taken_over_deliberately(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("live", host_session_id="host-aaaa-1111")
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222", force=True)
+        assert after.host_session_id == "host-bbbb-2222"
+
+    def test_resuming_the_same_host_is_not_a_hand_over(self, m):
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-aaaa-1111")
+        assert after.hosts == []
+        assert after.host_ended is False
+
+    def test_a_host_that_already_owns_a_live_session_is_refused(self, m):
+        domain, session = self.ended(m)
+        domain.start("other", host_session_id="host-bbbb-2222")
+        with pytest.raises(UsageError, match="already owns session"):
+            domain.resume(session.id, host_session_id="host-bbbb-2222")
+
+    # -- the seam adopt_host_session gives up ---------------------------
+
+    def test_adopting_may_replace_a_SPENT_binding(self, m):
+        """Nobody is on the other end to have a pipeline taken away from them."""
+        domain, session = self.ended(m)
+        after = domain.adopt_host_session(session.id, "host-bbbb-2222")
+        assert after.host_session_id == "host-bbbb-2222"
+        assert after.host_ended is False
+        assert after.hosts == ["host-aaaa-1111"]
+
+    def test_adopting_still_refuses_a_LIVE_binding(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="LIVE host session"):
+            domain.adopt_host_session(session.id, "host-bbbb-2222")
+
+    def test_the_refusal_names_resume_as_the_route_for_the_spent_case(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError) as exc:
+            domain.adopt_host_session(session.id, "host-bbbb-2222")
+        assert "session resume" in str(exc.value)
+
+    def test_a_legacy_record_acquires_its_own_history_on_the_first_rebind(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        assert session.hosts == []
+        after = domain.adopt_host_session(session.id, "host-bbbb-2222", force=True)
+        assert after.hosts == ["host-aaaa-1111"]
+
+    # -- start refuses to fork a plan -----------------------------------
+
+    def test_start_refuses_to_fork_a_resumable_plan(self, m):
+        domain, session = self.ended(m, name="add-widget")
+        domain.plan_add(session.id, "read the docs")
+        domain.plan_add(session.id, "write the tests")
+        domain.plan_done(session.id, 1)
+        with pytest.raises(UsageError) as exc:
+            domain.start("add-widget", host_session_id="host-bbbb-2222")
+        text = str(exc.value)
+        assert domain.get(session.id).name in text
+        assert "1 of 2 done" in text
+        assert "invariant session resume" in text
+        assert "--force" in text
+
+    def test_a_genuinely_separate_session_is_still_startable(self, m):
+        domain, _ = self.ended(m, name="add-widget")
+        second = domain.start(
+            "add-widget", host_session_id="host-bbbb-2222", force=True
+        )
+        assert second.name.startswith("add-widget-")
+
+    def test_a_different_task_name_is_not_the_same_plan(self, m):
+        domain, _ = self.ended(m, name="add-widget")
+        assert domain.start("remove-widget", host_session_id="host-bbbb-2222")
+
+    def test_a_live_session_elsewhere_does_not_block_a_new_name(self, m):
+        """The refusal is about a plan waiting to be picked up, not about a
+        name that happens to be in use by a session nobody has put down."""
+        domain = SessionDomain(m)
+        domain.start("add-widget", host_session_id="host-aaaa-1111")
+        assert domain.start("add-widget", host_session_id="host-bbbb-2222")

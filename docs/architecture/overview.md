@@ -30,6 +30,7 @@ graph TD
         PRIVACY[privacy]
         STATS[stats]
         GIT[git]
+        PLAN[plan]
     end
 
     subgraph domains["domains/ — the five state domains"]
@@ -77,6 +78,7 @@ graph TD
     STATSDOMAIN --> SESSION
     STATSDOMAIN --> PIPELINE
     SESSION --> STATS
+    SESSION --> PLAN
     PIPELINE --> STATS
     CCTEL -- implements SampleSource --> STATS
 
@@ -287,6 +289,23 @@ floor for a file that already clears the first. A record read only in PART is an
 error, never a smaller record: a dropped entry stops being enforced and stops
 being honoured at the same time, with nothing in any verdict to say so.
 
+`SESSION → PLAN` is the newest arrow into `core/`, and it is drawn for the
+reason `SESSION → STATS` is. The deliverable set a session owes is *stored* on
+the session document and *mutated* by the domain, which owns the store, the
+locking and the refusals — but the questions asked of it are arithmetic over a
+list, and a rule will have to ask them. A rule lives in `core/rules`, and
+`core/` may not import `domains/`, so a plan reader inside the domain would be
+a question the layer above cannot reach and the layer below may not. The
+precedent is exact: `core/stats.breakdown` does the arithmetic that
+`domains/stats` renders.
+
+One judgement in that module is worth naming here because it is the kind that
+gets re-decided by accident. An **empty** plan is not a complete one — a
+session with no deliverables is *unplanned*, not *finished* — and the obvious
+inline spelling, `done == total`, is `True` for an empty list. Written at three
+call sites it would be written wrong at one of them, so it is computed once, in
+`core/plan.progress`, and every caller reads the answer.
+
 The two labelled arrows around `stats` — `CLI -. injects .-> CCTEL`, dotted,
 and `CCTEL -- implements SampleSource --> STATS`, solid — are the same rule
 applied to a case that could easily have inverted it (ADR-002 D2). Reading a host's
@@ -317,6 +336,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
 | `git` | Read-only queries about the repository — worktrees, branches, the staged set and the bytes staged for a path | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
+| `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 
 ### `domains/`
 

@@ -88,6 +88,15 @@ session:
                                # a relative value resolves against the repo root,
                                # so worktrees may live INSIDE it
   push: false                  # is publishing to a remote a session step at all
+  plan_stale_days: 7           # how long an OPEN deliverables plan may sit without
+                               # moving before the closeout gate treats the branch as
+                               # stranded rather than parked. A session that spans
+                               # several agent-host sessions rests with commits on its
+                               # branch BY DESIGN, so unmerged work stops being
+                               # evidence of anything on its own; what still separates
+                               # the two cases is whether the plan is being worked.
+                               # Seven days, because the distinction being drawn is
+                               # "paused over a weekend" against "abandoned".
 
 items:
   backend: markdown            # markdown | sphinx_needs | json | none
