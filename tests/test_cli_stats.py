@@ -13,6 +13,7 @@ import pytest
 from test_cli import out, payload, project, run  # noqa: F401 - fixtures
 
 HOST_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+HOST_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 
 
 def transcript(host_home, origin, host_session_id, records):
@@ -117,12 +118,6 @@ class TestReport:
 
 
 class TestShow:
-    @pytest.mark.xfail(
-        strict=True,
-        reason="IDEA_005 — a session name now carries its id, and "
-        "StatsDomain.resolve still matches session_name by equality. The "
-        "assertion is right; the resolver is owed name_matches().",
-    )
     def test_one_session_by_name(self, wired, capsys):
         run("stats", "refresh")
         assert run("stats", "show", "stats-domain") == 0
@@ -137,16 +132,43 @@ class TestShow:
 
 
 class TestArchive:
-    @pytest.mark.xfail(
-        strict=True,
-        reason="IDEA_005 — a session name now carries its id, and "
-        "StatsDomain.resolve still matches session_name by equality. The "
-        "assertion is right; the resolver is owed name_matches().",
-    )
     def test_archiving_promotes_a_record(self, wired, capsys):
         run("stats", "refresh")
         assert run("stats", "archive", "stats-domain", "--json") == 0
         assert payload(capsys)["archived"] is True
+
+
+class TestASelectorThatNamesTwoRecords:
+    """The cost of admitting a prefix: a name can now match twice.
+
+    It is paid at the surface where the reader can do something about it —
+    a refusal listing the full names, each of which carries its id and so
+    cannot be ambiguous — rather than by taking the first hit, which would
+    archive or render one session's telemetry under another's name.
+    """
+
+    def second_session(self, wired, tmp_path, monkeypatch, slug, host=HOST_B):
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host)
+        assert run("session", "start", slug) == 0
+        transcript(tmp_path / "host", wired, host, [assistant()])
+
+    def test_show_refuses_and_names_both(self, wired, tmp_path, monkeypatch, capsys):
+        self.second_session(wired, tmp_path, monkeypatch, "stats-other")
+        run("stats", "refresh")
+        assert run("stats", "show", "stats-") == 2
+        err = capsys.readouterr().err
+        assert "stats-domain-" in err and "stats-other-" in err
+        assert HOST_A not in err and HOST_B not in err
+
+    def test_archive_refuses_and_promotes_neither(
+        self, wired, tmp_path, monkeypatch, capsys
+    ):
+        self.second_session(wired, tmp_path, monkeypatch, "stats-other")
+        run("stats", "refresh")
+        assert run("stats", "archive", "stats-") == 2
+        capsys.readouterr()
+        assert run("stats", "show", "stats-domain") == 0
+        assert "[archived]" not in out(capsys)
 
 
 class TestCheck:

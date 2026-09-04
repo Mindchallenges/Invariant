@@ -684,7 +684,7 @@ def _push_enabled(ctx: RuleContext) -> Verdict:
         "database. Publishing costs a CI run and is a decision about the "
         "project, so it is left to whoever is making that decision.",
         fixes=(
-            "invariant session teardown  (the normal end of a session)",
+            "invariant session teardown  # the normal end of a session",
             "set session.push: true in the manifest to make it a session step",
         ),
     )
@@ -1593,7 +1593,7 @@ def _test_new_test_fails(ctx: RuleContext) -> Verdict:
             # machine's own, so the advice stopped being a workaround that
             # teaches a session to label a run with a state it was never in.
             fixes=(
-                f"invariant pipeline test --phase {phase}  (records the failing run)",
+                f"invariant pipeline test --phase {phase}  # records the failing run",
             ),
         )
     failing = [r for r in red if not r.get("passed", True)]

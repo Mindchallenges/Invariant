@@ -1654,9 +1654,12 @@ class TestEveryCommandARuleNamesCanBeRun(ParkedSessionHarness):
     happy run never produces.
     """
 
-    #: The two annotation forms a fix uses for prose after the command. Both
-    #: are stripped before parsing, because both are the message's, not the
-    #: command's.
+    #: `#` is the ONE annotation form a fix may use for prose after the
+    #: command, because it is the one a shell ignores: a `fixes` line is
+    #: written to be pasted by somebody already blocked, and a parenthetical
+    #: annotation makes the paste a syntax error (IDEA_006). Nothing but this
+    #: normaliser keeps that closed — it used to strip parentheses too, which
+    #: is how three of them shipped.
     def commands_named_in(self, module) -> list[str]:
         import inspect
         import re as _re
@@ -1669,10 +1672,9 @@ class TestEveryCommandARuleNamesCanBeRun(ParkedSessionHarness):
         return sorted(set(found))
 
     def runnable(self, text: str) -> list[str]:
-        import re as _re
         import shlex
 
-        stripped = _re.sub(r"\s*\([^)]*\)\s*$", "", text.split("#")[0].strip())
+        stripped = text.split("#")[0].strip()
         tokens = shlex.split(stripped.replace('\\"', '"'))[1:]
         # A placeholder for a NUMBER is the one substitution the parser needs:
         # `<n>` is typed by a human as an integer and the parser is what says
@@ -1697,6 +1699,22 @@ class TestEveryCommandARuleNamesCanBeRun(ParkedSessionHarness):
         parser = build_parser()
         named = self.commands_named_in(session_module)
         assert any("session resume" in text for text in named)
+        for text in named:
+            parser.parse_args(self.runnable(text))
+
+    def test_every_command_the_stats_domain_names_parses(self):
+        """The third module that names commands in a refusal (IDEA_006).
+
+        Unscanned until now, and it showed: `stats archive` was named without
+        the `<session>` its parser requires, so the one command the orphaned
+        record advice hands the reader could not be run as printed.
+        """
+        import invariant.domains.stats as stats_module
+        from invariant.cli.main import build_parser
+
+        parser = build_parser()
+        named = self.commands_named_in(stats_module)
+        assert any("stats archive" in text for text in named)
         for text in named:
             parser.parse_args(self.runnable(text))
 

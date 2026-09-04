@@ -412,6 +412,11 @@ class SessionDomain:
            reading a task list would type;
         4. a unique **name prefix**.
 
+        Rungs 2 to 4 are :func:`name_rank`'s, which is where their order is
+        written down. ``domains/stats`` climbs the same three over telemetry
+        records, and a second spelling of this precedence would drift without
+        either copy ever looking wrong.
+
         Returns ``(session, [])`` on a hit, ``(None, candidates)`` when a rung
         matched more than one, and ``(None, [])`` when nothing matched.
         Ambiguity is handed back rather than raised because this is also the
@@ -431,13 +436,9 @@ class SessionDomain:
         if by_id is not None:
             return by_id, []
 
-        live = self.live()
-        for rung in (
-            lambda s: s.name == query,
-            lambda s: s.name == qualified_name(query, s.id),
-            lambda s: s.name.startswith(query),
-        ):
-            hits = [s for s in live if rung(s)]
+        ranked = [(name_rank(s.name, s.id, query), s) for s in self.live()]
+        for rung in (RANK_FULL_NAME, RANK_BARE_SLUG, RANK_NAME_PREFIX):
+            hits = [s for rank, s in ranked if rank == rung]
             if len(hits) == 1:
                 return hits[0], []
             if len(hits) > 1:
@@ -1683,9 +1684,22 @@ class SessionDomain:
         session that isolated days ago.
 
         Two reasons a resume row is not decoration. It is where the usage
-        counter **changes identity**, and the row carries ``usage`` and
-        ``usage_host`` read from the new host, so the seam sits on a record
-        that says it is a seam. And it **absorbs the dormant interval**:
+        counter **changes identity**, and where the caller supplied the new
+        host id the row carries ``usage`` and ``usage_host`` read from it, so
+        the seam sits on a record that says it is a seam.
+
+        That is the bound case and not the only one. A ``session resume`` run
+        from a shell that exports no host identifier cannot see the new host —
+        the host adapter rebinds afterwards, from a hook — so this row's
+        readings come from the OLD counter, and the change of identity lands on
+        the NEXT transition instead. Nothing is mis-measured either way: this
+        row subtracts two readings of one counter, and the next one is declined
+        by ``core.stats._incommensurable``'s host check exactly as a rebind
+        should be. What is lost is the LABEL — the seam is detected on a row
+        that does not say why it is a seam. IDEA_007 is where that reading
+        would acquire an owner.
+
+        And it **absorbs the dormant interval**:
         ``elapsed`` is wall time since the last stamp, so without a row here
         the days between two host sessions land on the next real transition and
         read as "this state took three days".
@@ -1787,6 +1801,45 @@ def qualified_name(slug: str, session_id: str) -> str:
     return slug if slug.endswith(f"-{session_id}") else f"{slug}-{session_id}"
 
 
+#: The name rungs of :meth:`SessionDomain.resolve_name`'s ladder, narrowest
+#: first, as the numbers :func:`name_rank` answers with. They are *ordering*
+#: and nothing else — never stored, never printed — so a rung inserted between
+#: two of these is a renumbering and not a migration.
+RANK_FULL_NAME = 0
+RANK_BARE_SLUG = 1
+RANK_NAME_PREFIX = 2
+
+
+def name_rank(session_name: str, session_id: str, query: str) -> int | None:
+    """WHICH rung of the name ladder answers ``query``, or ``None`` for none.
+
+    The ordered form of :func:`name_matches`, and the one a caller holding
+    several matches needs. A predicate can only say *yes*, so a query that is
+    one record's bare slug and another's prefix comes back true twice with
+    nothing to choose between them — and choosing is the whole point of a
+    ladder whose rungs get narrower. The rank hands the precedence back.
+
+    It lives here rather than in the caller because it *is*
+    :meth:`SessionDomain.resolve_name`'s ordering, and that method reads it —
+    two spellings of one precedence is the duplication that drifts, and this
+    one would drift silently, since both spellings would keep answering
+    plausibly.
+
+    ``session_id`` is what makes the middle rung possible: a name carries its
+    id, so the bare slug is recovered by re-qualifying the query rather than by
+    guessing where the name ends.
+    """
+    if not query or not session_name:
+        return None
+    if session_name == query:
+        return RANK_FULL_NAME
+    if session_id and session_name == qualified_name(query, session_id):
+        return RANK_BARE_SLUG
+    if session_name.startswith(query):
+        return RANK_NAME_PREFIX
+    return None
+
+
 def name_matches(session_name: str, session_id: str, query: str) -> bool:
     """Does a session answer to ``query`` by NAME?
 
@@ -1796,19 +1849,14 @@ def name_matches(session_name: str, session_id: str, query: str) -> bool:
     has to ask — ``domains/stats`` joins on a name it read off a telemetry
     record, and its records outlive the sessions that produced them.
 
-    It **flattens the ladder's precedence**, which the caller must handle: a
-    query matching three sessions at three different levels gets three ``True``
-    answers and no ranking. That is the honest shape for a predicate, and
-    :meth:`SessionDomain.resolve_name` is where a caller with the live set goes
-    for the ordered answer.
+    It **flattens the ladder's precedence** — which is the honest shape for a
+    predicate, and the reason :func:`name_rank` exists beside it. A caller that
+    only has to decide whether one session answers to one query (``session
+    resume --id X <name>``, where the answer is already pinned) wants this one;
+    a caller choosing *between* matches wants the rank. Both are the same
+    answer, so they cannot disagree.
     """
-    if not query or not session_name:
-        return False
-    if session_name == query:
-        return True
-    if session_id and session_name == qualified_name(query, session_id):
-        return True
-    return session_name.startswith(query)
+    return name_rank(session_name, session_id, query) is not None
 
 
 def name_ambiguity_message(candidates: list[Session]) -> str:

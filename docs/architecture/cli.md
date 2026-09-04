@@ -454,6 +454,15 @@ invariant stats report [--write]
     contract needs an anchor.
 
 invariant stats show <session>
+    <session> is a selector, not a spelling: the host session id, the
+    invariant session's id, its full name, its bare task name, or a prefix of
+    the name — the same ladder `session resume` takes, because it is the same
+    question asked of a record that outlives the session. A selector matching
+    several records REFUSES and lists them by full name; it never takes the
+    first hit, which would render one session's telemetry under another's
+    name. The listing names no host session identifier, for the reason
+    `check` names none.
+
     One session in full, including its per-state breakdown. A session with no
     breakdown says so explicitly and says WHY: recorded before per-state
     attribution existed, no pipeline state left yet, no pipeline at all, no

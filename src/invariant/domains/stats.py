@@ -405,28 +405,92 @@ class StatsDomain:
         deliberately here rather than discovered after a cleanup has already
         removed the only copy of a month of history.
         """
-        record = self.resolve(selector)
-        if record is None:
-            raise UsageError(
-                f"no stats record matches {selector!r}.\n"
-                "  A record is named by its invariant session's name, that "
-                "session's id, or the host session id.\n"
-                "  'invariant stats report' lists what is in the store."
-            )
+        record = self.require(selector)
         record.archived = True
         self._save(record)
         return record
 
+    def require(self, selector: str) -> StatRecord:
+        """:meth:`resolve`, with the miss turned into the refusal.
+
+        The house idiom beside ``SessionDomain.require``, and here it also
+        collects a message that had been written out three times — in
+        ``archive``, in ``render_session`` and in the CLI — with three
+        different accounts of what a selector accepts. One of them would have
+        gone stale the moment the ladder below it grew a rung, and the reader
+        would have had no way to tell which.
+        """
+        record = self.resolve(selector)
+        if record is None:
+            raise UsageError(
+                f"no stats record matches {selector!r}.\n"
+                "  A record answers to its invariant session's name — in "
+                "full, as the bare task name, or as a prefix of either — to "
+                "that session's id, or to the host session id.\n"
+                "  invariant stats report   # every record in the store"
+            )
+        return record
+
     def resolve(self, selector: str) -> StatRecord | None:
+        """The record a person meant, or ``None``, or a refusal (IDEA_005).
+
+        A ladder, narrowest rung first, and the same one
+        :meth:`SessionDomain.resolve_name` climbs — because it is the same
+        question asked of a record that outlives the session:
+
+        1. an exact **identifier**, the host session's or the invariant
+           session's;
+        2. the full **name**;
+        3. the **bare slug** — the name without the id it carries, which is
+           the one thing a person actually remembers;
+        4. a **name prefix**.
+
+        Equality alone used to be the whole test, and it stopped selecting
+        anything the moment a name began carrying its id: `stats show
+        add-widget` matched no record and the refusal named three spellings the
+        reader had none of.
+
+        Where a rung matches SEVERAL records this refuses and names them. It
+        does not take the first hit, and it does not fall through to a wider
+        rung: the first is a silent guess that would archive or render one
+        session's telemetry under another's name, and the second would let a
+        wider rung overturn a narrower one's genuine tie. Falling BACK is what
+        the ladder already forbids in the other direction, and for the same
+        reason.
+
+        The rungs are asked as sets rather than by first hit because
+        :func:`name_rank` — the predicate's ordered form — is what supplies the
+        precedence, and a bare ``name_matches`` loop would flatten it: a query
+        that is one record's bare slug and another's prefix would come back
+        ambiguous when the ladder has an answer.
+        """
         if not selector:
             return None
+
+        from .session import RANK_FULL_NAME, RANK_NAME_PREFIX, name_rank
+
+        # One rung above the name ladder's first, so an exact identifier is
+        # never beaten by a name that happens to start with it — the same
+        # precedence `resolve_name` gives its own id rung.
+        by_identifier = RANK_FULL_NAME - 1
+        rungs: dict[int, list[StatRecord]] = {}
         for record in self.records():
-            if selector in (
-                record.host_session_id,
-                record.session_id,
-                record.session_name,
-            ):
-                return record
+            if selector in (record.host_session_id, record.session_id):
+                rank = by_identifier
+            else:
+                rank = name_rank(
+                    record.session_name or "", record.session_id or "", selector
+                )
+                if rank is None:
+                    continue
+            rungs.setdefault(rank, []).append(record)
+
+        for rank in range(by_identifier, RANK_NAME_PREFIX + 1):
+            hits = rungs.get(rank) or []
+            if len(hits) == 1:
+                return hits[0]
+            if hits:
+                raise UsageError(record_ambiguity_message(selector, hits))
         return None
 
     # -- invariants ----------------------------------------------------
@@ -471,7 +535,7 @@ class StatsDomain:
                         f"{record.label}: the transcript is gone and this "
                         f"record is not archived — the store is now the only "
                         f"copy, and state collection may drop it. "
-                        f"'invariant stats archive' keeps it."
+                        f"'invariant stats archive <session>' keeps it."
                     )
             elif live != record.watermark:
                 report.stale.append(
@@ -662,12 +726,7 @@ class StatsDomain:
 
     def render_session(self, selector: str) -> str:
         """One session in full, including its per-state breakdown."""
-        record = self.resolve(selector)
-        if record is None:
-            raise UsageError(
-                f"no stats record matches {selector!r}; "
-                f"'invariant stats report' lists what is in the store"
-            )
+        record = self.require(selector)
         stats = record.stats
         lines = [
             f"{record.label}  {stats.date or 'date unknown'}"
@@ -716,6 +775,50 @@ class StatsDomain:
                 models = ", ".join(f"{m} x{c}" for m, c in sorted(agent.models.items()))
                 lines.append(f"    {name:<20} {agent.launches:>3}  {models}")
         return "\n".join(lines)
+
+
+def record_ambiguity_message(selector: str, candidates: list[StatRecord]) -> str:
+    """How to name a telemetry record when a partial name cannot.
+
+    A sibling of ``domains/session.name_ambiguity_message`` rather than a reuse
+    of it: that one prints a session's state and how far along its plan is,
+    which is the information a reader picking between LIVE sessions needs, and
+    a record has neither. A record is a measurement of a host session that has
+    usually ended; what separates two of them is the name and the date.
+
+    The remedy is to copy a full name, because a name carries its id and so
+    cannot be ambiguous — the same property that makes the prefix rung safe to
+    offer at all.
+
+    One case has no such remedy, and says so instead of pretending. Several
+    records carrying ONE name are one invariant session measured across several
+    host sessions, and no selector this command accepts separates them. Naming
+    the host sessions would separate them and is declined for the reason
+    `check` declines it: these identifiers get pasted into commits, and a
+    reader who cannot act on the distinction is not helped by being shown it.
+    """
+    names = sorted({record.label for record in candidates})
+    if len(names) == 1:
+        return (
+            f"{selector!r} names {len(candidates)} stats records, all of them "
+            f"{names[0]} — one invariant session measured across several host "
+            f"sessions.\n"
+            f"  No selector separates them; they are one session's telemetry "
+            f"in several pieces.\n"
+            f"  invariant stats report   # every record in the store"
+        )
+    lines = [f"{selector!r} names {len(candidates)} stats records:"]
+    for record in sorted(candidates, key=_row_key):
+        lines.append(
+            f"  {record.label}  {record.stats.date or 'date unknown'}"
+            + ("  [archived]" if record.archived else "")
+        )
+    lines.append(
+        "Name one in full. A session name carries its id, so the full name "
+        "cannot be ambiguous:"
+    )
+    lines.append(f"  invariant stats show {names[0]}")
+    return "\n".join(lines)
 
 
 def _spend_dict(spend: StateSpend) -> dict:

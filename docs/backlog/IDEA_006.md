@@ -2,15 +2,32 @@
 id: IDEA_006
 type: idea
 title: A fix line annotated in parentheses cannot be pasted into a shell
-status: proposed
-residue: []
-history: []
+status: done
+residue:
+- The scan that holds this closed now covers domains/stats as well as core/rules and
+  domains/session. cli/main.py is still unscanned, and its refusals use the aligned
+  two-column form (invariant session list   shows what is registered here), which
+  this rule would reject. Widening the scan there is a separate judgement about that
+  form, not a leftover of this entry.
+history:
+- from: proposed
+  to: accepted
+  reason: 'combined into IDEA_005''s increment: same refusal-message surface, three
+    one-line edits'
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: two parenthetical annotations converted, stats archive given its <session>,
+    and the test normaliser no longer strips parentheses
+  forced: false
 area: core/rules, domains/stats
 severity: low
 priority: low
 ---
-
-
 
 **The want.** Every command a refusal names should survive being pasted into a
 shell exactly as printed.

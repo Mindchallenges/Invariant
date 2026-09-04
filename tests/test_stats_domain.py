@@ -277,12 +277,6 @@ class TestArchiving:
         stats.archive(HOST_A)
         assert domain(m, source).get(HOST_A).archived is True
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="IDEA_005 — a session name now carries its id, and "
-        "StatsDomain.resolve still matches session_name by equality. The "
-        "assertion is right; the resolver is owed name_matches().",
-    )
     def test_a_record_can_be_archived_by_its_invariant_session_name(self, m):
         SessionDomain(m).start("a-task", host_session_id=HOST_A)
         source = FakeSource()
@@ -312,6 +306,166 @@ class TestArchiving:
         stats.refresh()
         stats.archive(HOST_A)
         assert stats.archive(HOST_A).archived is True
+
+
+class TestResolvingARecordByName:
+    """IDEA_005 — a record is selected by the thing a person remembers.
+
+    A session name carries its id, so the bare task name is a PREFIX of the
+    record's `session_name` rather than equal to it, and equality selected
+    nothing. The ladder is `resolve_name`'s, minus the rungs that need a live
+    set: a record outlives the session that produced it.
+    """
+
+    def joined(self, m, *specs):
+        """One session, one transcript and one record per `(slug, id, host)`."""
+        source = FakeSource()
+        for slug, session_id, host in specs:
+            SessionDomain(m).start(slug, session_id=session_id, host_session_id=host)
+            source.put(host, [sample(host=host)])
+        stats = domain(m, source)
+        stats.refresh()
+        return stats
+
+    def test_a_bare_task_name_selects_the_record(self, m):
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        found = stats.resolve("add-widget")
+        assert found is not None and found.session_name == "add-widget-aaaa1111"
+
+    def test_a_name_prefix_selects_the_record(self, m):
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        found = stats.resolve("add-wid")
+        assert found is not None and found.host_session_id == HOST_A
+
+    def test_the_full_name_selects_the_record(self, m):
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        assert stats.resolve("add-widget-aaaa1111") is not None
+
+    def test_a_bare_slug_outranks_a_longer_name_it_prefixes(self, m):
+        """The rung the flattened predicate cannot express.
+
+        `add-widget` is this record's bare slug and the other record's prefix.
+        Both answer the predicate; only one is what the reader typed, and a
+        refusal here would be a refusal the ladder had the answer to.
+        """
+        stats = self.joined(
+            m,
+            ("add-widget", "aaaa1111", HOST_A),
+            ("add-widget-again", "bbbb2222", HOST_B),
+        )
+        found = stats.resolve("add-widget")
+        assert found is not None and found.session_name == "add-widget-aaaa1111"
+
+    def test_a_query_matching_two_records_at_one_rung_refuses_and_names_them(self, m):
+        """Never the first hit: a prefix that matches two records has no
+        winner, and guessing one would archive the wrong session's telemetry."""
+        stats = self.joined(
+            m,
+            ("add-widget", "aaaa1111", HOST_A),
+            ("add-wheel", "bbbb2222", HOST_B),
+        )
+        with pytest.raises(UsageError) as refusal:
+            stats.resolve("add-w")
+        text = str(refusal.value)
+        assert "add-widget-aaaa1111" in text and "add-wheel-bbbb2222" in text
+        assert "invariant stats show add-" in text
+
+    def test_the_refusal_never_prints_a_host_session_identifier(self, m):
+        """The rule `stats check` keeps, on the branch beside it (BUG_016 F2)."""
+        stats = self.joined(
+            m,
+            ("add-widget", "aaaa1111", HOST_A),
+            ("add-wheel", "bbbb2222", HOST_B),
+        )
+        with pytest.raises(UsageError) as refusal:
+            stats.resolve("add-w")
+        assert HOST_A not in str(refusal.value)
+        assert HOST_B not in str(refusal.value)
+
+    def test_a_host_session_id_still_selects_its_record(self, m):
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        found = stats.resolve(HOST_A)
+        assert found is not None and found.host_session_id == HOST_A
+
+    def test_an_invariant_session_id_still_selects_its_record(self, m):
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        found = stats.resolve("aaaa1111")
+        assert found is not None and found.session_id == "aaaa1111"
+
+    def test_an_identifier_outranks_a_name_that_happens_to_start_with_it(self, m):
+        """`resolve_name`'s first rung, kept: an exact id is never beaten."""
+        stats = self.joined(
+            m,
+            ("add-widget", "aaaa1111", HOST_A),
+            ("aaaa1111-lookalike", "bbbb2222", HOST_B),
+        )
+        found = stats.resolve("aaaa1111")
+        assert found is not None and found.session_id == "aaaa1111"
+
+    def test_an_unjoined_record_answers_to_no_name(self, m):
+        """A record with no session has no name to match, and must not crash."""
+        source = FakeSource()
+        source.put(HOST_A, [sample()])
+        stats = domain(m, source)
+        stats.refresh()
+        assert stats.get(HOST_A).session_name is None
+        assert stats.resolve("anything") is None
+
+    def test_an_empty_selector_selects_nothing(self, m):
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        assert stats.resolve("") is None
+
+    def test_two_records_of_one_session_refuse_with_the_reason(self, m):
+        """One name, several host sessions — which no selector separates.
+
+        Unreachable through `refresh` today, because the join reads the
+        session's CURRENT binding only. It is reachable the moment the earlier
+        hosts on `Session.hosts` are joined too, which is the fix this refusal
+        is written to survive rather than to be rewritten by.
+        """
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        record = stats.get(HOST_A)
+        record.host_session_id = HOST_B
+        stats._save(record)
+        with pytest.raises(UsageError) as refusal:
+            stats.resolve("add-widget")
+        text = str(refusal.value)
+        assert "add-widget-aaaa1111" in text
+        assert "several host sessions" in text
+
+    def test_every_surface_refuses_a_miss_with_one_message(self, m):
+        """The refusal was written three times, with three accounts of what a
+        selector accepts. One of them would have gone stale as the ladder grew
+        a rung, and no reader could have told which."""
+        stats = self.joined(m, ("add-widget", "aaaa1111", HOST_A))
+        messages = []
+        for call in (stats.require, stats.archive, stats.render_session):
+            with pytest.raises(UsageError) as refusal:
+                call("nothing-like-this")
+            messages.append(str(refusal.value))
+        assert len(set(messages)) == 1
+        assert "bare task name" in messages[0]
+
+    def test_show_refuses_an_ambiguous_selector_rather_than_rendering_one(self, m):
+        """The renderer resolves too, so the refusal has to reach it."""
+        stats = self.joined(
+            m,
+            ("add-widget", "aaaa1111", HOST_A),
+            ("add-wheel", "bbbb2222", HOST_B),
+        )
+        with pytest.raises(UsageError, match="2 stats records"):
+            stats.render_session("add-w")
+
+    def test_archive_refuses_an_ambiguous_selector_rather_than_promoting_one(self, m):
+        stats = self.joined(
+            m,
+            ("add-widget", "aaaa1111", HOST_A),
+            ("add-wheel", "bbbb2222", HOST_B),
+        )
+        with pytest.raises(UsageError, match="2 stats records"):
+            stats.archive("add-w")
+        assert stats.get(HOST_A).archived is False
+        assert stats.get(HOST_B).archived is False
 
 
 class TestCheck:

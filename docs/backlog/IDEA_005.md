@@ -2,9 +2,27 @@
 id: IDEA_005
 type: idea
 title: StatsDomain.resolve does not know that a session name carries its id
-status: proposed
-residue: []
-history: []
+status: done
+residue:
+- 'Shipped: the identifier rung, the three name rungs, and a refusal that lists candidates
+  rather than taking the first hit. NOT shipped, and filed as IDEA_007: joining the
+  earlier hosts on Session.hosts. That join is what makes several records share one
+  name, which this resolver refuses with no selector able to separate them — so IDEA_007
+  must ship a per-host selector with it.'
+history:
+- from: proposed
+  to: accepted
+  reason: increment 5 of the session-outlives-host series takes it
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: the three strict-xfail assertions pass unmarked and unmodified; resolve
+    climbs resolve_name's ladder through name_rank
+  forced: false
 area: domains/stats
 severity: low
 priority: medium

@@ -2364,6 +2364,31 @@ class TestSessionNamesAreAddresses:
         assert not name_matches("add-widget-abcd1234", "abcd1234", "other")
         assert not name_matches("add-widget-abcd1234", "abcd1234", "")
 
+    def test_name_rank_says_WHICH_rung_answered_where_the_predicate_flattens(self, m):
+        """The half `name_matches` cannot express, and its caller needs.
+
+        A predicate that says only yes cannot tell a bare slug from a prefix,
+        so a caller holding several matches has no way to prefer the narrower
+        one. The rank is that ordering, exported for the same reason the
+        predicate is: `domains/stats` scans records, not sessions.
+        """
+        from invariant.domains.session import name_rank
+
+        assert name_rank("add-widget-abcd1234", "abcd1234", "add-widget-abcd1234") == 0
+        assert name_rank("add-widget-abcd1234", "abcd1234", "add-widget") == 1
+        assert name_rank("add-widget-abcd1234", "abcd1234", "add-wid") == 2
+        assert name_rank("add-widget-abcd1234", "abcd1234", "other") is None
+        assert name_rank("add-widget-abcd1234", "abcd1234", "") is None
+
+    def test_the_predicate_and_the_rank_cannot_disagree(self, m):
+        """One answer, two shapes: the predicate is the rank having one."""
+        from invariant.domains.session import name_matches, name_rank
+
+        for query in ("add-widget-abcd1234", "add-widget", "add-wid", "other", ""):
+            assert name_matches("add-widget-abcd1234", "abcd1234", query) is (
+                name_rank("add-widget-abcd1234", "abcd1234", query) is not None
+            )
+
     def test_the_ambiguity_message_names_every_candidate_and_the_way_out(self, m):
         from invariant.domains.session import name_ambiguity_message
 

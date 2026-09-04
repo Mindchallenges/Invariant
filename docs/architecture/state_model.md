@@ -967,6 +967,40 @@ ADR-002.
 | Every model is priced | No model outside the price table | report only |
 | The report matches the store | Fingerprint in the artifact equals the store's | `stats report --write` |
 
+### Selecting a record
+
+A record is addressed by an identifier — the host session's or the invariant
+session's — or by the invariant session's name, climbing the same ladder
+`SessionDomain.resolve_name` climbs: full name, bare task slug, name prefix.
+It has to be the same ladder because it is the same question, and the
+precedence is written down once, in `domains/session.name_rank`, which both
+callers read. The predicate beside it answers only *yes*, so a bare-slug match
+and a prefix match come back indistinguishable; a caller choosing between
+records needs the rung, not the answer.
+
+Two properties are decisions rather than shape.
+
+**A selector that matches several records refuses.** The rungs get narrower, so
+a tie inside one rung is a genuine tie, and the wider rung below it must not be
+allowed to break it. Taking the first hit would archive or render one session's
+telemetry under another's name — quietly, since every figure in the output
+would be internally consistent. The refusal lists the candidates by full name,
+which carries the id and so cannot be ambiguous.
+
+**The join is scanned, not indexed.** Records outlive the sessions that
+produced them, and a name is read off the record rather than off a live
+session, which is exactly why the ladder is available here at all.
+
+One ambiguity has no remedy and says so instead of offering one: several
+records carrying ONE name are one invariant session measured across several
+host sessions, and no selector this domain accepts separates them. It is
+unreachable today — `_bindings` joins the session's CURRENT binding only, so
+each session claims one record — and it becomes reachable the moment the
+earlier hosts recorded on `Session.hosts` are joined too. That join is filed
+as IDEA_007 rather than taken here: mapping every id in `hosts` to the session
+would hand `_breakdown` the same session id N times and report the session's
+whole spend against each of N records.
+
 ### What a transition records
 
 Each recorded pipeline and session transition carries three fields beyond

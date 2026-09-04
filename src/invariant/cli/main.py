@@ -1993,12 +1993,7 @@ def cmd_stats_report(args) -> int:
 def cmd_stats_show(args) -> int:
     ctx = Context()
     stats = ctx.stats
-    record = stats.resolve(args.session)
-    if record is None:
-        raise UsageError(
-            f"no stats record matches {args.session!r}; "
-            f"'invariant stats report' lists what is in the store"
-        )
+    record = stats.require(args.session)
     return emit(args, record.to_dict(), stats.render_session(args.session))
 
 
