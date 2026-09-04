@@ -405,6 +405,29 @@ the host adapter records it in `PostToolUse`, which has the identifier and
 brackets the exact call that registered the session, reading the new session's
 id out of that command's own output rather than guessing.
 
+Two commands claim a session that way, and **exactly** two: `session start` and
+`session resume`. Both run through a shell, so the CLI can see the host
+identifier for neither; everything else that names a session is a query. The
+narrowness is load-bearing rather than tidy. The id is read as `session <id> (`
+anywhere in the tool response, and `session plan show` prints a header spelled
+`plan for session ab12cd34 (add-widget) — 2/5 done`, so a pattern widened to
+"any `invariant session` command" would bind this host to whatever session a
+read-only query happened to name — quite possibly one the caller was only
+looking at. `session status`, `session list`, `session sync` and `context` all
+print the same sequence.
+
+**The claim binds; it does not re-resume.** By the time `PostToolUse` sees a
+resume's output, `SessionDomain.resume` has already incremented
+`resumed_count` and written the standstill row, so the hook calls
+`adopt_host_session` for both verbs rather than routing the resume back through
+the domain method of the same name. A second call there would count one pickup
+twice and leave two `resumed` rows describing one event. `adopt_host_session`
+is sufficient, and it is sufficient because of the narrowing above: its refusal
+names a **live** binding only, so a spent one goes straight through to
+`_bind_host` — which is where `host_ended` is cleared and the outgoing id is
+kept. What the hook owes is the half the CLI could not do, which is *which*
+host session claimed it, and nothing more.
+
 Enforced in both directions. A host session that already owns a live session
 cannot start a second; a session bound to a **live** host is not rebound to
 another without `--force`. Rebinding silently would hand a pipeline, its
@@ -492,6 +515,35 @@ session is sitting right there, names the address and its progress, and gives
 the command that picks it up. A warning printed above a successful `start` would
 be prose-as-control-flow — it does not stop the fork, and by the time anyone
 reads it there are two branches. `--force` starts a genuinely separate session.
+
+**The greeting names what it will not do automatically.** A session somebody
+parked here is invisible unless it is offered, and the greeting listed only
+sessions with **no** owner — so the one kind that can actually be picked up was
+the single thing it could not mention, and finding it required already knowing
+it was there. `SessionStart` now prints the resumable set **above** the unowned
+one: a definite offer, carrying a name, a state and a progress count, above a
+conditional hedged with "only if it is yours". The other order buries the
+answer under the caveat. It is capped at three against six for the unowned
+list, because each line carries a progress clause and runs about twice as wide
+and the block is injected on every `SessionStart`; the overflow is named rather
+than dropped, behind `invariant session list`. Nothing on that path writes —
+`resumable()` is written from `live()` and sorts a list — and nothing may start
+to, because a hook that wrote on every `SessionStart` would stamp heartbeats
+and race every other host against one registry in order to say hello.
+
+**The turn projection reports the plan, not the checklist.** A session that
+outlived a host says so once, with the count; then at most two lines from
+`core.plan.summary_lines` — the next deliverable and the one after it — and
+everything else behind `invariant session plan show`. It sits below the
+stand-down banner, which keeps its place as the only line reporting an absence
+of enforcement, and above `session may go to:`, which is machinery: the plan is
+what the turn is *about*. Both halves are silent by default, so a session with
+no plan that was never resumed projects exactly as it did before this existed.
+An empty plan renders nothing at all rather than `(no deliverables recorded)`,
+which is the opposite of what `plan show` does and deliberate: that answer is
+right for a direct question and wrong for a line every project sees on every
+turn, where a permanent report of an absent checklist is what teaches a reader
+to skip the whole block.
 
 Resume also refuses a **merged** or **pushed** session without `--force`: the
 deliverable set already landed, and accumulating new commits onto a merged

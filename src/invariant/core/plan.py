@@ -63,6 +63,24 @@ class Progress:
             return "no deliverables recorded"
         return f"{self.done} of {self.total} done"
 
+    @property
+    def fraction(self) -> str:
+        """``2/5``. The compact spelling, for a clause inside a sentence.
+
+        A sibling of :meth:`describe` rather than a replacement: that one
+        reads as prose and answers the empty case in words, this one is two
+        numbers and a slash. Four call sites want the compact form — the
+        resume line, the ``plan show`` header, the turn projection and the
+        greeting's offer — and four hand-built f-strings is four chances to
+        print a total that disagrees with the numbers the commands take.
+
+        The empty plan renders ``0/0`` rather than a placeholder. A ``-``
+        belongs to a TABLE column, where every cell must be filled with
+        something; a caller writing a sentence wants the numbers, and a caller
+        that wants to say "unplanned" has :attr:`total` and :meth:`describe`.
+        """
+        return f"{self.done}/{self.total}"
+
 
 def entries(plan: Any) -> list[dict]:
     """The plan as a list of well-formed entries, in recorded order.
@@ -126,6 +144,49 @@ def render_lines(plan: Any) -> list[str]:
     return [
         f"[{'x' if e['done'] else ' '}] {e['n']:>{width}}  {e['title']}" for e in got
     ]
+
+
+def summary_lines(plan: Any) -> list[str]:
+    """The plan as a turn projection shows it: a headline and what is next.
+
+    Deliberately **not** :func:`render_lines`, and the difference is the
+    question each answers. ``render_lines`` was asked — somebody typed
+    ``session plan show`` — so it lists every entry against the number the
+    commands take. This one is injected into every turn of every project, so
+    it is capped at two lines however long the plan is and everything past the
+    second open deliverable lives behind the command that prints it.
+
+    Two behaviours are the reason this is a second reader rather than a flag
+    on the first.
+
+    **An empty plan renders nothing at all**, which is the exact opposite of
+    ``render_lines``' ``(no deliverables recorded)``. That answer is right for
+    a direct question and wrong here: most projects keep no checklist, and a
+    permanent line reporting the absence of one is the noise that teaches a
+    reader to skip the whole block — including the turns where it says
+    something.
+
+    **A complete plan names the finish.** ``5/5 done`` is the state
+    ``session.deliverables_complete`` is waiting for, so the line that reports
+    it names the command that acts on it. Left unsaid, the projection would
+    report a finished checklist every turn and never say what to do about one.
+
+    Both numbers come from :func:`progress`, which is what ``render_lines``
+    counts from too, so the two renderings cannot disagree about how far along
+    the plan is.
+    """
+    got = progress(plan)
+    if not got.total:
+        return []
+    if got.complete:
+        return [
+            f"plan {got.fraction} done — COMPLETE",
+            "  every deliverable is done; land it: invariant session review",
+        ]
+    lines = [f"plan {got.fraction} done — next: {got.remaining[0]['title']}"]
+    if len(got.remaining) > 1:
+        lines.append(f"  then: {got.remaining[1]['title']}")
+    return lines
 
 
 def _number(value: Any, position: int) -> int:

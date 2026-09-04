@@ -1710,6 +1710,504 @@ class TestEveryCommandARuleNamesCanBeRun(ParkedSessionHarness):
         assert payload(capsys)["complete"] is True
 
 
+class GreetingHarness:
+    """`SessionStart`, run the way the host runs it.
+
+    Through the hook rather than through `invariant context`, because the
+    resumable offer is on the GREETING path and `context` is the every-turn
+    one. Testing it through a fake context would prove only that a list was
+    formatted; the value of the block is that `resumable()` picks the right
+    sessions, which only real records can show.
+    """
+
+    def greet(self, monkeypatch, host_session_id="host-second-1111"):
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host_session_id)
+        monkeypatch.setattr(
+            "sys.stdin", _Stdin(json.dumps({"session_id": host_session_id}))
+        )
+        assert run("hook", "session-start") == 0
+
+    def greeting(self, capsys, monkeypatch, host_session_id="host-second-1111"):
+        self.greet(monkeypatch, host_session_id)
+        return (
+            payload(capsys)
+            .get("hookSpecificOutput", {})
+            .get("additionalContext", "")
+        )
+
+
+class TestTheGreetingOffersParkedWork(ParkedSessionHarness, GreetingHarness):
+    """The discoverability hole this whole feature exists to close.
+
+    The greeting listed only sessions with NO owner. A session whose host
+    ENDED has an owner — a spent one — so the single session that could
+    actually be picked up was the one the greeting could not mention, and the
+    only way to find it was to already know it was there.
+    """
+
+    def test_a_parked_session_is_offered_with_its_progress(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.parked(
+            project, capsys, monkeypatch, plan=("wire the toolbar", "add the icons")
+        )
+        text = self.greeting(capsys, monkeypatch)
+
+        assert "A session OUTLIVES a host session" in text
+        assert f"invariant session resume {session['name']}" in text
+        assert "0/2 deliverables" in text
+        assert "next: wire the toolbar" in text
+
+    def test_the_offer_says_it_is_an_offer(self, project, capsys, monkeypatch):
+        """Resumption is never automatic, and the line that offers it says so.
+
+        Picking up unfinished work brings a pipeline state, a declared file set
+        and a branch along with it. A greeting that read as an instruction
+        would make that decision on the reader's behalf.
+        """
+        self.parked(project, capsys, monkeypatch)
+        text = self.greeting(capsys, monkeypatch)
+        assert "offered, never automatic" in text
+        assert "new work starts a new session" in text
+
+    def test_a_parked_session_with_no_plan_says_so_rather_than_a_fraction(
+        self, project, capsys, monkeypatch
+    ):
+        self.parked(project, capsys, monkeypatch)
+        text = self.greeting(capsys, monkeypatch)
+        assert "no deliverables recorded" in text
+        assert "0/0" not in text
+
+    def unowned(self, project, capsys, monkeypatch, *names):
+        """Sessions with no owner at all — the list that was already there.
+
+        TWO at least, deliberately. One unbound session is not ambiguous: it is
+        the sole attributable candidate, so `current_session` resolves to it at
+        the origin step and the greeting never reaches the no-session branch
+        this block lives in.
+        """
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+        for name in names:
+            run("session", "start", name, "--force")
+        capsys.readouterr()
+
+    def test_a_parked_session_whose_plan_is_finished_says_all_done(
+        self, project, capsys, monkeypatch
+    ):
+        """Parked and complete is a real state, and not the same as parked.
+
+        The session did what it said it was for and its host went away before
+        it landed. The offer says so rather than printing a next deliverable
+        there is none of.
+        """
+        session = self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        run("session", "plan", "done", "1", "--id", session["id"])
+        capsys.readouterr()
+
+        text = self.greeting(capsys, monkeypatch)
+        assert "1/1 deliverables, all done" in text
+        assert "next:" not in text
+
+    def test_the_offer_is_above_the_unowned_list(self, project, capsys, monkeypatch):
+        """A definite offer outranks a hedged one.
+
+        A resumable session has a name, a state and a progress count, and the
+        reader probably parked it themselves. An unowned session is a
+        conditional — "claim one only if it is yours". Printing the hedged list
+        first buries the answer under the caveat.
+        """
+        self.parked(project, capsys, monkeypatch)
+        self.unowned(project, capsys, monkeypatch, "spare-a", "spare-b")
+
+        text = self.greeting(capsys, monkeypatch)
+        assert text.index("can be picked up") < text.index("have no owner")
+
+    def test_at_most_three_are_offered_and_the_rest_are_named(
+        self, project, capsys, monkeypatch
+    ):
+        """Capped at three against six for the unowned list, and deliberately.
+
+        Each of these lines carries a progress clause and is about twice as
+        wide, and the whole block is injected on every SessionStart. The
+        overflow is not dropped; it is named, behind the command that lists it.
+        """
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        for n in range(4):
+            host = f"host-{n}-0000"
+            monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host)
+            run("session", "start", f"task-{n}")
+            spend_the_binding(project, host)
+        capsys.readouterr()
+
+        text = self.greeting(capsys, monkeypatch)
+        assert text.count("invariant session resume ") == 3
+        assert "1 more" in text
+        assert "invariant session list" in text
+
+    def test_the_greeting_is_byte_identical_when_nothing_is_parked(
+        self, project, capsys, monkeypatch
+    ):
+        """What makes this change additive for every project that never adopts it.
+
+        A project with no parked sessions must see exactly the greeting it saw
+        before — not a reworded one, not an extra blank line. Anything else is
+        a change every consumer pays for and none of them asked for.
+        """
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        self.unowned(project, capsys, monkeypatch, "spare-a", "spare-b")
+
+        offered = unowned_candidates(project, "host-second-1111")
+        assert len(offered) == 2
+        assert self.greeting(capsys, monkeypatch) == "\n".join(
+            [
+                "invariant: this host session owns no session yet.",
+                "  Start one before editing: invariant session start <task-name>",
+                (
+                    "  It binds to this host session automatically — one host "
+                    "session, one invariant session."
+                ),
+                (
+                    "  2 session(s) here have no owner; claim one only if it "
+                    "is yours:"
+                ),
+            ]
+            + [
+                f"    invariant session adopt <host-id> --id {s.id}"
+                f"   ({s.name}, {s.state})"
+                for s in offered
+            ]
+        )
+
+
+class TestSessionStartWritesNothing(ParkedSessionHarness, GreetingHarness):
+    """A greeting is a READ. It must not move any state to produce one.
+
+    The block it now prints comes from `resumable()`, which is written from
+    `live()` and sorts a list. Nothing on that path saves — and nothing may
+    start to, because a hook that writes on every SessionStart would stamp
+    heartbeats, touch mtimes and race every other host against the same
+    registry, all to say hello.
+    """
+
+    def fingerprint(self, project):
+        from invariant.core.manifest import Manifest
+
+        root = Manifest.load(project).state_root
+        return {
+            str(f.relative_to(root)): (f.stat().st_mtime_ns, f.stat().st_size)
+            for f in sorted(root.rglob("*"))
+            if f.is_file()
+        }
+
+    def test_the_greeting_moves_no_state(self, project, capsys, monkeypatch):
+        self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        before = self.fingerprint(project)
+        assert before, "the fixture wrote no state, so this proves nothing"
+
+        self.greet(monkeypatch)
+        capsys.readouterr()
+
+        assert self.fingerprint(project) == before
+
+
+class TestTheTurnProjectionShowsThePlan(ParkedSessionHarness):
+    """What the turn is ABOUT, placed where that is what it reads as.
+
+    Below the stand-down banner, which keeps its position as the only line
+    reporting an absence of enforcement, and above `session may go to:`, which
+    is machinery.
+    """
+
+    def resumed(self, project, capsys, monkeypatch, plan=()):
+        session = self.parked(project, capsys, monkeypatch, plan=plan)
+        assert run("session", "resume", session["name"]) == 0
+        capsys.readouterr()
+        return session
+
+    def context(self, capsys, session):
+        assert run("context", "--id", session["id"]) == 0
+        return out(capsys)
+
+    def test_a_resumed_session_says_it_spans_host_sessions(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.resumed(
+            project, capsys, monkeypatch, plan=("wire the toolbar", "add the icons")
+        )
+        text = self.context(capsys, session)
+        assert "spans host sessions — resumed 1 time(s)" in text
+        assert "it merges when the plan is done" in text
+
+    def test_the_plan_shows_the_next_and_one_then(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.resumed(
+            project, capsys, monkeypatch, plan=("wire it", "ice it", "ship it")
+        )
+        text = self.context(capsys, session)
+        assert "plan 0/3 done — next: wire it" in text
+        assert "then: ice it" in text
+        assert "ship it" not in text
+
+    def test_a_resumed_session_with_no_plan_is_told_to_record_one(
+        self, project, capsys, monkeypatch
+    ):
+        """The one moment the plan is still cheap to write down.
+
+        Whatever is left is in somebody's head right now. Claiming "it merges
+        when the plan is done" against a plan that does not exist would name a
+        condition nothing can meet.
+        """
+        session = self.resumed(project, capsys, monkeypatch)
+        text = self.context(capsys, session)
+        assert "spans host sessions" in text
+        assert "it merges when the plan is done" not in text
+        assert 'invariant session plan add "<deliverable>"' in text
+
+    def test_a_complete_plan_names_the_finish(self, project, capsys, monkeypatch):
+        session = self.resumed(project, capsys, monkeypatch, plan=("wire it",))
+        run("session", "plan", "done", "1", "--id", session["id"])
+        capsys.readouterr()
+        text = self.context(capsys, session)
+        assert "plan 1/1 done — COMPLETE" in text
+        assert "invariant session review" in text
+
+    def test_the_projection_adds_at_most_three_lines(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.resumed(
+            project, capsys, monkeypatch, plan=("a", "b", "c", "d", "e")
+        )
+        text = self.context(capsys, session)
+        added = [
+            line
+            for line in text.splitlines()
+            if "spans host sessions" in line
+            or line.strip().startswith(("plan ", "then:"))
+        ]
+        assert len(added) == 3
+
+    def test_an_unplanned_never_resumed_session_projects_exactly_as_before(
+        self, project, capsys, monkeypatch
+    ):
+        """The additive guarantee, from the other end.
+
+        A session with no plan that was never resumed is every session in every
+        project that does not use this feature. Its turn projection must gain
+        nothing at all.
+        """
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        run("session", "start", "plain", "--json")
+        session = payload(capsys)["session"]
+        capsys.readouterr()
+
+        text = self.context(capsys, session)
+        assert "spans host sessions" not in text
+        assert "plan " not in text
+        assert "then:" not in text
+        assert text.splitlines()[1].strip().startswith("session may go to:")
+
+
+def unowned_candidates(project, host_session_id):
+    """The sessions with no owner, in the order the greeting lists them.
+
+    Read from the domain rather than hardcoded, because the ASSERTION is about
+    the rendering — the exact words, spacing and punctuation of a block every
+    project sees on every SessionStart — and not about which ids a fixture
+    happened to mint.
+    """
+    from invariant.core.manifest import Manifest
+    from invariant.core.store import JsonStore
+    from invariant.domains.session import SessionDomain
+
+    manifest = Manifest.load(project)
+    domain = SessionDomain(manifest, JsonStore(manifest.state_root))
+    return [
+        s
+        for s in domain.origin_candidates(project, host_session_id=host_session_id)
+        if not s.host_session_id
+    ]
+
+
+class HostClaimHarness:
+    """Push a real command's real output through the real host binder.
+
+    The two halves of the binding contract live in different modules and are
+    only a contract because they are tested against each other: the CLI shapes
+    a line, and `hosts/claude_code` parses it. A test that hand-writes the
+    line proves the parser reads a string somebody made up.
+    """
+
+    def claim(self, text, host_session_id="host-second-1111"):
+        from types import SimpleNamespace
+
+        from invariant.hosts.claude_code import ClaudeCodeHost
+
+        class Recorder:
+            def __init__(self):
+                self.adopted = []
+
+            def adopt_host_session(self, session_id, host_session_id, force=False):
+                self.adopted.append((session_id, host_session_id))
+
+        ctx = SimpleNamespace(sessions=Recorder(), host_session_id=host_session_id)
+        ClaudeCodeHost(Path("."))._bind_claimed_session(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "invariant session resume add-widget"},
+                "tool_response": text,
+            },
+            ctx,
+        )
+        return ctx.sessions.adopted
+
+
+class TestResumeBindsTheHostThatRanIt(ParkedSessionHarness, HostClaimHarness):
+    """The other end of the contract `TestSessionResume` tests one side of.
+
+    `session resume` runs through a shell, so the CLI cannot see the host
+    identifier and the binding has to be made in PostToolUse off the command's
+    own stdout. Until the claim pattern admitted `resume`, the command whose
+    entire purpose is to pick work up left the host bound to nothing: the
+    record said resumed and every subsequent hook resolved to no session.
+    """
+
+    def test_the_success_line_binds_the_host_that_ran_it(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        assert run("session", "resume", session["name"]) == 0
+        captured = capsys.readouterr()
+        assert self.claim(captured.out + captured.err) == [
+            (session["id"], "host-second-1111")
+        ]
+
+    def test_the_claim_counts_no_second_resume(
+        self, project, capsys, monkeypatch
+    ):
+        """One pickup, one count, one standstill row.
+
+        The CLI's `resume` has already incremented `resumed_count` and written
+        the `resumed` history row by the time PostToolUse sees its output. The
+        hook owes only the half the CLI could not do — WHICH host claimed it —
+        so it binds through `adopt_host_session`, which clears the spent
+        `host_ended`, keeps the outgoing id in `hosts`, and touches no counter.
+        Routing it through `SessionDomain.resume` instead counts the one
+        pickup twice and leaves two rows describing one event.
+        """
+        from invariant.core.manifest import Manifest
+        from invariant.core.store import JsonStore
+        from invariant.domains.session import SessionDomain
+
+        session = self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", session["name"]) == 0
+        captured = capsys.readouterr()
+        self.claim(captured.out + captured.err)
+
+        manifest = Manifest.load(project)
+        domain = SessionDomain(manifest, JsonStore(manifest.state_root))
+        after = domain.require(session["id"])
+        assert after.resumed_count == 1
+        assert len([h for h in after.history if h.get("resumed")]) == 1
+
+    def test_the_binding_actually_lands_so_later_hooks_resolve(
+        self, project, capsys, monkeypatch
+    ):
+        """`host_ended` must be CLEARED, or the pickup is unaddressable.
+
+        `by_host_session` filters on the flag, so a session claimed with it
+        still set resolves to nobody for every hook in its new host — resumed
+        in the record and invisible in practice.
+        """
+        from invariant.core.manifest import Manifest
+        from invariant.core.store import JsonStore
+        from invariant.domains.session import SessionDomain
+
+        session = self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", session["name"]) == 0
+        captured = capsys.readouterr()
+
+        manifest = Manifest.load(project)
+        domain = SessionDomain(manifest, JsonStore(manifest.state_root))
+        domain.adopt_host_session(*self.claim(captured.out + captured.err)[0])
+
+        found = domain.by_host_session("host-second-1111")
+        assert found is not None and found.id == session["id"]
+        assert found.host_ended is False
+        assert "host-first-0000" in found.hosts
+
+    def test_claiming_a_resumed_session_does_not_widen_attributable(
+        self, project, capsys, monkeypatch
+    ):
+        """The host-side counterpart of the domain's own guard.
+
+        A vacated binding would rejoin `attributable()`; a peer host that owned
+        nothing would then see two origin candidates, `resolve` would answer
+        ambiguous, `rule_context` would render `session=None`, and
+        `pre-tool-use` DENIES an unattributed edit. Claiming a session must
+        never be able to refuse another session's tool call, so the claim is
+        checked from the PEER's point of view rather than from its own.
+        """
+        from invariant.core.manifest import Manifest
+        from invariant.core.store import JsonStore
+        from invariant.domains.session import SessionDomain
+
+        session = self.parked(project, capsys, monkeypatch)
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-peer-2222")
+        run("session", "start", "peer", "--json")
+        peer = payload(capsys)["session"]
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-second-1111")
+        capsys.readouterr()
+
+        assert run("session", "resume", session["name"]) == 0
+        captured = capsys.readouterr()
+
+        manifest = Manifest.load(project)
+        domain = SessionDomain(manifest, JsonStore(manifest.state_root))
+        domain.adopt_host_session(*self.claim(captured.out + captured.err)[0])
+
+        resolution = domain.resolve(cwd=project, host_session_id="host-peer-2222")
+        assert resolution.session is not None
+        assert resolution.session.id == peer["id"]
+
+
+class TestARefusedResumeBindsNothing(ParkedSessionHarness, HostClaimHarness):
+    """The refusals go through the parser that would bind on them.
+
+    `TestSessionResume` asserts the refusal text carries no `session <id> (`
+    sequence. That is the property; this is the consequence, checked end to end
+    through the code that would act on it — because the reader searches the
+    WHOLE tool response and a host that merges streams puts stderr in it, so a
+    refusal carrying the sequence binds the caller to a session it just
+    declined to give them.
+    """
+
+    def test_a_name_that_matches_nothing(self, project, capsys, monkeypatch):
+        self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", "no-such-task") == 2
+        captured = capsys.readouterr()
+        assert "no-such-task" in captured.out + captured.err
+        assert self.claim(captured.out + captured.err) == []
+
+    def test_a_name_that_matches_several(self, project, capsys, monkeypatch):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        for host in ("host-a-0000", "host-b-1111"):
+            monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host)
+            run("session", "start", "add-widget", "--force")
+            spend_the_binding(project, host)
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-second-1111")
+        capsys.readouterr()
+
+        assert run("session", "resume", "add-widget") == 2
+        captured = capsys.readouterr()
+        assert "names 2 sessions" in captured.out + captured.err
+        assert self.claim(captured.out + captured.err) == []
+
+
 class TestSessionResume(ParkedSessionHarness):
     def test_it_reports_the_shape_the_host_binds_on(
         self, project, capsys, monkeypatch
@@ -1720,7 +2218,7 @@ class TestSessionResume(ParkedSessionHarness):
         created it, with one regex. A resume that prints a line the regex
         cannot read is a session the host never binds to.
         """
-        from invariant.hosts.claude_code import _bind_started_session_id
+        from invariant.hosts.claude_code import _bind_claimed_session_id
 
         session = self.parked(
             project, capsys, monkeypatch, plan=("read the docs", "wire the toolbar")
@@ -1728,7 +2226,7 @@ class TestSessionResume(ParkedSessionHarness):
         assert run("session", "resume", session["name"]) == 0
         text = out(capsys)
 
-        assert _bind_started_session_id(text) == session["id"]
+        assert _bind_claimed_session_id(text) == session["id"]
         assert text.splitlines()[0].endswith("resumed — 0/2 deliverables done")
         assert "next: read the docs" in text
         assert "invariant session status" in text
@@ -1761,12 +2259,12 @@ class TestSessionResume(ParkedSessionHarness):
     def test_not_found_binds_nothing(self, project, capsys, monkeypatch):
         """A failed resume must not print anything a host can bind to.
 
-        `_bind_started_session_id` searches the WHOLE tool response, and hosts
+        `_bind_claimed_session_id` searches the WHOLE tool response, and hosts
         that merge streams put stderr in it. A refusal carrying a
         `session <id> (` sequence would bind the caller to whatever it named —
         silently, and to the wrong session.
         """
-        from invariant.hosts.claude_code import _STARTED_ID, _bind_started_session_id
+        from invariant.hosts.claude_code import _STARTED_ID, _bind_claimed_session_id
 
         self.parked(project, capsys, monkeypatch)
         assert run("session", "resume", "no-such-task") == 2
@@ -1775,12 +2273,12 @@ class TestSessionResume(ParkedSessionHarness):
 
         assert "no-such-task" in both
         assert _STARTED_ID.search(both) is None
-        assert _bind_started_session_id(both) is None
+        assert _bind_claimed_session_id(both) is None
 
     def test_an_ambiguous_name_lists_the_candidates_and_binds_nothing(
         self, project, capsys, monkeypatch
     ):
-        from invariant.hosts.claude_code import _STARTED_ID, _bind_started_session_id
+        from invariant.hosts.claude_code import _STARTED_ID, _bind_claimed_session_id
 
         assert run("init", "--name", "demo") == 0
         commit_all(project, "manifest")
@@ -1797,7 +2295,7 @@ class TestSessionResume(ParkedSessionHarness):
 
         assert "names 2 sessions" in both
         assert _STARTED_ID.search(both) is None
-        assert _bind_started_session_id(both) is None
+        assert _bind_claimed_session_id(both) is None
 
     def test_id_names_the_session_directly(self, project, capsys, monkeypatch):
         session = self.parked(project, capsys, monkeypatch)
@@ -2150,14 +2648,14 @@ class TestPlanIsVisibleWhereWorkIsPickedUp(ParkedSessionHarness):
 
     def test_start_names_the_way_back(self, project, capsys, monkeypatch):
         """And line one still binds: `TestAutomaticBinding` reads it."""
-        from invariant.hosts.claude_code import _bind_started_session_id
+        from invariant.hosts.claude_code import _bind_claimed_session_id
 
         assert run("init", "--name", "demo") == 0
         commit_all(project, "manifest")
         run("session", "start", "later-work")
         text = out(capsys)
 
-        assert _bind_started_session_id(text) is not None
+        assert _bind_claimed_session_id(text) is not None
         assert "invariant session resume later-work-" in text
 
 

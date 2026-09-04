@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core import plan as plan_reader
 from ..core.errors import InvariantError, UsageError
 from ..core.rules import (
     EDIT_TOOLS,
@@ -970,18 +971,37 @@ class ClaudeCodeHost:
             return {"systemMessage": "\n".join(notices)}
         return {}
 
-    def _bind_started_session(self, payload: dict, ctx) -> None:
+    def _bind_claimed_session(self, payload: dict, ctx) -> None:
+        """Record which host session a `session start` or `resume` claimed.
+
+        Both commands run through a shell, so the CLI never sees the host
+        identifier; PostToolUse has it and brackets the exact call, so it reads
+        the id out of that command's own output rather than guessing.
+
+        **Both verbs bind through `adopt_host_session`, and `resume` is not an
+        exception to that.** What is owed here is the BINDING, and only the
+        binding: the resume itself has already happened inside the command
+        whose output this is, which incremented `resumed_count` and wrote the
+        `resumed` standstill row. Calling `SessionDomain.resume` again would
+        count one pickup twice and leave two rows describing one event.
+        `adopt_host_session` is the half the CLI could not do and nothing more
+        — and it is sufficient, because since the session-outlives-its-host
+        increment its refusal names a *live* binding only, so a SPENT one goes
+        through to `_bind_host`, which clears `host_ended` (without which the
+        session resolves to nobody for every later hook) and keeps the outgoing
+        id in `hosts`.
+        """
         if not ctx.host_session_id:
             return
         tool_input = payload.get("tool_input") or {}
         command = str(tool_input.get("command", ""))
-        if not _SESSION_START.search(command):
+        if not _SESSION_CLAIM.search(command):
             return
 
         response = payload.get("tool_response")
         if isinstance(response, dict):
             response = response.get("stdout") or response.get("output") or ""
-        session_id = _bind_started_session_id(str(response or ""))
+        session_id = _bind_claimed_session_id(str(response or ""))
         if not session_id:
             return
 
@@ -989,7 +1009,8 @@ class ClaudeCodeHost:
             ctx.sessions.adopt_host_session(session_id, ctx.host_session_id)
         except InvariantError:
             # Already bound, or this host already owns one. Both are the 1:1
-            # rule working; neither is a reason to fail a completed command.
+            # rule working; neither is a reason to fail a completed command,
+            # and PostToolUse must never turn a refusal into a denial.
             pass
 
     def _bind_by_successful_edit(self, payload: dict, ctx) -> None:
@@ -1106,7 +1127,7 @@ class ClaudeCodeHost:
         # binding it makes is what lets every following call from that subagent
         # resolve by host identifier instead of by guess.
         if tool == "Bash":
-            self._bind_started_session(payload, ctx)
+            self._bind_claimed_session(payload, ctx)
         elif tool in EDIT_TOOLS:
             self._bind_by_successful_edit(payload, ctx)
 
@@ -1374,12 +1395,24 @@ _UNRECORDED_DISPATCH = (
 )
 
 
-#: `invariant session start <name>` — with any flags, and however the command
-#: was reached (a bare call, or one wrapped in `cd … &&`).
-_SESSION_START = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+start\b")
+#: The two commands that CLAIM a session for this host session:
+#: `invariant session start <name>` and `invariant session resume <name>` —
+#: with any flags, and however the command was reached (a bare call, or one
+#: wrapped in `cd … &&`). Both run through a shell, which carries no hook
+#: payload, so the binding has to be read out of their own stdout.
+#:
+#: **Exactly those two verbs, and not "any `session` subcommand".** The id
+#: reader below matches `session <id> (` anywhere in the tool response, and
+#: `session plan show` prints a header spelled
+#: `plan for session ab12cd34 (add-widget) — 2/5 done`. Loosened to the
+#: subcommand-agnostic form, a read-only query would bind this host to
+#: whatever session it happened to name — silently, and quite possibly to one
+#: the caller was only looking at. `session status`, `session list`,
+#: `session sync` and `context` all print the same sequence.
+_SESSION_CLAIM = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+(start|resume)\b")
 
-#: The identifier `session start` prints. Parsed rather than guessed, so the
-#: binding names the session that command actually created.
+#: The identifier a claiming command prints. Parsed rather than guessed, so
+#: the binding names the session that command actually created or picked up.
 _STARTED_ID = re.compile(r"session\s+([0-9a-z]+)\s+\(")
 
 
@@ -1429,7 +1462,7 @@ def _override_notice(verdict, record: dict) -> str:
     )
 
 
-def _bind_started_session_id(response: str) -> str | None:
+def _bind_claimed_session_id(response: str) -> str | None:
     """The session id out of `session start` output, text or JSON."""
     try:
         data = json.loads(response)
@@ -1452,6 +1485,103 @@ def _context_response(event_name: str, text: str) -> dict:
             "additionalContext": text,
         }
     }
+
+
+#: How many parked sessions the greeting offers, against six for the unowned
+#: list. Each of these lines carries a progress clause and runs about twice as
+#: wide, and the whole block is injected on every SessionStart — so the cap is
+#: lower, and the overflow is NAMED rather than dropped.
+_RESUMABLE_OFFERED = 3
+
+
+def _resumable_offer(ctx) -> list[str]:
+    """What somebody put down here, and the command that picks it up.
+
+    Empty when nothing is parked, which is what makes this change additive:
+    a project that never adopts the plan sees byte-identical output to before.
+
+    The offer is phrased as an offer. Resumption is never automatic — picking
+    up unfinished work brings a pipeline state, a declared file set and a
+    branch along with it — so the block says so rather than leaving a greeting
+    that reads as an instruction to make that decision for the reader.
+
+    This is a READ and stays one. ``resumable()`` is written from ``live()``
+    and sorts a list; nothing on the path saves, and nothing may start to,
+    because a hook that wrote on every SessionStart would stamp heartbeats and
+    race every other host against the same registry in order to say hello.
+    """
+    # Unguarded, like the `origin_candidates` call it sits beside. Wrapping
+    # only this one would claim it is the more fragile of the two, which it is
+    # not — both read the same registry — and the hook already has an outer
+    # net: an engine that throws answers with the degraded marker rather than
+    # wedging the turn.
+    parked = ctx.sessions.resumable(ctx.cwd)
+    if not parked:
+        return []
+
+    lines = [
+        (
+            "  A session OUTLIVES a host session. These stopped here and can "
+            "be picked up:"
+        )
+    ]
+    for session in parked[:_RESUMABLE_OFFERED]:
+        lines.append(
+            f"    invariant session resume {session.name}"
+            f"   ({session.state}, {_offer_clause(session)})"
+        )
+    if len(parked) > _RESUMABLE_OFFERED:
+        lines.append(
+            f"    … and {len(parked) - _RESUMABLE_OFFERED} more: "
+            f"invariant session list"
+        )
+    lines.append(
+        "  Resuming is offered, never automatic — new work starts a new session."
+    )
+    return lines
+
+
+def _offer_clause(session) -> str:
+    """How far along an offered session is, in one parenthesised clause.
+
+    An unplanned session says so in words rather than rendering ``0/0``: the
+    fraction would read as "none of nothing done", which is a report about a
+    checklist that was never written.
+    """
+    got = plan_reader.progress(session.plan)
+    if not got.total:
+        return "no deliverables recorded"
+    if got.complete:
+        return f"{got.fraction} deliverables, all done"
+    return f"{got.fraction} deliverables, next: {got.remaining[0]['title']}"
+
+
+def _spans_hosts_line(session) -> list[str]:
+    """That this session outlived a host session, said once, on the turns it did.
+
+    Silent when ``resumed_count`` is zero, which is every session in every
+    project that does not use the plan — their turn projection gains nothing at
+    all, which is what makes this additive.
+
+    The clause after the count depends on whether there IS a plan, because the
+    two cases want opposite things said. A session with deliverables recorded
+    needs to know what ends it: it merges when they are done, and nothing else
+    in the projection says so. A session with none needs the opposite — the
+    same sentence would name a condition that cannot be met, so it names the
+    command that arms it instead. A resume is the last cheap moment to record
+    what is left; after it, what remains is in somebody's head and then in a
+    commit.
+    """
+    if not session.resumed_count:
+        return []
+    tail = (
+        "it merges when the plan is done"
+        if session.plan_total
+        else 'nothing records what is left: invariant session plan add "<deliverable>"'
+    )
+    return [
+        f"  spans host sessions — resumed {session.resumed_count} time(s); {tail}"
+    ]
 
 
 def build_context(ctx, greeting: bool = False) -> str:
@@ -1491,9 +1621,24 @@ def build_context(ctx, greeting: bool = False) -> str:
             lines = [
                 "invariant: this host session owns no session yet.",
                 "  Start one before editing: invariant session start <task-name>",
-                "  It binds to this host session automatically — one host "
-                "session, one invariant session.",
+                (
+                    "  It binds to this host session automatically — one host "
+                    "session, one invariant session."
+                ),
             ]
+            # ABOVE the unowned list, and the ordering is the point. A
+            # resumable session is a DEFINITE offer — it has a name, a state
+            # and a progress count, and the reader most likely parked it
+            # themselves. An unowned one is a conditional, hedged with "only
+            # if it is yours". Printing the hedged list first buries the
+            # answer under the caveat.
+            #
+            # Until this block existed the greeting listed only sessions with
+            # NO owner, so a session whose host had ENDED — the one that can
+            # actually be picked up — was the single thing it could not
+            # mention. Finding it required already knowing it was there.
+            lines += _resumable_offer(ctx)
+
             if unbound:
                 lines.append(
                     f"  {len(unbound)} session(s) here have no owner; claim one "
@@ -1542,6 +1687,16 @@ def build_context(ctx, greeting: bool = False) -> str:
             + (f"; still enforced: {', '.join(still)}" if still else "")
         )
         lines.append("    put it back with: invariant standdown --clear")
+
+    # After the stand-down banner, before `session may go to:`. The banner
+    # keeps its position as the only line reporting an absence of enforcement;
+    # the plan is what the turn is ABOUT, and `session may go to:` is
+    # machinery. At most three lines land here however long the plan is — a
+    # session spanning hosts says so, and `core.plan.summary_lines` caps the
+    # rest at the next deliverable and one after it. The whole listing is
+    # behind `invariant session plan show`.
+    lines += _spans_hosts_line(session)
+    lines += [f"  {line}" for line in plan_reader.summary_lines(session.plan)]
 
     machine = ctx.sessions.machine
     legal = machine.next_states(session.state)

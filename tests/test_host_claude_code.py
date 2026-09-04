@@ -405,6 +405,7 @@ class FakeSession:
 class FakeSessions:
     def __init__(self):
         self.adopted: list[tuple[str, str]] = []
+        self.resumed: list[tuple[str, str | None]] = []
         self.ended: list[str] = []
         self.raises = None
 
@@ -412,6 +413,17 @@ class FakeSessions:
         if self.raises:
             raise self.raises
         self.adopted.append((session_id, host_session_id))
+
+    def resume(self, session_id, host_session_id=None, force=False):
+        """Recorded, never expected.
+
+        Present so that a host claiming a resumed session through the WRONG
+        domain method is a visible assertion failure rather than an
+        AttributeError that reads like a broken fake.
+        """
+        if self.raises:
+            raise self.raises
+        self.resumed.append((session_id, host_session_id))
 
     def end_host_session(self, host_session_id):
         self.ended.append(host_session_id)
@@ -1538,6 +1550,69 @@ class TestAutomaticBinding:
         sessions = self.post(host, "invariant session list", "session ab12cd34 (x) ...")
         assert sessions.adopted == []
 
+    def test_a_resumed_session_is_bound(self, host):
+        """`session resume` claims a session for this host exactly as `start` does.
+
+        It runs through Bash, so it carries no hook payload either, and until
+        the pattern admitted it the one command whose whole purpose is to pick
+        work up left the host bound to nothing — the session was resumed in
+        the record and unaddressable for every subsequent hook.
+        """
+        sessions = self.post(
+            host,
+            "invariant session resume add-widget",
+            "session ab12cd34 (add-widget-ab12cd34) resumed — 2/5 deliverables done\n"
+            "  next: wire the toolbar",
+        )
+        assert sessions.adopted == [("ab12cd34", "host-1111")]
+
+    def test_a_resume_reached_through_cd_still_binds(self, host):
+        sessions = self.post(
+            host,
+            "cd /somewhere && invariant session resume add-widget",
+            "session 12345678 (add-widget-12345678) resumed — 0/2 deliverables done",
+        )
+        assert sessions.adopted == [("12345678", "host-1111")]
+
+    def test_a_refused_resume_does_not_fail_the_command(self, host):
+        """A refusal here is the 1:1 rule working, not a reason to error.
+
+        PostToolUse runs after the tool has already finished. Turning a
+        binding refusal into a hook failure would report a command that
+        succeeded as one that did not.
+        """
+        ctx = FakeCtx()
+        ctx.sessions.raises = InvariantError("this host already owns one")
+        host._post_tool_use(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "invariant session resume x"},
+                "tool_response": "session ab12cd34 (x-ab12cd34) resumed — 0/1",
+            },
+            ctx,
+        )
+        assert ctx.sessions.adopted == []
+
+    def test_a_resume_binds_through_adopt_not_through_resume(self, host):
+        """The claim is a BINDING, and the resume itself already happened.
+
+        `SessionDomain.resume` increments `resumed_count` and writes a
+        standstill history row. The CLI command that produced this very output
+        has already done both; calling it again here would count one pickup
+        twice and leave two `resumed` rows for one event. What PostToolUse
+        still owes is the half the CLI could not do — record WHICH host
+        session claimed it — and `adopt_host_session` is exactly that half:
+        since the binding it replaces is spent, it clears `host_ended`,
+        appends the outgoing id to `hosts`, and touches no counter.
+        """
+        sessions = self.post(
+            host,
+            "invariant session resume x",
+            "session ab12cd34 (x-ab12cd34) resumed — 0/1 deliverables done",
+        )
+        assert sessions.adopted == [("ab12cd34", "host-1111")]
+        assert sessions.resumed == []
+
     def test_unparseable_output_binds_nothing(self, host):
         """Guessing which session was created would bind the wrong one."""
         sessions = self.post(host, "invariant session start x", "command failed")
@@ -1568,6 +1643,87 @@ class TestAutomaticBinding:
             ctx,
         )
         assert ctx.sessions.adopted == []
+
+
+class TestTheClaimPatternIsNarrow:
+    """Widened to two verbs, and to exactly two.
+
+    `session start` and `session resume` are the commands that CLAIM a session
+    for this host session, and both run through a shell that carries no hook
+    payload — so the binding has to be read out of their stdout. Nothing else
+    may be.
+
+    The reason is not tidiness. `session plan show` prints a header reading
+    `plan for session ab12cd34 (add-widget) — 2/5 done`, and the id reader
+    matches `session <id> (` anywhere in the tool response. A pattern loosened
+    to "any `invariant session` command" would therefore bind this host to
+    whatever session a `plan show` happened to name — a read-only query
+    silently taking ownership, and of a session the caller may only have been
+    looking at.
+    """
+
+    def post(self, host, command, response):
+        ctx = FakeCtx(host_session_id="host-1111")
+        host._post_tool_use(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+                "tool_response": response,
+            },
+            ctx,
+        )
+        return ctx.sessions
+
+    #: Every one of these prints, or could print, a `session <id> (` sequence.
+    #: That is what makes them the dangerous set rather than an arbitrary one.
+    @pytest.mark.parametrize(
+        "command,response",
+        [
+            (
+                "invariant session plan show",
+                "plan for session ab12cd34 (add-widget) — 2/5 done\n  [ ] 1  wire it",
+            ),
+            (
+                "invariant session plan add \"wire it\"",
+                "plan for session ab12cd34 (add-widget) — 0/1 done",
+            ),
+            (
+                "invariant session plan done 1",
+                "plan for session ab12cd34 (add-widget) — 1/1 done",
+            ),
+            ("invariant session status", "session ab12cd34 (add-widget) is working"),
+            ("invariant session list", "session ab12cd34 (add-widget)  working"),
+            ("invariant session sync", "session ab12cd34 (add-widget) rebased"),
+            ("invariant context", "invariant — session ab12cd34 (add-widget) is working"),
+        ],
+    )
+    def test_a_query_that_merely_names_a_session_binds_nothing(
+        self, host, command, response
+    ):
+        assert self.post(host, command, response).adopted == []
+
+    @pytest.mark.parametrize("verb", ["start", "resume"])
+    def test_the_two_claiming_verbs_do_bind(self, host, verb):
+        sessions = self.post(
+            host,
+            f"invariant session {verb} add-widget",
+            f"session ab12cd34 (add-widget-ab12cd34) {verb}ed",
+        )
+        assert sessions.adopted == [("ab12cd34", "host-1111")]
+
+    def test_a_claim_may_not_be_read_across_a_shell_operator(self, host):
+        """`plan show` on the right of a pipe is still not a claim.
+
+        The pattern refuses to cross `|`, `;` and `&` for the same reason it
+        always has: what runs on the other side is a different command, and a
+        session id printed there belongs to it.
+        """
+        sessions = self.post(
+            host,
+            "invariant session list | grep resume",
+            "plan for session ab12cd34 (add-widget) — 2/5 done",
+        )
+        assert sessions.adopted == []
 
 
 class TestSessionEndReleasesTheBinding:

@@ -55,6 +55,8 @@ graph TD
     end
 
     CC --> CLI
+    CC --> PLAN
+    CC --> RULES
     CLI --> SESSION
     CLI --> PIPELINE
     CLI --> WORKITEM
@@ -97,6 +99,30 @@ graph TD
     PIPELINE --> adapters
     CC --> AGENTS
 ```
+
+`CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
+which the dependency rule below permits — arrows point down — and which the
+diagram had recorded for neither. `RULES` was the older of the two and went
+undrawn: `build_context` has asked `standdown_in_force` whether enforcement is
+held since the stand-down shipped. `PLAN` is new, and it is the arrow that
+keeps the turn projection honest. The host prints how far along a session's
+plan is, and so do `session resume` and `session plan show`; three
+hand-assembled renderings of one list is three chances for a printed total to
+disagree with the numbers the commands take, so the arithmetic lives once in
+`core/plan` and the callers sit above it. The two readers there are separate on
+purpose — `render_lines` answers a question somebody asked and lists every
+entry, `summary_lines` is injected into every turn and is capped at two lines —
+but they count from the same `progress()`, which is what makes them unable to
+disagree.
+
+Two arrows are still missing from this diagram and are **not** drawn here
+because drawing them would assert something this document has not decided:
+`claude_code` imports `ambiguity_message` from `domains/session` and
+`NO_PIPELINE` / `VIA_ACTOR` from `domains/pipeline`. Both are downward, and
+both sit against the sentence "`hosts/` … reach the engine only through the
+CLI". Whether that sentence means "no `domains/` import at all" or "no driving
+of the engine" is a question for whoever answers it, not for a diagram edit
+made in passing.
 
 The two `domains → core/rules` arrows are how a state machine's gates get
 evaluated: a gate names a rule id, and the domain that owns the transition asks
