@@ -341,6 +341,9 @@ invariant session plan add "<deliverable>" | done <n> | reopen <n>
     indistinguishable from one that finished its plan — so a consumer
     switching mode on it either defers the merge forever on every project that
     does not keep checklists, or passes every unplanned session as finished.
+    That consumer now exists: the shipped reviewing agent reads these two keys
+    to decide whether a run commits and stops or commits and finishes the
+    session. See state_model.md, "How a session lands".
 
 invariant session sync [--id <id>]
     Rebase this session's branch onto its base. What

@@ -1,5 +1,5 @@
 ---
-# invariant-managed: 50f8cf054059dbc3
+# invariant-managed: dd33fc5712a2003f
 name: feature-architect
 description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's compliance checklist), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase. MODEL: no hardcoded assignment — the parent scores the task's complexity per the host-injected rubric and passes `model` at invocation (session model for anything with design content; a smaller model only when every low-complexity signal holds).
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -182,6 +182,24 @@ Auto-fix patterns you may apply without bailing (the checklist doc gives the pro
 - Inline `TODO future` / backlog-marker comments → a filed idea via `invariant item new idea` (work items live in the backend, never in source comments)
 
 Cap auto-fix scope to **≤8 files not in the original touched-file list** (typically: the mock registry, new test files, one work item, one doc file). If you would exceed, bail to a Phase 3-style report.
+
+**What is left over goes on the session's plan, not into this pass.** Where the
+session carries a deliverable set (`invariant session plan show` — a session
+that outlives its host usually does), record the remainder as its own entry:
+
+```bash
+invariant session plan add "<what is still owed>"
+```
+
+That is the cheaper half of the same judgement Phase 1b makes about siblings.
+Widening one pass to swallow work the plan can hold buys an unreviewable diff
+and a coverage obligation over code nobody asked for yet; a recorded
+deliverable survives the host session, is what `compliance-reviewer` reads to
+decide whether this run merges, and names the work in the one place somebody
+picking the session up will look. Use it for work you have *decided* is owed —
+not as a place to file a `[DEFERRED]` sibling, which belongs in the backlog
+where it can be prioritised against everything else. A session with no plan
+needs none of this: one pass, one merge, nothing to record.
 
 ---
 

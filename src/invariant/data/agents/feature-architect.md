@@ -182,6 +182,24 @@ Auto-fix patterns you may apply without bailing (the checklist doc gives the pro
 
 Cap auto-fix scope to **≤8 files not in the original touched-file list** (typically: the mock registry, new test files, one work item, one doc file). If you would exceed, bail to a Phase 3-style report.
 
+**What is left over goes on the session's plan, not into this pass.** Where the
+session carries a deliverable set (`invariant session plan show` — a session
+that outlives its host usually does), record the remainder as its own entry:
+
+```bash
+invariant session plan add "<what is still owed>"
+```
+
+That is the cheaper half of the same judgement Phase 1b makes about siblings.
+Widening one pass to swallow work the plan can hold buys an unreviewable diff
+and a coverage obligation over code nobody asked for yet; a recorded
+deliverable survives the host session, is what `compliance-reviewer` reads to
+decide whether this run merges, and names the work in the one place somebody
+picking the session up will look. Use it for work you have *decided* is owed —
+not as a place to file a `[DEFERRED]` sibling, which belongs in the backlog
+where it can be prioritised against everything else. A session with no plan
+needs none of this: one pass, one merge, nothing to record.
+
 ---
 
 ## Phase 6 — Coverage gate

@@ -566,6 +566,60 @@ seam; and it absorbs the dormant interval, because `elapsed` is wall time since
 the last heartbeat and without this row the days between two host sessions land
 on the next real transition and read as "this state took three days".
 
+#### How a session lands: two modes, asked rather than remembered
+
+A session that outlives its host lands **once**, at the end of the plan, and
+every increment before that ends at a commit. Which of the two a given run is
+doing is a question with a recorded answer, and the reviewing agent asks the
+engine for it — `invariant session plan show --json`, whose `planned` and
+`complete` keys exist for exactly this consumer:
+
+| `planned` | `complete` | Mode | What the run does |
+|---|---|---|---|
+| `false` | `false` | FINAL | commit, merge, sync, teardown — the behaviour that predates the plan |
+| `true` | `false` | INCREMENT | commit and stop; the session stays open |
+| `true` | `true` | FINAL | the run that closed the last deliverable is the run that finishes the session |
+
+Three properties are decisions rather than shape.
+
+**It is asked, not told.** Before this, the reviewing agent's Definition of Done
+was commit → merge → teardown unconditionally, and holding a session open across
+several increments meant pasting a paragraph into every invocation that said not
+to merge. That is prose-as-control-flow — remembered or not, with nothing
+recording which — in the library whose whole argument is that discipline
+belongs in state a script owns. Five increments of this repository's own session
+work rested on a human retyping it.
+
+**The unplanned session lands, and that is why the two keys are separate.** A
+session with no plan is *unplanned*, not *unfinished*, so it takes the
+pre-existing behaviour. Collapsed into one flag the two cases are
+indistinguishable, and every project that keeps no checklist would defer its
+merge forever — which is the same failure `core.plan.progress` computes
+`complete` once to avoid, one layer up.
+
+**An engine that cannot answer falls back to FINAL.** Where the command fails or
+no plan record exists, the run merges and says so. The opposite default sounds
+safer and is not: it parks every run of every project silently, and unmerged
+work on branches looks exactly like the tool working.
+
+The state machine above is unchanged by this, and it is worth saying why the
+absence of an edit is the right outcome. An INCREMENT run never enters
+`reviewed`: it commits, rebases, marks its deliverables, and stops — which the
+diagram already draws as `working --> working: commit (local, granular)`. The
+loop was there for granular commits within one host session; a plan makes the
+same loop span several. A mode that needed a new edge would be a mode the
+session machine had never modelled.
+
+What the two modes do change is which gates a run meets. An increment never
+reaches `session.deliverables_complete` — an entry gate on `reviewed` and on
+`merged` — because it never attempts either transition, which is the gate
+working rather than being avoided: it refuses a landing, and no landing is being
+claimed. `session.work_would_be_stranded` is the one that stays live between
+increments, and it abstains on an open plan that moved recently, so an increment
+that marked a deliverable done has clocked the very touch that keeps the closeout
+quiet. The pair documented above as duals is what makes a parked session legal
+and a half-done merge illegal at the same time.
+
 #### Teardown will not remove the ground under the caller
 
 Teardown's other two preconditions are git questions — a clean tree, and a

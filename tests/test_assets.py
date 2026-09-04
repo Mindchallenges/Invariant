@@ -37,6 +37,19 @@ def write(host, kind_name, identity, text):
     return path
 
 
+def shipped(name):
+    """The agent definition as it is SHIPPED, not as it is installed.
+
+    The installed copy carries a digest marker and is regenerated from this
+    one, so a contract test that read it would be testing the install rather
+    than the instruction. Module-level because two classes ask the same
+    question of the same files.
+    """
+    from invariant.hosts.claude_code import DATA_DIR
+
+    return (DATA_DIR / "agents" / f"{name}.md").read_text(encoding="utf-8")
+
+
 def check(rows, label_fragment):
     for name, ok, detail in rows:
         if label_fragment in name:
@@ -227,16 +240,11 @@ class TestTheGateReceiptCannotHashAnEmptyDiff:
 
     RECEIPT_AGENTS = ("feature-architect", "compliance-reviewer")
 
-    def shipped(self, name):
-        from invariant.hosts.claude_code import DATA_DIR
-
-        return (DATA_DIR / "agents" / f"{name}.md").read_text(encoding="utf-8")
-
     def shell(self, name):
         """Only the fenced shell blocks — the prose NAMES the broken form as
         the thing not to write, and a check that cannot tell an example from
         an instruction would forbid documenting the defect."""
-        text = self.shipped(name)
+        text = shipped(name)
         blocks, inside = [], False
         for line in text.splitlines():
             if line.startswith("```"):
@@ -260,7 +268,7 @@ class TestTheGateReceiptCannotHashAnEmptyDiff:
         a construction, which is how it reached the same empty hash. A fix
         that changes only the architect leaves the other free to reintroduce
         it."""
-        text = self.shipped(name)
+        text = shipped(name)
         assert "SESSION_FILES=(" in text
         assert '"${SESSION_FILES[@]}"' in text
 
@@ -269,4 +277,154 @@ class TestTheGateReceiptCannotHashAnEmptyDiff:
         """Naming the constant costs one line and converts a silent match
         into a caught one — which matters because the next way to produce an
         empty diff will not be a quoting bug."""
-        assert self.EMPTY_SHA in self.shipped(name)
+        assert self.EMPTY_SHA in shipped(name)
+
+
+class TestTheReviewerAsksHowTheSessionLands:
+    """Increment 6 — the reviewer reads its mode off the engine, not off prose.
+
+    Five increments of a seven-increment plan were committed by a
+    `compliance-reviewer` run that had to be told, in the invocation prompt,
+    not to merge and not to tear down: its Definition of Done was
+    commit -> merge -> teardown, so the first "ship this" would have ended a
+    session that was deliberately mid-plan. Correct behaviour rested entirely
+    on a human remembering to paste the same paragraph every time, which is
+    prose-as-control-flow in the repository that exists to replace it.
+
+    `session plan show --json` answers the question instead. These are checks
+    over shipped markdown that nothing executes — the same reason
+    :class:`TestTheGateReceiptCannotHashAnEmptyDiff` exists: a shipped
+    instruction no test runs is an instrument nobody self-tested.
+    """
+
+    REVIEWER = "compliance-reviewer"
+
+    def rows(self, marker_cells):
+        """Markdown table rows, as `(cells...)` tuples with markup stripped.
+
+        The tables carry the decision — which mode a plan state means, and
+        which phases that mode skips — so the test reads the table rather than
+        a sentence near it. Only rows whose FIRST cell matches one of
+        ``marker_cells`` are returned, which is what keeps a header row and the
+        alignment row out without a positional assumption about either.
+        """
+        out = []
+        for line in shipped(self.REVIEWER).splitlines():
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip().strip("`*_ ") for c in line.strip().strip("|").split("|")]
+            if cells and any(m in cells[0] for m in marker_cells):
+                out.append(tuple(cells))
+        return out
+
+    def modes(self):
+        return {(r[0], r[1]): r[2] for r in self.rows(("true", "false"))}
+
+    def test_the_mode_is_read_from_the_engine(self):
+        """The command, spelled exactly, because that is the whole mechanism."""
+        assert "invariant session plan show --json" in shipped(self.REVIEWER)
+
+    def test_an_unplanned_session_still_lands_final(self):
+        """The load-bearing row.
+
+        `planned` and `complete` are separate keys precisely so this case is
+        expressible: no checklist was declared, so there is no outstanding
+        promise to wait for. Without the row, adopting a plan becomes
+        mandatory and every project that never keeps one defers its merge
+        forever.
+        """
+        assert self.modes()[("false", "false")] == "FINAL"
+
+    def test_every_plan_state_names_its_mode(self):
+        modes = self.modes()
+        assert modes[("true", "false")] == "INCREMENT"
+        assert modes[("true", "true")] == "FINAL"
+
+    def test_an_engine_that_cannot_answer_does_not_defer_the_merge(self):
+        text = shipped(self.REVIEWER)
+        assert "treat it as **FINAL**" in text or "treat it as FINAL" in text
+
+    def test_the_phases_an_increment_skips_are_named(self):
+        """The behaviour, not the vocabulary: which steps stop running."""
+        phases = {r[0]: r[1] for r in self.rows(("8b step 4", "8c step 1", "8c step 4", "8d"))}
+        assert all(cell == "SKIP" for cell in phases.values()), phases
+        assert len(phases) == 4
+
+    def test_the_memory_sync_runs_in_both_modes(self):
+        """Memory and host config commit straight to the base branch and are
+        exempt from the worktree flow, so deferring them to the final run
+        leaves the shared main checkout dirty across every increment."""
+        sync = {r[0]: (r[1], r[2]) for r in self.rows(("8c steps 2-3", "8c steps 2–3"))}
+        assert sync, "the memory/config sync row is not in the conditional table"
+        assert all("SKIP" not in cell for cells in sync.values() for cell in cells), sync
+
+    def test_the_deliverables_are_marked_through_the_engine(self):
+        assert "invariant session plan done" in shipped(self.REVIEWER)
+
+    def test_an_unnamed_deliverable_is_never_guessed(self):
+        """Guessing which line of somebody's checklist a diff discharged is
+        how a session merges before its work is finished."""
+        assert "[WARN] no deliverable id named — plan not advanced" in shipped(self.REVIEWER)
+
+    def test_both_increment_verdicts_are_present(self):
+        text = shipped(self.REVIEWER)
+        assert (
+            "VERDICT: INCREMENT COMMITTED — 3/5 deliverables done, session stays open" in text
+        )
+        assert "VERDICT: INCREMENT COMMITTED — plan not advanced (no deliverable id named)" in text
+
+    def test_a_success_verdict_never_reads_as_the_existing_failure_one(self):
+        """`COMMITTED — NOT MERGED` already exists and already means work
+        stranded by a refused merge. A success that reads like it gets
+        escalated to the user every time."""
+        for line in shipped(self.REVIEWER).splitlines():
+            if "NOT MERGED" in line:
+                assert "INCREMENT COMMITTED" not in line, line
+
+    def test_the_stranded_work_verdict_still_exists(self):
+        """The half that must NOT change: a refused merge is still a failure."""
+        assert "VERDICT: COMMITTED — NOT MERGED" in shipped(self.REVIEWER)
+
+    def test_teardown_is_still_the_definition_of_done_for_a_final_run(self):
+        text = shipped(self.REVIEWER)
+        assert "Definition of Done" in text
+        assert "invariant session teardown" in text
+        assert "VERDICT: COMMITTED & MERGED — session torn down" in text
+
+    def test_an_unmerged_increment_is_named_as_the_complete_outcome(self):
+        """The mirror of "an unpushed run is never a failure verdict"."""
+        assert "An unmerged INCREMENT run is never a failure verdict" in shipped(self.REVIEWER)
+
+    def test_the_report_has_somewhere_to_put_the_plan(self):
+        """A claim with no slot in the template is a claim that gets
+        improvised."""
+        assert "\nPLAN\n" in shipped(self.REVIEWER)
+
+
+class TestTheParentIsToldWhatTheModeCostsIt:
+    """The frontmatter `description` is the only part of an agent definition
+    the PARENT reads before invoking. A mode the subagent honours and the
+    parent does not know about produces a correct run the parent then undoes.
+    """
+
+    def description(self, name):
+        """Through the host's own line-based reader, which is also the check
+        that the value stayed on ONE line: `agent_frontmatter` treats a
+        following non-`key:` line as a continuation of the value."""
+        front = assets.frontmatter(shipped(name))
+        assert "description" in front, front
+        return front["description"]
+
+    def test_the_parent_is_told_which_ids_to_name(self):
+        assert "DELIVERABLES DONE:" in self.description("compliance-reviewer")
+
+    def test_the_parent_is_told_that_an_increment_is_a_success(self):
+        desc = self.description("compliance-reviewer")
+        assert "INCREMENT COMMITTED" in desc
+        assert "SUCCESS" in desc
+
+    def test_the_merge_is_no_longer_promised_unconditionally(self):
+        assert "deliverables plan is complete" in self.description("compliance-reviewer")
+
+    def test_the_architect_can_record_what_is_left_instead_of_widening_scope(self):
+        assert "invariant session plan add" in shipped("feature-architect")
