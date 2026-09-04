@@ -21,6 +21,7 @@ architecture/cli
 
 adr/ADR-001-scripted-state-over-prose-rules
 adr/ADR-002-session-telemetry
+adr/ADR-004-a-session-is-a-deliverable-set
 ```
 
 ```{toctree}
