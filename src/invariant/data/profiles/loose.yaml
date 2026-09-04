@@ -14,6 +14,8 @@ rules:
   session.ff_merge_target: warn
   session.own_file_set_only: warn
   session.work_would_be_stranded: "off"
+  session.deliverables_complete: warn
+  session.branch_is_current: warn
   session.named_after_isolating: "off"
   session.teardown_complete: "off"
 

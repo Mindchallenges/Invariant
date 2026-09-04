@@ -653,7 +653,11 @@ Existence is checked at load; whether the file parses as a machine of the
 right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it
 (`pipeline.complete`, `session.work_would_be_stranded`) rather than being
-stepped past.
+stepped past. The session machine is read the same way and answers the same
+way: `session.work_would_be_stranded`, `session.deliverables_complete` and
+`session.branch_is_current` each need its terminal set to know whether the
+session is still in flight, and each FAILS when it cannot be loaded, because a
+skip on a rule a project holds at `block` reads as a pass.
 
 ### An override either takes effect or says it did not
 

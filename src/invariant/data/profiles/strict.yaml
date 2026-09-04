@@ -14,6 +14,8 @@ rules:
   session.ff_merge_target: block
   session.own_file_set_only: block
   session.work_would_be_stranded: block
+  session.deliverables_complete: block
+  session.branch_is_current: warn
   session.named_after_isolating: block
   session.teardown_complete: block
 

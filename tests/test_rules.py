@@ -1,4 +1,5 @@
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,32 @@ def write_manifest(root: Path, body: dict) -> Path:
 
 def run(args, cwd):
     subprocess.run(args, cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def manifest_with_unloadable_session_machine(tmp_path):
+    """A manifest whose session machine cannot load, via the sanctioned route.
+
+    `methodology.extra_machines` is how a project shadows a shipped machine
+    (`core/machines.find_machine_file` checks it before falling back to the
+    shipped file), so a directory holding a malformed `session.yaml` reaches
+    the same `_terminal_states(...) is None` branch the pipeline-unloadable
+    tests already exercise for `methodology.pipeline` — without touching a
+    single byte of shipped package data.
+    """
+    from invariant.core.manifest import Manifest
+
+    broken = tmp_path / "broken_machines"
+    broken.mkdir()
+    (broken / "session.yaml").write_text("not: [valid, yaml:", encoding="utf-8")
+    write_manifest(
+        tmp_path,
+        {
+            "version": 1,
+            "project": {"name": "demo"},
+            "methodology": {"extra_machines": [str(broken)]},
+        },
+    )
+    return Manifest.load(tmp_path)
 
 
 @pytest.fixture
@@ -3471,6 +3498,215 @@ class TestClosingTheSessionIsGated:
         assert not verdict.ok and not verdict.skipped
         assert "commit(s)" in verdict.message
 
+    # -- parked against a plan is not abandoned -------------------------
+
+    class TestAPlanTellsParkedFromAbandoned:
+        """The half that keeps this rule liveable once a session outlives a host.
+
+        `session.work_would_be_stranded` fires on "the pipeline says done AND
+        the branch is ahead". Under the multi-host model that is the RESTING
+        STATE at the end of every increment: a plan spanning four sessions
+        parks with commits on its branch three times before it merges once. As
+        written the gate would fail on every one of those turns until it was
+        ignored, which is the exact failure its own docstring says the
+        pipeline-terminal narrowing exists to avoid — one model change later.
+
+        What still separates the two cases is whether the plan is being
+        WORKED, so that is what the rule now asks.
+        """
+
+        DAY = 86400.0
+
+        def parked(self, ctx_factory, *, moved_days_ago, open_titles=("ship it",),
+                   done_titles=()):
+            """A session whose branch is ahead and whose plan is half open."""
+            outer = TestClosingTheSessionIsGated()
+            session = outer.committed_ahead(ctx_factory, commits=2)
+            plan = [
+                {"n": i, "title": t, "done": True, "done_at": 1.0}
+                for i, t in enumerate(done_titles, start=1)
+            ]
+            plan += [
+                {"n": len(done_titles) + i, "title": t, "done": False, "done_at": None}
+                for i, t in enumerate(open_titles, start=1)
+            ]
+            session["plan"] = plan
+            session["plan_touched"] = time.time() - moved_days_ago * self.DAY
+            return session
+
+        def test_an_open_plan_that_moved_recently_is_parked_not_stranded(
+            self, ctx_factory
+        ):
+            """`clean`, not `na`. The question was asked and answered.
+
+            `na` would mean the rule had nothing to say about this session, and
+            it has: this work is parked against a promise somebody recorded.
+            """
+            ctx = ctx_factory(
+                session=self.parked(
+                    ctx_factory,
+                    moved_days_ago=0,
+                    done_titles=("wire the domain",),
+                    open_titles=("wire the rules",),
+                ),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert verdict.ok and not verdict.skipped
+            # progress, the commit count, and what happens next.
+            assert "1 of 2" in verdict.message
+            assert "2 commit(s)" in verdict.message
+            assert "wire the rules" in verdict.detail
+
+        def test_an_open_plan_nobody_has_touched_is_stranded(self, ctx_factory):
+            ctx = ctx_factory(
+                session=self.parked(ctx_factory, moved_days_ago=30),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped
+            assert "30 day" in verdict.message
+            assert any("plan done" in fix for fix in verdict.fixes)
+            assert any("transition abandoned" in fix for fix in verdict.fixes)
+
+        def test_the_cold_threshold_comes_from_the_manifest(self, repo):
+            """`session.plan_stale_days`, not a constant in the rule."""
+            from invariant.core.manifest import Manifest
+
+            main, wt = repo
+            session = {
+                "state": "working",
+                "branch": "session/x",
+                "base": "master",
+                "plan": [{"n": 1, "title": "ship it", "done": False}],
+                "plan_touched": time.time() - 3 * self.DAY,
+            }
+            run(["git", "commit", "-q", "--allow-empty", "-m", "w"], wt)
+
+            def verdict_under(days):
+                write_manifest(
+                    main,
+                    {
+                        "version": 1,
+                        "project": {"name": "demo"},
+                        "session": {"plan_stale_days": days},
+                    },
+                )
+                ctx = RuleContext(
+                    manifest=Manifest.load(main),
+                    cwd=main,
+                    session=dict(session),
+                    pipeline={"state": "committed"},
+                )
+                return only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+
+            assert not verdict_under(1).ok
+            assert verdict_under(90).ok
+
+        def test_marking_a_deliverable_done_clears_a_cold_finding(self, repo):
+            """Satisfiability, end to end through the domain that owns the plan.
+
+            A blocking gate clearable only by something no command does is a
+            gate whose one exit is `--force`. This is why `plan_touched` is a
+            separate field from `heartbeat`: every plan mutation stamps it, so
+            each of the fixes this rule names actually clears it, and none of
+            them has to corrupt the transition telemetry to do it.
+            """
+            from invariant.core.manifest import Manifest
+            from invariant.domains.session import SessionDomain
+
+            main, wt = repo
+            run(["git", "commit", "-q", "--allow-empty", "-m", "w"], wt)
+            long_ago = time.time() - 90 * self.DAY
+
+            stale = SessionDomain(Manifest.load(main), clock=lambda: long_ago)
+            record = stale.start("spans-hosts")
+            for title in ("wire the domain", "wire the rules", "wire the cli"):
+                stale.plan_add(record.id, title)
+            record = stale.get(record.id)
+            record.state, record.branch, record.base = "working", "session/x", "master"
+            stale._save(record)
+
+            def verdict_now():
+                ctx = RuleContext(
+                    manifest=Manifest.load(main),
+                    cwd=main,
+                    session=SessionDomain(Manifest.load(main)).get(record.id).to_dict(),
+                    pipeline={"state": "committed"},
+                )
+                return only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+
+            assert not verdict_now().ok
+
+            SessionDomain(Manifest.load(main)).plan_done(record.id, 1)
+            after = verdict_now()
+            assert after.ok and not after.skipped
+            assert "1 of 3" in after.message
+
+        def test_a_complete_plan_is_stranded_exactly_as_before(self, ctx_factory):
+            """A finished checklist says nothing about where the commits live."""
+            ctx = ctx_factory(
+                session=self.parked(
+                    ctx_factory, moved_days_ago=99, open_titles=(),
+                    done_titles=("wire the domain",),
+                ),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped
+            assert "2 commit(s) on session/x" in verdict.message
+
+        def test_no_plan_at_all_behaves_exactly_as_before(self, ctx_factory):
+            """The pin. Every session written before this field existed, and
+            every one-line chore that never declares a checklist, takes the
+            old path byte for byte — message, detail and fixes.
+            """
+            outer = TestClosingTheSessionIsGated()
+            ctx = ctx_factory(
+                session=outer.committed_ahead(ctx_factory, commits=2),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped
+            assert verdict.message == "2 commit(s) on session/x are not on master"
+            assert verdict.fixes[0] == "invariant session review"
+
+        def test_a_record_with_no_plan_clock_at_all_reads_as_fresh(self, ctx_factory):
+            """Legacy records have `plan_touched` 0.0 and no heartbeat.
+
+            Failing on missing data would fire this blocking gate on every
+            record written before the field existed, simultaneously, at `stop`
+            — the surface with the least room to be wrong.
+            """
+            session = self.parked(ctx_factory, moved_days_ago=0)
+            session["plan_touched"] = 0.0
+            session["heartbeat"] = 0.0
+            ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+            assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.ok
+
+        def test_a_lifecycle_transition_counts_as_the_session_being_alive(
+            self, ctx_factory
+        ):
+            """`max(plan_touched, heartbeat)`, so a session moving through its
+            states is alive even if it has not edited the checklist."""
+            session = self.parked(ctx_factory, moved_days_ago=99)
+            session["heartbeat"] = time.time()
+            ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert verdict.ok and not verdict.skipped
+
+        def test_an_unmerged_branch_with_nothing_ahead_never_reaches_the_plan(
+            self, ctx_factory
+        ):
+            """The unstranded path is untouched: the plan is read only after
+            the `ahead == 0` return, so a merged branch answers as it always
+            did whatever its checklist says."""
+            session = self.parked(ctx_factory, moved_days_ago=99)
+            run(["git", "merge", "--ff-only", "session/x"], ctx_factory.main)
+            ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert verdict.ok and "holds nothing" in verdict.message
+
 
 class TestTheMethodologyMustActuallyRun:
     """`pipeline.started_before_edit` proved a pipeline exists, never that it moved.
@@ -5376,3 +5612,235 @@ class TestProofOfRedReadsTheMachinesOwnRedState:
         assert not only(
             evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
         ).verdict.ok
+
+
+class TestTheDeliverablesGate:
+    """`session.deliverables_complete` — a session lands once, when it is done.
+
+    The model this serves is a session that accumulates work across several
+    agent-host sessions and merges ONCE. Nothing enforced the "once, when it is
+    done" half: the merge was reachable from any `reviewed` record, so the
+    thing that decided whether the work was finished was whichever host session
+    happened to be looking. This gate reads the list the operator wrote about
+    their own work and asks whether they finished it.
+    """
+
+    def session(self, *, state="reviewed", done=0, open_=0):
+        plan = [
+            {"n": i, "title": f"done {i}", "done": True, "done_at": 1.0}
+            for i in range(1, done + 1)
+        ]
+        plan += [
+            {"n": done + i, "title": f"open {i}", "done": False, "done_at": None}
+            for i in range(1, open_ + 1)
+        ]
+        return {"state": state, "branch": "session/x", "base": "master", "plan": plan}
+
+    def verdict(self, ctx_factory, session):
+        return only(evaluate(["session.deliverables_complete"], ctx_factory(session=session))).verdict
+
+    # -- the five rungs -------------------------------------------------
+
+    def test_no_session_is_not_applicable(self, ctx_factory):
+        assert self.verdict(ctx_factory, None).skipped
+
+    def test_a_finished_session_is_not_asked_again(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.session(state="torn_down", open_=3))
+        assert verdict.skipped
+        assert "torn_down" in verdict.message
+
+    def test_an_empty_plan_abstains_rather_than_passing_or_failing(self, ctx_factory):
+        """The load-bearing rung.
+
+        `clean` is the vacuous green — an empty plan is not "the plan is
+        finished", it is "no plan was made", and this gate guards the merge.
+        `fail` would make declaring a checklist mandatory for every session
+        including a one-line chore, and a gate legitimate work must override
+        routinely is what teaches people to reach for `--force`.
+        """
+        verdict = self.verdict(ctx_factory, self.session())
+        assert verdict.ok and verdict.skipped
+
+    def test_the_empty_plan_skip_names_the_command_that_would_arm_it(
+        self, ctx_factory
+    ):
+        """BUG_027: a `[skip:BLOCK]` that says "not applicable here" tells a
+        reader a gate went inert and nothing about how to make it mean
+        something."""
+        verdict = self.verdict(ctx_factory, self.session())
+        assert verdict.message != "not applicable here"
+        assert "invariant session plan add" in verdict.message
+
+    def test_open_deliverables_are_a_finding(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.session(done=1, open_=2))
+        assert not verdict.ok and not verdict.skipped
+        assert "2 of 3" in verdict.message
+
+    def test_the_recorded_route_is_named_before_the_forced_one(self, ctx_factory):
+        """What stops `--force` becoming the reflex.
+
+        `plan remove` retires the number permanently, so the record still shows
+        WHICH deliverable was abandoned. Forcing the merge records only that
+        somebody went past a gate.
+        """
+        fixes = self.verdict(ctx_factory, self.session(open_=1)).fixes
+        first_remove = next(i for i, f in enumerate(fixes) if "plan remove" in f)
+        first_force = next(i for i, f in enumerate(fixes) if "--force" in f)
+        assert first_remove < first_force
+        assert any("plan done" in f for f in fixes)
+
+    def test_a_finished_plan_passes_and_says_so(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.session(done=3))
+        assert verdict.ok and not verdict.skipped
+        assert "3/3" in verdict.message
+
+    # -- binding and level ----------------------------------------------
+
+    def test_it_is_a_machine_gate_and_not_a_hook(self, ctx_factory):
+        """A merge is a transition. Attaching this to `stop` as well would ask
+        it on every turn of a session that is nowhere near landing."""
+        from invariant.core.rules import get_rule
+
+        assert get_rule("session.deliverables_complete").events == ()
+
+    def test_it_blocks_under_standard_and_strict_and_advises_under_loose(self):
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        def level(profile):
+            raw = yaml.safe_load(
+                (DATA_DIR / "profiles" / f"{profile}.yaml").read_text(encoding="utf-8")
+            )
+            return raw["rules"]["session.deliverables_complete"]
+
+        assert level("standard") == "block"
+        assert level("strict") == "block"
+        assert level("loose") == "warn"
+
+    def test_an_unloadable_session_machine_fails_rather_than_stepping_aside(
+        self, tmp_path
+    ):
+        """The terminal check needs the machine. AUD-08: an unanswerable
+        question is not a pass."""
+        from invariant.core.manifest import Manifest
+
+        write_manifest(
+            tmp_path,
+            {"version": 1, "project": {"name": "demo"},
+             "methodology": {"pipeline": "bug"}},
+        )
+        ctx = RuleContext(
+            manifest=Manifest.load(tmp_path),
+            cwd=tmp_path,
+            session={"state": "reviewed", "plan": []},
+        )
+        # The session machine is shipped and loads; what this pins is that the
+        # rule reads the SESSION machine's terminal set rather than the
+        # pipeline's, which a mistyped methodology would otherwise break.
+        verdict = only(evaluate(["session.deliverables_complete"], ctx)).verdict
+        assert verdict.skipped and "plan add" in verdict.message
+
+    def test_a_session_machine_that_cannot_load_fails_this_gate_too(self, tmp_path):
+        """The other half of AUD-08 for this rule: not just "reads the right
+        machine" (above) but "fails, not skips, when THAT machine is broken".
+
+        Shadowed via `methodology.extra_machines`, the sanctioned route a
+        project uses to override a shipped machine — not by corrupting the
+        package.
+        """
+        ctx = RuleContext(
+            manifest=manifest_with_unloadable_session_machine(tmp_path),
+            cwd=tmp_path,
+            session={"state": "reviewed", "plan": [{"n": 1, "title": "x", "done": False}]},
+        )
+        verdict = only(evaluate(["session.deliverables_complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "session machine could not be loaded" in verdict.message
+
+
+class TestTheBranchIsCurrentRule:
+    """`session.branch_is_current` — the model said "rebase onto the local base
+    after every commit" and nothing owned it, so it was prose.
+
+    `warn` in every profile, deliberately. A stale branch costs a rebase and
+    never data, and a `block` here would fire whenever a peer landed anything —
+    a gate whose trigger is someone else's commit.
+    """
+
+    def behind(self, ctx_factory, commits=1):
+        """Base moves on; the session branch does not."""
+        for n in range(commits):
+            (ctx_factory.main / f"base{n}.txt").write_text("x", encoding="utf-8")
+            run(["git", "add", "-A"], ctx_factory.main)
+            run(["git", "commit", "-qm", f"base {n}"], ctx_factory.main)
+        return {"state": "working", "branch": "session/x", "base": "master"}
+
+    def verdict(self, ctx_factory, session, cwd=None):
+        ctx = ctx_factory(cwd=cwd, session=session)
+        return only(evaluate(["session.branch_is_current"], ctx)).verdict
+
+    def test_it_runs_at_the_close_of_a_turn(self):
+        assert "session.branch_is_current" in {s.id for s in rules_for_event("stop")}
+
+    def test_a_branch_the_base_has_moved_past_is_a_finding(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.behind(ctx_factory, commits=2))
+        assert not verdict.ok and not verdict.skipped
+        assert "2 commit(s) behind" in verdict.message
+        assert any("session sync" in fix for fix in verdict.fixes)
+
+    def test_a_current_branch_passes(self, ctx_factory):
+        session = {"state": "working", "branch": "session/x", "base": "master"}
+        verdict = self.verdict(ctx_factory, session)
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_branch_merely_ahead_is_not_behind(self, ctx_factory):
+        """The two questions are opposite argument orders of one helper, and
+        getting them the wrong way round would make every session with work on
+        it report as stale."""
+        (ctx_factory.wt / "work.txt").write_text("x", encoding="utf-8")
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "work"], ctx_factory.wt)
+        session = {"state": "working", "branch": "session/x", "base": "master"}
+        assert self.verdict(ctx_factory, session).ok
+
+    def test_no_session_and_no_branch_are_both_not_applicable(self, ctx_factory):
+        assert self.verdict(ctx_factory, None).skipped
+        assert self.verdict(ctx_factory, {"state": "working", "branch": ""}).skipped
+
+    def test_a_finished_session_is_not_asked_to_rebase(self, ctx_factory):
+        session = self.behind(ctx_factory)
+        session["state"] = "torn_down"
+        assert self.verdict(ctx_factory, session).skipped
+
+    def test_a_comparison_git_cannot_make_is_skipped_with_a_stated_reason(
+        self, ctx_factory, tmp_path
+    ):
+        session = {"state": "working", "branch": "session/x", "base": "no-such-ref"}
+        verdict = self.verdict(ctx_factory, session)
+        assert verdict.skipped
+        assert "no-such-ref" in verdict.message
+
+    def test_it_advises_in_every_profile(self):
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        for profile in ("standard", "strict", "loose"):
+            raw = yaml.safe_load(
+                (DATA_DIR / "profiles" / f"{profile}.yaml").read_text(encoding="utf-8")
+            )
+            assert raw["rules"]["session.branch_is_current"] == "warn", profile
+
+    def test_a_session_machine_that_cannot_load_fails_this_gate_too(self, tmp_path):
+        """AUD-08 again, for this rule's own terminal-set read: a configuration
+        error is not a skip. Shadowed via `methodology.extra_machines`, the
+        sanctioned override route — not by corrupting the package."""
+        ctx = RuleContext(
+            manifest=manifest_with_unloadable_session_machine(tmp_path),
+            cwd=tmp_path,
+            session={"state": "working", "branch": "session/x", "base": "master"},
+        )
+        verdict = only(evaluate(["session.branch_is_current"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "session machine could not be loaded" in verdict.message

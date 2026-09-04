@@ -460,6 +460,28 @@ class TestSessionMachine:
         for state in ("registered", "isolated", "working", "reviewed", "merged"):
             assert machine.can(state, "abandoned"), state
 
+    def test_the_landing_boundary_carries_the_deliverables_gate(self):
+        """Both states, and the repetition is the point.
+
+        `reviewed` can be re-entered from `working`, and the merge is the
+        irreversible step, so a gate that only guarded the reviewable step
+        would guard nothing once the work moved on from it. The file already
+        carries that argument for `pipeline.complete`; this is the same shape
+        one question over — did the session finish what it said it was for.
+
+        Entry gates, so the `reviewed -> working` retreat stays walkable: a
+        session that discovers more deliverables are owed must be able to go
+        back and do them without first satisfying the gate that says they are
+        all done (BUG_037).
+        """
+        machine = load_session_machine()
+        for state in ("reviewed", "merged"):
+            assert "session.deliverables_complete" in machine.state(state).entry_gates
+            assert "session.deliverables_complete" not in (
+                machine.state(state).exit_gates
+            )
+        assert machine.can("reviewed", "working")
+
 
 class TestBugMachine:
     def test_fixed_is_unreachable_without_a_reproduction(self):

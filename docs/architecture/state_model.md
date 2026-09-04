@@ -155,6 +155,8 @@ Invariants this domain enforces:
 | `session.push_barrier` | At most one push per session, and only from `merged` | block |
 | `session.ff_merge_target` | A fast-forward merge must be run from the main checkout, not inside the worktree | block |
 | `session.own_file_set_only` | Commits touch only files this session declared | warn |
+| `session.deliverables_complete` | A session lands only once the deliverables it recorded are done | block |
+| `session.branch_is_current` | A session branch has not fallen behind the base it will merge into | warn |
 | `session.named_after_isolating` | Session has a task-derived name and color | warn |
 | `session.teardown_complete` | Worktree removed after push | warn |
 
@@ -169,7 +171,7 @@ behaves exactly as it did.
 | Field | Holds | Read by |
 |---|---|---|
 | `plan` | The deliverable set this session owes, in the order it was recorded: `{"n", "title", "done", "done_at"}` per entry | `core/plan`, through four derived properties on the record |
-| `plan_touched` | When the plan last MOVED | the resumable ordering, and a later staleness check |
+| `plan_touched` | When the plan last MOVED | the resumable ordering, and `session.work_would_be_stranded`'s staleness check |
 | `resumed_count` | How many host sessions picked this one up | the report |
 | `hosts` | Every host session bound to it BEFORE the current one, oldest first | provenance |
 
@@ -192,6 +194,72 @@ per-transition `elapsed` telemetry below, so stamping it on a checklist edit
 would shorten the next transition's recorded duration by however long the edit
 happened to be after the last one: a plan edit silently rewriting the record of
 what a *state* cost.
+
+There is a second reason, and it is what makes the field load-bearing rather
+than merely tidy. `session.work_would_be_stranded` refuses on a **cold** plan,
+and a `block` must be clearable by the commands its own fixes name. `plan_done`,
+`plan_remove` and `plan_reopen` each stamp `plan_touched`; had the plan reused
+`heartbeat`, the one way to clear that gate would have been to stamp the anchor
+of the `elapsed` measurement — a gate satisfiable only by corrupting a number.
+The staleness reading is `max(plan_touched, heartbeat)`, so a session moving
+through its lifecycle counts as alive without touching its checklist, and **both
+clocks at zero reads as fresh**: every record written before the field existed
+carries `0.0`, and failing on missing data would fire a blocking gate on all of
+them at once, at `stop`, the surface with the least room to be wrong.
+
+### The two gates the plan arms, and why they are duals
+
+The plan exists so a session can outlive its host. That model breaks both
+closeout questions unless they are asked as a pair:
+
+| Gate | Fires at | Asks |
+|---|---|---|
+| `session.work_would_be_stranded` | `stop`, every turn | are these commits abandoned, or parked? |
+| `session.deliverables_complete` | entering `reviewed` and `merged` | did the session finish what it said it was for? |
+
+**`work_would_be_stranded` abstains exactly where `deliverables_complete` has
+something to hold.** An open plan that moved recently is `clean` at the closeout
+— the work is parked against a recorded promise, and under the multi-host model
+that is the *resting* state at the end of every increment, not a defect. The
+same open plan is a refusal at the landing boundary, because merging is the
+claim that the session is over. Cold is the one case the closeout still refuses
+on: the threshold is `session.plan_stale_days`, drawing the line between "paused
+over a weekend" and "abandoned". Reversed, the two would fight — a gate firing
+on every parked turn is a gate that teaches people to ignore it, and a merge
+that lands a half-done checklist is the thing the checklist was written to stop.
+
+An **empty** plan is `na` at both, deliberately, and `na` rather than `clean`:
+an empty plan is not "the plan is finished", it is "no plan was made". `clean`
+would be a vacuous green on a gate guarding the merge, and `fail` would make a
+checklist mandatory for every one-line chore — a gate legitimate work must
+override routinely is what teaches people to reach for `--force`. The skip names
+`invariant session plan add`, the command that would arm it, rather than "not
+applicable here" (BUG_027).
+
+`session.deliverables_complete` is an **entry** gate on both `reviewed` and
+`merged`. Both, because `reviewed` can be re-entered from `working` and the
+merge is the irreversible step, so guarding only the reviewable step guards
+nothing once the work moves on from it — the same argument `pipeline.complete`
+carries in the machine file. *Entry* rather than exit, so the
+`reviewed -> working` retreat stays walkable: a session that discovers more is
+owed must be able to go back and do it without first satisfying the gate that
+says it is all done (BUG_037).
+
+`session.branch_is_current` is the third, and the one that is `warn` in every
+profile. The model has always said "rebase onto the local base after every
+commit"; nothing owned it, so a branch discovered it was behind at the
+fast-forward merge — the one step where the fix costs a rebase of work already
+declared done. It stays advisory because a stale branch costs a rebase and never
+data, and a `block` whose trigger is *somebody else's commit* is one the person
+holding it cannot prevent. It reads `commits_ahead(root, base, branch)`: the
+same helper as the closeout rule with the arguments the other way round, which
+is the whole rule.
+
+The fixes all three name — `invariant session plan add|done|remove|show` and
+`invariant session sync` — are the CLI surface over the plan; the rules landed
+with the domain that answers them and the commands follow. A fix naming a
+command that does not exist yet is a forward reference on purpose: the
+alternative was a gate that refuses and suggests nothing.
 
 The plan is a **field, not a file**. It is per-session, it is read on the same
 turn as the state it qualifies, and it is small, so a second document under

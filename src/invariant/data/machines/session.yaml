@@ -30,15 +30,23 @@ states:
     # an EXIT gate on one of its states, so a session that never advanced its
     # pipeline skipped all of them rather than passing them — which is exactly
     # how work reached `torn_down` with the pipeline still in `designing`.
-    entry_gates: [pipeline.complete]
+    #
+    # `session.deliverables_complete` is the same shape one question over: not
+    # "did the methodology run" but "did the session finish what it said it was
+    # for". Both are ENTRY gates so the `reviewed -> working` retreat stays
+    # walkable — a session that discovers more deliverables are owed must be
+    # able to go back and do them without first satisfying the gate that says
+    # they are all done (BUG_037).
+    entry_gates: [pipeline.complete, session.deliverables_complete]
     exit_gates: [privacy.clean]
     next: [merged, working, abandoned]
   merged:
     description: Rebased and fast-forward merged into the base branch.
-    # Repeated here deliberately. `reviewed` can be re-entered from `working`,
-    # and the merge is the irreversible step; a gate that only guards the
-    # reviewable step guards nothing once the work moves on from it.
-    entry_gates: [session.ff_merge_target, pipeline.complete]
+    # Repeated here deliberately, both of them. `reviewed` can be re-entered
+    # from `working`, and the merge is the irreversible step; a gate that only
+    # guards the reviewable step guards nothing once the work moves on from it.
+    entry_gates:
+      [session.ff_merge_target, pipeline.complete, session.deliverables_complete]
     next: [torn_down, pushed, abandoned]
   pushed:
     description: >

@@ -18,12 +18,14 @@ import codecs
 import fnmatch
 import re
 import shlex
+import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
 
 from ..adapters import Adapter, get_adapter
 from . import git
+from . import plan as plan_reader
 from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
@@ -840,9 +842,64 @@ def _machine_unloadable_failure(which: str) -> Verdict:
     )
 
 
+def _as_float(value: object, default: float = 0.0) -> float:
+    """A stored number, or the default when the document holds rubbish.
+
+    Same tolerance as ``core.plan``, for the same stated reason: the session
+    files are promised to be hand-inspectable and hand-fixable, which is the
+    same sentence as "a hand can get one wrong". A rule that raised on a
+    mistyped timestamp would take a blocking gate down with it.
+    """
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _plan_cold_days(ctx: RuleContext) -> float | None:
+    """How long an open plan has sat still, or ``None`` if it counts as alive.
+
+    Returns the number rather than a bare boolean so the refusal can NAME the
+    days it judged on. A ``_plan_is_cold`` answering ``True`` would have made
+    the rule read the clock a second time to print it, and this repository
+    already states why one mutation takes exactly one reading of a clock.
+
+    The reading is ``max(plan_touched, heartbeat)``. A session moving through
+    its lifecycle is alive whether or not anyone edited the checklist on the
+    way, and the plan's own clock alone would call a session that transitioned
+    twice today cold.
+
+    **Why ``plan_touched`` is a separate field from ``heartbeat`` at all.** The
+    cold branch below BLOCKS, so it must be clearable by the commands its own
+    fixes name — and ``plan_done``, ``plan_remove`` and ``plan_reopen`` each
+    stamp ``plan_touched``. Had the plan reused ``heartbeat``, the only way to
+    clear this gate would have been to stamp the anchor of the per-transition
+    ``elapsed`` telemetry: a gate satisfiable only by corrupting a measurement.
+
+    **Both clocks zero reads as FRESH.** Every record written before
+    ``plan_touched`` existed carries ``0.0``. Failing on missing data would
+    fire a blocking gate on every one of those records simultaneously, at
+    ``stop`` — the surface with the least room to be wrong. The two mistakes do
+    not cost the same: a false "cold" ends a turn, a false "parked" costs one
+    turn's reminder.
+    """
+    session = ctx.session or {}
+    last = max(
+        _as_float(session.get("plan_touched")), _as_float(session.get("heartbeat"))
+    )
+    if last <= 0:
+        return None
+    days = max(0.0, (time.time() - last) / 86400.0)
+    # From the manifest, never a constant here: the distinction being drawn is
+    # "paused over a weekend" against "abandoned", and where that line sits is
+    # a property of how a project works.
+    threshold = _as_float(ctx.manifest.get("session.plan_stale_days"), 7.0)
+    return days if days >= threshold else None
+
+
 @rule(
     "session.work_would_be_stranded",
-    summary="A turn does not end with committed work sitting on an unmerged branch.",
+    summary="A turn does not end with finished work stranded on an unmerged branch, unless an open plan says it is parked.",
     events=("stop",),
 )
 def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
@@ -925,6 +982,51 @@ def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
     if ahead == 0:
         return Verdict.clean(f"{branch} holds nothing {base} does not")
 
+    # Asked here and nowhere earlier, deliberately: the unstranded path above is
+    # untouched, so a merged branch answers exactly as it always did whatever
+    # its checklist says.
+    #
+    # Under the model where a session outlives its host, "terminal pipeline AND
+    # commits ahead" is the RESTING state at the end of every increment — a
+    # plan spanning four host sessions parks with work on its branch three
+    # times before it merges once. Refusing on that alone would fire on every
+    # one of those turns until it was ignored, which is the failure this rule's
+    # own narrowing to a terminal pipeline exists to avoid, one model change
+    # later. What still separates parked from abandoned is whether the plan is
+    # being WORKED, so that is the question. A session with no plan, or with a
+    # finished one, falls through to the original answer byte for byte: an
+    # empty checklist says nothing about where the commits live, and a complete
+    # one says the opposite of parked.
+    progress = plan_reader.progress(ctx.session.get("plan"))
+    if progress.remaining:
+        cold_days = _plan_cold_days(ctx)
+        if cold_days is None:
+            # `clean`, not `na`. The question was asked and answered: this work
+            # is parked against a promise somebody recorded. `na` would claim
+            # the rule had nothing to say about a session it just examined.
+            return Verdict.clean(
+                f"parked against an open plan — {progress.describe()}, "
+                f"{ahead} commit(s) on {branch}",
+                detail=f"Next up: {progress.remaining[0]['title']!r}. The plan "
+                "moved recently, so these commits are where the next host "
+                "session picks them up rather than where they get lost.",
+            )
+        return Verdict.fail(
+            f"{ahead} commit(s) on {branch}, against a plan nobody has moved "
+            f"in {int(cold_days)} day(s)",
+            detail=f"{progress.describe()}, and the open entries have sat "
+            "still long enough that 'parked' no longer explains them. Either "
+            "the plan is out of date or the session is. Both are fixed by "
+            "saying so; neither is fixed by the branch sitting there.",
+            fixes=(
+                "invariant session plan show",
+                "invariant session plan done <n>     # it is finished",
+                "invariant session plan remove <n>   # it is not going to happen",
+                "invariant session review",
+                "invariant session transition abandoned --reason '<why>'",
+            ),
+        )
+
     return Verdict.fail(
         f"{ahead} commit(s) on {branch} are not on {base}",
         detail="The pipeline says this work is finished and the turn is "
@@ -939,6 +1041,137 @@ def _work_would_be_stranded(ctx: RuleContext) -> Verdict:
             "invariant session teardown   # removes the worktree AND the branch",
             "invariant session transition abandoned --reason '<why>'  # if dropped",
         ),
+    )
+
+
+@rule(
+    "session.deliverables_complete",
+    summary="A session lands only once the deliverables it recorded are done.",
+    events=(),
+)
+def _deliverables_complete(ctx: RuleContext) -> Verdict:
+    """The other half of "a session accumulates work across hosts and merges once".
+
+    The model gained the first half — a plan the session carries between host
+    sessions — and nothing enforced the second. The merge was reachable from
+    any ``reviewed`` record, so what decided whether the work was finished was
+    whichever host session happened to be looking at the time. This gate reads
+    the list the operator wrote about their own work and asks whether they
+    finished it.
+
+    A machine gate, ``events=()``. Landing is a transition, and attaching this
+    to ``stop`` as well would ask, on every turn of a session nowhere near
+    merging, a question whose only honest answer then is "not yet".
+    """
+    if ctx.session is None:
+        return Verdict.na("no session")
+
+    state = str(ctx.session.get("state") or "")
+    # Through the machine, exactly as `session.work_would_be_stranded` does it.
+    # A skip on a gate a project holds at `block` reads as a pass, so a machine
+    # that cannot be loaded FAILS here rather than stepping aside (AUD-08).
+    session_terminal = _terminal_states(load_session_machine, ctx.manifest)
+    if session_terminal is None:
+        return _machine_unloadable_failure("session")
+    if state in session_terminal:
+        return Verdict.na(f"session is {state}")
+
+    progress = plan_reader.progress(ctx.session.get("plan"))
+    if not progress.total:
+        # `na`, and neither of the two obvious alternatives. `clean` is the
+        # vacuous green: an empty plan is not "the plan is finished", it is "no
+        # plan was made", and this gate guards the merge. `fail` would make a
+        # checklist mandatory for every session including a one-line chore, and
+        # a gate that legitimate work must override routinely is what teaches
+        # people to reach for `--force`.
+        #
+        # The message names the command that would ARM the gate rather than
+        # saying "not applicable here", which tells a reader a gate went inert
+        # and nothing about how to make it mean something (BUG_027).
+        return Verdict.na(
+            "this session recorded no deliverables, so there is nothing to "
+            'finish — invariant session plan add "<what is owed>" arms this gate'
+        )
+
+    if progress.remaining:
+        return Verdict.fail(
+            f"{len(progress.remaining)} of {progress.total} deliverables are "
+            "still open",
+            detail="This session said what it was for and has not finished "
+            "saying it. Open: "
+            + ", ".join(f"{e['n']} {e['title']!r}" for e in progress.remaining[:5]),
+            # Both recorded routes are named before the forced one: `plan
+            # remove` retires the entry and its number permanently, so the
+            # checklist itself carries the decision, while forcing the merge
+            # records only that somebody went past a gate. Between the two
+            # recorded routes, `plan done` leads: this gate fires most often
+            # because work is genuinely finished but unticked, so `plan done`
+            # is the commoner and more honest answer. The reflex being guarded
+            # against is `--force`, and both of the first two avoid it, so the
+            # ordering between them follows frequency rather than ceremony.
+            fixes=(
+                "invariant session plan done <n>     # it is finished",
+                "invariant session plan remove <n>   # it is not going to happen",
+                "invariant session merge --force     # the override is recorded",
+            ),
+        )
+
+    return Verdict.clean(f"{progress.done}/{progress.total} deliverables done")
+
+
+@rule(
+    "session.branch_is_current",
+    summary="A session branch has not fallen behind the base it will merge into.",
+    events=("stop",),
+)
+def _branch_is_current(ctx: RuleContext) -> Verdict:
+    """"Rebase onto the local base after every commit" was prose until now.
+
+    The model has always said it; nothing owned it, so nothing checked it, and
+    a branch discovers it is behind at the moment of the fast-forward merge —
+    the one step where the fix costs a rebase of work already declared done.
+
+    ``warn`` in every profile, deliberately. A stale branch costs a rebase and
+    never data, and a ``block`` here would fire whenever a peer landed
+    anything: a gate whose trigger is somebody else's commit is a gate the
+    person holding it cannot prevent, and one they will learn to ignore.
+    """
+    if ctx.session is None:
+        return Verdict.na("no session")
+
+    state = str(ctx.session.get("state") or "")
+    session_terminal = _terminal_states(load_session_machine, ctx.manifest)
+    if session_terminal is None:
+        return _machine_unloadable_failure("session")
+    if state in session_terminal:
+        return Verdict.na(f"session is {state}")
+
+    branch = str(ctx.session.get("branch") or "")
+    if not branch:
+        return Verdict.na("session owns no branch")
+    base = str(ctx.session.get("base") or "master")
+
+    # Argument order is the whole rule. `commits_ahead(cwd, X, Y)` counts what
+    # X holds that Y does not, so "behind" is the base measured against the
+    # branch — the opposite order to `session.work_would_be_stranded`, which
+    # asks the same helper the other question a line away. Getting these the
+    # wrong way round reports every session with work on it as stale.
+    behind = git.commits_ahead(_repo_root(ctx), base, branch)
+    if behind is None:
+        # `na`, matching the sibling closeout rule: an unmakeable comparison
+        # names the refs it could not compare, and this rule advises rather
+        # than blocks, so there is nothing here for a silent skip to relax.
+        return Verdict.na(f"could not compare {branch} against {base}")
+    if behind == 0:
+        return Verdict.clean(f"{branch} carries everything on {base}")
+
+    return Verdict.fail(
+        f"{branch} is {behind} commit(s) behind {base}",
+        detail="Rebasing now resolves any conflict here, with this session's "
+        "tests around it. Rebasing at the merge resolves it against work "
+        "already declared reviewed, which is the same conflict at the worst "
+        "moment to meet it.",
+        fixes=("invariant session sync",),
     )
 
 
