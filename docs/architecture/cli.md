@@ -95,6 +95,14 @@ invariant doctor
     settings wired, state root writable, adapter commands resolvable, memory
     index current. One line per check, exit 1 if any fails.
 
+    It also reports what was left PARKED here — sessions whose host binding is
+    spent, and live sessions with an open plan — which `end_host_session` has
+    promised in its docstring since it was written. Those two rows are
+    INFORMATIONAL and never fail: any false row makes this command exit 1, and
+    a parked session is the designed resting state of a plan that spans several
+    host sessions. A `doctor` that goes permanently red on every project which
+    adopts a checklist is the gate that gets ignored, and then switched off.
+
     A manifest that will not LOAD is one of those checks and not a reason to
     stop: this is the command someone runs because the manifest is wrong, and
     it used to resolve the manifest before it could report anything, so a
@@ -178,7 +186,20 @@ Three consequences are load-bearing:
 ## Session
 
 ```
-invariant session start <name> [--task <slug>]
+invariant session start <name> [--base <branch>] [--force]
+    The session id is APPENDED to the task slug, so the name a human types is
+    an address: `add-widget` registers as `add-widget-a3f9c1de`. Uniqueness is
+    then structural rather than checked — ids are unique, therefore `slug-id`
+    is — and `session resume` can take the name back.
+
+    REFUSED when the same task slug already has a session parked here, because
+    that is the fork this whole model exists to prevent: a second host session
+    starting a second invariant session under one task name leaves two branches
+    holding half the work each. The refusal names the parked session, prints
+    its plan, and gives the command that picks it up. `--force` starts a
+    genuinely separate session; it is the escape the refusal's own last line
+    names, and it was passed through to the domain only when the commands
+    below landed — until then that line named a flag the CLI did not have.
 invariant session isolate            Print the worktree and branch to create,
                                      or create them with --execute.
 invariant session status [--json]
@@ -278,6 +299,68 @@ invariant session adopt <host-id> [--id <id>] [--force]
     Bind a host session to an invariant session. Normally automatic; needed by
     hand only to claim a session registered before the binding existed.
 
+    What it is NOT is a rebind of a LIVE binding. That is the hand-over
+    ADR-001 D19 forbids — work changing owner behind its owner's back, with
+    its pipeline, its evidence and its declared file set going with it — and
+    `--force` is the deliberate exception, not the ordinary route. The case
+    that looks like it and is not is a binding that is SPENT: the host session
+    ended, and there is nobody on the other end to take anything away from.
+    That is a continuation, and it has its own command.
+
+invariant session resume <name> [--id <id>] [--force]
+    Pick up a session a previous host session put down. `<name>` is a full
+    name, a bare task slug, or an id; a partial name that matches more than one
+    session is refused with every candidate printed in full, because a full
+    name carries its id and therefore cannot be ambiguous.
+
+    The success line is a CONTRACT with the host adapter, which binds a host
+    session by parsing `session <id> (` out of the stdout of the command that
+    claimed it — a command run through a shell carries no hook payload, so this
+    text is the only evidence of which session was claimed. The refusals are
+    shaped so that sequence never appears in them: the same reader searches the
+    whole tool response, stderr included on a host that merges the streams, so
+    a refusal carrying it would bind the caller to the session it just declined
+    to give them.
+
+invariant session plan add "<deliverable>" | done <n> | reopen <n>
+                    | remove <n> | show          [--id <id>] [--json]
+    The deliverable set this session owes — what makes a session outlive its
+    host, and what `session.deliverables_complete` and
+    `session.work_would_be_stranded` read. A number is retired when its entry
+    is removed and never reissued, so `plan done 3` means the same thing after
+    a `remove` as it did before one.
+
+    `add` takes exactly ONE positional, so a lost quote is a usage error rather
+    than a deliverable called "wire". Every action prints the whole plan and
+    the same JSON document, because a mutation that reported only itself would
+    leave the caller re-running `show` to see the numbering it just changed.
+
+    `show --json` carries `planned` and `complete` as SEPARATE keys. `planned`
+    is "a checklist exists"; `complete` is "and nothing on it is open".
+    Collapsed into one flag, a session that never recorded a plan is
+    indistinguishable from one that finished its plan — so a consumer
+    switching mode on it either defers the merge forever on every project that
+    does not keep checklists, or passes every unplanned session as finished.
+
+invariant session sync [--id <id>]
+    Rebase this session's branch onto its base. What
+    `session.branch_is_current` names as its fix: the model has always said
+    "rebase onto the local base after every commit", and until this existed,
+    saying it was all anything did.
+
+    Every refusal runs BEFORE git does, the same shape as `session merge`, and
+    for the same reason: a rebase rewrites commits, so a validation after it
+    would be a report. It refuses to run outside the session's own worktree —
+    the mirror of `session.ff_merge_target` one command over, because `git
+    rebase` acts on whatever HEAD the CALLING tree has checked out, so run from
+    the main checkout it rebases the base branch onto itself and exits zero. A
+    detached HEAD is refused on the same evidence.
+
+    A conflict is reported, never resolved: the rebase is aborted, which leaves
+    the commits exactly where they were, and the decision stays with the
+    operator. Resolving a conflict is a judgement about two people's intent,
+    and a program that guesses at one produces a merge nobody reviewed.
+
 invariant session reap [--dry-run]
     Abandon sessions whose worktree AND branch are both gone. A missing
     worktree alone is not enough: its branch may still hold unmerged commits.
@@ -298,7 +381,14 @@ invariant session teardown [--keep-worktree] [--keep-branch] [--force]
     the refusal asks for, and git's own calls run from there too — removing
     the worktree a later git call is standing in fails after the removal has
     already happened.
-invariant session list                All registered sessions on this machine.
+invariant session list                All registered sessions on this machine,
+                                      with how far each is through its plan.
+                                      The fraction is what distinguishes two
+                                      sessions on one task; a session with no
+                                      plan reads `-` rather than `0/0`, because
+                                      those are different facts. `--json` is
+                                      unchanged — the record already carries
+                                      the plan.
 ```
 
 ## Pipeline

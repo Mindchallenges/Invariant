@@ -16,6 +16,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from ..core import plan as plan_reader
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
 from ..core.manifest import MANIFEST_RELPATH, Manifest
 from ..core.rules import (
@@ -26,7 +27,11 @@ from ..core.rules import (
 )
 from ..core.store import JsonStore
 from ..domains.pipeline import PipelineDomain, describe_run, summarise
-from ..domains.session import SessionDomain
+from ..domains.session import (
+    SessionDomain,
+    name_ambiguity_message,
+    name_matches,
+)
 
 #: Absolute paths inside free text. Used only to find a session worktree an
 #: agent prompt names — every hit is checked against the live session registry
@@ -524,11 +529,59 @@ def cmd_doctor(args) -> int:
         except InvariantError:
             pass
 
+        # What `end_host_session` has promised in its docstring since it was
+        # written: a spent binding is a session somebody parked, and nothing
+        # told them where. Reported in the ONE command people run when they
+        # suspect they have lost something.
+        #
+        # Informational, never a failure row. `_report_checks` turns any false
+        # row into exit 1, and a parked session is this feature's designed
+        # resting state — a `doctor` that goes permanently red on every project
+        # adopting the plan is the gate that gets ignored and then switched
+        # off. Guarded like the sibling checks: a diagnosis that cannot be made
+        # must not take the diagnosis command down with it.
+        try:
+            parked = ctx.sessions.resumable(cwd=ctx.cwd)
+            checks.append(
+                (
+                    "sessions parked here",
+                    True,
+                    "; ".join(
+                        f"{s.name} ({plan_reader.progress(s.plan).describe()})"
+                        for s in parked
+                    )
+                    + " — pick one up: invariant session resume <name>"
+                    if parked
+                    else "none parked here",
+                )
+            )
+            owing = [s for s in ctx.sessions.live() if s.plan_open]
+            checks.append(
+                (
+                    "open deliverable plans",
+                    True,
+                    "; ".join(
+                        f"{s.name}: {s.plan_done_count}/{s.plan_total} done"
+                        for s in owing
+                    )
+                    if owing
+                    else "no live session has an open plan",
+                )
+            )
+        except InvariantError:
+            pass
+
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()
             checks.append(
-                ("memory store clean", report.clean, f"{report.count} memories, "
-                 f"{len(report.problems())} problem(s)")
+                (
+                    "memory store clean",
+                    report.clean,
+                    (
+                        f"{report.count} memories, "
+                        f"{len(report.problems())} problem(s)"
+                    ),
+                )
             )
 
     return _report_checks(args, checks)
@@ -871,14 +924,29 @@ def cmd_session_start(args) -> int:
         session_id=args.id,
         base=args.base,
         host_session_id=args.host_session_id or ctx.host_session_id,
+        # The escape from the refusal that stops a plan forking. The domain
+        # refuses a task name whose parked session is sitting right there and
+        # ends "add --force" — which, until this argument was passed through,
+        # named a flag the CLI did not have. A refusal whose remedy cannot be
+        # run is the same dead end as a `fixes` line naming an unwritten
+        # command, one layer up.
+        force=args.force,
     )
     plan = ctx.sessions.isolation_plan(session)
     return emit(
         args,
         {"session": session.to_dict(), "plan": plan},
+        # Line one is a CONTRACT with `hosts/claude_code`: it binds a session
+        # by parsing this command's own stdout for `session <id> (`, which is
+        # how a registration made through a shell — carrying no hook payload —
+        # gets attributed at all. Anything added here goes BELOW it.
         f"session {session.id} ({session.name}) registered\n"
         f"  next: invariant session isolate --execute\n"
-        f"        worktree {plan['worktree']}  branch {plan['branch']}",
+        f"        worktree {plan['worktree']}  branch {plan['branch']}\n"
+        # The name carries the id, so it is an address. Printed at the one
+        # moment the operator is looking, because the alternative route to it
+        # is remembering that `session list` exists a week later.
+        f"  resume it later with: invariant session resume {session.name}",
     )
 
 
@@ -910,6 +978,26 @@ def cmd_session_status(args) -> int:
     ]
     if pipeline:
         text.append(f"  pipeline   {pipeline.methodology} in {pipeline.state}")
+    # The plan, where somebody picking the session up will look for it. Only
+    # when there IS one: an unplanned session is a legitimate resting state —
+    # the same judgement `session.deliverables_complete` makes when it skips
+    # rather than fails — and a permanent "plan (none)" line on every one-line
+    # chore is a nag, which is how a line stops being read.
+    progress = plan_reader.progress(session.plan)
+    if progress.total:
+        tail = (
+            f"next: {progress.remaining[0]['title']}"
+            if progress.remaining
+            else "complete"
+        )
+        text.append(
+            f"  plan       {progress.done}/{progress.total} done — {tail}"
+        )
+    if session.resumed_count:
+        text.append(
+            f"  resumed    {session.resumed_count} host session(s) picked "
+            f"this up"
+        )
     # Loud, and above the fold. A held override is enforcement the operator
     # turned off and may well have forgotten; the whole reason it is a recorded
     # grant rather than a flag is that it can be seen and withdrawn.
@@ -1059,8 +1147,14 @@ def cmd_session_list(args) -> int:
     sessions = ctx.sessions.list()
     if not sessions:
         return emit(args, {"sessions": []}, "no registered sessions")
+    # The fraction, not the checklist. This is the list somebody scans to find
+    # the session they parked, and "how far along" is the one thing that
+    # distinguishes two sessions on the same task. A session with no plan reads
+    # `-` rather than `0/0`, because those are different facts.
     text = "\n".join(
-        f"  {s.id}  {s.state:<12} {s.name:<24} {s.worktree or ''}" for s in sessions
+        f"  {s.id}  {s.state:<12} {s.name:<24} {_plan_fraction(s):<7} "
+        f"{s.worktree or ''}"
+        for s in sessions
     )
     return emit(args, {"sessions": [s.to_dict() for s in sessions]}, text)
 
@@ -1083,6 +1177,335 @@ def cmd_session_adopt(args) -> int:
         args,
         updated.to_dict(),
         f"session {updated.id} now answers to this host session",
+    )
+
+
+def cmd_session_resume(args) -> int:
+    """Pick up work a previous host session put down.
+
+    The sibling of :func:`cmd_session_adopt`, and the distinction between them
+    is which binding they replace. `adopt` claims a session that has NO owner;
+    this one replaces a **spent** binding — a host session that ended, leaving
+    a worktree, a branch, a pipeline and a plan behind. Neither may replace a
+    LIVE binding without --force, because that is the hand-over ADR-001 D19
+    forbids: work changing owner behind its owner's back.
+
+    Two properties of the OUTPUT are contracts rather than presentation.
+
+    **The success line is parsed.** `hosts/claude_code` binds a host session to
+    an invariant session by reading `session <id> (` out of the stdout of the
+    command that claimed it — a command run through a shell carries no hook
+    payload, so this text is the only evidence of which session was claimed.
+
+    **The refusals must not be parseable that way.** The same reader searches
+    the WHOLE tool response, and a host that merges streams puts stderr in it.
+    A refusal carrying `session <id> (` would bind the caller to a session it
+    just refused to give them — silently, and to the wrong one. So every
+    refusal below names sessions in the `<name>  [<state>]` shape the ambiguity
+    messages already use, which has no such sequence in it.
+    """
+    ctx = Context()
+    session = _resume_target(ctx, args)
+    updated = ctx.sessions.resume(
+        session.id, host_session_id=ctx.host_session_id, force=args.force
+    )
+
+    progress = plan_reader.progress(updated.plan)
+    if not progress.total:
+        headline = "no deliverables recorded"
+        # An unplanned session resumed is the moment the plan is worth
+        # recording: whatever is left is in somebody's head right now, and this
+        # is the last point before it is in a commit instead.
+        second = 'record what is left: invariant session plan add "<deliverable>"'
+    else:
+        headline = f"{progress.done}/{progress.total} deliverables done"
+        second = (
+            f"next: {progress.remaining[0]['title']}"
+            if progress.remaining
+            else "every deliverable is done; land it: invariant session review"
+        )
+    return emit(
+        args,
+        {"session": updated.to_dict(), "plan": _plan_payload(updated)},
+        "\n".join(
+            [
+                f"session {updated.id} ({updated.name}) resumed — {headline}",
+                f"  {second}",
+                (
+                    f"  worktree {updated.worktree or '(not isolated yet)'}"
+                    f"   branch {updated.branch or '(none)'}"
+                ),
+                (
+                    "  it binds to this host session on the next tool call; "
+                    "confirm with: invariant session status"
+                ),
+            ]
+        ),
+    )
+
+
+def _resume_target(ctx, args):
+    """Which session `resume` was asked for, or a refusal that says why not.
+
+    `--id` is accepted alongside the name because every ambiguity message in
+    this library tells the caller to pass it, and a subcommand that then
+    rejected it would make that advice a dead end. When both are given they
+    must AGREE: silently preferring one would let a copied-and-half-edited
+    command resume a session the caller did not name.
+    """
+    if args.id:
+        session = ctx.sessions.require(args.id)
+        if args.name and not name_matches(session.name, session.id, args.name):
+            raise UsageError(
+                f"--id names {session.name}, which does not answer to "
+                f"{args.name!r}.\n"
+                f"  Name it one way or the other, not two ways that disagree."
+            )
+        return session
+
+    if not args.name:
+        raise UsageError(
+            "name the session to resume.\n"
+            "  invariant session list   shows what is registered here\n"
+            "  invariant session resume <name>   takes a name, a bare task "
+            "slug, or an id"
+        )
+
+    session, candidates = ctx.sessions.resolve_name(args.name)
+    if session is not None:
+        return session
+    if candidates:
+        raise UsageError(f"{args.name!r} — {name_ambiguity_message(candidates)}")
+    raise UsageError(
+        f"no session answers to {args.name!r}.\n"
+        "  invariant session list   shows what is registered here\n"
+        "  invariant session start <task-name>   begins a new one"
+    )
+
+
+def cmd_session_plan(args) -> int:
+    """The deliverable set this session owes: add, tick, untick, drop, show.
+
+    **Nested subparsers rather than `session files`' flat `action` + positional
+    shape**, because the argument shapes genuinely differ where that command's
+    do not: `files` takes a list of paths for both of its actions, while `add`
+    takes one free-text title, three actions take an integer, and `show` takes
+    nothing. Flattened, the parser could only accept a string and the command
+    would hand-roll the type check — so `plan done abc` would reach the domain
+    and come back as "no deliverable 'abc' in session …", a report about the
+    plan for what is a malformed command. One function still serves all five,
+    so the dispatch stays in one place.
+
+    `add` takes exactly ONE positional, so a lost quote is a usage error rather
+    than a truncated title. That is the same failure the domain's own length
+    bound catches from the other direction — a shell handing a whole list over
+    as one argument — and both refusals are cheaper than a plan entry that
+    silently says half of what was meant.
+
+    Every action prints the WHOLE plan, and the same JSON document. A mutation
+    that reported only itself would leave the caller re-running `show` to see
+    the numbering it just changed, and two output shapes for one subcommand is
+    two things for a consumer to parse.
+    """
+    ctx = Context()
+    session = (
+        ctx.sessions.require(args.id) if getattr(args, "id", None)
+        else ctx.require_session()
+    )
+    action = args.plan_action
+    if action == "add":
+        session = ctx.sessions.plan_add(session.id, args.title)
+    elif action == "done":
+        session = ctx.sessions.plan_done(session.id, args.n)
+    elif action == "reopen":
+        session = ctx.sessions.plan_reopen(session.id, args.n)
+    elif action == "remove":
+        session = ctx.sessions.plan_remove(session.id, args.n)
+    return emit(args, _plan_payload(session), _plan_text(session))
+
+
+def _plan_payload(session) -> dict:
+    """The plan as a machine reads it.
+
+    ``planned`` and ``complete`` are SEPARATE keys and neither is derivable
+    from the other by a consumer that only has one. ``planned`` is "a checklist
+    exists"; ``complete`` is "and nothing on it is open". Collapsed into a
+    single flag, a session that never recorded a plan is indistinguishable from
+    one that finished its plan — so a reviewer switching mode on it either
+    defers the merge forever on every project that does not keep checklists, or
+    passes every unplanned session as finished. ``core.plan.progress`` is where
+    the distinction is computed, once, for exactly this reason.
+    """
+    progress = plan_reader.progress(session.plan)
+    return {
+        "session": session.id,
+        "name": session.name,
+        "plan": plan_reader.entries(session.plan),
+        "total": progress.total,
+        "done": progress.done,
+        "next": progress.remaining[0]["title"] if progress.remaining else None,
+        "planned": progress.total > 0,
+        "complete": progress.complete,
+    }
+
+
+def _plan_text(session) -> str:
+    """The plan as a person reads it.
+
+    The entries come from ``core.plan.render_lines`` rather than from a second
+    renderer here. There will be another caller — the state a host injects at
+    the top of a turn — and two renderings of one list is two chances for the
+    numbers printed to disagree with the numbers the commands take.
+    """
+    progress = plan_reader.progress(session.plan)
+    lines = [
+        (
+            f"plan for session {session.id} ({session.name}) — "
+            f"{progress.done}/{progress.total} done"
+        )
+    ]
+    lines += [f"  {line}" for line in plan_reader.render_lines(session.plan)]
+    if progress.remaining:
+        lines.append(f"  next: {progress.remaining[0]['title']}")
+    elif not progress.total:
+        lines.append(
+            '  record what is owed: invariant session plan add "<deliverable>"'
+        )
+    return "\n".join(lines)
+
+
+def _plan_fraction(session) -> str:
+    """`2/5`, or `-` where no plan was ever recorded."""
+    total = session.plan_total
+    return f"{session.plan_done_count}/{total}" if total else "-"
+
+
+def cmd_session_sync(args) -> int:
+    """Rebase this session's branch onto its base, from inside its worktree.
+
+    What `session.branch_is_current` names as its fix. The model has always
+    said "rebase onto the local base after every commit"; until this command
+    existed, saying it was all anything did.
+
+    **Every refusal runs before git does**, in the same shape as
+    `cmd_session_merge`: a validation that runs after an irreversible step is a
+    report, not a gate, and a rebase rewrites commits.
+
+    **It refuses to run outside the session's own worktree**, which is the
+    mirror of `session.ff_merge_target`'s reasoning one command over. `git
+    rebase` acts on whatever HEAD the calling tree has checked out, so run from
+    the main checkout it rebases the BASE branch onto itself, reports success
+    and exits zero — the invisible-success shape this library exists to catch.
+    The same argument makes a detached HEAD a refusal: the branch this session
+    owns is what must move, and HEAD is what would.
+
+    **A conflict is reported, never resolved.** The rebase is aborted, which
+    puts the commits back exactly where they were, and the operator is left
+    with the decision. Resolving a conflict is a judgement about two people's
+    intent, and a program that guesses at it produces a merge nobody reviewed.
+    """
+    import subprocess
+
+    from ..core import git
+
+    ctx = Context()
+    session = ctx.sessions.require(args.id) if args.id else ctx.require_session()
+
+    if not session.branch:
+        raise UsageError(
+            f"session {session.name} owns no branch, so there is nothing to "
+            f"rebase.\n  invariant session isolate --execute  creates one"
+        )
+
+    # Where the caller is standing, answered by the domain rather than by a
+    # second path comparison here: `by_worktree_containing` is what every other
+    # caller asks, and it already excludes a stranded worktree.
+    here = ctx.sessions.by_worktree_containing(ctx.cwd)
+    if here is None or here.id != session.id:
+        where = session.worktree or "(this session never isolated)"
+        raise UsageError(
+            f"a rebase acts on the branch the CALLING tree has checked out, "
+            f"and this is not session {session.name}'s worktree.\n"
+            f"  Run it from: {where}\n"
+            f"  Run from anywhere else it rebases a different branch and "
+            f"exits zero, which is the same invisible success "
+            f"session.ff_merge_target refuses at the merge."
+        )
+
+    branch = git.current_branch(ctx.cwd)
+    if branch != session.branch:
+        raise UsageError(
+            f"this worktree has {branch or 'a detached HEAD'} checked out, not "
+            f"{session.branch}. A rebase moves HEAD's branch, so it would move "
+            f"the wrong one.\n  git switch {session.branch}"
+        )
+
+    # Uncommitted work in TRACKED files is what `git rebase` itself refuses on,
+    # and asking first buys a message that names the way out. Untracked files
+    # are deliberately not counted: git only minds them when a replayed commit
+    # would overwrite one, and refusing on scratch files would make this
+    # command unusable in the tree it is meant to be run from.
+    dirty = git.changed_files(ctx.cwd)
+    if dirty:
+        listed = ", ".join(str(path) for path in dirty[:5])
+        raise UsageError(
+            f"{len(dirty)} file(s) carry uncommitted changes: {listed}\n"
+            f"  A rebase replays commits, so it refuses to run over work that "
+            f"is not in one.\n"
+            f"  Commit them, or set them aside with 'git stash', then retry."
+        )
+
+    # The same helper and the same argument order as `session.branch_is_current`
+    # reads, so the number this command acts on and the number that gate
+    # reports cannot disagree.
+    behind = git.commits_ahead(ctx.cwd, session.base, session.branch)
+    if behind == 0:
+        return emit(
+            args,
+            {"rebased": False, "behind": 0, "branch": session.branch},
+            f"{session.branch} already carries everything on {session.base}",
+        )
+
+    proc = subprocess.run(
+        ["git", "rebase", session.base],
+        cwd=str(ctx.cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        abort = subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=str(ctx.cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise UsageError(
+            f"the rebase onto {session.base} stopped: "
+            f"{detail[-1] if detail else 'git said nothing'}\n"
+            + (
+                "  It was aborted, so the branch and its commits are exactly "
+                "as they were.\n"
+                if abort.returncode == 0
+                else "  The abort ALSO failed; check 'git status' before "
+                "anything else.\n"
+            )
+            + "  Resolve it by hand — a conflict is a decision about two "
+            "people's intent, and this command will not guess at one."
+        )
+
+    return emit(
+        args,
+        {
+            "rebased": True,
+            "behind": behind,
+            "branch": session.branch,
+            "base": session.base,
+        },
+        f"{session.branch} rebased onto {session.base} — it was {behind} "
+        f"commit(s) behind and now carries everything on it",
     )
 
 
@@ -1199,7 +1622,9 @@ def cmd_session_merge(args) -> int:
     ]
     performed = []
     for command, cwd in steps:
-        proc = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True)
+        proc = subprocess.run(
+            command, cwd=str(cwd), capture_output=True, text=True, check=False
+        )
         performed.append(" ".join(command))
         if proc.returncode != 0:
             raise UsageError(
@@ -1260,6 +1685,7 @@ def cmd_session_push(args) -> int:
         cwd=str(ctx.cwd),
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         raise UsageError(f"push failed: {proc.stderr.strip()}")
@@ -1484,7 +1910,9 @@ def cmd_item_show(args) -> int:
 def cmd_item_transition(args) -> int:
     ctx = Context()
     try:
-        item, verdicts = ctx.items.transition(
+        # The verdicts are reported by the failure path below; a clean
+        # transition has nothing to say about them.
+        item, _verdicts = ctx.items.transition(
             args.id, args.status, reason=args.reason, force=args.force, cwd=ctx.cwd
         )
     except GateFailure as exc:
@@ -1873,6 +2301,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--id")
     q.add_argument("--base", default="master")
     q.add_argument(
+        "--force",
+        action="store_true",
+        help="start a second session for a task that already has a parked one",
+    )
+    q.add_argument(
         "--host-session-id",
         help="the agent host's session identifier; attribution survives a cwd reset with it",
     )
@@ -1912,6 +2345,57 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--id")
     q.add_argument("--force", action="store_true", help="rebind deliberately")
     q.set_defaults(func=cmd_session_adopt)
+
+    q = session.add_parser(
+        "resume", help="pick up a session a previous host session put down"
+    )
+    # Optional, because --id must be able to name the session on its own: every
+    # ambiguity message in this library tells the caller to pass --id, and a
+    # subcommand that required a name alongside it would make that advice a
+    # dead end.
+    q.add_argument("name", nargs="?", help="a name, a bare task slug, or an id")
+    q.add_argument("--id")
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="take over a live binding, or resume a session that already landed",
+    )
+    q.set_defaults(func=cmd_session_resume)
+
+    # Nested subparsers rather than `files`' flat `action` + positional: `add`
+    # takes one title, three actions take an integer, and `show` takes nothing.
+    # A flat shape could only accept strings, so the integer check would move
+    # out of the parser and into a refusal about the plan.
+    plan = session.add_parser(
+        "plan", help="the deliverable set this session owes"
+    ).add_subparsers(dest="plan_action", required=True)
+
+    q = plan.add_parser("add", help="record a deliverable this session owes")
+    # ONE positional, deliberately. `plan add wire the toolbar` unquoted is then
+    # a usage error rather than a deliverable called "wire".
+    q.add_argument("title")
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_session_plan)
+
+    for action, help_text in (
+        ("done", "mark a deliverable finished"),
+        ("reopen", "undo a done — the way back from ticking the wrong number"),
+        ("remove", "drop a deliverable; its number is retired, never reissued"),
+    ):
+        q = plan.add_parser(action, help=help_text)
+        q.add_argument("n", type=int)
+        q.add_argument("--id")
+        q.set_defaults(func=cmd_session_plan)
+
+    q = plan.add_parser("show", help="the plan, and what is next on it")
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_session_plan)
+
+    q = session.add_parser(
+        "sync", help="rebase this session's branch onto its base"
+    )
+    q.add_argument("--id")
+    q.set_defaults(func=cmd_session_sync)
 
     q = session.add_parser(
         "reap", help="abandon sessions whose worktree and branch are both gone"

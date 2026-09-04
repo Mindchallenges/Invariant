@@ -257,9 +257,16 @@ is the whole rule.
 
 The fixes all three name — `invariant session plan add|done|remove|show` and
 `invariant session sync` — are the CLI surface over the plan; the rules landed
-with the domain that answers them and the commands follow. A fix naming a
-command that does not exist yet is a forward reference on purpose: the
-alternative was a gate that refuses and suggests nothing.
+with the domain that answers them and the commands followed one increment
+later. A fix naming a command that does not exist yet was a forward reference
+on purpose: the alternative was a gate that refuses and suggests nothing.
+
+The reference is closed, and what keeps it closed is a test rather than a
+memory. A `fixes` line is a string literal, so a renamed subcommand breaks it
+silently and the only reader who finds out is somebody already stopped at a
+blocking gate. `tests/test_cli.py` reads every `invariant …` command named in
+`core/rules` and in `domains/session` and puts it through the real argument
+parser, so a fix that cannot be run is a failing test.
 
 The plan is a **field, not a file**. It is per-session, it is read on the same
 turn as the state it qualifies, and it is small, so a second document under

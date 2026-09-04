@@ -1592,3 +1592,616 @@ class TestRepeatedSelectorsSurviveTheParser:
         from invariant.cli.main import build_parser
 
         assert build_parser().parse_args(["pipeline", "test", "--selector", "A"]).selector == ["A"]
+
+
+# -- a session that outlives its host, at the surface ------------------
+#
+# The domain and the rules landed in two earlier increments; these are the
+# commands over them. The rules' `fixes` name three of these commands by
+# spelling, so the first test in this block is the one that keeps a fix from
+# being advice nobody can take.
+
+
+def spend_the_binding(project, host_session_id):
+    """What `SessionEnd` does, without a hook.
+
+    A session is resumable exactly when its binding is SPENT — the complement
+    of the attributable set — so every test here has to get a session into that
+    state, and the hook route would drag a payload fixture along for a fact the
+    domain already owns.
+    """
+    from invariant.core.manifest import Manifest
+    from invariant.core.store import JsonStore
+    from invariant.domains.session import SessionDomain
+
+    manifest = Manifest.load(project)
+    return SessionDomain(manifest, JsonStore(manifest.state_root)).end_host_session(
+        host_session_id
+    )
+
+
+class ParkedSessionHarness:
+    """A session with a spent binding, which is what `resume` picks up."""
+
+    def parked(self, project, capsys, monkeypatch, name="add-widget", plan=()):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-first-0000")
+        run("session", "start", name, "--json")
+        session = payload(capsys)["session"]
+        run("session", "isolate", "--execute", "--id", session["id"])
+        for title in plan:
+            run("session", "plan", "add", title, "--id", session["id"])
+        spend_the_binding(project, "host-first-0000")
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-second-1111")
+        capsys.readouterr()
+        return session
+
+
+class TestEveryCommandARuleNamesCanBeRun(ParkedSessionHarness):
+    """A `fixes` line is a promise that the command exists, spelled that way.
+
+    Two increments shipped rules whose fixes named `session plan done`,
+    `session plan remove` and `session sync` before any of them was written —
+    accepted as a within-branch forward reference on the explicit basis that
+    this increment closes it. Nothing but a test keeps that closed: a fix
+    string is a literal, so a renamed subcommand breaks it silently and the
+    only reader who finds out is somebody already stuck at a blocking gate.
+
+    The scan reads the SOURCE of the two modules that emit these strings,
+    rather than evaluating rules, because a `fixes` tuple is built inside a
+    verdict at refusal time and there is no other way to enumerate the ones a
+    happy run never produces.
+    """
+
+    #: The two annotation forms a fix uses for prose after the command. Both
+    #: are stripped before parsing, because both are the message's, not the
+    #: command's.
+    def commands_named_in(self, module) -> list[str]:
+        import inspect
+        import re as _re
+
+        source = inspect.getsource(module)
+        # `\s*` inside the quotes: a fix is often written INDENTED, as one
+        # line of a multi-line refusal. The indentation belongs to the message.
+        found = _re.findall(r'"\s*(invariant [a-z][^"\n]*)"', source)
+        found += _re.findall(r"'\s*(invariant [a-z][^'\n]*)'", source)
+        return sorted(set(found))
+
+    def runnable(self, text: str) -> list[str]:
+        import re as _re
+        import shlex
+
+        stripped = _re.sub(r"\s*\([^)]*\)\s*$", "", text.split("#")[0].strip())
+        tokens = shlex.split(stripped.replace('\\"', '"'))[1:]
+        # A placeholder for a NUMBER is the one substitution the parser needs:
+        # `<n>` is typed by a human as an integer and the parser is what says
+        # so. Every other placeholder is a string wherever it lands.
+        return ["1" if t == "<n>" else t for t in tokens]
+
+    def test_every_command_the_rules_name_parses(self):
+        import invariant.core.rules as rules_module
+        from invariant.cli.main import build_parser
+
+        parser = build_parser()
+        named = self.commands_named_in(rules_module)
+        assert "invariant session sync" in named  # the scan found the fixes
+        for text in named:
+            parser.parse_args(self.runnable(text))
+
+    def test_every_command_the_session_domain_names_parses(self):
+        """The domain names `session resume <name>` in two refusals."""
+        import invariant.domains.session as session_module
+        from invariant.cli.main import build_parser
+
+        parser = build_parser()
+        named = self.commands_named_in(session_module)
+        assert any("session resume" in text for text in named)
+        for text in named:
+            parser.parse_args(self.runnable(text))
+
+    def test_the_deliverables_gate_fix_is_runnable_as_written(
+        self, project, capsys, monkeypatch
+    ):
+        """End to end, not just through the parser: the gate names it, it runs."""
+        session = self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        assert run("session", "plan", "done", "1", "--id", session["id"]) == 0
+        run("session", "plan", "show", "--id", session["id"], "--json")
+        assert payload(capsys)["complete"] is True
+
+
+class TestSessionResume(ParkedSessionHarness):
+    def test_it_reports_the_shape_the_host_binds_on(
+        self, project, capsys, monkeypatch
+    ):
+        """The success line is a contract with `hosts/claude_code`.
+
+        That module claims a session by parsing the stdout of the command that
+        created it, with one regex. A resume that prints a line the regex
+        cannot read is a session the host never binds to.
+        """
+        from invariant.hosts.claude_code import _bind_started_session_id
+
+        session = self.parked(
+            project, capsys, monkeypatch, plan=("read the docs", "wire the toolbar")
+        )
+        assert run("session", "resume", session["name"]) == 0
+        text = out(capsys)
+
+        assert _bind_started_session_id(text) == session["id"]
+        assert text.splitlines()[0].endswith("resumed — 0/2 deliverables done")
+        assert "next: read the docs" in text
+        assert "invariant session status" in text
+
+    def test_a_bare_slug_resolves(self, project, capsys, monkeypatch):
+        session = self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", "add-widget") == 0
+        assert session["id"] in out(capsys)
+
+    def test_a_session_with_no_plan_is_told_how_to_record_one(
+        self, project, capsys, monkeypatch
+    ):
+        self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", "add-widget") == 0
+        text = out(capsys)
+        assert "no deliverables recorded" in text
+        assert 'invariant session plan add "<deliverable>"' in text
+
+    def test_a_finished_plan_names_the_landing_step(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        run("session", "plan", "done", "1", "--id", session["id"])
+        capsys.readouterr()
+        assert run("session", "resume", "add-widget") == 0
+        text = out(capsys)
+        assert "1/1 deliverables done" in text
+        assert "invariant session review" in text
+
+    def test_not_found_binds_nothing(self, project, capsys, monkeypatch):
+        """A failed resume must not print anything a host can bind to.
+
+        `_bind_started_session_id` searches the WHOLE tool response, and hosts
+        that merge streams put stderr in it. A refusal carrying a
+        `session <id> (` sequence would bind the caller to whatever it named —
+        silently, and to the wrong session.
+        """
+        from invariant.hosts.claude_code import _STARTED_ID, _bind_started_session_id
+
+        self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", "no-such-task") == 2
+        captured = capsys.readouterr()
+        both = captured.out + captured.err
+
+        assert "no-such-task" in both
+        assert _STARTED_ID.search(both) is None
+        assert _bind_started_session_id(both) is None
+
+    def test_an_ambiguous_name_lists_the_candidates_and_binds_nothing(
+        self, project, capsys, monkeypatch
+    ):
+        from invariant.hosts.claude_code import _STARTED_ID, _bind_started_session_id
+
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        for host in ("host-a-0000", "host-b-1111"):
+            monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host)
+            run("session", "start", "add-widget", "--force")
+            spend_the_binding(project, host)
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-c-2222")
+        capsys.readouterr()
+
+        assert run("session", "resume", "add-widget") == 2
+        captured = capsys.readouterr()
+        both = captured.out + captured.err
+
+        assert "names 2 sessions" in both
+        assert _STARTED_ID.search(both) is None
+        assert _bind_started_session_id(both) is None
+
+    def test_id_names_the_session_directly(self, project, capsys, monkeypatch):
+        session = self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", "--id", session["id"]) == 0
+        assert session["id"] in out(capsys)
+
+    def test_a_name_that_contradicts_the_id_is_refused(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume", "something-else", "--id", session["id"]) == 2
+        assert "something-else" in capsys.readouterr().err
+
+    def test_naming_nothing_is_a_usage_error(self, project, capsys, monkeypatch):
+        self.parked(project, capsys, monkeypatch)
+        assert run("session", "resume") == 2
+        assert "invariant session list" in capsys.readouterr().err
+
+    def test_the_record_counts_the_resume(self, project, capsys, monkeypatch):
+        self.parked(project, capsys, monkeypatch)
+        run("session", "resume", "add-widget", "--json")
+        assert payload(capsys)["session"]["resumed_count"] == 1
+
+    def test_a_merged_session_is_refused_without_force(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.parked(project, capsys, monkeypatch)
+        for state in ("working", "reviewed", "merged"):
+            run("session", "transition", state, "--id", session["id"], "--force",
+                "--reason", "test fixture")
+        capsys.readouterr()
+
+        assert run("session", "resume", session["name"]) == 2
+        assert "push_barrier" in capsys.readouterr().err
+
+
+class TestSessionPlan(ParkedSessionHarness):
+    def started(self, project, capsys, monkeypatch):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-plan-0000")
+        run("session", "start", "plan-work", "--json")
+        session = payload(capsys)["session"]
+        capsys.readouterr()
+        return session["id"]
+
+    def test_add_then_show(self, project, capsys, monkeypatch):
+        sid = self.started(project, capsys, monkeypatch)
+        assert run("session", "plan", "add", "read the toolbar docs") == 0
+        assert run("session", "plan", "add", "wire the toolbar") == 0
+        capsys.readouterr()
+
+        assert run("session", "plan", "show") == 0
+        lines = out(capsys).splitlines()
+        assert lines[0].startswith(f"plan for session {sid} (")
+        assert lines[0].endswith("— 0/2 done")
+        assert lines[1] == "  [ ] 1  read the toolbar docs"
+        assert lines[-1] == "  next: read the toolbar docs"
+
+    def test_done_reopen_and_remove_round_trip(self, project, capsys, monkeypatch):
+        self.started(project, capsys, monkeypatch)
+        run("session", "plan", "add", "one")
+        run("session", "plan", "add", "two")
+
+        assert run("session", "plan", "done", "1") == 0
+        run("session", "plan", "show", "--json")
+        assert payload(capsys)["done"] == 1
+
+        assert run("session", "plan", "reopen", "1") == 0
+        run("session", "plan", "show", "--json")
+        assert payload(capsys)["done"] == 0
+
+        assert run("session", "plan", "remove", "1") == 0
+        run("session", "plan", "show", "--json")
+        after = payload(capsys)
+        assert [e["n"] for e in after["plan"]] == [2]
+
+        # A retired number is never reissued, so `plan done 3` means the same
+        # thing after a remove as it did before one.
+        assert run("session", "plan", "add", "three") == 0
+        run("session", "plan", "show", "--json")
+        assert [e["n"] for e in payload(capsys)["plan"]] == [2, 3]
+
+    def test_planned_and_complete_are_separate_keys(
+        self, project, capsys, monkeypatch
+    ):
+        """A session that never planned must not read as one that finished.
+
+        The reviewer contract switches mode on exactly these two. Collapsed
+        into one key, every project that never adopts a checklist either
+        defers its merge forever or gets a vacuous green.
+        """
+        self.started(project, capsys, monkeypatch)
+
+        run("session", "plan", "show", "--json")
+        empty = payload(capsys)
+        assert empty["planned"] is False
+        assert empty["complete"] is False
+
+        run("session", "plan", "add", "one")
+        run("session", "plan", "show", "--json")
+        open_plan = payload(capsys)
+        assert open_plan["planned"] is True
+        assert open_plan["complete"] is False
+        assert open_plan["next"] == "one"
+
+        run("session", "plan", "done", "1")
+        run("session", "plan", "show", "--json")
+        finished = payload(capsys)
+        assert finished["planned"] is True
+        assert finished["complete"] is True
+        assert finished["next"] is None
+
+    def test_the_json_document_carries_the_session_and_its_name(
+        self, project, capsys, monkeypatch
+    ):
+        sid = self.started(project, capsys, monkeypatch)
+        run("session", "plan", "add", "one", "--json")
+        document = payload(capsys)
+        assert document["session"] == sid
+        assert document["name"].endswith(sid)
+        assert document["total"] == 1
+
+    def test_an_empty_plan_says_how_to_record_one(self, project, capsys, monkeypatch):
+        self.started(project, capsys, monkeypatch)
+        assert run("session", "plan", "show") == 0
+        text = out(capsys)
+        assert "(no deliverables recorded)" in text
+        assert 'invariant session plan add "<deliverable>"' in text
+
+    def test_a_number_that_is_not_one_is_a_usage_error(
+        self, project, capsys, monkeypatch
+    ):
+        """argparse answers this, so the refusal is about the COMMAND.
+
+        Reaching the domain as a string, the same mistake comes back as "no
+        deliverable 'abc' in session …" — a report about the plan for what is
+        a malformed command.
+        """
+        self.started(project, capsys, monkeypatch)
+        with pytest.raises(SystemExit) as exc:
+            run("session", "plan", "done", "abc")
+        assert exc.value.code == 2
+
+    def test_an_unknown_number_is_refused(self, project, capsys, monkeypatch):
+        self.started(project, capsys, monkeypatch)
+        run("session", "plan", "add", "one")
+        assert run("session", "plan", "done", "9") == 2
+        assert "no deliverable 9" in capsys.readouterr().err
+
+    def test_an_unquoted_title_is_refused_by_the_parser(
+        self, project, capsys, monkeypatch
+    ):
+        """One positional, so a lost quote is a usage error and not a title."""
+        self.started(project, capsys, monkeypatch)
+        with pytest.raises(SystemExit) as exc:
+            run("session", "plan", "add", "wire", "the", "toolbar")
+        assert exc.value.code == 2
+
+
+class TestSessionSync(ParkedSessionHarness):
+    def isolated(self, project, capsys, monkeypatch):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-sync-0000")
+        run("session", "start", "sync-work", "--json")
+        session = payload(capsys)["session"]
+        run("session", "isolate", "--execute", "--id", session["id"])
+        run("session", "list", "--json")
+        entry = payload(capsys)["sessions"][0]
+        capsys.readouterr()
+        return entry, Path(entry["worktree"])
+
+    def advance_the_base(self, project, name="peer.py", body="print('peer')\n"):
+        (project / name).write_text(body, encoding="utf-8")
+        commit_all(project, f"peer adds {name}")
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=project, capture_output=True, text=True,
+            check=False,
+        ).stdout.strip()
+
+    def tip(self, worktree):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True,
+            check=False,
+        ).stdout.strip()
+
+    def test_it_rebases_onto_the_base(self, project, capsys, monkeypatch):
+        entry, worktree = self.isolated(project, capsys, monkeypatch)
+        peer = self.advance_the_base(project)
+        monkeypatch.chdir(worktree)
+
+        assert run("session", "sync", "--id", entry["id"]) == 0
+        contains = subprocess.run(
+            ["git", "branch", "--contains", peer, "--format=%(refname:short)"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        ).stdout.split()
+        assert entry["branch"] in contains
+        assert "master" in out(capsys)
+
+    def test_a_branch_already_current_is_said_so(self, project, capsys, monkeypatch):
+        entry, worktree = self.isolated(project, capsys, monkeypatch)
+        monkeypatch.chdir(worktree)
+        before = self.tip(worktree)
+
+        assert run("session", "sync", "--id", entry["id"]) == 0
+        assert "already" in out(capsys)
+        assert self.tip(worktree) == before
+
+    def test_it_is_refused_from_outside_the_worktree(
+        self, project, capsys, monkeypatch
+    ):
+        """The mirror of `session.ff_merge_target`.
+
+        A rebase run from the wrong tree rebases whatever branch that tree has
+        checked out and exits zero, which is the invisible-success shape this
+        library exists to catch.
+        """
+        entry, worktree = self.isolated(project, capsys, monkeypatch)
+        self.advance_the_base(project)
+        assert Path.cwd() == project
+        before = self.tip(project)
+
+        assert run("session", "sync", "--id", entry["id"]) == 2
+        message = capsys.readouterr().err
+        assert str(worktree) in message
+        # Nothing was touched: the refusal ran before git did.
+        assert self.tip(project) == before
+
+    def test_a_dirty_worktree_is_refused_before_git_runs(
+        self, project, capsys, monkeypatch
+    ):
+        entry, worktree = self.isolated(project, capsys, monkeypatch)
+        self.advance_the_base(project)
+        (worktree / "app.py").write_text("print('edited')\n", encoding="utf-8")
+        monkeypatch.chdir(worktree)
+        before = self.tip(worktree)
+
+        assert run("session", "sync", "--id", entry["id"]) == 2
+        assert "uncommitted" in capsys.readouterr().err
+        assert self.tip(worktree) == before
+        assert (worktree / "app.py").read_text() == "print('edited')\n"
+
+    def test_a_detached_head_is_refused(self, project, capsys, monkeypatch):
+        """HEAD is what a rebase acts on; the branch is only what we expect."""
+        entry, worktree = self.isolated(project, capsys, monkeypatch)
+        subprocess.run(
+            ["git", "checkout", "-q", "--detach"], cwd=worktree, check=True
+        )
+        monkeypatch.chdir(worktree)
+
+        assert run("session", "sync", "--id", entry["id"]) == 2
+        assert entry["branch"] in capsys.readouterr().err
+
+    def test_a_conflict_aborts_and_keeps_the_commits(
+        self, project, capsys, monkeypatch
+    ):
+        entry, worktree = self.isolated(project, capsys, monkeypatch)
+        (worktree / "shared.py").write_text("session\n", encoding="utf-8")
+        commit_all(worktree, "session writes shared.py")
+        session_tip = self.tip(worktree)
+        self.advance_the_base(project, name="shared.py", body="base\n")
+        monkeypatch.chdir(worktree)
+
+        assert run("session", "sync", "--id", entry["id"]) == 2
+        message = capsys.readouterr().err
+        assert "conflict" in message.lower()
+        # The commits are exactly where they were, and no rebase is in flight.
+        assert self.tip(worktree) == session_tip
+        state = subprocess.run(
+            ["git", "status", "--porcelain=v2", "--branch"],
+            cwd=worktree, capture_output=True, text=True, check=False,
+        ).stdout
+        assert entry["branch"] in state
+
+
+class TestPlanIsVisibleWhereWorkIsPickedUp(ParkedSessionHarness):
+    def test_status_carries_the_plan_and_the_resume_count(
+        self, project, capsys, monkeypatch
+    ):
+        session = self.parked(
+            project, capsys, monkeypatch, plan=("read the docs", "wire the toolbar")
+        )
+        run("session", "plan", "done", "1", "--id", session["id"])
+        run("session", "resume", session["name"])
+        capsys.readouterr()
+
+        run("session", "status", "--id", session["id"])
+        text = out(capsys)
+        assert "plan" in text
+        assert "1/2 done — next: wire the toolbar" in text
+        assert "resumed" in text
+        assert "1" in text
+
+    def test_a_finished_plan_reads_as_complete(self, project, capsys, monkeypatch):
+        session = self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        run("session", "plan", "done", "1", "--id", session["id"])
+        capsys.readouterr()
+
+        run("session", "status", "--id", session["id"])
+        assert "1/1 done — complete" in out(capsys)
+
+    def test_an_unplanned_session_gets_no_plan_line(
+        self, project, capsys, monkeypatch
+    ):
+        """A gate that fires on every one-line chore is a gate people switch off.
+
+        The same argument `session.deliverables_complete` makes for `na` over
+        `fail`: an unplanned session is a legitimate resting state, so status
+        does not nag about it.
+        """
+        session = self.parked(project, capsys, monkeypatch)
+        run("session", "status", "--id", session["id"])
+        assert "plan " not in out(capsys)
+
+    def test_list_carries_a_progress_column(self, project, capsys, monkeypatch):
+        session = self.parked(project, capsys, monkeypatch, plan=("one", "two"))
+        run("session", "plan", "done", "1", "--id", session["id"])
+        capsys.readouterr()
+
+        run("session", "list")
+        assert "1/2" in out(capsys)
+
+    def test_the_list_json_is_unchanged(self, project, capsys, monkeypatch):
+        session = self.parked(project, capsys, monkeypatch, plan=("one",))
+        run("session", "list", "--json")
+        entry = payload(capsys)["sessions"][0]
+        assert entry["id"] == session["id"]
+        assert [e["title"] for e in entry["plan"]] == ["one"]
+
+    def test_start_refuses_to_fork_a_parked_plan_and_force_is_reachable(
+        self, project, capsys, monkeypatch
+    ):
+        """The refusal ends "add --force", and the flag has to exist.
+
+        The domain has refused a task name whose parked session is sitting
+        right there since the increment that introduced the plan; the CLI had
+        no `--force` to pass through, so the remedy the refusal named could not
+        be run — a `fixes` line pointing at nothing, one layer up.
+        """
+        session = self.parked(project, capsys, monkeypatch)
+
+        assert run("session", "start", "add-widget") == 2
+        refusal = capsys.readouterr().err
+        assert session["name"] in refusal
+        assert "--force" in refusal
+
+        assert run("session", "start", "add-widget", "--force") == 0
+        assert "registered" in out(capsys)
+
+    def test_start_names_the_way_back(self, project, capsys, monkeypatch):
+        """And line one still binds: `TestAutomaticBinding` reads it."""
+        from invariant.hosts.claude_code import _bind_started_session_id
+
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        run("session", "start", "later-work")
+        text = out(capsys)
+
+        assert _bind_started_session_id(text) is not None
+        assert "invariant session resume later-work-" in text
+
+
+class TestDoctorReportsWhatWasLeftParked(ParkedSessionHarness):
+    """`end_host_session`'s docstring has promised this since it was written."""
+
+    def test_a_parked_session_is_named(self, project, capsys, monkeypatch):
+        session = self.parked(project, capsys, monkeypatch, plan=("wire it",))
+        capsys.readouterr()
+
+        run("doctor")
+        text = out(capsys)
+        assert session["name"] in text
+        assert "invariant session resume" in text
+
+    def test_it_never_turns_doctor_red(self, project, capsys, monkeypatch):
+        """A parked session is this feature's designed resting state.
+
+        `_report_checks` turns any false row into exit 1, so an informational
+        row reported as a failure would make `doctor` permanently red on every
+        project that adopts the plan — the "gate that gets ignored, then
+        switched off" failure this codebase names repeatedly.
+        """
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        capsys.readouterr()
+        before = run("doctor")
+        capsys.readouterr()
+
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-parked-0000")
+        run("session", "start", "parked-work", "--json")
+        session = payload(capsys)["session"]
+        run("session", "plan", "add", "wire it", "--id", session["id"])
+        spend_the_binding(project, "host-parked-0000")
+        capsys.readouterr()
+
+        assert run("doctor") == before
+        text = out(capsys)
+        assert "FAIL" not in text.split("parked")[0].splitlines()[-1]
+
+    def test_no_parked_session_says_so(self, project, capsys, monkeypatch):
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "manifest")
+        capsys.readouterr()
+
+        run("doctor")
+        assert "none parked here" in out(capsys)

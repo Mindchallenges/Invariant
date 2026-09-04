@@ -62,6 +62,7 @@ graph TD
     CLI --> STATSDOMAIN
     CLI --> RULES
     CLI --> MANIFEST
+    CLI --> PLAN
     CLI -. injects .-> CCTEL
 
     SESSION --> FSM
@@ -298,6 +299,20 @@ list, and a rule will have to ask them. A rule lives in `core/rules`, and
 a question the layer above cannot reach and the layer below may not. The
 precedent is exact: `core/stats.breakdown` does the arithmetic that
 `domains/stats` renders.
+
+`CLI --> PLAN` is the second caller that arrow was drawn for. `session plan
+show` renders the checklist and `session status` and `session list` report how
+far along it is, and all three read `core/plan` directly rather than through
+the domain — the domain owns the mutations, and asking it to also own the
+arithmetic would put a read-only question behind a store, a lock and a set of
+refusals that have nothing to say about it. The CLI reaching past a domain into
+`core/` is downward and therefore allowed, and it is the same shape as
+`CLI --> RULES`.
+
+What that arrow must not become is a second renderer. `core.plan.render_lines`
+is the only place a plan is turned into lines, because the numbers it prints
+are the numbers `session plan done <n>` takes, and two renderings of one list
+is two chances for those to disagree.
 
 One judgement in that module is worth naming here because it is the kind that
 gets re-decided by accident. An **empty** plan is not a complete one — a
