@@ -1,4 +1,5 @@
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from invariant.core.items import (
 )
 from invariant.core.manifest import MANIFEST_RELPATH, Level, Manifest
 from invariant.core.rules import Evaluated, Verdict
+from invariant.core.store import UNKNOWN_KEYS, PreservesUnknownKeys
 from invariant.domains.pipeline import PipelineDomain, describe_run, summarise
 from invariant.domains.session import Session, SessionDomain
 from invariant.domains.workitem import WorkItemDomain
@@ -2408,6 +2410,44 @@ class TestSessionNamesAreAddresses:
         assert "0 sessions" in name_ambiguity_message([])
 
 
+@dataclass
+class OlderSession(PreservesUnknownKeys):
+    """`Session` as a build that predates the deliverables plan declares it.
+
+    A trimmed copy rather than a subclass: a subclass INHERITS the fields it is
+    supposed not to have, so it would round-trip them as fields and prove
+    nothing about a build that does not know them.
+    """
+
+    id: str
+    name: str
+    state: str = "registered"
+    branch: str | None = None
+    worktree: str | None = None
+    host_session_id: str | None = None
+    host_ended: bool = False
+    base: str = "master"
+    files: list = field(default_factory=list)
+    push_count: int = 0
+    history: list = field(default_factory=list)
+    heartbeat: float = 0.0
+    _extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class OlderPipeline(PreservesUnknownKeys):
+    """`Pipeline` the same way, for the twin defect on the same store."""
+
+    session_id: str
+    methodology: str
+    task: str = ""
+    state: str = ""
+    evidence: dict = field(default_factory=dict)
+    history: list = field(default_factory=list)
+    started: float = 0.0
+    _extra: dict = field(default_factory=dict)
+
+
 class TestTheDeliverablesPlan:
     """The set a session owes, so that finishing is a fact rather than a feeling."""
 
@@ -2427,6 +2467,35 @@ class TestTheDeliverablesPlan:
         assert session.resumed_count == 0
         assert session.hosts == []
         assert session.plan_complete is False
+
+    def test_a_record_written_after_the_field_existed_survives_an_older_build(self, m):
+        """The mirror of the test above, and the half that was never designed
+        (BUG_061). Forward compatibility is what the unknown-key filter buys;
+        backward compatibility is what it used to spend. A build that has never
+        heard of `plan` now writes it back instead of deleting it.
+
+        The stand-in below is honest about what the fix can and cannot do: it
+        carries the round-trip contract and NOT the four fields, because a
+        build predating the contract has no way to preserve anything. This
+        stops the next asymmetry, not the one already installed.
+        """
+        session = SessionDomain(m).start("work")
+        session.plan = [{"n": 1, "title": "read the docs", "done": False, "done_at": None}]
+        session.plan_touched = 900.0
+        session.resumed_count = 2
+        session.hosts = ["host-aaaa-1111"]
+        written = session.to_dict()
+
+        older = OlderSession.from_dict(written)
+        older.state = "working"
+        rewritten = older.to_dict()
+
+        reloaded = Session.from_dict(rewritten)
+        assert reloaded.plan == session.plan
+        assert reloaded.plan_touched == 900.0
+        assert reloaded.resumed_count == 2
+        assert reloaded.hosts == ["host-aaaa-1111"]
+        assert reloaded.state == "working"
 
     def test_numbers_start_at_one_and_count_up(self, m):
         domain = SessionDomain(m)
@@ -2790,3 +2859,47 @@ class TestResumingASessionThatOutlivedItsHost:
         domain = SessionDomain(m)
         domain.start("add-widget", host_session_id="host-aaaa-1111")
         assert domain.start("add-widget", host_session_id="host-bbbb-2222")
+
+
+class TestARecordSurvivesAnOlderBuild:
+    """BUG_061 on the two records the state root holds per session."""
+
+    def test_a_pipeline_field_an_older_build_lacks_is_written_back(self, m):
+        """`Pipeline` carries the identical idiom on the identical store. No
+        field of it was at risk when the defect was found, only because none
+        had been added alongside the session's four — a fact about the calendar
+        rather than about the code."""
+        domain = PipelineDomain(m)
+        SessionDomain(m).start("work")
+        pipeline = domain.start("work")
+        raw = pipeline.to_dict()
+        raw["a_field_from_the_future"] = {"kept": True}
+
+        rewritten = OlderPipeline.from_dict(raw).to_dict()
+
+        assert rewritten["a_field_from_the_future"] == {"kept": True}
+        assert rewritten["session_id"] == pipeline.session_id
+        assert rewritten["methodology"] == pipeline.methodology
+
+    def test_a_preserved_key_does_not_reach_the_registry_projection(self, m):
+        """The registry is a projection of four attributes, rebuilt on every
+        write rather than round-tripped, so preservation has nothing to say to
+        it. Asserted rather than assumed: the projection is the one place a
+        session's document is read for something other than itself."""
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        session._extra = {"a_field_from_the_future": 1}
+        domain._save(session)
+        domain._register(session)
+
+        entry = domain.store.read("registry.json")["sessions"][session.id]
+        assert set(entry) == {"name", "state", "worktree", "branch"}
+        assert domain.get(session.id)._extra == {"a_field_from_the_future": 1}
+
+    def test_the_document_a_new_build_writes_is_unchanged_by_the_contract(self, m):
+        """No migration in either direction: a record with nothing unknown on
+        it serialises exactly as it did before the container existed."""
+        session = SessionDomain(m).start("work")
+        written = session.to_dict()
+        assert UNKNOWN_KEYS not in written
+        assert Session.from_dict(written).to_dict() == written

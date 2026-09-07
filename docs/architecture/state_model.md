@@ -163,10 +163,12 @@ Invariants this domain enforces:
 ### What the record carries beyond the state
 
 Four fields exist so that a session can outlive the agent-host session that
-started it. None of them needs a migration: `Session.from_dict` filters unknown
-keys and every field has a default, so a document written before they existed
-loads with an empty plan, no recorded hosts and a zero resume count, and
-behaves exactly as it did.
+started it. None of them needs a migration, in either direction: every field
+has a default, so a document written before they existed loads with an empty
+plan, no recorded hosts and a zero resume count and behaves exactly as it did
+— and a document carrying them is written back INTACT by a build that has
+never heard of them, which is the half that had to be added (BUG_061, and the
+round-trip contract under Storage layout below).
 
 | Field | Holds | Read by |
 |---|---|---|
@@ -854,16 +856,22 @@ has declared there is no structure to draw.
 
 ### Agent-role gates
 
-A second pair rides the same injection, and **both leave the review state** —
-`agents.review_agent_ran` and, despite its name, `agents.design_agent_ran`.
-They read the subagent invocations the host recorded as pipeline evidence,
-keyed by `agents.roles.<role>` in the manifest.
+A second pair rides the same injection, and **both hang on the landing
+state's entry** — `agents.review_agent_ran` and, despite its name,
+`agents.design_agent_ran`. Neither guards the state it is named after, and
+that is two decisions rather than one: where the design gate can be satisfied
+at all (ADR-003 D2), and which EDGES a gate ought to fire on (BUG_037). The
+second bullet below argues both, including the history — these were the review
+state's exit gates until BUG_037 moved them, and the sentence you are reading
+said so for longer than it was true. They read the subagent invocations the
+host recorded as pipeline evidence, keyed by `agents.roles.<role>` in the
+manifest.
 
 They exist because installing an agent and using one are different events, and
 only the second changes any outcome. A project can carry four correctly
 installed agents and never dispatch one.
 
-Four properties, each deliberate:
+Five properties, each deliberate:
 
 - **Two events, not one: the dispatch and the actor.** A dispatch is observed
   from the *parent's* tool call. An agent that starts its own session and
@@ -1154,6 +1162,56 @@ registry is written by every session, so it is guarded by an advisory lock
 (`flock`) held across a read-modify-write. Lock acquisition has a timeout; a
 timeout is reported as a real error rather than waited out forever, because a
 wedged lock must be visible.
+
+**The round trip, in both directions.** A record is a dataclass, and the two
+builds at either end of a document need not be the same one. Forward: unknown
+keys never reach the constructor and every field has a default, so a document
+written before a field existed loads with that field at its default. That is
+what makes a new field cost no migration, and it was designed and tested from
+the start. Backward: the keys a build does not declare are KEPT on the record
+and written back at the top level, so a build older than a field does not
+delete it. That half was not designed, and its absence was live — the editable
+install on `PATH` points at the main checkout, so while a feature branch adds
+fields every hook subprocess writes the record through a dataclass that lacks
+them, and a session's whole deliverable plan could be erased by a command that
+reported success (BUG_061).
+
+Both per-session documents carry the contract — `sessions/<sid>.json` and
+`pipelines/<sid>.json`, from one implementation in `core/store`, because two
+copies of one rule is two chances for a build to honour half of it. The stats
+records deliberately do not: they are derived and rebuildable, so a key lost
+there is recovered by re-deriving it, and a session document has no such
+second source.
+
+Three properties of the preserved set, since a reader will ask:
+
+- **Preserved keys travel at the top level, not in a container.** They are
+  written back where the build that owns them will look, which is where they
+  were. Nesting them under a key of their own would be the same deletion one
+  indirection along, because no other build's loader reads that key. The
+  attribute they are held in — `_extra` — is reserved in the format and never
+  written: a leading underscore where every real field is public says
+  "structure, not data" to somebody reading the file by hand, and the loader
+  holds the name out of its own field match, so a document that carries a key
+  spelled that way round-trips as ordinary data rather than being expanded
+  into the record.
+- **A declared field always wins a collision.** The live attribute is what the
+  running code means; a preserved value is by definition one that build could
+  not interpret. The other polarity would discard the value the code had just
+  computed, which is this defect inverted and harder to see.
+- **It rescues nothing already on disk.** A build that predates the contract
+  has neither the fields nor the preservation, so this stops the NEXT
+  asymmetry rather than the one currently installed. The alternative — a
+  version stamp on the record and a refusal to write on downgrade — has the
+  same limitation and a worse failure: the older writer is usually a hook
+  subprocess, which cannot usefully refuse, since a hook that errors turns
+  every tool call in the repository into a failure and one that proceeds has
+  lost the data anyway.
+
+The registry is untouched by all of this, and deliberately so. Its per-session
+entry is a PROJECTION of four attributes — name, state, worktree, branch —
+rebuilt from the record on every write rather than round-tripped, so there is
+nothing there for an older build to drop.
 
 **Recovery.** Everything is JSON, hand-inspectable, and hand-fixable.
 `invariant state show` prints it; `invariant state repair` reconciles the

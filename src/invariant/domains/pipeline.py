@@ -12,7 +12,7 @@ import os
 import subprocess
 import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ from ..core.rules import (
     get_rule,
 )
 from ..core.stats import Usage, WatermarkSource
-from ..core.store import JsonStore
+from ..core.store import JsonStore, PreservesUnknownKeys
 
 
 def _refuse_chained_coverage(coverage: str, report: str, bundle: str) -> None:
@@ -113,7 +113,17 @@ NO_PIPELINE = "no-pipeline"
 
 
 @dataclass
-class Pipeline:
+class Pipeline(PreservesUnknownKeys):
+    """One task's progress through a methodology.
+
+    Shares the session record's store and, until BUG_061, its defect: an older
+    build loading and saving this document deleted every field it did not
+    declare. No field of this record was at risk when that was found, only
+    because none had been added alongside the session's four — a fact about the
+    calendar rather than about the code. So it takes the same round-trip
+    contract, from the same place, rather than a second copy of the reasoning.
+    """
+
     session_id: str
     methodology: str
     task: str = ""
@@ -135,14 +145,9 @@ class Pipeline:
     #: is recorded with the reading rather than assumed from the session's
     #: binding at the time the report is rendered.
     usage_at_start_host: str | None = None
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, raw: dict) -> "Pipeline":
-        known = set(cls.__dataclass_fields__)
-        return cls(**{k: v for k, v in raw.items() if k in known})
+    #: Keys a document carried that this build does not declare. See
+    #: `core.store.PreservesUnknownKeys`; never written under this name.
+    _extra: dict[str, Any] = field(default_factory=dict)
 
     def state_entered(self) -> float | None:
         """When the current state began, derived rather than stored.

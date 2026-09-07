@@ -15,7 +15,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_session_machine
 from ..core.rules import Evaluated, RuleContext, evaluate, get_rule
 from ..core.stats import Usage, WatermarkSource
-from ..core.store import JsonStore
+from ..core.store import JsonStore, PreservesUnknownKeys
 
 REGISTRY = "registry.json"
 
@@ -83,7 +83,15 @@ class Resolution:
 
 
 @dataclass
-class Session:
+class Session(PreservesUnknownKeys):
+    """One session's whole record.
+
+    ``to_dict`` and ``from_dict`` come from `core.store.PreservesUnknownKeys`
+    and carry the round trip in BOTH directions: a field written before it
+    existed loads at its default, and a field this build has never heard of is
+    written back rather than deleted (BUG_061).
+    """
+
     id: str
     name: str
     state: str = "registered"
@@ -176,6 +184,11 @@ class Session:
     #: A rebind moves the binding and leaves this pointing at the old counter,
     #: which is exactly what makes the crossing visible instead of plausible.
     usage_at_start_host: str | None = None
+    #: Keys a document carried that this build does not declare, kept verbatim
+    #: so that saving the record cannot delete them. Never written under this
+    #: name — `to_dict` merges it back at the top level. See
+    #: `core.store.PreservesUnknownKeys`.
+    _extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_stranded(self) -> bool:
@@ -219,21 +232,6 @@ class Session:
     def plan_complete(self) -> bool:
         """Every recorded deliverable is done, and there is at least one."""
         return plan_reader.progress(self.plan).complete
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, raw: dict) -> "Session":
-        """Load a record, including one written before half these fields were.
-
-        Unknown keys are filtered and every field has a default, so this is
-        what makes a new field cost no migration: an old document loads with an
-        empty plan, no recorded hosts and a zero resume count, and behaves
-        exactly as it did.
-        """
-        known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in raw.items() if k in known})
 
 
 class SessionDomain:

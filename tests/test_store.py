@@ -1,11 +1,12 @@
 import fcntl
 import json
 import threading
+from dataclasses import dataclass, field
 
 import pytest
 
 from invariant.core.errors import LockTimeout, StateError
-from invariant.core.store import JsonStore
+from invariant.core.store import UNKNOWN_KEYS, JsonStore, PreservesUnknownKeys
 
 
 @pytest.fixture
@@ -160,3 +161,82 @@ def test_ensure_root_reports_a_real_failure(tmp_path):
 def test_json_is_valid_on_disk(store):
     store.write("sessions/a.json", {"k": "v"})
     json.loads((store.root / "sessions" / "a.json").read_text(encoding="utf-8"))
+
+
+# -- the round-trip contract -------------------------------------------
+
+
+@dataclass
+class Record(PreservesUnknownKeys):
+    """A persisted record as an older build has it: two fields and no more.
+
+    Stands in for `Session` and `Pipeline` in the tests that are about the
+    contract rather than about either domain.
+    """
+
+    id: str
+    state: str = "new"
+    _extra: dict = field(default_factory=dict)
+
+
+class TestPreservesUnknownKeys:
+    """A build writes back what it could not read (BUG_061).
+
+    The mirror of the forward half. `from_dict` filtering unknown keys is what
+    makes a NEW field cost no migration; on its own it also made an OLD build
+    delete every field it had not heard of, silently, in a command that
+    reported success.
+    """
+
+    def test_an_unrecognised_key_survives_a_load_and_a_save(self):
+        raw = {"id": "s1", "state": "working", "plan": [{"n": 1}], "resumed_count": 2}
+        written = Record.from_dict(raw).to_dict()
+        assert written["plan"] == [{"n": 1}]
+        assert written["resumed_count"] == 2
+        assert written["id"] == "s1"
+        assert written["state"] == "working"
+
+    def test_the_preserved_keys_are_written_at_the_top_level(self):
+        """Where the build that owns them will look for them, which is where
+        they were. Nesting them under a container would be the same deletion
+        one indirection along: the older build's `_extra` is not a key any
+        newer `from_dict` reads."""
+        written = Record.from_dict({"id": "s1", "hosts": ["h1"]}).to_dict()
+        assert written == {"id": "s1", "state": "new", "hosts": ["h1"]}
+
+    def test_the_container_never_reaches_the_document(self):
+        assert UNKNOWN_KEYS not in Record.from_dict({"id": "s1", "x": 1}).to_dict()
+
+    def test_a_declared_field_wins_a_collision_with_a_preserved_key(self):
+        """The live attribute is what the running code means; the preserved
+        value is by definition one this build cannot interpret. Letting the
+        preserved key shadow the field would discard the value the code just
+        computed — this defect inverted."""
+        record = Record(id="s1", state="working", _extra={"state": "abandoned"})
+        assert record.to_dict()["state"] == "working"
+
+    def test_a_key_named_like_the_container_round_trips_as_data(self):
+        """`_extra` is reserved in the format and never read back as the
+        container, so a hand-edit that writes one is preserved rather than
+        expanded into the record."""
+        written = Record.from_dict({"id": "s1", UNKNOWN_KEYS: 3}).to_dict()
+        assert written[UNKNOWN_KEYS] == 3
+        assert Record.from_dict(written).to_dict() == written
+
+    def test_a_dunder_key_stays_inert_data(self):
+        """Preserved keys are dict entries, never attributes. A document that
+        could name `__class__` and have it assigned would be a hand-editable
+        file with reach into the object."""
+        record = Record.from_dict({"id": "s1", "__class__": "int", "__dict__": 1})
+        assert type(record) is Record
+        assert record.to_dict()["__class__"] == "int"
+
+    def test_a_document_that_is_not_a_record_says_so(self):
+        """The store promises hand-inspectable, hand-fixable files, so a hand
+        edit that leaves a list where an object was gets the repair advice
+        rather than an AttributeError from a comprehension."""
+        with pytest.raises(StateError, match="state repair"):
+            Record.from_dict([{"id": "s1"}])
+
+    def test_a_record_with_nothing_unknown_serialises_as_it_always_did(self):
+        assert Record(id="s1").to_dict() == {"id": "s1", "state": "new"}

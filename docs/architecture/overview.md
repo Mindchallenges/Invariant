@@ -347,6 +347,15 @@ inline spelling, `done == total`, is `True` for an empty list. Written at three
 call sites it would be written wrong at one of them, so it is computed once, in
 `core/plan.progress`, and every caller reads the answer.
 
+`core/store` gained a responsibility that reads like a contradiction of its
+own "never interprets the contents" and is not one: the round-trip contract
+both per-session records honour, so that a build older than a field writes the
+field back instead of deleting it (BUG_061, argued in the state model's
+Storage layout). Preservation is the opposite of interpretation — the store
+keeps those keys precisely because it cannot read them — and it lives here
+rather than in the two domains because one rule written twice is two chances
+for a build to honour half of it.
+
 The two labelled arrows around `stats` — `CLI -. injects .-> CCTEL`, dotted,
 and `CCTEL -- implements SampleSource --> STATS`, solid — are the same rule
 applied to a case that could easily have inverted it (ADR-002 D2). Reading a host's
@@ -369,7 +378,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | Module | Owns | Never does |
 |---|---|---|
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates | Persist anything; know what a session or a bug is |
-| `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry | Interpret the contents |
+| `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection | Read state; run commands |
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level | Decide policy — levels come from the manifest |
 | `items` | The work-item model and the pluggable store backends that read and write it | Know an item's lifecycle — that is `domains/workitem` |
