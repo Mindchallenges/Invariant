@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..core import plan as plan_reader
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
-from ..core.manifest import MANIFEST_RELPATH, Manifest
+from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Manifest
 from ..core.rules import (
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
@@ -39,6 +39,11 @@ from ..domains.session import (
 _ABSOLUTE_PATH = re.compile(r"/[^\s'\"`,;]+")
 
 EXIT_OK = 0
+
+#: The starter architecture doc `init` writes when the docs directory is
+#: absent. Shipped text lives under `data/` beside the agents and the
+#: machines; `{project}` is the one substitution.
+ARCHITECTURE_SCAFFOLD = DATA_DIR / "scaffold" / "architecture-overview.md"
 
 #: Distinguishes "not resolved yet" from "resolved to nothing". A plain None
 #: default would re-run host detection on every access for a project whose
@@ -404,6 +409,19 @@ def cmd_init(args) -> int:
     host = ClaudeCodeHost(root)
     actions.extend(host.plan_install())
     actions.append("add the state root to .gitignore")
+    # A starter architecture doc, ONLY where the docs directory is absent. A
+    # fresh project otherwise starts out failing its own docs-first gate with
+    # nothing to read: `doctor` reports the directory missing and the first
+    # `pipeline advance` blocks on `docs.read_architecture` against an empty
+    # path. A directory that exists — even empty — is the project's, and
+    # `--force` does not change that: it rewrites the manifest, not the docs.
+    docs_dir = root / DEFAULTS["paths"]["docs"]
+    scaffold = docs_dir / "overview.md" if not docs_dir.exists() else None
+    if scaffold is not None:
+        actions.append(
+            f"write {scaffold.relative_to(root)} (a starter architecture doc; "
+            f"the docs-first gate reads this directory)"
+        )
 
     if args.dry_run:
         return emit(
@@ -424,6 +442,15 @@ def cmd_init(args) -> int:
             handle.write(
                 f"\n# invariant runtime state: machine-local and session-scoped\n{marker}\n"
             )
+
+    if scaffold is not None:
+        scaffold.parent.mkdir(parents=True, exist_ok=True)
+        scaffold.write_text(
+            ARCHITECTURE_SCAFFOLD.read_text(encoding="utf-8").replace(
+                "{project}", args.name or root.name
+            ),
+            encoding="utf-8",
+        )
 
     JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
     return emit(
@@ -472,12 +499,22 @@ def cmd_doctor(args) -> int:
             detail = str(ctx.manifest.state_root)
         checks.append(("state root writable", state_ok, detail))
 
+        # A failing row names the remedy. "docs-first is core policy" stated
+        # the rule to an adopter whose first `pipeline advance` was about to
+        # block on it, and said nothing about how to satisfy it.
         docs = ctx.manifest.path_for("docs")
         checks.append(
             (
                 "architecture docs exist",
                 docs.is_dir(),
-                str(docs) + ("" if docs.is_dir() else "  (docs-first is core policy)"),
+                str(docs)
+                + (
+                    ""
+                    if docs.is_dir()
+                    else "  missing: create overview.md there (invariant init "
+                    "scaffolds one when this directory is absent), or set "
+                    "enforcement.rules.docs.read_architecture: warn"
+                ),
             )
         )
 
@@ -941,6 +978,12 @@ def cmd_session_start(args) -> int:
         # how a registration made through a shell — carrying no hook payload —
         # gets attributed at all. Anything added here goes BELOW it.
         f"session {session.id} ({session.name}) registered\n"
+        # The base is shown because it is CHOSEN here and read nowhere before
+        # `isolate`, where a wrong one used to surface as git's "invalid
+        # reference" on every repository whose default branch is not master.
+        f"  base: {session.base}"
+        + ("" if args.base else "  (the main checkout's branch; --base overrides)")
+        + "\n"
         f"  next: invariant session isolate --execute\n"
         f"        worktree {plan['worktree']}  branch {plan['branch']}\n"
         # The name carries the id, so it is an address. Printed at the one
@@ -2294,7 +2337,11 @@ def build_parser() -> argparse.ArgumentParser:
     q = session.add_parser("start")
     q.add_argument("name")
     q.add_argument("--id")
-    q.add_argument("--base", default="master")
+    q.add_argument(
+        "--base",
+        help="the branch to cut the worktree from and merge back into; "
+        "defaults to the branch the main checkout has checked out",
+    )
     q.add_argument(
         "--force",
         action="store_true",

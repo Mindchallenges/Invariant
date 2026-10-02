@@ -98,6 +98,13 @@ commands:
 privacy:
   enabled: true
   patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
+  # The project's own public repository is the one link its documentation
+  # must carry: the install command IS that URL. A literal allow, not a
+  # marker, because the string is the same everywhere it appears and a
+  # marker exempts a place rather than a value (manifest.md, "The exemption
+  # marker").
+  allow:
+    - github.com/Mindchallenges/invariant
   # `docs` resolves through paths.docs, which here names only docs/architecture
   # — but everything under docs/ is committed prose where a leak becomes
   # permanent, audits and ADRs included (the 2026-08 audit itself sat outside

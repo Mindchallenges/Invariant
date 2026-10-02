@@ -67,8 +67,18 @@ def is_repo(cwd: Path) -> bool:
 
 
 def current_branch(cwd: Path) -> str | None:
+    """The branch ``cwd`` has checked out, or ``None`` when there is not one.
+
+    ``rev-parse --abbrev-ref HEAD`` prints the literal ``HEAD`` on a detached
+    head, which is an answer shaped like a branch name and is not one. It is
+    folded into ``None`` here so that a caller taking the result as a ref —
+    `session start` derives the base branch from it — cannot record a base no
+    later command can resolve.
+    """
     code, out, _ = _run(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
-    return out or None if code == 0 else None
+    if code != 0 or not out or out == "HEAD":
+        return None
+    return out
 
 
 def toplevel(cwd: Path) -> Path | None:

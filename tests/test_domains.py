@@ -2903,3 +2903,50 @@ class TestARecordSurvivesAnOlderBuild:
         written = session.to_dict()
         assert UNKNOWN_KEYS not in written
         assert Session.from_dict(written).to_dict() == written
+
+
+class TestTheBaseIsTheCheckedOutBranch:
+    """`start` used to default the base to a literal `master`.
+
+    On a repository whose default branch is `main` nothing noticed until
+    `isolate --execute`, which failed with git's `invalid reference: master`
+    — a wrong base is discovered at the one step that cannot proceed without
+    it. The base is now the branch the main checkout has checked out, and a
+    checkout that cannot name one refuses rather than guessing.
+    """
+
+    def test_the_base_is_the_branch_the_checkout_is_on(self, m):
+        subprocess.run(["git", "branch", "-m", "master", "main"], cwd=m.root, check=True)
+        session = SessionDomain(m).start("add-widget")
+        assert session.base == "main"
+        # The acceptance case: no flags, a worktree.
+        plan = SessionDomain(m).isolate(session.id, execute=True)
+        assert plan["base"] == "main"
+        assert Path(plan["worktree"]).is_dir()
+
+    def test_an_explicit_base_wins(self, m):
+        subprocess.run(["git", "branch", "release"], cwd=m.root, check=True)
+        session = SessionDomain(m).start("add-widget", base="release")
+        assert session.base == "release"
+
+    def test_a_detached_head_refuses_and_names_the_flag(self, m):
+        from invariant.hosts.claude_code import _STARTED_ID
+
+        subprocess.run(["git", "switch", "-q", "--detach"], cwd=m.root, check=True)
+        domain = SessionDomain(m)
+        with pytest.raises(UsageError, match="--base") as info:
+            domain.start("add-widget")
+        # A refusal must not carry the sequence the host binds a session on
+        # (BUG_060 is the same property, asked of two older refusals).
+        assert _STARTED_ID.search(str(info.value)) is None
+        assert domain.list() == []
+
+    def test_git_reports_a_detached_head_as_no_branch(self, m):
+        """`rev-parse --abbrev-ref HEAD` prints the literal `HEAD` when
+        detached; the helper answers ``None``, as every unanswerable question
+        in `core/git` does, instead of handing a caller a branch named HEAD."""
+        from invariant.core import git
+
+        assert git.current_branch(m.root) == "master"
+        subprocess.run(["git", "switch", "-q", "--detach"], cwd=m.root, check=True)
+        assert git.current_branch(m.root) is None

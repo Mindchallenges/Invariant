@@ -127,6 +127,11 @@ class Session(PreservesUnknownKeys):
     #: scalar the first time the binding moves, so nothing has to be migrated
     #: for a session to acquire its own history.
     hosts: list[str] = field(default_factory=list)
+    #: The branch this session's worktree was cut from and will merge back
+    #: into. Chosen ONCE, in :meth:`SessionDomain.start` — derived from the
+    #: main checkout or passed explicitly — and never guessed after that. The
+    #: default here is the loader's, for a document missing the key; every
+    #: document this library writes carries one.
     base: str = "master"
     files: list[str] = field(default_factory=list)
     #: The deliverable set this session owes, in the order it was recorded.
@@ -837,7 +842,7 @@ class SessionDomain:
         self,
         name: str,
         session_id: str | None = None,
-        base: str = "master",
+        base: str | None = None,
         host_session_id: str | None = None,
         force: bool = False,
     ) -> Session:
@@ -868,6 +873,23 @@ class SessionDomain:
                 )
 
         origin = str(git.toplevel(self.manifest.root) or self.manifest.root)
+
+        # The base is the branch the main checkout is on, unless the caller
+        # named one. It used to default to a literal `master`, and a
+        # repository whose default branch is `main` found out at
+        # `isolate --execute` — `fatal: invalid reference: master` — because a
+        # base is read by nothing before the step that cannot proceed without
+        # it. A checkout that cannot name its branch (detached, or not a
+        # repository) REFUSES rather than falling back: a wrong base is
+        # discovered at isolate or merge time, which is the worst place.
+        if base is None:
+            base = git.current_branch(Path(origin))
+            if not base:
+                raise UsageError(
+                    f"cannot derive a base branch: {origin} has no branch "
+                    f"checked out (detached HEAD, or not a git repository).\n"
+                    f"  Name one: invariant session start {name} --base <branch>"
+                )
 
         # The failure this whole feature exists to prevent: a plan silently
         # forking into two sessions because the second Claude session started

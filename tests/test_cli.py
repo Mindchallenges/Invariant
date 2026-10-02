@@ -195,7 +195,13 @@ class TestDoctorAndConfig:
         run("init", "--ecosystem", "python")
         shutil.rmtree(project / "docs")
         assert run("doctor") == 1
-        assert "docs-first is core policy" in out(capsys)
+        # The row names the remedy. "docs-first is core policy" told a fresh
+        # adopter what the rule was and nothing about how to satisfy it, and
+        # the gate it stood for blocks the first `pipeline advance`.
+        text = out(capsys)
+        assert "overview.md" in text
+        assert "invariant init" in text
+        assert "enforcement.rules.docs.read_architecture: warn" in text
 
     def test_config_show_reports_provenance(self, project, capsys):
         run("init", "--ecosystem", "python")
@@ -2721,3 +2727,106 @@ class TestDoctorReportsWhatWasLeftParked(ParkedSessionHarness):
 
         run("doctor")
         assert "none parked here" in out(capsys)
+
+
+class TestInitScaffoldsTheArchitectureDoc:
+    """A fresh project used to fail its own docs-first gate with nothing to read.
+
+    `doctor` printed FAIL on "architecture docs exist" and the first
+    `pipeline advance red` blocked on `docs.read_architecture` — "read the
+    relevant doc under docs/architecture" — against an empty directory. `init`
+    now writes a starter when the directory is absent, and only then: a
+    directory that exists, even empty, is the project's.
+    """
+
+    def scaffold(self, project):
+        return project / "docs" / "architecture" / "overview.md"
+
+    def test_a_fresh_project_gets_a_starter_doc(self, project, capsys):
+        import shutil
+
+        shutil.rmtree(project / "docs")
+        assert run("init", "--ecosystem", "python", "--name", "widgets") == 0
+        assert "docs/architecture/overview.md" in out(capsys)
+        body = self.scaffold(project).read_text(encoding="utf-8")
+        assert "widgets" in body
+        assert "## Layers" in body
+        assert "```mermaid" in body
+        assert "## Component responsibilities" in body
+        assert "## Compliance checklist" in body
+        assert "docs.read_architecture" in body and "docs.updated" in body
+
+    def test_an_existing_docs_directory_is_left_alone(self, project, capsys):
+        before = self.scaffold(project).read_text(encoding="utf-8")
+        assert run("init", "--ecosystem", "python") == 0
+        assert "overview.md" not in out(capsys)
+        assert self.scaffold(project).read_text(encoding="utf-8") == before
+
+    def test_an_empty_docs_directory_counts_as_present(self, project, capsys):
+        import shutil
+
+        shutil.rmtree(project / "docs")
+        (project / "docs" / "architecture").mkdir(parents=True)
+        assert run("init", "--ecosystem", "python") == 0
+        assert "overview.md" not in out(capsys)
+        assert list((project / "docs" / "architecture").iterdir()) == []
+
+    def test_dry_run_lists_the_scaffold_and_writes_nothing(self, project, capsys):
+        import shutil
+
+        shutil.rmtree(project / "docs")
+        assert run("init", "--dry-run") == 0
+        assert "docs/architecture/overview.md" in out(capsys)
+        assert not (project / "docs").exists()
+
+    def test_force_does_not_touch_existing_docs(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        self.scaffold(project).write_text("# mine\n", encoding="utf-8")
+        assert run("init", "--force", "--ecosystem", "python") == 0
+        assert self.scaffold(project).read_text(encoding="utf-8") == "# mine\n"
+
+    def test_the_scaffold_passes_the_privacy_scan(self, project, capsys):
+        """It is committed, and the project's own gate screens it."""
+        import shutil
+
+        shutil.rmtree(project / "docs")
+        run("init", "--ecosystem", "python")
+        assert self.scaffold(project).is_file()
+        assert run("privacy", "scan", str(self.scaffold(project))) == 0
+        assert "clean" in out(capsys)
+
+
+class TestSessionStartDerivesItsBase:
+    """`--base` defaulted to a literal `master`, and a `main` repository found
+    out at `isolate --execute`: `fatal: invalid reference: master`."""
+
+    def adopt_on(self, project, branch):
+        subprocess.run(["git", "branch", "-m", "master", branch], cwd=project, check=True)
+        run("init", "--ecosystem", "python")
+        commit_all(project, "adopt invariant")
+
+    def test_a_main_repository_isolates_with_no_flags(self, project, capsys):
+        self.adopt_on(project, "main")
+        out(capsys)  # drop init's output; the lines under test are start's
+        assert run("session", "start", "add-widget") == 0
+        lines = out(capsys).splitlines()
+        # Line one is the host's binding contract and stays exactly as it was.
+        assert lines[0].startswith("session ") and lines[0].endswith("registered")
+        assert any("base" in line and "main" in line for line in lines[1:])
+        assert run("session", "isolate", "--execute") == 0
+        run("session", "status", "--json")
+        session = payload(capsys)["session"]
+        assert session["base"] == "main"
+        assert Path(session["worktree"]).is_dir()
+
+    def test_an_explicit_base_wins(self, project, capsys):
+        self.adopt_on(project, "main")
+        subprocess.run(["git", "branch", "release"], cwd=project, check=True)
+        assert run("--json", "session", "start", "x", "--base", "release") == 0
+        assert payload(capsys)["session"]["base"] == "release"
+
+    def test_a_detached_head_is_refused_naming_the_flag(self, project, capsys):
+        self.adopt_on(project, "main")
+        subprocess.run(["git", "switch", "-q", "--detach"], cwd=project, check=True)
+        assert run("session", "start", "x") == 2
+        assert "--base" in capsys.readouterr().err

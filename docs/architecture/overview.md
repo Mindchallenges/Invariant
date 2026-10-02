@@ -52,6 +52,7 @@ graph TD
         METH[methodologies/*.yaml]
         PROF[profiles/*.yaml]
         AGENTS[agents/*.md]
+        SCAFFOLD[scaffold/*.md]
     end
 
     CC --> CLI
@@ -98,6 +99,7 @@ graph TD
     MANIFEST --> adapters
     PIPELINE --> adapters
     CC --> AGENTS
+    CLI --> SCAFFOLD
 ```
 
 `CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
@@ -114,6 +116,14 @@ purpose — `render_lines` answers a question somebody asked and lists every
 entry, `summary_lines` is injected into every turn and is capped at two lines —
 but they count from the same `progress()`, which is what makes them unable to
 disagree.
+
+`CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
+not a host asset: the starter architecture doc it writes when `paths.docs`
+does not exist. It is read by the CLI rather than installed by the host
+adapter because a project's docs are host-agnostic — the gate that reads
+them is `core/rules`' — and it is shipped as a file under `data/` rather than
+a string in `cli/` for the reason the agents and machines are: text somebody
+will edit by eye belongs where it can be read by eye.
 
 Two arrows are still missing from this diagram and are **not** drawn here
 because drawing them would assert something this document has not decided:
@@ -595,7 +605,10 @@ actually happened.
     commands/                > managed host assets: library copies carry an
     skills/<name>/SKILL.md  /  in-frontmatter content hash; project-owned files
                                are checked for LOADABILITY but never for drift
-  docs/                     architecture docs the docs-first gate reads
+  docs/                     architecture docs the docs-first gate reads.
+    architecture/           `init` scaffolds overview.md here ONLY when the
+                            directory is absent — once, and no command
+                            rewrites it afterwards; the file is the project's
     conf.py                 Sphinx config (MyST + mermaid); renders docs/ as
                             one site — architecture, ADRs, audits. `docs/_build/`
                             is gitignored: the site is derived, not committed.

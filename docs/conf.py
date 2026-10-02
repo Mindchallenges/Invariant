@@ -22,6 +22,9 @@ source_suffix = {
 # ```mermaid fences become mermaid directives without editing the docs.
 myst_fence_as_directive = ["mermaid"]
 myst_enable_extensions = ["colon_fence"]
+# Headings down to ### get slug anchors, so the user guide can link into a
+# section of a reference document rather than only to its top.
+myst_heading_anchors = 3
 
 # The backlog is a work-item store (items.path), not prose for the site; it is
 # read through `invariant item`, so it is excluded rather than toctree'd.

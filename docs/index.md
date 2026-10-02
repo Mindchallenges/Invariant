@@ -1,9 +1,17 @@
 # invariant documentation
 
-Deterministic, scripted state for agent workflows. The architecture documents
+Deterministic, scripted state for agent workflows. The user guide is for
+anyone adopting the tool in a project of their own; the architecture documents
 are the authoritative dependency map (the docs-first gate reads them); the
 ADRs record why each design decision was taken; audits record what was checked
 against the mission and when.
+
+```{toctree}
+:maxdepth: 1
+:caption: User guide
+
+guide/index
+```
 
 ```{toctree}
 :maxdepth: 1

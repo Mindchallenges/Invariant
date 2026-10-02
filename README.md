@@ -29,20 +29,34 @@ Hooks enforce a configurable subset and inject the *current state* instead of a
 static rulebook. Compliance becomes an artifact you can read; gates become
 functions with fixtures proving they fail on a known-positive input.
 
+## Install
+
+One binary per machine, from the repository (it is not on PyPI yet). Python
+3.10+, git, and [Claude Code](https://claude.com/claude-code) are the
+requirements.
+
+```bash
+uv tool install git+https://github.com/Mindchallenges/invariant
+# or: pipx install git+https://github.com/Mindchallenges/invariant
+```
+
 ## Quick start
 
 ```bash
-pipx install invariant     # or: uv tool install invariant
 cd your-project
-invariant init             # writes a manifest, installs hook shims, wires the host
+invariant init             # manifest, hook shims, host wiring, four agents,
+                           # and a starter docs/architecture/overview.md if
+                           # the project has none
 git add -A && git commit -m "adopt invariant"
-invariant doctor           # verify the install
+invariant doctor           # one line per check
 ```
 
-Then, per task:
+Then open a new Claude Code session in the project. The agent is told what
+state it is in and which transitions are legal; you say what you want done.
+Driving it by hand looks like this:
 
 ```bash
-invariant session start add-widget
+invariant session start add-widget       # base = the branch you are on
 invariant session isolate --execute      # own worktree, own branch
 cd ../your-project-wt-<id>
 invariant pipeline start --task "add the widget"
@@ -58,6 +72,10 @@ A gate that is not satisfied refuses the transition and says why:
         makes the plan trustworthy.
         try: read the relevant doc under docs/architecture
 ```
+
+It works on any repository. `init` detects Python, Node and Xcode projects
+and falls back to `generic`, which runs whatever commands the manifest names;
+nothing in the library assumes a language, a layout, or a default branch.
 
 ## What it governs
 
@@ -163,18 +181,33 @@ back that quietly does nothing is worse than one never offered.
 
 ## Documentation
 
-- `docs/adr/ADR-001` — why scripted state, and every design decision with the
-  alternative that was rejected
-- `docs/architecture/overview.md` — layers and the dependency rule
-- `docs/architecture/state_model.md` — the machines and the storage layout
-- `docs/architecture/manifest.md` — full schema and the adapter interface
-- `docs/architecture/cli.md` — the complete command surface
+**User guide** — `docs/guide/`, for anyone adopting the tool:
+
+- [Installation](docs/guide/installation.md) · [Quickstart](docs/guide/quickstart.md)
+- [Daily workflow](docs/guide/workflow.md) — sessions, pipelines, deliverable plans, resuming
+- [The agents](docs/guide/agents.md) · [Configuration](docs/guide/configuration.md)
+- [Work items and memory](docs/guide/backlog-and-memory.md)
+- [Troubleshooting](docs/guide/troubleshooting.md) · [Extending it](docs/guide/extending.md) · [Uninstall](docs/guide/uninstall.md)
+
+**Reference** — `docs/architecture/`, the documents the docs-first gate reads:
+
+- [`overview.md`](docs/architecture/overview.md) — layers and the dependency rule
+- [`state_model.md`](docs/architecture/state_model.md) — the machines and the storage layout
+- [`manifest.md`](docs/architecture/manifest.md) — full schema and the adapter interface
+- [`cli.md`](docs/architecture/cli.md) — the complete command surface
+
+**Decisions** — `docs/adr/`; ADR-001 is why scripted state, with every design
+decision and the alternative that was rejected.
+
+Render it all as one site with `uv run --group docs sphinx-build -b html docs docs/_build/html`.
 
 ## Development
 
 ```bash
+git clone https://github.com/Mindchallenges/invariant && cd invariant
 uv sync --group dev
 uv run pytest
+uv tool install --editable .     # the clone becomes the installed tool
 ```
 
 The library dogfoods what it ships: its own repository carries a manifest, and

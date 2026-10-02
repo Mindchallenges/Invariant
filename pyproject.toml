@@ -12,6 +12,12 @@ license = { text = "MIT" }
 keywords = ["agents", "workflow", "state-machine", "claude-code"]
 dependencies = ["PyYAML>=6.0"]
 
+[project.urls]
+Homepage = "https://github.com/Mindchallenges/invariant"
+Repository = "https://github.com/Mindchallenges/invariant"
+Issues = "https://github.com/Mindchallenges/invariant/issues"
+Documentation = "https://github.com/Mindchallenges/invariant/tree/main/docs/guide"
+
 [project.scripts]
 invariant = "invariant.cli.main:main"
 

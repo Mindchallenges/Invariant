@@ -52,6 +52,19 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     manifest without --force; prints a diff of what it would change with
     --dry-run.
 
+    Where the docs directory (`paths.docs`, `docs/architecture` by default)
+    does not exist it also writes a starter `overview.md` there. A fresh
+    project otherwise began by failing its own docs-first gate with nothing
+    to read: `doctor` reported the directory missing and the first `pipeline
+    advance` blocked on `docs.read_architecture` — "read the relevant doc
+    under docs/architecture" — against a path with nothing in it. The starter
+    is generic, with the project name substituted: what the file is for, a
+    Layers diagram to replace, a responsibilities table, and a compliance
+    checklist the reviewing agents read as canonical. A directory that EXISTS
+    — even empty — is the project's and is left alone, `--force` included:
+    that flag rewrites the manifest, not the docs. `--dry-run` lists the write
+    when it would happen. Written once; no command rewrites it afterwards.
+
 invariant uninstall [--remove-assets] [--remove-manifest] [--dry-run]
     Remove the hook shims, unwire the entries this library added to the host
     settings file, and SAY WHAT IS LEFT BEHIND.
@@ -94,6 +107,12 @@ invariant doctor
     Check the installation: manifest valid, shims present and executable, host
     settings wired, state root writable, adapter commands resolvable, memory
     index current. One line per check, exit 1 if any fails.
+
+    A failing row names its remedy. The architecture-docs row used to say
+    only "docs-first is core policy", which told a fresh adopter the rule
+    they were about to be blocked by and nothing about satisfying it; it now
+    says to create `overview.md` there (`init` scaffolds one when the
+    directory is absent) or to set `docs.read_architecture` to `warn`.
 
     It also reports what was left PARKED here — sessions whose host binding is
     spent, and live sessions with an open plan — which `end_host_session` has
@@ -200,6 +219,18 @@ invariant session start <name> [--base <branch>] [--force]
     genuinely separate session; it is the escape the refusal's own last line
     names, and it was passed through to the domain only when the commands
     below landed — until then that line named a flag the CLI did not have.
+
+    --base is the branch the worktree is cut from and merged back into. It
+    defaults to the branch the MAIN CHECKOUT has checked out, and the choice
+    is printed on the line after the registration line, at the one moment
+    somebody is looking. It used to default to a literal `master`, which
+    nothing read before `isolate --execute` — so a repository whose default
+    branch is `main` failed there, with git's `invalid reference: master`. A
+    checkout that cannot name its branch — a detached HEAD, or no repository
+    at all — is REFUSED with the flag named, never guessed at: a wrong base
+    surfaces at isolate or merge time, the worst place to learn it. Line one
+    of the output is unchanged; it is the host's binding contract (see
+    `session resume`).
 invariant session isolate            Print the worktree and branch to create,
                                      or create them with --execute.
 invariant session status [--json]
