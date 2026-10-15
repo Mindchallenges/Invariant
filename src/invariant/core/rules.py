@@ -1420,10 +1420,24 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
         return Verdict.na("nothing changed")
 
     root = _repo_root(ctx)
-    source_changed = [p for p in changed if not _is_within(root / p, docs_root)]
     docs_changed = [p for p in changed if _is_within(root / p, docs_root)]
+    # "Is it source" has ONE answer, and `coverage.meets_floor` is where it was
+    # worked out: outside the architecture docs is not the same as code. A
+    # backlog record, a release plan or a LICENSE read as "source changed" and
+    # blocked the chore and docs lanes on a doc nobody could honestly write
+    # (BUG_064). Same classifier, same project assertion (`non_source`).
+    outside_docs = {
+        _relative_to_any(p, (root,))
+        for p in changed
+        if not _is_within(root / p, docs_root)
+    }
+    source_changed, _ = _excluded_as_declared_non_source(
+        ctx, {p for p in outside_docs if not _looks_like_docs(p)}
+    )
 
     if not source_changed:
+        if outside_docs:
+            return Verdict.clean(f"no source changed ({len(outside_docs)} non-source file(s))")
         return Verdict.clean("docs-only change")
     if docs_changed:
         return Verdict.clean(f"{len(docs_changed)} doc file(s) updated alongside")
@@ -3340,8 +3354,22 @@ _UNMEASURED_SUFFIXES = (
 )
 
 
+#: Repository metadata that carries no suffix for `_UNMEASURED_SUFFIXES` to
+#: see, matched on the whole file name. The same admission price applies: each
+#: is prose in every ecosystem, so no reporter has a row for it and no diagram
+#: changes because of it. `LICENSE-MIT` and its kin are the Rust convention for
+#: a dual licence, which is why the licence names also match as a prefix.
+_UNMEASURED_NAMES = frozenset(
+    {"LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS", "CONTRIBUTORS", "CODEOWNERS"}
+)
+_UNMEASURED_NAME_PREFIXES = ("LICENSE-", "LICENCE-", "COPYING-")
+
+
 def _looks_like_docs(path: str) -> bool:
-    return str(path).lower().endswith(_UNMEASURED_SUFFIXES)
+    if str(path).lower().endswith(_UNMEASURED_SUFFIXES):
+        return True
+    name = Path(str(path)).name.upper()
+    return name in _UNMEASURED_NAMES or name.startswith(_UNMEASURED_NAME_PREFIXES)
 
 
 def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:

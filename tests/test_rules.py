@@ -672,6 +672,94 @@ class TestDocsGatesOnACommittedTree:
         assert "source changed but no architecture doc did" in result.verdict.message
 
 
+class TestDocsUpdatedAsksWhetherSourceChanged:
+    """Repro for BUG_064 half (b) — `invariant item show BUG_064`.
+
+    `docs.updated` answered "is it source" with "is it outside `paths.docs`",
+    so every path not under the architecture docs read as source: a backlog
+    entry, a release plan, a LICENSE. `coverage.meets_floor` already asks the
+    same question with a better answer — the built-in unmeasured suffixes plus
+    `methodology.gates.non_source` — and BUG_012 unified the "what changed"
+    half of it while leaving "is it source" with two answers.
+    """
+
+    def stage(self, wt, *paths):
+        for rel in paths:
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).write_text("text\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+
+    def test_prose_outside_the_architecture_docs_is_not_source(self, ctx_factory):
+        """The observed case: a backlog rescore touched two `.rst` records."""
+        self.stage(ctx_factory.wt, "docs/backlog.rst", "docs/release_plan.rst")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+
+    def test_a_license_file_is_not_source(self, ctx_factory):
+        """The 4af6e15 case: repository metadata with no suffix at all."""
+        self.stage(ctx_factory.wt, "LICENSE")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+
+    def test_a_declared_non_source_path_is_not_source(self, ctx_factory):
+        """One project assertion, honoured by both gates that ask the question."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"non_source": ["design/**"]}},
+            },
+        )
+        self.stage(ctx_factory.wt, "design/src/kit.jsx")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+
+    def test_code_beside_prose_still_needs_a_doc(self, ctx_factory):
+        """The control: the classifier narrows "source", it does not drop it."""
+        self.stage(ctx_factory.wt, "app.py", "docs/backlog.rst", "LICENSE")
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_the_coverage_gate_reads_a_license_the_same_way(self, ctx_factory):
+        """One classifier, so the licence names are not source to the floor
+        either: no reporter in any ecosystem has a row for a LICENSE file."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            session={"id": "s1", "files": ["LICENSE"], "worktree": str(ctx_factory.wt)},
+            pipeline={"evidence": {"coverage": {str(ctx_factory.wt / "app.py"): 100.0}}},
+        )
+        verdict = only(evaluate(["coverage.meets_floor"], ctx)).verdict
+        assert verdict.ok, verdict.message
+
+    @pytest.mark.parametrize(
+        "path, expected",
+        [
+            ("LICENSE", True),
+            ("sub/licence", True),
+            ("LICENSE-MIT", True),
+            ("CODEOWNERS", True),
+            ("NOTICE", True),
+            ("license.py", False),
+            ("src/notices.py", False),
+            ("Makefile", False),
+        ],
+    )
+    def test_the_metadata_names_match_whole_names_only(self, path, expected):
+        """The control on the widening: a name, never a stem of real code."""
+        from invariant.core.rules import _looks_like_docs
+
+        assert _looks_like_docs(path) is expected
+
+
 class TestTheChangedSetIsAnsweredOrRefused:
     """The other half of the BUG_012 repair: what an EMPTY set is allowed to mean.
 

@@ -57,7 +57,9 @@ methodology:
                                # in this project could produce a row for it at
                                # all", and is applied where the built-in prose and
                                # config suffixes are — before the missing-row
-                               # check, not after it. For versioned design
+                               # check, not after it. `docs.updated` reads the
+                               # same answer: a non_source path is not "source
+                               # changed" there either. For versioned design
                                # bundles, fixtures, vendored assets. Every match is
                                # named in the verdict with the pattern that spent
                                # it, because this is the project asserting
