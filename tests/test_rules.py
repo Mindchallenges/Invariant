@@ -715,6 +715,60 @@ class TestDocsUpdatedAsksWhetherSourceChanged:
         verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
         assert verdict.ok, verdict.message
 
+    @pytest.mark.parametrize(
+        "path",
+        ["src/pkg/data/machines/tdd.yaml", "openapi.json", "pyproject.toml", "web/app.html"],
+    )
+    def test_configuration_alone_is_still_source(self, ctx_factory, path):
+        """The control on sharing a classifier with the coverage gate.
+
+        "No reporter has a row for it" is the coverage question; this gate asks
+        whether a diagram could now be wrong. A machine YAML, an API contract or
+        an entry-point table changes structure with no code beside it.
+        """
+        self.stage(ctx_factory.wt, path)
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_a_declared_non_source_path_is_named_in_the_verdict(self, ctx_factory):
+        """A project's assertion is never spent silently, here as in coverage."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"non_source": ["design/**"]}},
+            },
+        )
+        self.stage(ctx_factory.wt, "design/src/kit.jsx")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert "design/src/kit.jsx" in (verdict.detail or "")
+        assert "design/**" in (verdict.detail or "")
+
+    def test_a_worktree_path_is_classified_from_the_main_checkout(self, ctx_factory):
+        """`session merge` asks from the main checkout; a declared path spelled
+        against the worktree must still meet the project's globs."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"non_source": ["design/**"]}},
+            },
+        )
+        # Committed, or the manifest itself is a changed configuration file in
+        # the checkout the gate is asked from — which is source to this gate.
+        run(["git", "add", "-A"], ctx_factory.main)
+        run(["git", "commit", "-qm", "declare the bundle"], ctx_factory.main)
+        self.stage(ctx_factory.wt, "design/src/kit.jsx")
+        run(["git", "commit", "-qm", "bundle"], ctx_factory.wt)
+        declared = str(ctx_factory.wt / "design" / "src" / "kit.jsx")
+        session = {"worktree": str(ctx_factory.wt), "base": "", "files": [declared]}
+        verdict = only(
+            evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.main, session=session))
+        ).verdict
+        assert verdict.ok, verdict.message
+
     def test_code_beside_prose_still_needs_a_doc(self, ctx_factory):
         """The control: the classifier narrows "source", it does not drop it."""
         self.stage(ctx_factory.wt, "app.py", "docs/backlog.rst", "LICENSE")

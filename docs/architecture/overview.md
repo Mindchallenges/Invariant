@@ -311,6 +311,13 @@ key. It is the project asserting what the engine cannot check, so it is applied
 where the built-in suffixes are, it is empty by default, and every path it
 holds out is named in the verdict with the pattern that spent it.
 
+Extensionless repository metadata — `LICENSE`, `NOTICE`, `CODEOWNERS` and their
+kin, matched by whole name — joins the built-in set, since no reporter in any
+ecosystem has a row for one. `docs.updated` reads only part of this answer: the
+prose suffixes, those names and `non_source`. "Nothing could measure it" is the
+coverage question; "nothing could make a diagram wrong" is the docs question,
+and configuration and markup pass the first while failing the second (BUG_064).
+
 A third lever answers a question neither of those can: the floor is right for
 new code and wrong for old. A file months below it blocks a two-line, fully
 covered, net-negative edit, so the gate refuses precisely the change that

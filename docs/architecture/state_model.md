@@ -844,16 +844,19 @@ Details that are load-bearing rather than incidental:
   set is empty for a reason that is not "nothing changed". Those gates fail
   and say so instead of skipping, because a skip on a `block`-level gate reads
   as a pass, and an unanswered question is not a negative answer.
-- **"Is it source" has one answer too.** BUG_012 unified *what changed* and
-  left *which of it is code* with two answers: `coverage.meets_floor` held out
-  prose and configuration suffixes and the project's `non_source` globs, while
-  `docs.updated` called everything outside `paths.docs` source. A backlog
-  record, a release plan or a `LICENSE` then demanded an architecture-doc edit
-  nobody could honestly write, and the chore lane's first non-code change
-  needed `--force` (BUG_064). Both gates now read `core/rules._looks_like_docs`
-  — the unmeasured suffixes plus extensionless repository metadata by whole
-  name (`LICENSE`, `NOTICE`, `CODEOWNERS`, …) — and then the declared
-  `non_source` globs. Code beside such a file still needs its doc.
+- **"What changed" has one answer; "is it structural" deliberately does not
+  share coverage's.** `docs.updated` used to call everything outside
+  `paths.docs` source, so a backlog record, a release plan or a `LICENSE`
+  demanded an architecture-doc edit nobody could honestly write, and the chore
+  lane's first non-code change needed `--force` (BUG_064). It now holds out
+  prose (`.md`, `.rst`, `.txt`), extensionless repository metadata by whole
+  name (`LICENSE`, `NOTICE`, `CODEOWNERS`, …) and the project's `non_source`
+  globs, naming every `non_source` match in its verdict. It does NOT borrow
+  the coverage gate's full unmeasured set: that set answers "could a run
+  measure this", and configuration, markup and stylesheets are unmeasurable
+  without being unstructural — a machine YAML in `data/machines/`, an API
+  contract or an entry-point table changes a diagram with no code beside it,
+  and still reads as source here.
 
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —

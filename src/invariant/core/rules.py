@@ -1421,23 +1421,29 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
 
     root = _repo_root(ctx)
     docs_changed = [p for p in changed if _is_within(root / p, docs_root)]
-    # "Is it source" has ONE answer, and `coverage.meets_floor` is where it was
-    # worked out: outside the architecture docs is not the same as code. A
-    # backlog record, a release plan or a LICENSE read as "source changed" and
-    # blocked the chore and docs lanes on a doc nobody could honestly write
-    # (BUG_064). Same classifier, same project assertion (`non_source`).
+    # Outside the architecture docs is not the same as structural: a backlog
+    # record, a release plan or a LICENSE read as "source changed" and blocked
+    # the chore and docs lanes on a doc nobody could honestly write (BUG_064).
+    # The answer is NARROWER than the coverage gate's on purpose. That one asks
+    # whether a run could measure the path; this one asks whether a diagram
+    # could now be wrong, and a machine YAML or an API contract changes
+    # structure with no code beside it. Prose and repository metadata, then the
+    # project's own `non_source` assertion — named, as it is there.
     outside_docs = {
-        _relative_to_any(p, (root,))
+        _relative_to_any(p, _coverage_roots(ctx))
         for p in changed
         if not _is_within(root / p, docs_root)
     }
-    source_changed, _ = _excluded_as_declared_non_source(
-        ctx, {p for p in outside_docs if not _looks_like_docs(p)}
+    source_changed, declared_non_source = _excluded_as_declared_non_source(
+        ctx, {p for p in outside_docs if not _is_prose(p)}
     )
 
     if not source_changed:
         if outside_docs:
-            return Verdict.clean(f"no source changed ({len(outside_docs)} non-source file(s))")
+            return Verdict.clean(
+                f"no structural change ({len(outside_docs)} non-source file(s))",
+                detail="; ".join(declared_non_source) or None,
+            )
         return Verdict.clean("docs-only change")
     if docs_changed:
         return Verdict.clean(f"{len(docs_changed)} doc file(s) updated alongside")
@@ -3355,21 +3361,33 @@ _UNMEASURED_SUFFIXES = (
 
 
 #: Repository metadata that carries no suffix for `_UNMEASURED_SUFFIXES` to
-#: see, matched on the whole file name. The same admission price applies: each
-#: is prose in every ecosystem, so no reporter has a row for it and no diagram
-#: changes because of it. `LICENSE-MIT` and its kin are the Rust convention for
-#: a dual licence, which is why the licence names also match as a prefix.
+#: see, matched on the whole file name. The same admission price applies: no
+#: reporter in any ecosystem has a row for one. All but `CODEOWNERS` are prose;
+#: that one is configuration, ownership rather than structure. `LICENSE-MIT`
+#: and its kin are the Rust convention for a dual licence, which is why the
+#: licence names also match as a prefix.
 _UNMEASURED_NAMES = frozenset(
     {"LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS", "CONTRIBUTORS", "CODEOWNERS"}
 )
 _UNMEASURED_NAME_PREFIXES = ("LICENSE-", "LICENCE-", "COPYING-")
 
+#: The subset of `_UNMEASURED_SUFFIXES` no diagram can depend on — what
+#: `docs.updated` holds out. Configuration, markup and stylesheets are absent
+#: deliberately: unmeasurable is not the same as unstructural (BUG_064).
+_PROSE_SUFFIXES = (".md", ".rst", ".txt")
 
-def _looks_like_docs(path: str) -> bool:
-    if str(path).lower().endswith(_UNMEASURED_SUFFIXES):
-        return True
+
+def _is_metadata_name(path: str) -> bool:
     name = Path(str(path)).name.upper()
     return name in _UNMEASURED_NAMES or name.startswith(_UNMEASURED_NAME_PREFIXES)
+
+
+def _is_prose(path: str) -> bool:
+    return str(path).lower().endswith(_PROSE_SUFFIXES) or _is_metadata_name(path)
+
+
+def _looks_like_docs(path: str) -> bool:
+    return str(path).lower().endswith(_UNMEASURED_SUFFIXES) or _is_metadata_name(path)
 
 
 def _project_relative_forms(ctx: RuleContext, target: Path) -> list[str]:
