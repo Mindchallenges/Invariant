@@ -3,9 +3,13 @@ id: IDEA_008
 type: idea
 title: A handoff note is offered to every unbound greeting until it goes stale, even
   after a session acted on it
-status: proposed
+status: accepted
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: null
+  forced: false
 area: domains/session, hosts/claude_code, cli/main
 priority: medium
 severity: medium
@@ -32,37 +36,47 @@ note is wrong is most of its life.
 **Acceptance:**
 
 * After a handoff, the launched host session's first `session start` or
-  `session resume` in this project marks the newest handoff consumed; the next
-  unbound greeting and `invariant context` no longer show it.
+  `session resume` in this project marks the handoff its launcher token names
+  consumed; the next unbound greeting and `invariant context` no longer show
+  it.
 * A consumed handoff stays on `Session.handoffs` with when it was consumed and
   by which session/host — the record is history, not a queue to pop.
 * A handoff recorded AFTER the consuming start is still offered (consumption is
   per note, not "any start silences all handoffs").
 * An unconsumed note still expires by `session.plan_stale_days` exactly as
   today.
-* There is an explicit way to dismiss a note without starting a session (for a
-  handoff the user decided not to act on).
+* `invariant session handoff --dismiss` dismisses the latest fresh note
+  without starting a session (for a handoff the user decided not to act on);
+  it is recorded as dismissed, not claimed.
+
+**Decisions (user, 2026-10-20):**
+
+1. **Claim signal: a launcher env token.** The handoff launcher prefixes
+   `claude` in the `cd <main> && …` line it types with an environment token,
+   e.g. `INVARIANT_HANDOFF=<session-id>:<at>`. Hook subprocesses inherit the
+   environment the host was started with, so the first `session start` /
+   `session resume` in that host reads the token and consumes EXACTLY that
+   note, on the PostToolUse binding path. This keeps the write out of
+   SessionStart (which state_model.md says must not write), does not depend
+   on the host exposing its session name, and is safe with parallel sessions.
+   A note launched by hand (no token) is cleared only by dismiss or by
+   staleness. There is deliberately NO "any start/resume after `at`"
+   fallback.
+2. **Which note is consumed:** the one the token names — never "every fresh
+   note".
+3. **Dismiss:** `invariant session handoff --dismiss` marks the latest fresh
+   note consumed and records it as dismissed. Same command, not a new
+   subcommand.
+4. **Storage:** the consumed marker lives on the `handoffs` entry — timestamp,
+   consuming session/host, and how (`claimed` or `dismissed`). An entry
+   without the key reads as unconsumed, preserving the BUG_061 no-migration /
+   round-trip contract. The write to the old (possibly torn-down) session's
+   record is a standstill-style event, not an edge, like the handoff itself.
 
 **Risks / open questions:**
 
-* **What counts as "acted on".** The handed-off host's id is not known at
-  handoff time — the launcher only knows the `--name` slug. Candidate claim
-  signals, most to least specific: a start/resume whose host session name
-  matches the recorded `name`; a start/resume by a host that saw the note in
-  its greeting; any start/resume in this project after `at`. The last is cheap
-  and wrong when two sessions are opened in parallel; the first depends on the
-  host exposing its session name to the hook.
-* **Which note a start consumes** when several fresh handoffs exist from
-  different sessions — only `latest_handoff`, or every fresh one older than the
-  start.
-* **Storage contract.** Adding a consumed marker to a `handoffs` entry has to
-  respect the no-migration / round-trip contract on `Session` fields (BUG_061):
-  an older record without the key reads as unconsumed.
-* **Where the write happens.** A start or resume binds a NEW session, while the
-  note lives on the OLD (often torn-down, unregistered) session's record, so
-  consumption writes to a finished session's file. That is a new kind of write
-  to a terminal record and should be stated as a standstill-style event, not an
-  edge, like the handoff itself.
+* None open — the four questions (claim signal, which note, storage contract,
+  where the write happens) are resolved by the decisions above.
 
 **Affects:** the session domain's `latest_handoff` reader and the
 `session start` / `session resume` binding path; the SessionStart greeting and
