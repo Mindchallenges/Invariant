@@ -14,6 +14,7 @@ graph TD
     subgraph host["hosts/ — agent-host adapters"]
         CC[claude_code]
         CCTEL[claude_code_telemetry]
+        CCLAUNCH[claude_code_launch]
     end
 
     subgraph cli["cli/ — entrypoint"]
@@ -67,6 +68,7 @@ graph TD
     CLI --> MANIFEST
     CLI --> PLAN
     CLI -. injects .-> CCTEL
+    CLI -. launches through .-> CCLAUNCH
 
     SESSION --> FSM
     PIPELINE --> FSM
@@ -83,6 +85,7 @@ graph TD
     STATSDOMAIN --> PIPELINE
     SESSION --> STATS
     SESSION --> PLAN
+    SESSION --> PRIVACY
     PIPELINE --> STATS
     CCTEL -- implements SampleSource --> STATS
 
@@ -383,6 +386,16 @@ directly, the arrow would have run `domains → hosts` and the binding would hav
 stopped being replaceable. The precedent is `core/items`, which already defines
 a model with pluggable backends.
 
+`CLI -. launches through .-> CCLAUNCH` is the same shape as the telemetry
+injection and the newest dotted arrow: `session handoff` is the one command
+that STARTS a host process, and the CLI is where the host-specific launcher is
+chosen and handed the plan. The domain never sees it — `domains/session` vets
+the note, derives the next session's name and records the handoff, and the
+launch is a value the CLI builds from those answers and passes down (ADR-005
+D3). `SESSION --> PRIVACY` is drawn for that vetting: the note is scanned with
+the project's own `PrivacyScanner` before it is recorded or handed to a host
+whose transcript this library cannot scrub.
+
 `domains/stats → domains/session` and `→ domains/pipeline` are horizontal, not
 upward. The join from a host session to an invariant session is knowledge of
 *what a session is*, which this document reserves to a domain; putting it in
@@ -410,7 +423,8 @@ the CLI would have traded a documentation edit for an architecture violation.
 Each domain binds a state machine to a store and exposes the operations that
 advance it. They are the only place where "what a session is" is encoded.
 
-- **`session`** — identity, isolation, the push barrier, teardown. Multiple
+- **`session`** — identity, isolation, the push barrier, teardown, and the
+  handoff note a session leaves for the next host session. Multiple
   sessions coexist on one machine, so this is the only domain with genuine
   cross-process concurrency, mediated by the locked registry.
 - **`pipeline`** — one task's progress through the configured methodology.
@@ -514,7 +528,18 @@ wrote down — its per-project JSONL transcripts. A reader has no business in a
 module about hook payload schemas, and the split keeps a change to one from
 touching the other.
 
-It is also the library's only dependency on another program's **undocumented**
+`claude_code_launch` is the third module for the same host, and the third
+relationship: `claude_code` drives a running host, the telemetry reader reads
+back what one wrote, and this one STARTS one. It turns a handoff into a
+`LaunchPlan` — the `claude --name <slug> --remote-control <slug> "<note>"`
+argv, the `cd <main checkout> && …` line quoted with `shlex`, and the
+AppleScript that types that line into a new macOS Terminal window — and
+`TerminalLauncher` runs `osascript` on it. Claude Code has no flag for a
+working directory or a window, so those two are this module's. The CLI reaches
+it through one replaceable function, which is how the suite keeps every test
+from opening a window (ADR-005).
+
+The telemetry reader is also the library's only dependency on another program's **undocumented**
 format, and that shapes the code: every field access tolerates absence, an
 unparseable record is skipped rather than fatal, and the file is a cache keyed
 on a content fingerprint. A format change degrades a report and never breaks a

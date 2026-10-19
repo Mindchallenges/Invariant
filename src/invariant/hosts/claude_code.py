@@ -1541,6 +1541,25 @@ def _resumable_offer(ctx) -> list[str]:
     return lines
 
 
+def _handoff_lines(ctx) -> list[str]:
+    """What the last session here said to do next, while it is fresh.
+
+    Shown only where NO session is bound, which is the turn a handed-off
+    session starts on: it is the backstop for a prompt argument that did not
+    arrive, so the next session sees the note however it was opened. Empty
+    when nothing fresh is recorded, so a project that never hands off projects
+    exactly as before. A read, like the resumable offer beside it.
+    """
+    found = ctx.sessions.latest_handoff(ctx.cwd)
+    if found is None:
+        return []
+    session, entry = found
+    return [
+        f"  last handoff here, from {session.name} as {entry.get('name')}:",
+        f"    {entry.get('note')}",
+    ]
+
+
 def _offer_clause(session) -> str:
     """How far along an offered session is, in one parenthesised clause.
 
@@ -1637,6 +1656,7 @@ def build_context(ctx, greeting: bool = False) -> str:
             # NO owner, so a session whose host had ENDED — the one that can
             # actually be picked up — was the single thing it could not
             # mention. Finding it required already knowing it was there.
+            lines += _handoff_lines(ctx)
             lines += _resumable_offer(ctx)
 
             if unbound:
@@ -1655,12 +1675,20 @@ def build_context(ctx, greeting: bool = False) -> str:
         # the directory really is the only evidence, so ambiguity is genuine.
         if len(unbound) > 1:
             return "invariant: " + ambiguity_message(unbound)
+        handoff = _handoff_lines(ctx)
         if greeting:
-            return (
-                "invariant: no session is active in this directory.\n"
-                "  Start one before editing: invariant session start <task-name>"
+            return "\n".join(
+                [
+                    "invariant: no session is active in this directory.",
+                    "  Start one before editing: invariant session start <task-name>",
+                    *handoff,
+                ]
             )
-        return ""
+        # `invariant context` run by hand with nothing bound. Silent as before
+        # unless a handoff is waiting, which is the one thing worth saying here.
+        if not handoff:
+            return ""
+        return "\n".join(["invariant: no session is active in this directory.", *handoff])
 
     lines.append(f"invariant — session {session.id} ({session.name}) is {session.state}")
 

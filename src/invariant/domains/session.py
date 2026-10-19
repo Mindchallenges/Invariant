@@ -30,6 +30,10 @@ from ..core.store import JsonStore, PreservesUnknownKeys
 
 REGISTRY = "registry.json"
 
+#: The two states a session does not come back from. The registry indexes
+#: sessions in flight, so a write to a finished record must not re-register it.
+_FINISHED = frozenset({"torn_down", "abandoned"})
+
 #: Context a gate needs to know which question it is being asked, derived from
 #: the state being ENTERED. ``session.ff_merge_target`` and
 #: ``session.push_barrier`` serve double duty — they also fire from the
@@ -189,6 +193,15 @@ class Session(PreservesUnknownKeys):
     #: A rebind moves the binding and leaves this pointing at the old counter,
     #: which is exactly what makes the crossing visible instead of plausible.
     usage_at_start_host: str | None = None
+    #: What this session told the NEXT one, oldest first:
+    #: ``{"note", "name", "at", "state"}`` per ``invariant session handoff``.
+    #:
+    #: A field rather than a store, for the reasons ``plan`` is one. And kept
+    #: on a record that may already be torn down: a handoff is normally the
+    #: LAST thing a session does, after its merge and teardown, so the record
+    #: that outlives the worktree is the only place it can live. ``at`` is the
+    #: same epoch reading ``heartbeat`` holds, in the machine-local state root.
+    handoffs: list[dict] = field(default_factory=list)
     #: Keys a document carried that this build does not declare, kept verbatim
     #: so that saving the record cannot delete them. Never written under this
     #: name — `to_dict` merges it back at the top level. See
@@ -1388,6 +1401,146 @@ class SessionDomain:
         self._register(session)
         return session
 
+    # -- handing off to the next host session --------------------------
+    #
+    # A handoff is an EVENT, not an edge. It changes nothing the machine
+    # governs — no worktree, no branch, no gate — so it is legal in every
+    # state, terminal ones included, and is recorded the way `resume` is: a
+    # standstill row in `history`. Routing it through `_advance` would evaluate
+    # the current state's entry gates on something that is not an entry, and
+    # from `torn_down`, where the documented handoff happens, there is no edge
+    # to walk at all (ADR-005 D2).
+
+    def vet_handoff_note(self, note: str) -> str:
+        """The note, stripped, or a refusal saying why it cannot be written down.
+
+        Public so that ``--dry-run`` refuses exactly what the real run would.
+        The note is written into the session record and handed to a new host
+        session as its first prompt — and from there into that host's
+        transcript, which this library does not own and cannot scrub. So the
+        privacy patterns run here, before any of that, with the project's own
+        configuration, and a finding REFUSES: the remedy is a rewritten note,
+        which costs the caller one retry.
+
+        The exemption marker is refused outright rather than honoured. In a
+        document it marks a place a reviewer can see; in a one-line note it
+        would exempt the whole note from the only scan it gets.
+        """
+        from ..core.privacy import EXEMPTION_MARKER, PrivacyScanner
+
+        text = (note or "").strip()
+        if not text:
+            raise UsageError("a handoff note cannot be empty")
+        if "\n" in text or "\r" in text:
+            raise UsageError(
+                "a handoff note is one line — a terse keyword line the next "
+                "session reads as its first prompt. Join it with ' · '."
+            )
+        if len(text) > HANDOFF_NOTE_MAX:
+            raise UsageError(
+                f"a handoff note is a keyword line, not a document: "
+                f"{len(text)} characters against a bound of {HANDOFF_NOTE_MAX}"
+            )
+        if EXEMPTION_MARKER in text:
+            raise GateFailure(
+                f"a handoff note cannot carry the {EXEMPTION_MARKER!r} marker: "
+                f"it would exempt the whole note from the one scan it gets"
+            )
+        findings = PrivacyScanner.from_manifest(self.manifest).scan_text(text)
+        if findings:
+            lines = [
+                (
+                    "the handoff note carries personal or operational data, so "
+                    "it is not recorded and no session is started:"
+                )
+            ]
+            lines += [f"  {finding.describe()}" for finding in findings]
+            lines.append(
+                "  Describe it by its characteristics instead, and run the "
+                "handoff again."
+            )
+            raise GateFailure("\n".join(lines))
+        return text
+
+    def record_handoff(self, session_id: str, note: str, name: str) -> Session:
+        """Write the handoff onto the session record, in any state.
+
+        A torn-down or abandoned session is saved but NOT re-registered: the
+        registry indexes sessions in flight, teardown removed this one from it,
+        and a handoff must not put it back.
+        """
+        session = self.require(session_id)
+        text = self.vet_handoff_note(note)
+        now = self._note(session, "handoff", extra={"handoff": name})
+        session.handoffs.append(
+            {"note": text, "name": name, "at": now, "state": session.state}
+        )
+        self._save(session)
+        if session.state not in _FINISHED:
+            self._register(session)
+        return session
+
+    def handoff_candidate(
+        self, cwd: Path | None = None, host_session_id: str | None = None
+    ) -> Session | None:
+        """The session a handoff from here belongs to, when nothing names one.
+
+        The most recently MOVED session registered at or above ``cwd``, in any
+        state — including torn down, because handing off is normally the last
+        step, after teardown has already made the session unattributable. A
+        session bound to ``host_session_id``, now or earlier, wins over one
+        that was not: it is the one this host was working in.
+
+        A fallback, and the command says which session it chose, because
+        "most recent here" is a guess and a guess is fine to act on only where
+        the reader can see it.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        here = [
+            s for s in self.list() if s.origin and _contains(Path(s.origin), cwd)
+        ]
+        if host_session_id:
+            mine = [
+                s
+                for s in here
+                if s.host_session_id == host_session_id or host_session_id in s.hosts
+            ]
+            here = mine or here
+        if not here:
+            return None
+        return max(here, key=lambda s: max(s.heartbeat, s.plan_touched))
+
+    def latest_handoff(
+        self, cwd: Path | None = None
+    ) -> tuple[Session, dict] | None:
+        """The newest handoff recorded here, while it is still fresh.
+
+        "Fresh" is ``session.plan_stale_days`` — the threshold this domain
+        already uses to tell a paused piece of work from an abandoned one —
+        DERIVED on every read rather than cleared by a later command, because
+        an expiry that depends on something else running is one that does not
+        happen. A read, and only a read: the greeting calls it on every
+        ``SessionStart``.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        days = self.manifest.get("session.plan_stale_days", 7)
+        try:
+            horizon = float(days) * 86400.0
+        except (TypeError, ValueError):
+            horizon = 7 * 86400.0
+        now = self.clock()
+        best: tuple[Session, dict] | None = None
+        for session in self.list():
+            if not session.origin or not _contains(Path(session.origin), cwd):
+                continue
+            for entry in session.handoffs:
+                at = entry.get("at")
+                if not isinstance(at, (int, float)) or now - at > horizon:
+                    continue
+                if best is None or at > best[1]["at"]:
+                    best = (session, entry)
+        return best
+
     def teardown(
         self,
         session_id: str,
@@ -1917,6 +2070,69 @@ def host_slug(host_session_id: str | None) -> str:
         return ""
     alphanumeric = "".join(c for c in str(host_session_id) if c.isalnum())
     return alphanumeric[-8:] if alphanumeric else ""
+
+
+#: How long a derived handoff name may be, in words and in characters. Two
+#: bounds because they fail differently: a word cap keeps a long item from
+#: becoming a sentence, a character cap keeps a few long words from becoming
+#: an unreadable terminal title. The name is cut at a word, never mid-word,
+#: unless the first word alone is over the bound.
+HANDOFF_NAME_WORDS = 6
+HANDOFF_NAME_CHARS = 48
+
+#: A handoff note is a keyword line, not a document. The bound is far above
+#: any real one and far below what a shell argument or a prompt can carry.
+HANDOFF_NOTE_MAX = 2000
+
+#: The ``next:`` label, wherever it sits in the note. The look-behind keeps it
+#: from matching the tail of a longer word.
+_NEXT_ITEM = re.compile(r"(?<![A-Za-z0-9_])next\s*:\s*(?P<item>.+)", re.IGNORECASE)
+
+#: Where the next item ENDS: a list separator, an arrow, or the start of the
+#: next ``label:``. What follows an arrow is a routing hint ("-> bugprep"), not
+#: part of what the work is called.
+_NEXT_ITEM_END = re.compile(
+    r"\s*(?:·|•|\||;|->|→|=>|\s[A-Za-z][A-Za-z_-]*:\s)"
+)
+
+#: A work-item type prefix. ``BUG_X`` and ``IDEA_X`` name X; the type is noise
+#: in a session name, and keeping it costs a word of a six-word budget.
+_ITEM_TYPE_PREFIX = re.compile(r"\b(?:bug|idea)_", re.IGNORECASE)
+
+
+def handoff_name(note: str, name: str | None = None) -> str | None:
+    """A short kebab-case name for the session a handoff starts, or ``None``.
+
+    ``name``, when given, wins and is only normalised — the operator chose it,
+    so it is not shortened, and one with no alphanumeric character in it is
+    refused the way a session name is.
+
+    Derived from the note's ``next:`` item, because that is what the next
+    session is FOR: ``next: P1.11 BUG_PERLIB_MINTED_KEY_CLOBBERED_AFTER_BINDING
+    critical -> bugprep`` names ``p1-11-perlib-minted-key-clobbered``.
+
+    Deterministic — a pure function of the note — so a dry run and the real
+    run name the same session, and a reader can predict the name from the
+    note. ``None`` when there is no ``next:`` item or it holds no word; the
+    caller refuses rather than inventing a name, because a session named after
+    nothing is one nobody can find again.
+    """
+    if name is not None:
+        return _slug(name)
+    match = _NEXT_ITEM.search(note or "")
+    if match is None:
+        return None
+    item = match.group("item")
+    end = _NEXT_ITEM_END.search(item)
+    if end is not None:
+        item = item[: end.start()]
+    words = re.findall(r"[a-z0-9]+", _ITEM_TYPE_PREFIX.sub("", item).lower())
+    if not words:
+        return None
+    kept = words[:HANDOFF_NAME_WORDS]
+    while len(kept) > 1 and len("-".join(kept)) > HANDOFF_NAME_CHARS:
+        kept.pop()
+    return "-".join(kept)[:HANDOFF_NAME_CHARS]
 
 
 def _branch_names(root: Path) -> list[str]:

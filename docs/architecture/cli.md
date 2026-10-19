@@ -353,6 +353,34 @@ invariant session resume <name> [--id <id>] [--force]
     a refusal carrying it would bind the caller to the session it just declined
     to give them.
 
+invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--id <id>]
+    Hand the work to a fresh Claude Code session, in one command. The note is
+    privacy-scanned with the project's own patterns and REFUSED on a finding
+    (exit 1, findings redacted); it must be one line, and may not carry the
+    exemption marker. It is recorded on the session — in any state, torn down
+    included, since the handoff normally runs after merge and teardown — and a
+    new macOS Terminal window opens in the MAIN checkout running
+
+        claude --name <slug> --remote-control <slug> "<note>"
+
+    The slug is derived from the note's `next:` item, up to the first
+    separator, type prefixes dropped, at most six words and 48 characters:
+    `next: P1.11 BUG_SOME_ITEM_NAME critical -> bugprep` names
+    `p1-11-some-item-name-critical`. `--name` overrides it. Having neither is
+    a refusal: a session named after nothing is one nobody can find again.
+
+    Every refusal comes before anything is written: a bad note, no name,
+    another `host.kind`, no `claude` on PATH, or a host that is not macOS —
+    that last one printing the command to run by hand. `--dry-run` prints the
+    exact command and AppleScript, records and launches nothing, and needs
+    neither macOS nor `claude`. The note is recorded BEFORE the launch, so a
+    failed launch keeps it, and the next unbound greeting shows it.
+
+    Which session hands off: `--id` / `INVARIANT_SESSION_ID`, else a session
+    the call proves, else the most recently moved one registered here. The
+    output names the one it recorded on. It never prints `session <id> (`,
+    the binding sequence `start` and `resume` own: a handoff claims nothing.
+
 invariant session plan add "<deliverable>" | done <n> | reopen <n>
                     | remove <n> | show          [--id <id>] [--json]
     The deliverable set this session owes — what makes a session outlive its
@@ -644,6 +672,11 @@ invariant context
     Print the state projection a host would inject: current state, legal
     transitions, pending gates, outstanding residue. Useful standalone for
     debugging what an agent is actually being told.
+
+    With no session bound it prints nothing — unless a fresh handoff is
+    recorded here, in which case it prints that note and who left it, as the
+    SessionStart greeting does. That is the backstop for a handed-off session
+    whose prompt argument was lost.
 ```
 
 `invariant context` existing as a plain command is the point of the design.

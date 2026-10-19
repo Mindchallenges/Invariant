@@ -1326,6 +1326,140 @@ def _resume_target(ctx, args):
     )
 
 
+def _real_handoff_launcher():
+    from ..hosts.claude_code_launch import TerminalLauncher
+
+    return TerminalLauncher()
+
+
+def _handoff_launcher():
+    """The launcher `session handoff` uses. The one seam a test replaces."""
+    return _real_handoff_launcher()
+
+
+def cmd_session_handoff(args) -> int:
+    """Hand the work to a fresh host session, in one command.
+
+    Records the note on the session, then opens a new Terminal window in the
+    MAIN checkout running ``claude --name <slug> --remote-control <slug>
+    "<note>"``. The order of the steps is the design:
+
+    1. **Vet the note and settle the name first.** Both are refusals that must
+       happen before anything is written or launched — a note with personal
+       data in it is not recorded, and a session nobody can name is not
+       started. `--dry-run` runs exactly these, so it refuses what the real run
+       would.
+    2. **Refuse what cannot launch**, still before writing: another host kind,
+       a platform without Terminal, no `claude` on PATH. A refusal leaves no
+       trace; the non-macOS one prints the command to run by hand.
+    3. **Record, then launch.** If the launch fails the note is already on
+       the record, and the greeting of whatever session starts next shows it —
+       which is the fallback for a lost prompt argument, too.
+
+    The output never prints ``session <id> (``: that sequence is the binding
+    contract `session start` and `session resume` own (see their docstrings),
+    and a handoff claims nothing.
+    """
+    from ..core import git
+    from ..domains.session import handoff_name
+    from ..hosts import claude_code_launch as launch
+
+    ctx = Context(session_id=args.id)
+    explicit = args.id or os.environ.get("INVARIANT_SESSION_ID")
+    if explicit:
+        session = ctx.sessions.require(explicit)
+    else:
+        resolution = ctx.sessions.resolve(
+            ctx.cwd, host_session_id=ctx.host_session_id
+        )
+        session = (
+            resolution.session
+            if resolution.proven
+            else ctx.sessions.handoff_candidate(ctx.cwd, ctx.host_session_id)
+        )
+    if session is None:
+        raise UsageError(
+            "no session to record a handoff on: none is registered at or above "
+            "this directory.\n"
+            "  Name one: invariant session handoff --note \"...\" --id <id>"
+        )
+
+    note = ctx.sessions.vet_handoff_note(args.note)
+    name = handoff_name(note, name=args.name)
+    if not name:
+        raise UsageError(
+            "the note has no 'next:' item to name the new session after.\n"
+            "  Add one — next: <what the next session is for> — or name it: "
+            "--name <slug>"
+        )
+
+    main_checkout = git.main_checkout(ctx.manifest.root) or ctx.manifest.root
+    claude = launch.resolve_claude()
+    plan = launch.plan_launch(claude or launch.CLAUDE_BINARY, name, note, main_checkout)
+    result = {
+        "session": session.id,
+        "session_name": session.name,
+        "name": name,
+        "note": note,
+        "argv": list(plan.argv),
+        "cwd": plan.cwd,
+        "shell_line": plan.shell_line,
+        "applescript": plan.applescript,
+        "dry_run": bool(args.dry_run),
+    }
+
+    if args.dry_run:
+        lines = [
+            (
+                f"handoff {name} from {session.name} [{session.state}] — dry run, "
+                "nothing recorded or launched"
+            ),
+            f"  command:     {plan.shell_line}",
+            "  applescript:",
+            *[f"    {line}" for line in plan.applescript.splitlines()],
+        ]
+        if claude is None:
+            lines.append(
+                f"  note: {launch.CLAUDE_BINARY} is not on PATH; a real run "
+                f"refuses until it is"
+            )
+        return emit(args, result, "\n".join(lines))
+
+    kind = ctx.manifest.get("host.kind")
+    if kind != "claude_code":
+        raise UsageError(
+            f"session handoff starts a Claude Code session, and this project's "
+            f"host.kind is {kind!r}, not 'claude_code'"
+        )
+    if claude is None:
+        raise UsageError(
+            f"{launch.CLAUDE_BINARY} is not on PATH, so there is nothing to "
+            f"launch. Install Claude Code, or put it on PATH, and run the "
+            f"handoff again; nothing was recorded."
+        )
+    if launch.host_platform() != "darwin":
+        raise UsageError(
+            "session handoff opens a new window through macOS Terminal, and "
+            "this is not macOS; nothing was recorded. Run it by hand:\n"
+            f"  {plan.shell_line}"
+        )
+
+    updated = ctx.sessions.record_handoff(session.id, note, name)
+    _handoff_launcher().launch(plan)
+    return emit(
+        args,
+        result,
+        "\n".join(
+            [
+                f"handed off as {name}",
+                f"  recorded on {updated.name} [{updated.state}]",
+                f"  opened a new Terminal window in {plan.cwd}:",
+                f"    {plan.shell_line}",
+            ]
+        ),
+    )
+
+
 def cmd_session_plan(args) -> int:
     """The deliverable set this session owes: add, tick, untick, drop, show.
 
@@ -2403,6 +2537,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="take over a live binding, or resume a session that already landed",
     )
     q.set_defaults(func=cmd_session_resume)
+
+    q = session.add_parser(
+        "handoff",
+        help="hand the work to a fresh Claude Code session: record a note, "
+        "open a new Terminal window running it",
+        description=(
+            "Privacy-scan and record --note on this session (any state, torn "
+            "down included), then open a new macOS Terminal window in the main "
+            "checkout running: claude --name <slug> --remote-control <slug> "
+            "\"<note>\". The slug comes from the note's 'next:' item unless "
+            "--name gives one."
+        ),
+    )
+    q.add_argument(
+        "--note",
+        required=True,
+        help="one terse keyword line; its 'next:' item names the new session",
+    )
+    q.add_argument("--name", help="the new session's name, instead of deriving it")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the exact command and AppleScript; record and launch nothing",
+    )
+    q.add_argument("--id", help="the session handing off, when the directory cannot say")
+    q.set_defaults(func=cmd_session_handoff)
 
     # Nested subparsers rather than `files`' flat `action` + positional: `add`
     # takes one title, three actions take an integer, and `show` takes nothing.

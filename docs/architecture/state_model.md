@@ -176,6 +176,10 @@ round-trip contract under Storage layout below).
 | `plan_touched` | When the plan last MOVED | the resumable ordering, and `session.work_would_be_stranded`'s staleness check |
 | `resumed_count` | How many host sessions picked this one up | the report |
 | `hosts` | Every host session bound to it BEFORE the current one, oldest first | provenance |
+| `handoffs` | What it told the NEXT host session: `{"note", "name", "at", "state"}` per `session handoff` | the greeting and `invariant context`, when nothing is bound |
+
+`handoffs` is the fifth, added with `session handoff` (ADR-005) and under the
+same no-migration contract.
 
 Three properties of that set are decisions rather than shape.
 
@@ -567,6 +571,36 @@ usage counter changes identity, so the seam sits on a row that says it is a
 seam; and it absorbs the dormant interval, because `elapsed` is wall time since
 the last heartbeat and without this row the days between two host sessions land
 on the next real transition and read as "this state took three days".
+
+#### Handing off: an event, not an edge
+
+`invariant session handoff --note "<line>"` is how a session hands its work to
+the next host session: the note is privacy-scanned and recorded on
+`handoffs`, and a new Claude Code session is launched in the main checkout with
+the note as its first prompt (ADR-005). The machine above is unchanged by it,
+and that is the decision rather than an omission.
+
+A handoff changes nothing the machine governs — no worktree, branch or gate —
+so it is legal in **every** state, terminal ones included. That matters,
+because the documented place for it is after `merged` and `torn_down`, where no
+edge exists to walk. It is recorded the way a resume is, as a standstill row in
+`history` (`from` equal to `to`, carrying `handoff: <name>`), and it passes and
+forces no gate. A finished session is saved and NOT re-registered: the registry
+indexes sessions in flight, and teardown removed this one from it.
+
+Which session a handoff belongs to, most reliable first:
+
+1. An explicit `--id` or `INVARIANT_SESSION_ID`.
+2. A session the call PROVES — any attribution route except `origin`.
+3. Otherwise the most recently moved session registered at or above the
+   working directory, in ANY state, preferring one bound to this host now or
+   earlier (`handoff_candidate`). This is a guess, so the command prints which
+   session it recorded on.
+
+Where nothing is bound, the greeting and `invariant context` show the newest
+handoff recorded here (`latest_handoff`) while it is younger than
+`session.plan_stale_days` — derived on every read, like the stand-down's
+expiry, so nothing has to run for an old note to stop being offered.
 
 #### How a session lands: two modes, asked rather than remembered
 
