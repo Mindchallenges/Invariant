@@ -2950,3 +2950,179 @@ class TestTheBaseIsTheCheckedOutBranch:
         assert git.current_branch(m.root) == "master"
         subprocess.run(["git", "switch", "-q", "--detach"], cwd=m.root, check=True)
         assert git.current_branch(m.root) is None
+
+
+class TestBUG066AStrictExpectedFailureIsARedRun:
+    """BUG_066 — the red-phase recorder reads a strict expected failure as red.
+
+    A bug-reproducer commits its proof wrapped in a strict expected-failure
+    marker, and pytest reports that test failing as ``1 xfailed`` with exit
+    zero. Recorded on exit status alone it read as a pass, so the proof of red
+    was unsatisfiable until the fixer removed the wrapper. In the machine's
+    own red phase, and only there, a run whose only outcome is expected
+    failures the adapter can confirm are strict is recorded as failing, with
+    those failures counted. Every other phase records the exit status as it
+    always did: a strict expected failure in a green run is the tripwire
+    holding, not a failure.
+    """
+
+    STRICT = (
+        "import pytest\n\n"
+        "@pytest.mark.xfail(strict=True, reason='live')\n"
+        "def test_symptom():\n    assert 0\n"
+    )
+    LOOSE = (
+        "import pytest\n\n"
+        "@pytest.mark.xfail(reason='live')\n"
+        "def test_symptom():\n    assert 0\n"
+    )
+
+    def project(self, tmp_path, output="1 xfailed in 0.01s", code=0, body=STRICT):
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                # The output is pytest's; the runner is a stand-in so the
+                # test does not depend on a nested interpreter.
+                "commands": {
+                    "test": f"echo '{output}'; exit {code}",
+                    "test_one": f"echo '{output}' {{selector}}; exit {code}",
+                },
+            },
+        )
+        (m.root / "test_symptom.py").write_text(body, encoding="utf-8")
+        session = SessionDomain(m).start("x")
+        return m, session
+
+    def run(self, m, session, methodology, phase, selectors=("test_symptom.py",)):
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, methodology=methodology)
+        return pipelines.run_tests(
+            session.id, phase=phase, selectors=list(selectors), cwd=m.root
+        )
+
+    @pytest.mark.parametrize(
+        "methodology,phase", [("bugfix", "reproducing"), ("tdd", "red")]
+    )
+    def test_in_the_red_phase_it_is_a_counted_failure(
+        self, tmp_path, methodology, phase
+    ):
+        m, session = self.project(tmp_path)
+        record = self.run(m, session, methodology, phase)
+        assert record["passed"] is False
+        assert record["failed"] == 1 and record["expected_failures"] == 1
+        assert record["read_as_red"] is True
+        # The exit status is a fact and stays recorded as one.
+        assert record["exit_code"] == 0
+        assert "strict expected failure" in record["note"]
+        assert "read as red" in describe_run(record)
+
+    def test_outside_the_red_phase_it_is_the_exit_status(self, tmp_path):
+        """The GREEN half: a strict expected failure still failing is the
+        tripwire holding, and must not block `test.all_pass`."""
+        m, session = self.project(tmp_path)
+        record = self.run(m, session, "tdd", "green")
+        assert record["passed"] is True and record["failed"] is None
+        assert record["expected_failures"] == 1 and record["read_as_red"] is False
+
+    def test_a_loose_expected_failure_is_not_proof(self, tmp_path):
+        m, session = self.project(tmp_path, body=self.LOOSE)
+        record = self.run(m, session, "bugfix", "reproducing")
+        assert record["passed"] is True and record["read_as_red"] is False
+        assert "not confirm" in record["note"]
+
+    def test_a_whole_suite_run_cannot_say_which_test_it_was(self, tmp_path):
+        m, session = self.project(tmp_path)
+        record = self.run(m, session, "bugfix", "reproducing", selectors=())
+        assert record["passed"] is True and record["read_as_red"] is False
+
+    def test_a_run_that_already_failed_is_left_as_it_failed(self, tmp_path):
+        m, session = self.project(tmp_path, output="1 failed, 1 xfailed", code=1)
+        record = self.run(m, session, "bugfix", "reproducing")
+        assert record["passed"] is False and record["failed"] == 1
+        assert record["read_as_red"] is False
+
+    def test_a_clean_run_with_no_expected_failure_is_a_pass(self, tmp_path):
+        m, session = self.project(tmp_path, output="1 passed")
+        record = self.run(m, session, "bugfix", "reproducing")
+        assert record["passed"] is True and record["read_as_red"] is False
+        assert record["note"] == ""
+
+    def test_the_gate_reads_the_recorded_red(self, tmp_path):
+        """End to end: the recorded run satisfies `test.new_test_fails`, so
+        both the reproducer's `reproducing -> reproduced` and a later fixer's
+        `reproducing -> fixing` can be taken with the wrapper still on."""
+        m, session = self.project(tmp_path)
+        self.run(m, session, "bugfix", "reproducing")
+        pipelines = PipelineDomain(m)
+        for target in ("reproduced", "fixing"):
+            verdicts = pipelines.evaluate_gates(session.id, target=target, cwd=m.root)
+            assert any(
+                v.rule_id == "test.new_test_fails" and v.verdict.ok for v in verdicts
+            ), target
+
+
+    def test_an_unloadable_machine_reads_nothing_into_the_run(self, tmp_path):
+        """Which phase is red is the machine's answer; with no machine there is
+        no red phase, and the run is recorded as it exited."""
+        from invariant.adapters import get_adapter
+        from invariant.adapters.base import TestResult
+
+        m, session = self.project(tmp_path)
+        pipelines = PipelineDomain(m)
+        pipeline = pipelines.start(session.id, methodology="bugfix")
+        pipeline.methodology = "no-such-machine"
+        result = TestResult(passed=True, exit_code=0, expected_failures=1)
+        read, as_red = pipelines._read_red_phase_run(
+            pipeline, "reproducing", get_adapter("python"), result,
+            ["test_symptom.py"], m.root,
+        )
+        assert read is result and as_red is False
+
+
+class TestBUG066AReproOnlyPipelineLands:
+    """BUG_066 — `reproduced` is a terminal the review boundary accepts.
+
+    The reproducer's session ends there with its proof merged and the fix left
+    to a later session; that later session starts its own pipeline and
+    records red against the proof now on the base branch.
+    """
+
+    def test_reproducing_to_reproduced_then_complete(self, tmp_path):
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "commands": {"test_one": "echo '1 failed' {selector}; exit 1"},
+            },
+        )
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        # The proof the session lands: declared, so privacy.clean has a
+        # changed set to screen.
+        (m.root / "t.py").write_text("def test_t():\n    assert 0\n", encoding="utf-8")
+        session = sessions.add_files(session.id, ["t.py"])
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, methodology="bugfix")
+        pipelines.advance(session.id, "reproducing", force=True, reason="test")
+        pipelines.run_tests(
+            session.id, phase="reproducing", selectors=["t.py"], cwd=m.root
+        )
+        verdicts = pipelines.evaluate_gates(
+            session.id, target="reproduced", session=session.to_dict(), cwd=m.root
+        )
+        assert not [v for v in verdicts if v.blocks], [
+            (v.rule_id, v.verdict.message) for v in verdicts if v.blocks
+        ]
+        pipeline, _ = pipelines.advance(
+            session.id, "reproduced", session=session.to_dict(), cwd=m.root
+        )
+        assert pipeline.state == "reproduced"
+        assert pipeline.state in pipelines.machine_for(pipeline).terminal
+
+        # The fixer's session: a fresh pipeline is permitted once the last
+        # one is terminal, and its own red phase records from scratch.
+        fresh = pipelines.start(session.id, methodology="bugfix")
+        assert fresh.state == "triaging"

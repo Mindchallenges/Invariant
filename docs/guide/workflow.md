@@ -163,7 +163,7 @@ recorded so a later manifest edit cannot swap a running pipeline's gates.
 | id | states | use it for |
 |---|---|---|
 | `tdd` | designing → red → green → refactor → reviewing → committed | the default; any change with behaviour to test |
-| `bugfix` | triaging → reproducing → fixing → verifying → committed | a defect: the repro is a state with stopping authority, and `not_reproducible` is a real outcome |
+| `bugfix` | triaging → reproducing → fixing → verifying → committed, or reproducing → reproduced | a defect: the repro is a state with stopping authority, `reproduced` lands a proof without a fix, and `not_reproducible` is a real outcome |
 | `spec-first` | designing → specified → implementing → reviewing → committed | a change whose specification is the deliverable and the implementation follows it |
 | `chore` | doing → reviewing → committed | a rename, a formatter pass, a dependency bump — green suite, no proof of red |
 | `docs` | drafting → reviewing → committed | prose, records, backlog entries — privacy still blocks, the docs are still read |

@@ -19,7 +19,6 @@ only recorder) — each asserts the outcome a repro-only session meets.
 
 import sys
 
-import pytest
 from test_domains import git_project
 
 from invariant.core.machines import load_pipeline_machine
@@ -31,10 +30,6 @@ from invariant.domains.session import SessionDomain
 FALSE_FOR_A_PROOF_THAT_FIRED = {"not_reproducible", "abandoned"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_066 is live — delete this marker with the fix",
-)
 def test_BUG_066_a_reproduced_bugfix_pipeline_has_a_lawful_terminal(tmp_path):
     m = git_project(tmp_path / "proj", {"version": 1, "project": {"name": "demo"}})
     machine = load_pipeline_machine(m, "bugfix")
@@ -76,10 +71,6 @@ def test_BUG_066_a_reproduced_bugfix_pipeline_has_a_lawful_terminal(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_066 is live — delete this marker with the fix",
-)
 def test_BUG_066_a_strict_expected_failure_that_fails_is_a_red_run(tmp_path):
     m = git_project(
         tmp_path / "proj",

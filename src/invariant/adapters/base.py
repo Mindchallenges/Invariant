@@ -81,6 +81,11 @@ class TestResult:
     #: sessions ran on a peer's simulator without either being able to tell.
     device: str | None = None
     skipped: int | None = None
+    #: Tests that failed under an expected-failure marker, as the ecosystem
+    #: reports them (pytest's ``N xfailed``). Not part of ``failed``: such a
+    #: run exits clean, and outside the red phase that clean exit is the
+    #: truth. ``None`` means not reported or not parsed, not zero.
+    expected_failures: int | None = None
     hazards: list[Hazard] = field(default_factory=list)
     note: str = ""
 
@@ -340,6 +345,32 @@ class Adapter:
         aside and passes unmeasured code silently. So implementations anchor
         on naming conventions the ecosystem actually enforces, never on the
         substring "test" appearing somewhere in a path.
+        """
+        return None
+
+    def expected_failures_are_strict(
+        self, root: Path, selectors: Sequence[str]
+    ) -> bool | None:
+        """Is every expected-failure marker the selected tests carry STRICT?
+
+        Asked by the red-phase recorder about a run that exited clean with
+        expected failures on it (BUG_066). A strict marker fails the suite when
+        the expected failure stops occurring, so a strict expected failure that
+        fails is the committed form of a red test, and the recorder may count
+        it as one. A non-strict marker is a tolerance — a known-broken test
+        allowed to stay broken — and is not proof of anything.
+
+        ``True`` lets the recorder read the run as red; ``False`` and ``None``
+        ("cannot tell") both leave it recorded as it exited. The wrong answers
+        are not symmetrical: calling a loose marker strict manufactures proof,
+        which is the direction that must never happen; calling a strict marker
+        unknown costs the reproducer one unwrapped red run.
+
+        The generic adapter knows no test framework and answers ``None``. So
+        do ``node`` and ``swift_xcode``, deliberately: Jest's ``test.failing``
+        and XCTest's ``XCTExpectFailure`` have strict semantics of their own,
+        but neither adapter parses them, and an answer would be a guess. In
+        those ecosystems record the red run with the wrapper off, then wrap.
         """
         return None
 

@@ -32,6 +32,7 @@ adr/ADR-002-session-telemetry
 adr/ADR-003-agent-role-gate-placement
 adr/ADR-004-a-session-is-a-deliverable-set
 adr/ADR-005-session-handoff-launches-a-host
+adr/ADR-006-proved-not-fixed-is-a-pipeline-outcome
 ```
 
 ```{toctree}

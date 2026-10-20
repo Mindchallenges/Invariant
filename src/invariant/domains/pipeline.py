@@ -12,7 +12,7 @@ import os
 import subprocess
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -827,12 +827,80 @@ class PipelineDomain:
         result = adapter.read_run(
             proc.stdout, proc.stderr, proc.returncode, bundle=bundle
         )
-
-        return self._record_test_run(
-            session_id, phase or pipeline.state, command, result
+        phase = phase or pipeline.state
+        result, read_as_red = self._read_red_phase_run(
+            pipeline, phase, adapter, result, selectors, cwd or self.manifest.root
         )
 
-    def _record_test_run(self, session_id: str, phase: str, command: str, result):
+        return self._record_test_run(
+            session_id, phase, command, result, read_as_red=read_as_red
+        )
+
+    def _read_red_phase_run(
+        self, pipeline, phase, adapter, result, selectors, root
+    ) -> tuple[Any, bool]:
+        """In the red phase, a strict expected failure that fails is red.
+
+        The committed form of a repro is wrapped in a strict expected-failure
+        marker, and such a run exits clean: read on exit status alone it was a
+        PASS, so ``test.new_test_fails`` could not be satisfied until the fixer
+        removed the wrapper (BUG_066). Here, and only in the phase the machine
+        names as its proof of red, a clean run whose only outcome is expected
+        failures the adapter confirms are strict is recorded as failing, those
+        failures counted — ``_why_not_proof`` asks for a parsed, non-zero
+        failure count, and flipping ``passed`` alone would not supply one.
+
+        Everywhere else the exit status stands. In a green run a strict
+        expected failure still failing is the tripwire holding, not a failure,
+        and reading it as one would block ``test.all_pass`` on every suite
+        carrying a committed repro. The exit code is recorded unchanged either
+        way, and ``read_as_red`` says which reading was taken.
+
+        A selector is required: a whole-suite run cannot say WHICH test
+        xfailed, and every other committed repro in the suite is a strict
+        expected failure too.
+        """
+        expected = result.expected_failures
+        if not expected or not result.passed or result.failed:
+            return result, False
+        try:
+            red_phase = self.machine_for(pipeline).red_phase or "red"
+        except InvariantError:
+            return result, False
+        if phase != red_phase:
+            return result, False
+
+        strict = (
+            adapter.expected_failures_are_strict(Path(root), selectors)
+            if selectors
+            else None
+        )
+        if strict is not True:
+            why = (
+                "the run named no selector, so which test failed cannot be told"
+                if not selectors
+                else "the adapter could not confirm its marker is strict"
+            )
+            note = (
+                f"{expected} expected failure(s) ran, but {why}, so the run is "
+                "recorded as it exited — mark the repro strict "
+                "(pytest: xfail(strict=True)) and name it with --selector, or "
+                "record the red run with the wrapper off"
+            )
+            return replace(result, note=_joined(result.note, note)), False
+
+        note = (
+            f"{expected} strict expected failure(s) read as red: the wrapped "
+            "test failed as intended, and the run exited 0 because of the marker"
+        )
+        return (
+            replace(result, passed=False, failed=expected, note=_joined(result.note, note)),
+            True,
+        )
+
+    def _record_test_run(
+        self, session_id: str, phase: str, command: str, result, read_as_red=False
+    ):
         """Append one run to the evidence every test rule reads.
 
         Shared so that every path which runs the suite lands here. A path that
@@ -860,6 +928,11 @@ class PipelineDomain:
             "source": result.source,
             "device": result.device,
             "skipped": result.skipped,
+            # BUG_066. `read_as_red` marks the one case where `passed` is not
+            # the exit status: a strict expected failure counted as red in the
+            # machine's red phase. `exit_code` above stays the process's own.
+            "expected_failures": result.expected_failures,
+            "read_as_red": read_as_red,
             "hazards": [h.id for h in result.hazards],
             "note": result.note,
         }
@@ -924,6 +997,10 @@ def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) ->
     )
 
 
+def _joined(note: str, extra: str) -> str:
+    return f"{note}; {extra}" if note else extra
+
+
 def describe_run(record: dict) -> str:
     """One line naming each number's UNIT.
 
@@ -946,6 +1023,12 @@ def describe_run(record: dict) -> str:
     else:
         parts.append("no failures")
 
+    if record.get("read_as_red"):
+        parts.append(
+            f"{record.get('expected_failures')} strict expected failure(s) read as red"
+        )
+    elif record.get("expected_failures"):
+        parts.append(f"{record['expected_failures']} expected failure(s)")
     if record.get("skipped"):
         parts.append(f"{record['skipped']} skipped")
     # Where the number came from, because a console fallback and a bundle read

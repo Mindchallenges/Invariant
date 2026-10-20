@@ -876,7 +876,7 @@ Shipped methodologies:
 |---|---|---|
 | `tdd` | Default. Test-first development | designing → red → green → refactor → reviewing → committed |
 | `spec-first` | Design-heavy work where the spec is the deliverable | designing → specified → implementing → reviewing → committed |
-| `bugfix` | Proving a reported defect is real before fixing it | triaging → reproducing → fixing → verifying → committed (`red_phase: reproducing`) |
+| `bugfix` | Proving a reported defect is real before fixing it | triaging → reproducing → fixing → verifying → committed, or reproducing → reproduced (`red_phase: reproducing`) |
 | `chore` | Mechanical work with no design content | doing → reviewing → committed |
 | `docs` | Prose, records, backlog entries — nothing to test or diagram | drafting → reviewing → committed |
 | `none` | Escape hatch — a single state, no gates | working |
@@ -965,6 +965,51 @@ file extensions would be guessing, and would guess wrong on the change that adds
 a doc and a schema together. Privacy still blocks and the docs are still read
 and updated — only the diagram gate steps aside, and only for a pipeline that
 has declared there is no structure to draw.
+
+### A proof is an outcome: `bugfix`'s `reproduced`
+
+```mermaid
+stateDiagram-v2
+    [*] --> triaging
+    triaging --> reproducing
+    reproducing --> fixing: test.new_test_fails
+    reproducing --> reproduced: test.new_test_fails, privacy.clean
+    reproducing --> not_reproducible
+    fixing --> verifying: test.all_pass
+    verifying --> committed: landing gates
+    verifying --> fixing
+    reproduced --> [*]
+    not_reproducible --> [*]
+    committed --> [*]
+```
+
+(`abandoned` is reachable from every non-terminal state and omitted.)
+
+`reproducing` has stopping authority, and the `bug-reproducer` role uses it:
+it proves the bug, commits the red test wrapped in a strict expected-failure
+marker, and never fixes. Until BUG_066 the only terminals reachable from there
+without fixing were `not_reproducible` and `abandoned` — both false about a
+proof that fired — so `pipeline.complete` refused the session and its proof
+could not reach the base branch until its fix did. `reproduced` is that
+outcome: terminal, reached from `reproducing` only, priced at the recorded
+red run and a clean privacy scan. It deliberately does not carry the
+`landing` role, whose docs and agent gates ask for a diagram a test-only
+commit cannot honestly change and for a design and review this outcome does
+not claim (ADR-006 D2). The fixer starts a fresh pipeline later and records
+red against the proof, which is then on the base branch (D3).
+
+The proof also has to read as red. A strict expected failure that fails exits
+clean, so on exit status alone the reproducer's run recorded as a pass. The
+recorder behind `pipeline test` now reads it as a counted failure — in the
+machine's `red_phase` only, for a run that named a `--selector`, when the
+adapter confirms every expected-failure marker in the selected files is
+strict. The record keeps its real `exit_code` and says `read_as_red: true`.
+Every other phase records the exit status, because in a green run a strict
+expected failure still failing is the tripwire holding, not a failure. Only
+the Python adapter can confirm strictness, from a literal `strict=True` in the
+source, since pytest's output prints strict and non-strict expected failures
+identically; the other adapters answer "cannot tell", and in those ecosystems
+the red run is recorded with the wrapper off (ADR-006 D4–D6).
 
 ### Agent-role gates
 

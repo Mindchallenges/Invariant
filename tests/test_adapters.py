@@ -276,6 +276,150 @@ class TestPythonAdapter:
         assert self.adapter.parse_coverage(raw) == {}
 
 
+class TestBUG066ExpectedFailures:
+    """BUG_066 — what the Python adapter can say about an expected failure.
+
+    pytest prints a strict expected failure that fails as ``1 xfailed`` and
+    exits zero, and the console output is the same whether the marker was
+    strict or not. The count is therefore parsed from the output, and the
+    strictness is read from the selected test files themselves — narrowly,
+    so that "cannot tell" is the answer to everything but a literal
+    ``strict=True``.
+    """
+
+    def setup_method(self):
+        self.adapter = get_adapter("python")
+
+    def write(self, root, name, body):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("import pytest\n\n" + body, encoding="utf-8")
+        return path
+
+    def test_an_expected_failure_is_counted_and_is_not_a_failure(self):
+        result = self.adapter.parse_test_output("1 xfailed in 0.01s", "", 0)
+        assert result.expected_failures == 1
+        assert result.failed is None and result.passed
+        # It executed: an xfailed case ran its body.
+        assert result.total == 1
+
+    def test_expected_failures_beside_real_counts(self):
+        result = self.adapter.parse_test_output(
+            "1 failed, 3 passed, 2 xfailed, 1 xpassed in 0.2s", "", 1
+        )
+        assert result.failed == 1 and result.expected_failures == 2
+        assert result.total == 7
+
+    def test_no_expected_failures_is_none_not_zero(self):
+        assert self.adapter.parse_test_output("3 passed", "", 0).expected_failures is None
+
+    def test_xfailed_is_not_read_as_failed(self):
+        """`(\\d+) failed` must not match inside `1 xfailed`."""
+        result = self.adapter.parse_test_output("2 passed, 1 xfailed", "", 0)
+        assert result.failed is None
+
+    def test_a_literal_strict_marker_is_strict(self, tmp_path):
+        self.write(tmp_path, "tests/test_a.py",
+                   "@pytest.mark.xfail(strict=True, reason='live')\n"
+                   "def test_a():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(
+            tmp_path, ["tests/test_a.py"]
+        ) is True
+
+    def test_a_node_id_is_read_through_its_file(self, tmp_path):
+        self.write(tmp_path, "tests/test_a.py",
+                   "@pytest.mark.xfail(strict=True)\ndef test_a():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(
+            tmp_path, ["tests/test_a.py::test_a"]
+        ) is True
+
+    def test_an_absolute_selector_is_read(self, tmp_path):
+        path = self.write(tmp_path, "test_a.py",
+                          "@pytest.mark.xfail(strict=True)\ndef test_a():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(tmp_path, [str(path)]) is True
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # Not strict, said outright.
+            "@pytest.mark.xfail(strict=False)\ndef test_a():\n    assert 0\n",
+            # Not said at all: the ini default decides, and it is not read.
+            "@pytest.mark.xfail(reason='x')\ndef test_a():\n    assert 0\n",
+            # Not a literal.
+            "S = True\n@pytest.mark.xfail(strict=S)\ndef test_a():\n    assert 0\n",
+            # A bare mark, uncalled.
+            "@pytest.mark.xfail\ndef test_a():\n    assert 0\n",
+            # The imperative form is never strict.
+            "def test_a():\n    pytest.xfail('x')\n",
+            # Imported by name.
+            "from pytest import xfail\ndef test_a():\n    xfail('x')\n",
+            # One strict beside one loose: which one xfailed cannot be told.
+            (
+                "@pytest.mark.xfail(strict=True)\ndef test_a():\n    assert 0\n"
+                "@pytest.mark.xfail\ndef test_b():\n    assert 0\n"
+            ),
+        ],
+    )
+    def test_anything_short_of_a_literal_strict_true_is_not_strict(self, tmp_path, body):
+        self.write(tmp_path, "test_a.py", body)
+        assert self.adapter.expected_failures_are_strict(tmp_path, ["test_a.py"]) is False
+
+    def test_a_mark_reached_through_a_bare_mark_name_is_read(self, tmp_path):
+        self.write(tmp_path, "test_a.py",
+                   "from pytest import mark\n"
+                   "@mark.xfail(strict=True)\ndef test_a():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(tmp_path, ["test_a.py"]) is True
+
+    def test_strictness_across_several_files(self, tmp_path):
+        self.write(tmp_path, "test_a.py",
+                   "@pytest.mark.xfail(strict=True)\ndef test_a():\n    assert 0\n")
+        self.write(tmp_path, "test_b.py", "def test_b():\n    assert 1\n")
+        self.write(tmp_path, "test_c.py",
+                   "@pytest.mark.xfail(strict=False)\ndef test_c():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(
+            tmp_path, ["test_a.py", "test_b.py"]
+        ) is True
+        assert self.adapter.expected_failures_are_strict(
+            tmp_path, ["test_a.py", "test_c.py"]
+        ) is False
+
+    @pytest.mark.parametrize(
+        "selector",
+        ["tests", "-k symptom", "missing.py", "notes.txt", "broken.py", "clean.py"],
+    )
+    def test_cannot_tell_is_none(self, tmp_path, selector):
+        """A directory, a filter, a missing file, a non-Python file, a file
+        that does not parse, and a file with no expected-failure marker all
+        leave the question open — the xfailed count came from somewhere this
+        reading cannot see."""
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "notes.txt").write_text("xfail(strict=True)", encoding="utf-8")
+        (tmp_path / "broken.py").write_text("def (:\n", encoding="utf-8")
+        self.write(tmp_path, "clean.py", "def test_a():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(tmp_path, [selector]) is None
+
+    def test_no_selector_cannot_tell(self, tmp_path):
+        assert self.adapter.expected_failures_are_strict(tmp_path, []) is None
+
+    def test_an_unreadable_file_beside_a_strict_one_cannot_tell(self, tmp_path):
+        self.write(tmp_path, "test_a.py",
+                   "@pytest.mark.xfail(strict=True)\ndef test_a():\n    assert 0\n")
+        assert self.adapter.expected_failures_are_strict(
+            tmp_path, ["test_a.py", "missing.py"]
+        ) is None
+
+    @pytest.mark.parametrize("ecosystem", ["generic", "node", "swift_xcode"])
+    def test_other_adapters_say_they_cannot_tell(self, tmp_path, ecosystem):
+        """Not supported, stated rather than guessed: Jest's `test.failing`
+        and XCTest's `XCTExpectFailure` have strict semantics of their own,
+        and neither adapter parses them yet. `None` leaves the run recorded
+        as it exited."""
+        assert get_adapter(ecosystem).expected_failures_are_strict(
+            tmp_path, ["anything"]
+        ) is None
+        assert get_adapter(ecosystem).parse_test_output("", "", 0).expected_failures is None
+
+
 class TestPythonMeasuredScope:
     """BUG_019 — the fact the coverage rule had no way to learn.
 

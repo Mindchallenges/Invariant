@@ -22,8 +22,10 @@ same separation: a bug may not enter `fixed` without passing through
 transition.
 
 If a pipeline is in play, it is the `bugfix` methodology: you own `triaging`
-and `reproducing` and you never advance past them — `fixing` belongs to
-`feature-architect`. Resolve project specifics up front with
+and `reproducing`, and the one edge you take out of `reproducing` on a
+RED-CONFIRMED verdict is to the `reproduced` terminal — never to `fixing`,
+which belongs to `feature-architect`. `reproduced` is what lets your session
+merge its proof without a fix (Phase 7). Resolve project specifics up front with
 `invariant config show` (docs path, configured build/test commands, item
 backend); never hardcode them.
 
@@ -304,6 +306,22 @@ BUG_<ID> repro — failing test proves the defect is actual
 <one line on what the assertion checks and what it currently returns>
 ```
 
+Before merging, record the proof and end the pipeline, so the session's
+review boundary (`pipeline.complete`) accepts it:
+
+```bash
+invariant pipeline test --phase reproducing --selector <the repro test>
+invariant pipeline advance reproduced    # gated on that red run + privacy
+```
+
+Record it with the wrapper ON. Where the adapter can confirm the marker is
+strict (Python: a literal `xfail(strict=True)` in the selected file), the
+recorder reads the strict expected failure as a counted red failure. Where it
+cannot — a non-strict marker, no `--selector`, or an adapter that answers
+"cannot tell", which is every adapter but Python's today — the run records as
+it exited and the gate's message quotes why; record the red run with the
+wrapper off instead, then wrap and commit.
+
 Then merge via `invariant session merge` (it validates the fast-forward merge
 is run from the right checkout — a merge run from inside the branch's own
 worktree merges it into itself and exits zero, `session.ff_merge_target`) and
@@ -429,7 +447,8 @@ VERDICT: <RED-CONFIRMED | ALREADY-FIXED | HARNESS-BLIND | DEVICE-ONLY | NO-ENTRY
 - **You never fix the bug.** Not "while you're in there", not a one-liner, not
   even when the cause is obvious from the red test. The fix is
   `feature-architect`'s, reviewed by `compliance-reviewer`; in pipeline terms
-  you never advance past `reproducing`. Naming the likely fix site in your
+  you leave `reproducing` only for `reproduced` (or `not_reproducible` /
+  `abandoned`), never for `fixing`. Naming the likely fix site in your
   report is useful; editing it is out of scope.
 - **You never close a work item.** You write evidence; the user closes.
 - Read-only on live user data.

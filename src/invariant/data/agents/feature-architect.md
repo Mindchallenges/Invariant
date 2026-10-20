@@ -145,7 +145,12 @@ failure of the step — record it and move on.
 **If this task is a `BUG_<id>` that cleared gate B9**, the failing test already
 exists — `bug-reproducer` committed it. Do not write a second one. Your first
 edit is to delete its expected-failure wrapper so the assertion goes live,
-and the fix is done when that untouched assertion passes. If the committed
+and the fix is done when that untouched assertion passes. The proof's own
+pipeline ended at `reproduced`, so start a fresh one and record red against
+the proof before fixing: `invariant pipeline test --phase <red phase>
+--selector <the repro test>` — a plain counted failure once the wrapper is
+gone (a strict wrapper still on also records as red on adapters that can
+confirm it is strict). If the committed
 repro test passes *before* you change any production code, stop: the ground
 moved under the verdict (another session shipped the fix, or the wrapper was
 already removed). Report it rather than proceeding.

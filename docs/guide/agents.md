@@ -61,7 +61,10 @@ test and moves the item `filed → reproduced`), `ALREADY-FIXED` (names the
 commit), `HARNESS-BLIND` (the test cannot see the surface — the attempt is at
 fault, not the bug) or `DEVICE-ONLY` (real, but not expressible in the test
 target). It never fixes the bug. The work-item machine has no edge from
-`filed` to `fixed`, so this agent is how a bug becomes fixable at all.
+`filed` to `fixed`, so this agent is how a bug becomes fixable at all. Under
+the `bugfix` methodology its session ends at the pipeline's `reproduced`
+terminal, which the review boundary accepts, so the proof merges on its own and
+the fix is a later session's (ADR-006).
 
 ## What they need from you
 

@@ -1619,10 +1619,23 @@ def _test_new_test_fails(ctx: RuleContext) -> Verdict:
         )
     failing = [r for r in red if not r.get("passed", True)]
     if not failing:
+        detail = (
+            "A test that passes before the change cannot be evidence for it. "
+            "Either it does not reach the defect, or the defect is not there."
+        )
+        # A run that exited clean with expected failures on it carries the
+        # recorder's reason for not reading them as red (BUG_066). Without it
+        # this verdict tells a reproducer its failing test passed.
+        why = [
+            str(r.get("note"))
+            for r in red
+            if r.get("expected_failures") and r.get("note")
+        ]
+        if why:
+            detail += " The recorder's reading: " + "; ".join(why)
         return Verdict.fail(
             f"the run recorded in the {phase} phase passed",
-            detail="A test that passes before the change cannot be evidence for it. "
-            "Either it does not reach the defect, or the defect is not there.",
+            detail=detail,
             fixes=("make the test fail on the reported symptom first",),
         )
     rejected = []

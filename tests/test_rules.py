@@ -3987,6 +3987,26 @@ class TestTheMethodologyMustActuallyRun:
         verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
         assert not verdict.ok and "abandoned" in verdict.message
 
+    def test_BUG_066_a_proof_that_fired_is_a_finished_bugfix_pipeline(
+        self, ctx_factory
+    ):
+        ctx = ctx_factory(
+            session={"state": "working"},
+            pipeline={"methodology": "bugfix", "state": "reproduced"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_BUG_066_the_bugfix_message_offers_the_repro_only_terminal(
+        self, ctx_factory
+    ):
+        ctx = ctx_factory(
+            session={"state": "working"},
+            pipeline={"methodology": "bugfix", "state": "reproducing"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert any("reproduced" in fix for fix in verdict.fixes)
+
     def test_the_message_names_where_to_go_next(self, ctx_factory):
         ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "red"})
         verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
@@ -5795,6 +5815,35 @@ class TestProofOfRedIsAProofAboutATest:
         assert only(
             evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
         ).verdict.ok
+
+
+class TestBUG066APassingRedRunSaysWhy:
+    """A red-phase run that passed with expected failures on record says so.
+
+    The recorder reads a strict expected failure as red only when the adapter
+    can confirm the marker is strict. When it cannot, the gate's refusal
+    carries the recorder's reason, so the reproducer is told to write
+    `strict=True` instead of being told its failing test passed.
+    """
+
+    def test_the_recorders_note_reaches_the_verdict(self, ctx_factory):
+        note = "1 expected failure ran, but the adapter could not confirm its marker is strict"
+        pipeline = {
+            "evidence": {
+                "test_runs": [
+                    {"phase": "red", "passed": True, "expected_failures": 1, "note": note}
+                ]
+            }
+        }
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert not result.verdict.ok
+        assert note in result.verdict.detail
+
+    def test_a_plain_pass_keeps_the_plain_detail(self, ctx_factory):
+        pipeline = {"evidence": {"test_runs": [{"phase": "red", "passed": True}]}}
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert result.verdict.detail.startswith("A test that passes")
+        assert "expected failure" not in result.verdict.detail
 
 
 class TestProofOfRedReadsTheMachinesOwnRedState:

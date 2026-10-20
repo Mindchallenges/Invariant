@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import tomllib
@@ -121,17 +123,67 @@ class PythonAdapter(Adapter):
         live = [h for h in self.hazards() if h.matches(combined)]
         passed = _first_int(r"(\d+) passed", combined)
         failed = _first_int(r"(\d+) failed", combined)
+        # Kept apart from the two above by the pattern itself: in "1 xfailed"
+        # the "x" sits between the count and the word, so `(\d+) failed`
+        # cannot read an expected failure as a failure.
+        xfailed = _first_int(r"(\d+) xfailed", combined)
+        xpassed = _first_int(r"(\d+) xpassed", combined)
         note = ""
         if code == 5 or re.search(r"collected 0 items", combined):
             note = "zero tests were collected — the selector matched nothing"
         return TestResult(
             passed=code == 0,
             exit_code=code,
-            total=(passed or 0) + (failed or 0) or None,
+            # An expected failure and an unexpected pass both ran their body.
+            total=(passed or 0) + (failed or 0) + (xfailed or 0) + (xpassed or 0)
+            or None,
             failed=failed,
+            expected_failures=xfailed,
             hazards=live,
             note=note,
         )
+
+    def expected_failures_are_strict(
+        self, root: Path, selectors: Sequence[str]
+    ) -> bool | None:
+        """Read from the selected files, because pytest's output cannot say.
+
+        A strict and a non-strict ``xfail`` that fail print the same ``x``, the
+        same ``XFAIL`` summary line and the same ``N xfailed``; strictness is
+        visible in the output only when the test PASSES. So the answer comes
+        from the source, and only one form counts: a ``mark.xfail(...)`` call
+        with a literal ``strict=True``. Anything else that could produce an
+        expected failure in the selected files — ``strict=False``, no keyword
+        (the ini ``xfail_strict`` default is not read), a non-literal value, an
+        uncalled mark, the imperative ``pytest.xfail()`` — answers ``False``,
+        because one loose marker beside a strict one leaves the reader unable
+        to say which of them produced the count.
+
+        ``None`` for everything this reading cannot see: no selector, a
+        selector that is not a ``.py`` file or a node id in one (a directory,
+        a ``-k`` filter), a file that cannot be read or parsed, and selected
+        files carrying no expected-failure marker at all — the count then came
+        from somewhere else, a ``conftest.py`` hook, say.
+        """
+        selected = [s for s in selectors if s]
+        if not selected:
+            return None
+        found = False
+        for selector in selected:
+            path = Path(selector.split("::", 1)[0])
+            if not path.is_absolute():
+                path = root / path
+            if path.suffix != ".py" or not path.is_file():
+                return None
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, ValueError):
+                return None
+            verdict = _xfail_markers_are_strict(tree)
+            if verdict is False:
+                return False
+            found = found or verdict is True
+        return True if found else None
 
     def parse_coverage(self, raw: str) -> dict[str, float]:
         """Each ``.py`` row's percentage, without counting columns.
@@ -170,6 +222,36 @@ class PythonAdapter(Adapter):
         ):
             out[match.group("file")] = float(match.group("pct"))
         return out
+
+
+def _xfail_markers_are_strict(tree: ast.AST) -> bool | None:
+    """``True`` all strict, ``False`` any not, ``None`` none present."""
+    calls = {id(node.func): node for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "xfail":
+            # `from pytest import xfail` — the imperative form, never strict.
+            return False
+        if not (isinstance(node, ast.Attribute) and node.attr == "xfail"):
+            continue
+        found = True
+        owner = node.value
+        is_mark = (isinstance(owner, ast.Attribute) and owner.attr == "mark") or (
+            isinstance(owner, ast.Name) and owner.id == "mark"
+        )
+        call = calls.get(id(node))
+        if not is_mark or call is None or not _literal_true(call, "strict"):
+            return False
+    return True if found else None
+
+
+def _literal_true(call: ast.Call, keyword: str) -> bool:
+    return any(
+        kw.arg == keyword
+        and isinstance(kw.value, ast.Constant)
+        and kw.value.value is True
+        for kw in call.keywords
+    )
 
 
 def _first_int(pattern: str, text: str) -> int | None:

@@ -639,3 +639,41 @@ class TestEveryMachineDeclaringProofOfRedNamesItsRedState:
 
     def test_bugfix_names_reproducing(self):
         assert load_machine("bugfix").red_phase == "reproducing"
+
+
+class TestBUG066ProvedNotFixedIsAnOutcome:
+    """BUG_066 — `reproduced` is a terminal of the bugfix machine.
+
+    The bug-reproducer has stopping authority and never fixes, so its session
+    ends in `reproducing`. Every terminal reachable from there without fixing
+    was a false statement about a proof that fired (`not_reproducible`,
+    `abandoned`), so its committed proof could not land until the fix did.
+    """
+
+    def gates(self, make_manifest, source, target):
+        from invariant.domains.pipeline import PipelineDomain
+
+        machine = load_pipeline_machine(make_manifest({}), "bugfix")
+        return PipelineDomain.gates_for(None, source, target, machine)
+
+    def test_reproduced_is_a_terminal_reached_from_reproducing_only(self):
+        machine = load_machine("bugfix")
+        assert "reproduced" in machine.terminal
+        assert machine.can("reproducing", "reproduced")
+        sources = {s for s in machine.states if machine.can(s, "reproduced")}
+        assert sources == {"reproducing"}
+        assert machine.next_states("reproduced") == ()
+
+    def test_its_price_is_the_proof_and_a_clean_privacy_scan(self, make_manifest):
+        """Gated on the recorded red run — the thing the outcome claims — and
+        on privacy, because the proof lands on the base branch. Not on the
+        landing role's docs and agent gates: a test-only commit cannot
+        honestly update a diagram, and the reproducer is the actor that
+        drives it."""
+        assert set(self.gates(make_manifest, "reproducing", "reproduced")) == {
+            "test.new_test_fails",
+            "privacy.clean",
+        }
+
+    def test_it_does_not_carry_the_landing_role(self):
+        assert "landing" not in load_machine("bugfix").state("reproduced").roles
