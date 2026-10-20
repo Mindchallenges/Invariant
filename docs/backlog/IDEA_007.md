@@ -4,7 +4,11 @@ type: idea
 title: The stats join reads only the current host binding, so a resumed session's
   earlier records claim nothing is known
 status: proposed
-residue: []
+residue:
+- 'DECISION 2026-10-20 (user-approved): The identity-only join — join earlier hosts
+  for session_id/session_name only, states = None with a new DECLINED_* code naming
+  the real cause, shipped with a per-host selector for StatsDomain.resolve. No per-host
+  arithmetic split.'
 history: []
 area: domains/stats
 severity: low
