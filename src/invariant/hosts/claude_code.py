@@ -46,6 +46,7 @@ from ..core.rules import (
 )
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
+from .claude_code_launch import HANDOFF_ENV
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -990,6 +991,14 @@ class ClaudeCodeHost:
         through to `_bind_host`, which clears `host_ended` (without which the
         session resolves to nobody for every later hook) and keeps the outgoing
         id in `hosts`.
+
+        **The same call claims the handoff this host was launched for.** The
+        handoff launcher sets `HANDOFF_ENV` in front of `claude`, and this
+        hook subprocess inherits the environment its host was started with, so
+        a token here names the one note this host session exists to pick up
+        (IDEA_008). It is consumed on the first `start` or `resume` and never
+        at `SessionStart`, which must not write; the domain makes every later
+        claim with the same token a no-op.
         """
         if not ctx.host_session_id:
             return
@@ -1012,6 +1021,15 @@ class ClaudeCodeHost:
             # rule working; neither is a reason to fail a completed command,
             # and PostToolUse must never turn a refusal into a denial.
             pass
+
+        token = os.environ.get(HANDOFF_ENV)
+        if token:
+            try:
+                ctx.sessions.claim_handoff(token, session_id, ctx.host_session_id)
+            except InvariantError:
+                # An unreadable record is not a reason to fail a command that
+                # already ran; the note then simply goes on being offered.
+                pass
 
     def _bind_by_successful_edit(self, payload: dict, ctx) -> None:
         """Claim an unowned session from an edit that actually landed in it.
@@ -1549,6 +1567,10 @@ def _handoff_lines(ctx) -> list[str]:
     arrive, so the next session sees the note however it was opened. Empty
     when nothing fresh is recorded, so a project that never hands off projects
     exactly as before. A read, like the resumable offer beside it.
+
+    A consumed note is not shown (IDEA_008), and the last line names the one
+    command that retires a note nobody is going to act on — the only exit a
+    note launched by hand has, short of going stale.
     """
     found = ctx.sessions.latest_handoff(ctx.cwd)
     if found is None:
@@ -1557,6 +1579,7 @@ def _handoff_lines(ctx) -> list[str]:
     return [
         f"  last handoff here, from {session.name} as {entry.get('name')}:",
         f"    {entry.get('note')}",
+        "    not acting on it? invariant session handoff --dismiss",
     ]
 
 

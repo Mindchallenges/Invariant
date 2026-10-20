@@ -46,6 +46,13 @@ from ..core.errors import InvariantError
 #: shell builds, which is not necessarily the one this command ran under.
 CLAUDE_BINARY = "claude"
 
+#: The variable set in front of ``claude`` naming the note the new session was
+#: launched to pick up (IDEA_008). A hook subprocess inherits the environment
+#: its host was started with, so ``claude_code`` reads it back on the
+#: PostToolUse that brackets that host's first ``session start`` or
+#: ``session resume``, and the session domain marks exactly that note claimed.
+HANDOFF_ENV = "INVARIANT_HANDOFF"
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -59,10 +66,13 @@ class LaunchPlan:
     argv: tuple[str, ...]
     #: The directory the new session starts in — the main checkout.
     cwd: str
-    #: ``cd <cwd> && <argv>``, quoted for a POSIX shell.
+    #: ``cd <cwd> && [NAME=value ...] <argv>``, quoted for a POSIX shell.
     shell_line: str
     #: The script ``osascript`` runs to type ``shell_line`` into a new window.
     applescript: str
+    #: Variables set for ``claude`` alone, as ``(name, value)`` pairs. Empty
+    #: where nothing has been recorded for the new session to claim.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 class Launcher(Protocol):
@@ -92,7 +102,13 @@ def applescript_string(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def plan_launch(claude: str, name: str, note: str, cwd: Path | str) -> LaunchPlan:
+def plan_launch(
+    claude: str,
+    name: str,
+    note: str,
+    cwd: Path | str,
+    token: str | None = None,
+) -> LaunchPlan:
     """The command, the shell line and the script, for one handoff.
 
     ``--name`` and ``--remote-control`` both carry the name, so the session is
@@ -100,9 +116,16 @@ def plan_launch(claude: str, name: str, note: str, cwd: Path | str) -> LaunchPla
     Control list. The note is the LAST argument and is positional: that is the
     initial prompt. ``--remote-control`` takes an optional value, so the name
     is given to it explicitly rather than left for the note to be read as.
+
+    ``token`` names the recorded note, and is set as ``HANDOFF_ENV`` in front
+    of ``claude`` — a prefix assignment, so it reaches that one process and the
+    hooks it spawns, and not the window's shell. ``None`` sets nothing: a plan
+    built before the note is recorded has no note to name.
     """
     argv = (claude, "--name", name, "--remote-control", name, note)
-    shell_line = f"cd {shlex.quote(str(cwd))} && {shlex.join(argv)}"
+    env = ((HANDOFF_ENV, token),) if token else ()
+    prefix = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
+    shell_line = f"cd {shlex.quote(str(cwd))} && {prefix}{shlex.join(argv)}"
     applescript = "\n".join(
         [
             'tell application "Terminal"',
@@ -111,7 +134,13 @@ def plan_launch(claude: str, name: str, note: str, cwd: Path | str) -> LaunchPla
             "end tell",
         ]
     )
-    return LaunchPlan(argv=argv, cwd=str(cwd), shell_line=shell_line, applescript=applescript)
+    return LaunchPlan(
+        argv=argv,
+        cwd=str(cwd),
+        shell_line=shell_line,
+        applescript=applescript,
+        env=env,
+    )
 
 
 class TerminalLauncher:

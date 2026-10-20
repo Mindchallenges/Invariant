@@ -114,7 +114,43 @@ nobody can find again.
 when no session is bound — the turn a handed-off session starts on — as the
 backstop for a prompt argument that did not arrive. Fresh means younger than
 `session.plan_stale_days`, derived on every read, so nothing has to run for an
-old note to stop being offered.
+old note to stop being offered. Amended by D6: a CONSUMED note is skipped, and
+the newest open one answers instead.
+
+### D6 — A launched session claims exactly the note its launcher named (amendment, IDEA_008)
+
+*Added after acceptance, from the follow-up the Consequences below named; the
+claim signal, the dismiss form and the storage were settled by the maintainer
+on IDEA_008 and are recorded here rather than in a new ADR because they extend
+D3 and D5 without reversing either.*
+
+The launcher prefixes `claude` in the typed line with
+`INVARIANT_HANDOFF=<session-id>:<at>`, naming the note it just recorded. A
+hook subprocess inherits the environment its host was started with, so on the
+PostToolUse that binds that host's first `session start` or `session resume`
+the Claude Code adapter reads the token and the session domain marks that one
+note consumed — on the binding path, never at `SessionStart`, which must not
+write. The first claim wins; later ones with the same token do nothing.
+
+`session handoff --dismiss` retires the note the greeting is showing, recorded
+as `dismissed` rather than `claimed`. Staleness by `session.plan_stale_days`
+is unchanged.
+
+The marker is a `consumed` key on the handoffs entry — when, how, and the
+consuming invariant and host session — so an entry without it reads as
+unconsumed and the round-trip contract needs nothing new. It is written onto
+the handing-off session's record as a standstill row, the shape D2 gave the
+handoff itself: saved, not re-registered, no gate.
+
+*Rejected:* consuming every note recorded before a start or resume ("any start
+after `at`"). It silences a note on behalf of whatever unrelated session
+happens to start next in the project, and it needs no evidence that the
+starting session had anything to do with the note. A note launched by hand
+carries no token and leaves only by dismissal or staleness.
+
+*Rejected:* reading the new host's session name instead of a token. Hooks are
+not told it, and two hosts launched from two handoffs would be told apart only
+by a name somebody may have overridden.
 
 ## Consequences
 
@@ -122,9 +158,12 @@ old note to stop being offered.
   only, and says so rather than degrading.
 - The handoff note reaches the new host's transcript, which this library does
   not own. That is why the scan refuses rather than warns.
-- A recorded note goes on being offered, while fresh, to every unbound
-  greeting here — including one that already acted on it. Consuming it when a
-  session starts is a follow-up, not part of this decision.
+- A recorded note was offered, while fresh, to every unbound greeting here —
+  including one that already acted on it. That follow-up is D6: the launched
+  session claims its note, and `--dismiss` retires one nobody will act on.
+- The handoff launcher now writes an environment variable the Claude Code
+  hook adapter reads, so two modules of one host share a constant. A note
+  whose host was started some other way is never claimed automatically.
 - The two override routes are unchanged: a handoff passes no gate and forces
   none.
 

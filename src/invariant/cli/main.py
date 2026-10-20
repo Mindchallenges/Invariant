@@ -1337,6 +1337,55 @@ def _handoff_launcher():
     return _real_handoff_launcher()
 
 
+def _dismiss_handoff(args) -> int:
+    """`session handoff --dismiss`: retire the note the greeting is showing.
+
+    Takes no note, name or id — it acts on what an unbound greeting here
+    offers, which is the latest fresh note, and naming anything else would be
+    a second selector over the same list. Like the handoff, it never prints
+    ``session <id> (``: it claims nothing.
+    """
+    stray = [
+        flag
+        for flag, value in (("--note", args.note), ("--name", args.name), ("--id", args.id))
+        if value
+    ]
+    if stray:
+        raise UsageError(
+            f"--dismiss retires the latest fresh note here and takes no "
+            f"{', '.join(stray)}"
+        )
+    ctx = Context()
+    if args.dry_run:
+        session, entry = ctx.sessions.dismissable_handoff(ctx.cwd)
+        verb = "would dismiss"
+    else:
+        resolution = ctx.sessions.resolve(ctx.cwd, host_session_id=ctx.host_session_id)
+        by = resolution.session.id if resolution.proven and resolution.session else None
+        session, entry = ctx.sessions.dismiss_handoff(
+            ctx.cwd, session_id=by, host_session_id=ctx.host_session_id
+        )
+        verb = "dismissed"
+    result = {
+        "dismissed": not args.dry_run,
+        "dry_run": bool(args.dry_run),
+        "session": session.id,
+        "session_name": session.name,
+        "name": entry.get("name"),
+        "note": entry.get("note"),
+    }
+    return emit(
+        args,
+        result,
+        "\n".join(
+            [
+                f"{verb} handoff {entry.get('name')} from {session.name}:",
+                f"    {entry.get('note')}",
+            ]
+        ),
+    )
+
+
 def cmd_session_handoff(args) -> int:
     """Hand the work to a fresh host session, in one command.
 
@@ -1356,13 +1405,26 @@ def cmd_session_handoff(args) -> int:
        the record, and the greeting of whatever session starts next shows it —
        which is the fallback for a lost prompt argument, too.
 
+    The launched line carries the claim token naming the note just recorded,
+    so the new host's first `session start` / `session resume` consumes that
+    note (IDEA_008). A dry run and the by-hand line on another platform carry
+    none: nothing was recorded, so there is no note to name.
+
     The output never prints ``session <id> (``: that sequence is the binding
     contract `session start` and `session resume` own (see their docstrings),
     and a handoff claims nothing.
     """
     from ..core import git
-    from ..domains.session import handoff_name
+    from ..domains.session import handoff_name, handoff_token
     from ..hosts import claude_code_launch as launch
+
+    if args.dismiss:
+        return _dismiss_handoff(args)
+    if not args.note:
+        raise UsageError(
+            "session handoff needs --note \"<line>\" to hand off, or --dismiss "
+            "to retire the latest fresh note without acting on it"
+        )
 
     ctx = Context(session_id=args.id)
     explicit = args.id or os.environ.get("INVARIANT_SESSION_ID")
@@ -1405,6 +1467,7 @@ def cmd_session_handoff(args) -> int:
         "cwd": plan.cwd,
         "shell_line": plan.shell_line,
         "applescript": plan.applescript,
+        "token": None,
         "dry_run": bool(args.dry_run),
     }
 
@@ -1417,6 +1480,10 @@ def cmd_session_handoff(args) -> int:
             f"  command:     {plan.shell_line}",
             "  applescript:",
             *[f"    {line}" for line in plan.applescript.splitlines()],
+            (
+                f"  a real run sets {launch.HANDOFF_ENV}=<session>:<recorded-at> "
+                f"before claude, so the new session claims this note"
+            ),
         ]
         if claude is None:
             lines.append(
@@ -1445,6 +1512,15 @@ def cmd_session_handoff(args) -> int:
         )
 
     updated = ctx.sessions.record_handoff(session.id, note, name)
+    token = handoff_token(updated.id, updated.handoffs[-1]["at"])
+    plan = launch.plan_launch(claude, name, note, main_checkout, token=token)
+    result.update(
+        {
+            "token": token,
+            "shell_line": plan.shell_line,
+            "applescript": plan.applescript,
+        }
+    )
     _handoff_launcher().launch(plan)
     return emit(
         args,
@@ -2547,13 +2623,19 @@ def build_parser() -> argparse.ArgumentParser:
             "down included), then open a new macOS Terminal window in the main "
             "checkout running: claude --name <slug> --remote-control <slug> "
             "\"<note>\". The slug comes from the note's 'next:' item unless "
-            "--name gives one."
+            "--name gives one. --dismiss instead retires the latest fresh note "
+            "without acting on it."
         ),
     )
     q.add_argument(
         "--note",
-        required=True,
         help="one terse keyword line; its 'next:' item names the new session",
+    )
+    q.add_argument(
+        "--dismiss",
+        action="store_true",
+        help="retire the latest fresh note here without acting on it; it is "
+        "recorded as dismissed",
     )
     q.add_argument("--name", help="the new session's name, instead of deriving it")
     q.add_argument(

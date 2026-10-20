@@ -381,6 +381,28 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--id <id>
     output names the one it recorded on. It never prints `session <id> (`,
     the binding sequence `start` and `resume` own: a handoff claims nothing.
 
+    The line actually typed carries the claim token in front of `claude`:
+
+        cd <main> && INVARIANT_HANDOFF=<session-id>:<at> claude --name …
+
+    naming the note just recorded, so the launched host's first `session
+    start` or `session resume` marks THAT note consumed and the greeting stops
+    offering it (state_model.md, "A note leaves the offer three ways"). A
+    `--dry-run` and the by-hand line printed on another platform carry no
+    token, because nothing was recorded for one to name; the dry run says what
+    a real run adds. The JSON result carries `token` (`null` on a dry run).
+
+invariant session handoff --dismiss [--dry-run] [--json]
+    Retire the note the unbound greeting is showing — the latest fresh,
+    unconsumed one here — without acting on it, recorded as `dismissed`
+    rather than `claimed`. For a handoff somebody decided not to take up, and
+    the only exit short of staleness for a note launched by hand. One note
+    per call, never "all of them": a dismissal must not silence a note the
+    caller has not seen. Refused (exit 2) when nothing fresh is recorded here,
+    and refused with --note, --name or --id, which select or describe a
+    handoff this form does not make. --dry-run names the note and writes
+    nothing. Prints no `session <id> (`.
+
 invariant session plan add "<deliverable>" | done <n> | reopen <n>
                     | remove <n> | show          [--id <id>] [--json]
     The deliverable set this session owes — what makes a session outlive its
@@ -673,10 +695,12 @@ invariant context
     transitions, pending gates, outstanding residue. Useful standalone for
     debugging what an agent is actually being told.
 
-    With no session bound it prints nothing — unless a fresh handoff is
-    recorded here, in which case it prints that note and who left it, as the
-    SessionStart greeting does. That is the backstop for a handed-off session
-    whose prompt argument was lost.
+    With no session bound it prints nothing — unless a fresh, unconsumed
+    handoff is recorded here, in which case it prints that note, who left it
+    and `invariant session handoff --dismiss`, as the SessionStart greeting
+    does. That is the backstop for a handed-off session whose prompt argument
+    was lost. A note a session has claimed, or somebody dismissed, is not
+    shown; an older open one is, if there is one.
 ```
 
 `invariant context` existing as a plain command is the point of the design.

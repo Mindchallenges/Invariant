@@ -59,6 +59,7 @@ graph TD
     CC --> CLI
     CC --> PLAN
     CC --> RULES
+    CC -. reads the claim token named by .-> CCLAUNCH
     CLI --> SESSION
     CLI --> PIPELINE
     CLI --> WORKITEM
@@ -396,6 +397,19 @@ D3). `SESSION --> PRIVACY` is drawn for that vetting: the note is scanned with
 the project's own `PrivacyScanner` before it is recorded or handed to a host
 whose transcript this library cannot scrub.
 
+`CC -. reads the claim token named by .-> CCLAUNCH` is horizontal, between two
+modules of one host, and carries one name: `HANDOFF_ENV`. The launcher sets
+that variable in front of `claude` with a token naming the recorded note, and
+`claude_code` reads it back — from the environment the hook subprocess
+inherited from its host — on the PostToolUse that binds the host's first
+`session start` or `resume`, then asks `domains/session` to mark that note
+claimed (IDEA_008, ADR-005 D6). One constant imported, rather than one string
+spelled twice, because a launcher that writes a variable the reader no longer
+looks for fails silently: the note just goes on being offered. The token's
+FORMAT is not host knowledge and lives with the domain that parses it
+(`handoff_token`); the arrow is dotted because what crosses it is a name, not
+a call.
+
 `domains/stats → domains/session` and `→ domains/pipeline` are horizontal, not
 upward. The join from a host session to an invariant session is knowledge of
 *what a session is*, which this document reserves to a domain; putting it in
@@ -532,7 +546,8 @@ touching the other.
 relationship: `claude_code` drives a running host, the telemetry reader reads
 back what one wrote, and this one STARTS one. It turns a handoff into a
 `LaunchPlan` — the `claude --name <slug> --remote-control <slug> "<note>"`
-argv, the `cd <main checkout> && …` line quoted with `shlex`, and the
+argv, the `cd <main checkout> && INVARIANT_HANDOFF=<token> …` line quoted
+with `shlex` (the token is set only once the note is recorded), and the
 AppleScript that types that line into a new macOS Terminal window — and
 `TerminalLauncher` runs `osascript` on it. Claude Code has no flag for a
 working directory or a window, so those two are this module's. The CLI reaches

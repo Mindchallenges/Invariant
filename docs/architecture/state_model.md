@@ -176,10 +176,12 @@ round-trip contract under Storage layout below).
 | `plan_touched` | When the plan last MOVED | the resumable ordering, and `session.work_would_be_stranded`'s staleness check |
 | `resumed_count` | How many host sessions picked this one up | the report |
 | `hosts` | Every host session bound to it BEFORE the current one, oldest first | provenance |
-| `handoffs` | What it told the NEXT host session: `{"note", "name", "at", "state"}` per `session handoff` | the greeting and `invariant context`, when nothing is bound |
+| `handoffs` | What it told the NEXT host session: `{"note", "name", "at", "state"}` per `session handoff`, plus `"consumed": {"at", "how", "session", "host"}` once the note was claimed or dismissed | the greeting and `invariant context`, when nothing is bound |
 
 `handoffs` is the fifth, added with `session handoff` (ADR-005) and under the
-same no-migration contract.
+same no-migration contract. Its `consumed` key (IDEA_008) is under it too, one
+level down: an entry without the key is unconsumed, so every entry written
+before it existed reads exactly as it did.
 
 Three properties of that set are decisions rather than shape.
 
@@ -434,6 +436,13 @@ names a **live** binding only, so a spent one goes straight through to
 kept. What the hook owes is the half the CLI could not do, which is *which*
 host session claimed it, and nothing more.
 
+The one other thing that call carries is the handoff claim. A host launched by
+`session handoff` inherits `INVARIANT_HANDOFF`, and the same PostToolUse that
+binds its first `start` or `resume` passes that token to
+`SessionDomain.claim_handoff` (see "A note leaves the offer three ways"). It is
+here for the reason the binding is: this is the first moment a write is both
+allowed and bracketed by the act it records.
+
 Enforced in both directions. A host session that already owns a live session
 cannot start a second; a session bound to a **live** host is not rebound to
 another without `--force`. Rebinding silently would hand a pipeline, its
@@ -598,9 +607,59 @@ Which session a handoff belongs to, most reliable first:
    session it recorded on.
 
 Where nothing is bound, the greeting and `invariant context` show the newest
-handoff recorded here (`latest_handoff`) while it is younger than
-`session.plan_stale_days` — derived on every read, like the stand-down's
+**unconsumed** handoff recorded here (`latest_handoff`) while it is younger
+than `session.plan_stale_days` — derived on every read, like the stand-down's
 expiry, so nothing has to run for an old note to stop being offered.
+
+##### A note leaves the offer three ways
+
+Freshness was the only exit at first (ADR-005 D5), so a note went on being
+offered — to every unbound greeting here, including the one in the very host
+session launched to act on it — for most of its life after the work was already
+in flight. Two exits were added beside it (IDEA_008, ADR-005 D6), and each
+consumes **one** note:
+
+```mermaid
+stateDiagram-v2
+    [*] --> offered: session handoff --note (recorded)
+    offered --> claimed: first start / resume in the host its token names
+    offered --> dismissed: session handoff --dismiss
+    offered --> stale: older than session.plan_stale_days (derived, nothing writes)
+    claimed --> [*]
+    dismissed --> [*]
+    stale --> [*]
+```
+
+- **Claimed — by the token the launcher set.** The launched line is
+  `cd <main> && INVARIANT_HANDOFF=<session-id>:<at> claude …`, so the
+  variable reaches that one `claude` process and every hook it spawns. On the
+  PostToolUse that brackets the host's first `session start` or
+  `session resume` — the binding path under "Host binding" above —
+  `claude_code` reads it and calls `SessionDomain.claim_handoff`, which marks
+  EXACTLY that note. Not at `SessionStart`, which must not write. The first
+  claim wins; the host keeps the variable for its whole life, and every later
+  claim with it is a no-op.
+- **Dismissed — by hand.** `session handoff --dismiss` marks the note the
+  greeting is showing, recorded as `dismissed` rather than `claimed`, so the
+  history says nobody acted on it.
+- **Stale — unchanged.** Still derived on every read.
+
+There is deliberately **no** "any start after `at` consumes" fallback. A note
+launched by hand carries no token, and a time window would silence a note on
+behalf of an unrelated session that merely started later in the same project
+— which is the duplicated-work failure this exists to remove, inverted. Such a
+note leaves by dismissal or staleness. Consumption is per note, so a handoff
+recorded after the one a session claimed is still offered.
+
+The marker lives on the entry — when, `how` (`claimed` or `dismissed`), the
+consuming invariant session and host session — and the entry stays on
+`handoffs`: the list is history, not a queue to pop. The write lands on the
+HANDING-OFF session's record, which is usually torn down by then, so it takes
+the handoff's own shape: a standstill row in `history` (carrying
+`handoff_consumed: <name>` and `how`), saved and never re-registered, passing
+and forcing no gate. A hook that cannot read the record, or a token that names
+nothing, changes nothing and fails nothing — the note simply goes on being
+offered.
 
 #### How a session lands: two modes, asked rather than remembered
 

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -723,3 +725,504 @@ def test_no_test_here_can_reach_a_real_window():
 
     assert isinstance(cli._handoff_launcher(), RecordingLauncher)
     assert os.environ.get("INVARIANT_SESSION_ID") is None
+
+
+# -- consuming a note (IDEA_008) ----------------------------------------
+#
+# A note stops being offered once a session acts on it. Two exits, and only
+# two: the launched host's first `session start` / `session resume` claims
+# EXACTLY the note its launcher token names, and `session handoff --dismiss`
+# retires the latest fresh one by hand. Freshness stays the third, derived
+# expiry, untouched.
+
+#: The variable the launcher sets in front of `claude`. Spelled out here rather
+#: than imported so that a rename is a failing test, not a silent agreement.
+TOKEN_ENV = "INVARIANT_HANDOFF"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_handoff_token(monkeypatch):
+    """A suite run from a handed-off host inherits that host's token."""
+    monkeypatch.delenv(TOKEN_ENV, raising=False)
+
+
+def hook(event: str, body: dict, monkeypatch) -> int:
+    monkeypatch.setattr("sys.stdin", _Stdin(json.dumps(body)))
+    return run("hook", event)
+
+
+def token_for(session_id: str, entry: dict) -> str:
+    return f"{session_id}:{entry['at']!r}"
+
+
+def started_id(out: str) -> str:
+    match = re.search(r"session\s+([0-9a-z]+)\s+\(", out)
+    assert match, out
+    return match.group(1)
+
+
+def claim_payload(command: str, stdout: str, host: str = "host-next-4242") -> dict:
+    return {
+        "session_id": host,
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {"stdout": stdout},
+    }
+
+
+class TestAConsumedHandoffIsNotOffered:
+    def test_a_consumed_entry_is_skipped(self, project):
+        sessions = domain(project, clock=lambda: 1000.0)
+        first = sessions.start("first")
+        first.handoffs = [
+            {
+                "note": "next: done already",
+                "name": "done-already",
+                "at": 900.0,
+                "state": "registered",
+                "consumed": {"at": 950.0, "how": "claimed", "session": "x", "host": None},
+            }
+        ]
+        sessions._save(first)
+
+        assert sessions.latest_handoff(project) is None
+
+    def test_an_older_open_note_is_offered_when_the_newest_is_consumed(self, project):
+        sessions = domain(project, clock=lambda: 1000.0)
+        first = sessions.start("first")
+        first.handoffs = [
+            {"note": "next: older", "name": "older", "at": 800.0, "state": "registered"},
+            {
+                "note": "next: newer",
+                "name": "newer",
+                "at": 900.0,
+                "state": "registered",
+                "consumed": {"at": 950.0, "how": "dismissed", "session": None, "host": None},
+            },
+        ]
+        sessions._save(first)
+
+        _, entry = sessions.latest_handoff(project)
+        assert entry["name"] == "older"
+
+    def test_an_entry_without_the_key_reads_as_unconsumed(self, project):
+        sessions = domain(project, clock=lambda: 1000.0)
+        first = sessions.start("first")
+        first.handoffs = [
+            {"note": "next: open", "name": "open", "at": 900.0, "state": "registered"}
+        ]
+        sessions._save(first)
+
+        _, entry = sessions.latest_handoff(project)
+        assert entry["name"] == "open"
+
+
+class TestTheLaunchCarriesTheClaimToken:
+    def test_the_typed_line_names_the_recorded_note(
+        self, project, capsys, launcher, macos_with_claude
+    ):
+        session = started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+
+        (plan,) = launcher.plans
+        entry = domain(project).get(session["id"]).handoffs[-1]
+        token = token_for(session["id"], entry)
+        assert f"{TOKEN_ENV}={token}" in shlex.split(plan.shell_line)
+        assert plan.argv[-1] == "next: ship it"
+
+    def test_a_real_shell_hands_claude_the_token(
+        self, project, capsys, launcher, monkeypatch, tmp_path
+    ):
+        captured = tmp_path / "env.json"
+        fake = tmp_path / "fakebin" / "claude"
+        fake.parent.mkdir()
+        fake.write_text(
+            f"#!{sys.executable}\nimport json, os, sys\n"
+            f"json.dump({{'token': os.environ.get({TOKEN_ENV!r}), "
+            f"'argv': sys.argv[1:]}}, open({str(captured)!r}, 'w'))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setattr(launch, "host_platform", lambda: "darwin")
+        monkeypatch.setattr(launch, "resolve_claude", lambda: str(fake))
+        session = started(project, capsys)
+        assert run("session", "handoff", "--note", NASTY) == 0
+
+        (plan,) = launcher.plans
+        subprocess.run(["/bin/sh", "-c", plan.shell_line], check=True)
+        got = json.loads(captured.read_text(encoding="utf-8"))
+        entry = domain(project).get(session["id"]).handoffs[-1]
+        assert got["token"] == token_for(session["id"], entry)
+        assert got["argv"][-1] == NASTY
+
+    def test_a_dry_run_carries_no_token_because_nothing_was_recorded(
+        self, project, capsys, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it", "--dry-run") == 0
+        text = capsys.readouterr().out
+        assert f"{TOKEN_ENV}=" not in text.split("command:", 1)[1].splitlines()[0]
+
+    def test_the_by_hand_line_on_another_platform_carries_no_token(
+        self, project, capsys, launcher, monkeypatch
+    ):
+        started(project, capsys)
+        monkeypatch.setattr(launch, "host_platform", lambda: "linux")
+        monkeypatch.setattr(launch, "resolve_claude", lambda: "/opt/bin/claude")
+        assert run("session", "handoff", "--note", "next: ship it") == 2
+        assert f"{TOKEN_ENV}=" not in capsys.readouterr().err
+
+
+class TestTheLaunchedSessionClaimsItsNote:
+    """The claim rides the PostToolUse binding path, never SessionStart."""
+
+    def handed_off(self, project, capsys, note="next: ship it", name="ship-it"):
+        session = started(project, capsys, name="old-task")
+        sessions = domain(project)
+        sessions.record_handoff(session["id"], note, name)
+        sessions.transition(session["id"], "abandoned", reason="fixture")
+        entry = sessions.get(session["id"]).handoffs[-1]
+        capsys.readouterr()
+        return session, entry
+
+    def start_next(self, capsys, name="ship-it"):
+        assert run("session", "start", name) == 0
+        out = capsys.readouterr().out
+        return out
+
+    def test_the_first_start_claims_the_named_note(
+        self, project, capsys, monkeypatch
+    ):
+        old, entry = self.handed_off(project, capsys)
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        out = self.start_next(capsys)
+        new_id = started_id(out)
+
+        assert hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        ) == 0
+        capsys.readouterr()
+
+        consumed = domain(project).get(old["id"]).handoffs[-1].get("consumed")
+        assert consumed is not None
+        assert consumed["how"] == "claimed"
+        assert consumed["session"] == new_id
+        assert consumed["host"] == "host-next-4242"
+        assert isinstance(consumed["at"], float)
+
+        assert domain(project).latest_handoff(project) is None
+
+    def test_context_no_longer_shows_a_claimed_note(
+        self, project, capsys, monkeypatch
+    ):
+        old, entry = self.handed_off(project, capsys)
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        out = self.start_next(capsys)
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        )
+        # The new session exists now; take it out of the way so `context` is
+        # asked the unbound question the greeting asks.
+        new_id = started_id(out)
+        domain(project).transition(new_id, "abandoned", reason="fixture")
+        capsys.readouterr()
+
+        assert run("context") == 0
+        assert "next: ship it" not in capsys.readouterr().out
+
+    def test_a_resume_claims_too(self, project, capsys, monkeypatch):
+        old, entry = self.handed_off(project, capsys)
+        parked = domain(project).start("parked-task", host_session_id="host-gone-1")
+        domain(project).end_host_session("host-gone-1")
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        assert run("session", "resume", parked.name) == 0
+        out = capsys.readouterr().out
+
+        hook(
+            "post-tool-use",
+            claim_payload(f"invariant session resume {parked.name}", out),
+            monkeypatch,
+        )
+        consumed = domain(project).get(old["id"]).handoffs[-1].get("consumed")
+        assert consumed is not None and consumed["session"] == parked.id
+
+    def test_session_start_the_greeting_writes_nothing(
+        self, project, capsys, monkeypatch
+    ):
+        old, entry = self.handed_off(project, capsys)
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        hook("session-start", {"session_id": "host-next-4242"}, monkeypatch)
+        capsys.readouterr()
+
+        assert "consumed" not in domain(project).get(old["id"]).handoffs[-1]
+
+    def test_without_a_token_a_start_consumes_nothing(
+        self, project, capsys, monkeypatch
+    ):
+        old, _ = self.handed_off(project, capsys)
+        out = self.start_next(capsys)
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        )
+        assert "consumed" not in domain(project).get(old["id"]).handoffs[-1]
+
+    def test_a_read_only_command_claims_nothing(self, project, capsys, monkeypatch):
+        old, entry = self.handed_off(project, capsys)
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        hook(
+            "post-tool-use",
+            claim_payload(
+                "invariant session status",
+                f"invariant — session {old['id']} (old-task) is abandoned",
+            ),
+            monkeypatch,
+        )
+        assert "consumed" not in domain(project).get(old["id"]).handoffs[-1]
+
+    def test_only_the_named_note_is_consumed(self, project, capsys, monkeypatch):
+        ticks = iter(range(1000, 2000))
+        sessions = domain(project, clock=lambda: float(next(ticks)))
+        a = sessions.start("task-a")
+        b = sessions.start("task-b")
+        sessions.record_handoff(a.id, "next: one", "one")
+        sessions.record_handoff(b.id, "next: two", "two")
+        named = sessions.get(a.id).handoffs[-1]
+        monkeypatch.setenv(TOKEN_ENV, token_for(a.id, named))
+
+        out = self.start_next(capsys, name="one")
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start one", out),
+            monkeypatch,
+        )
+        assert "consumed" in domain(project).get(a.id).handoffs[-1]
+        assert "consumed" not in domain(project).get(b.id).handoffs[-1]
+
+    def test_a_note_recorded_after_the_claim_is_still_offered(
+        self, project, capsys, monkeypatch
+    ):
+        old, entry = self.handed_off(project, capsys)
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        out = self.start_next(capsys)
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        )
+        domain(project).record_handoff(old["id"], "next: later work", "later-work")
+
+        _, latest = domain(project).latest_handoff(project)
+        assert latest["name"] == "later-work"
+
+    def test_a_second_start_in_the_same_host_does_not_reclaim(
+        self, project, capsys, monkeypatch
+    ):
+        old, entry = self.handed_off(project, capsys)
+        monkeypatch.setenv(TOKEN_ENV, token_for(old["id"], entry))
+        first = self.start_next(capsys)
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", first),
+            monkeypatch,
+        )
+        before = domain(project).get(old["id"]).handoffs[-1]["consumed"]
+
+        second = self.start_next(capsys, name="other-thing")
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start other-thing", second, host="host-2"),
+            monkeypatch,
+        )
+        assert domain(project).get(old["id"]).handoffs[-1]["consumed"] == before
+
+    def test_the_old_record_gets_a_standstill_row_and_stays_deregistered(
+        self, project, capsys, monkeypatch
+    ):
+        session = started(project, capsys, name="old-task")
+        sessions = domain(project)
+        sessions.transition(session["id"], "merged", force=True, reason="fixture")
+        sessions.teardown(session["id"])
+        sessions.record_handoff(session["id"], "next: ship it", "ship-it")
+        entry = sessions.get(session["id"]).handoffs[-1]
+        capsys.readouterr()
+        monkeypatch.setenv(TOKEN_ENV, token_for(session["id"], entry))
+
+        out = self.start_next(capsys)
+        hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        )
+        record = domain(project).get(session["id"])
+        assert record.state == "torn_down"
+        row = record.history[-1]
+        assert row["from"] == row["to"] == "torn_down"
+        assert row.get("handoff_consumed") == "ship-it"
+        assert row.get("how") == "claimed"
+        registry = sessions.store.read("registry.json", {"sessions": {}})
+        assert session["id"] not in registry["sessions"]
+
+
+class TestTheClaimIsForgiving:
+    """A hook must never fail a completed command over a bad token."""
+
+    def test_a_record_that_cannot_be_read_does_not_fail_the_hook(
+        self, project, capsys, monkeypatch
+    ):
+        session = started(project, capsys, name="old-task")
+        domain(project).record_handoff(session["id"], "next: ship it", "ship-it")
+        entry = domain(project).get(session["id"]).handoffs[-1]
+        capsys.readouterr()
+        monkeypatch.setenv(TOKEN_ENV, token_for(session["id"], entry))
+
+        def broken(self, *args, **kwargs):
+            raise InvariantError("state store unreadable")
+
+        monkeypatch.setattr(SessionDomain, "claim_handoff", broken)
+        assert run("session", "start", "ship-it") == 0
+        out = capsys.readouterr().out
+        assert hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        ) == 0
+
+    @pytest.mark.parametrize(
+        "token",
+        ["", "no-colon", "deadbeef:1.0", "{sid}:not-a-number", "{sid}:12345.0"],
+    )
+    def test_a_token_that_names_nothing_changes_nothing(
+        self, project, capsys, monkeypatch, token
+    ):
+        session = started(project, capsys, name="old-task")
+        domain(project).record_handoff(session["id"], "next: ship it", "ship-it")
+        capsys.readouterr()
+        monkeypatch.setenv(TOKEN_ENV, token.format(sid=session["id"]))
+
+        assert run("session", "start", "ship-it") == 0
+        out = capsys.readouterr().out
+        assert hook(
+            "post-tool-use",
+            claim_payload("invariant session start ship-it", out),
+            monkeypatch,
+        ) == 0
+        assert "consumed" not in domain(project).get(session["id"]).handoffs[-1]
+
+    def test_the_domain_answers_none_for_a_token_it_cannot_honour(self, project):
+        sessions = domain(project)
+        first = sessions.start("first")
+        sessions.record_handoff(first.id, "next: one", "one")
+        entry = sessions.get(first.id).handoffs[-1]
+
+        assert sessions.claim_handoff("garbage", "other", None) is None
+        assert sessions.claim_handoff(token_for(first.id, entry), "other", "h") is not None
+        assert sessions.claim_handoff(token_for(first.id, entry), "again", "h") is None
+
+
+class TestDismiss:
+    def recorded(self, project, capsys):
+        session = started(project, capsys, name="old-task")
+        domain(project).record_handoff(session["id"], "next: ship it", "ship-it")
+        domain(project).transition(session["id"], "abandoned", reason="fixture")
+        capsys.readouterr()
+        return session
+
+    def test_dismiss_retires_the_latest_fresh_note(self, project, capsys, launcher):
+        session = self.recorded(project, capsys)
+
+        assert run("session", "handoff", "--dismiss") == 0
+        text = capsys.readouterr().out
+        assert "ship-it" in text
+        assert f"session {session['id']} (" not in text
+        consumed = domain(project).get(session["id"]).handoffs[-1]["consumed"]
+        assert consumed["how"] == "dismissed"
+        assert launcher.plans == []
+
+        assert run("context") == 0
+        assert "next: ship it" not in capsys.readouterr().out
+
+    def test_dismiss_records_a_standstill_row(self, project, capsys):
+        session = self.recorded(project, capsys)
+        run("session", "handoff", "--dismiss")
+        row = domain(project).get(session["id"]).history[-1]
+        assert row["from"] == row["to"] == "abandoned"
+        assert row.get("handoff_consumed") == "ship-it"
+        assert row.get("how") == "dismissed"
+
+    def test_dismiss_json(self, project, capsys):
+        session = self.recorded(project, capsys)
+        assert run("session", "handoff", "--dismiss", "--json") == 0
+        doc = last_json(capsys)
+        assert doc["dismissed"] is True
+        assert doc["session"] == session["id"]
+        assert doc["name"] == "ship-it"
+
+    def test_dismiss_dry_run_writes_nothing(self, project, capsys):
+        session = self.recorded(project, capsys)
+        assert run("session", "handoff", "--dismiss", "--dry-run") == 0
+        assert "ship-it" in capsys.readouterr().out
+        assert "consumed" not in domain(project).get(session["id"]).handoffs[-1]
+
+    def test_dismiss_with_nothing_fresh_is_refused(self, project, capsys):
+        started(project, capsys)
+        assert run("session", "handoff", "--dismiss") == 2
+        assert "no fresh handoff" in capsys.readouterr().err
+
+    def test_a_dry_run_with_nothing_fresh_is_refused_the_same_way(
+        self, project, capsys
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--dismiss", "--dry-run") == 2
+        assert "no fresh handoff" in capsys.readouterr().err
+
+    def test_dismiss_names_the_proven_session_and_host_as_the_dismisser(
+        self, project, capsys, monkeypatch
+    ):
+        old = self.recorded(project, capsys)
+        mine = domain(project).start("mine", host_session_id="host-here-7777")
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-here-7777")
+
+        assert run("session", "handoff", "--dismiss") == 0
+        consumed = domain(project).get(old["id"]).handoffs[-1]["consumed"]
+        assert consumed["session"] == mine.id
+        assert consumed["host"] == "host-here-7777"
+
+    def test_dismiss_retires_one_note_at_a_time(self, project, capsys):
+        # Distinct, increasing and FRESH: the command reads the real clock.
+        base = time.time() - 60.0
+        ticks = iter(range(100))
+        sessions = domain(project, clock=lambda: base + next(ticks))
+        a = sessions.start("task-a")
+        sessions.record_handoff(a.id, "next: one", "one")
+        sessions.record_handoff(a.id, "next: two", "two")
+
+        assert run("session", "handoff", "--dismiss") == 0
+        capsys.readouterr()
+        _, left = domain(project).latest_handoff(project)
+        assert left["name"] == "one"
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--note", "next: x"], ["--name", "x"], ["--id", "deadbeef"]],
+    )
+    def test_dismiss_takes_no_note_name_or_id(self, project, capsys, extra):
+        self.recorded(project, capsys)
+        assert run("session", "handoff", "--dismiss", *extra) == 2
+        assert "--dismiss" in capsys.readouterr().err
+
+    def test_neither_note_nor_dismiss_is_refused(self, project, capsys):
+        started(project, capsys)
+        assert run("session", "handoff") == 2
+        err = capsys.readouterr().err
+        assert "--note" in err and "--dismiss" in err
+
+    def test_the_greeting_names_the_way_to_dismiss(self, project, capsys, monkeypatch):
+        self.recorded(project, capsys)
+        assert run("context") == 0
+        assert "invariant session handoff --dismiss" in capsys.readouterr().out

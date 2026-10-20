@@ -194,7 +194,11 @@ class Session(PreservesUnknownKeys):
     #: which is exactly what makes the crossing visible instead of plausible.
     usage_at_start_host: str | None = None
     #: What this session told the NEXT one, oldest first:
-    #: ``{"note", "name", "at", "state"}`` per ``invariant session handoff``.
+    #: ``{"note", "name", "at", "state"}`` per ``invariant session handoff``,
+    #: plus ``"consumed": {"at", "how", "session", "host"}`` once a session
+    #: claimed the note or somebody dismissed it (IDEA_008). An entry without
+    #: that key is unconsumed, so a record written before it existed reads
+    #: exactly as it did.
     #:
     #: A field rather than a store, for the reasons ``plan`` is one. And kept
     #: on a record that may already be torn down: a handoff is normally the
@@ -1521,6 +1525,11 @@ class SessionDomain:
         an expiry that depends on something else running is one that does not
         happen. A read, and only a read: the greeting calls it on every
         ``SessionStart``.
+
+        A CONSUMED entry is skipped — claimed by the session its launcher
+        named, or dismissed by hand — and the newest entry still open answers
+        instead. Skipping is per note: a handoff recorded after the one a
+        session claimed is still offered.
         """
         cwd = Path(cwd or Path.cwd()).resolve()
         days = self.manifest.get("session.plan_stale_days", 7)
@@ -1534,12 +1543,124 @@ class SessionDomain:
             if not session.origin or not _contains(Path(session.origin), cwd):
                 continue
             for entry in session.handoffs:
+                if entry.get("consumed"):
+                    continue
                 at = entry.get("at")
                 if not isinstance(at, (int, float)) or now - at > horizon:
                     continue
                 if best is None or at > best[1]["at"]:
                     best = (session, entry)
         return best
+
+    def claim_handoff(
+        self, token: str, session_id: str | None, host_session_id: str | None
+    ) -> dict | None:
+        """Mark the note ``token`` names as claimed by the session acting on it.
+
+        The token is what the handoff launcher put in front of ``claude``
+        (:func:`handoff_token`), so it names EXACTLY one note: the one this
+        host session was launched to pick up. Never "every fresh note", and
+        there is deliberately no fallback that consumes by time — a note
+        launched by hand carries no token and leaves only by dismissal or by
+        going stale.
+
+        Freshness is not asked. The token is proof the note was acted on, and
+        an old note marked so is still the truth about it.
+
+        Returns the consumed entry, or ``None`` when there is nothing to do: a
+        token that does not parse, names no session or no note, or names a
+        note already consumed. The first claim wins, so the token a host keeps
+        for its whole life cannot re-claim on a later ``start``. The caller is
+        a hook, and a hook must never fail a command that has already run, so
+        none of these is an error.
+        """
+        found = self._handoff_by_token(token)
+        if found is None:
+            return None
+        session, entry = found
+        if entry.get("consumed"):
+            return None
+        return self._consume_handoff(
+            session, entry, "claimed", session_id, host_session_id
+        )
+
+    def dismiss_handoff(
+        self,
+        cwd: Path | None = None,
+        session_id: str | None = None,
+        host_session_id: str | None = None,
+    ) -> tuple[Session, dict]:
+        """Retire the latest fresh note here without acting on it.
+
+        For a handoff somebody decided not to take up. It is recorded as
+        ``dismissed``, not ``claimed``, so the history says nobody acted on
+        it. One note per call — the one the greeting is showing — so a
+        dismissal never silences a note the caller has not seen.
+        """
+        session, entry = self.dismissable_handoff(cwd)
+        consumed = self._consume_handoff(
+            session, entry, "dismissed", session_id, host_session_id
+        )
+        return session, consumed
+
+    def dismissable_handoff(self, cwd: Path | None = None) -> tuple[Session, dict]:
+        """The note ``dismiss_handoff`` would retire, or the refusal it gives.
+
+        Public so that ``--dry-run`` names, and refuses, exactly what the real
+        run would.
+        """
+        found = self.latest_handoff(cwd)
+        if found is None:
+            raise UsageError(
+                "no fresh handoff here to dismiss: nothing recorded at or above "
+                "this directory is both unconsumed and younger than "
+                "session.plan_stale_days"
+            )
+        return found
+
+    def _handoff_by_token(self, token: str | None) -> tuple[Session, dict] | None:
+        session_id, sep, at_text = (token or "").partition(":")
+        if not sep or not session_id:
+            return None
+        try:
+            at = float(at_text)
+        except ValueError:
+            return None
+        session = self.get(session_id)
+        if session is None:
+            return None
+        for entry in session.handoffs:
+            if entry.get("at") == at:
+                return session, entry
+        return None
+
+    def _consume_handoff(
+        self,
+        session: Session,
+        entry: dict,
+        how: str,
+        session_id: str | None,
+        host_session_id: str | None,
+    ) -> dict:
+        """Write the marker onto the entry and a standstill row onto the record.
+
+        The shape the handoff itself took (ADR-005 D2): an event, not an edge,
+        on a record that is usually torn down — so it is saved and never
+        re-registered, and it passes and forces no gate.
+        """
+        now = self._note(
+            session,
+            f"handoff {how}",
+            extra={"handoff_consumed": entry.get("name"), "how": how},
+        )
+        entry["consumed"] = {
+            "at": now,
+            "how": how,
+            "session": session_id,
+            "host": host_session_id,
+        }
+        self._save(session)
+        return entry
 
     def teardown(
         self,
@@ -2098,6 +2219,16 @@ _NEXT_ITEM_END = re.compile(
 #: A work-item type prefix. ``BUG_X`` and ``IDEA_X`` name X; the type is noise
 #: in a session name, and keeping it costs a word of a six-word budget.
 _ITEM_TYPE_PREFIX = re.compile(r"\b(?:bug|idea)_", re.IGNORECASE)
+
+
+def handoff_token(session_id: str, at: float) -> str:
+    """The claim token naming one recorded note: ``<session-id>:<at>``.
+
+    ``at`` is written with ``repr``, which round-trips a float exactly, and the
+    record stores it through JSON, which does too — so the reader matches by
+    equality rather than by a tolerance that could name a neighbour.
+    """
+    return f"{session_id}:{float(at)!r}"
 
 
 def handoff_name(note: str, name: str | None = None) -> str | None:
