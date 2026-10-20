@@ -3,7 +3,7 @@ id: IDEA_008
 type: idea
 title: A handoff note is offered to every unbound greeting until it goes stale, even
   after a session acted on it
-status: in_progress
+status: done
 residue: []
 history:
 - from: proposed
@@ -12,6 +12,10 @@ history:
   forced: false
 - from: accepted
   to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
   reason: null
   forced: false
 area: domains/session, hosts/claude_code, cli/main
