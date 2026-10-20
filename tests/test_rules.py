@@ -1560,6 +1560,102 @@ class TestCommitMessageForms:
         assert verdict.ok and not verdict.skipped
 
 
+class TestDashFWrittenByTheSameCommand:
+    """BUG_067 — the ``-F`` file is written by the command that commits.
+
+    The hook runs before the command, so the file cannot exist at scan time.
+    Still a refusal (AUD-09); only the reason and the remedy change, and only
+    when a redirect, a ``tee`` or a heredoc-fed ``cat >`` in the same command
+    lands on the ``-F`` path. Anything unrecognised keeps the generic wording.
+    """
+
+    SAME = "which this same command writes"
+    GENERIC = "could not be read at scan time"
+
+    def refusal(self, ctx_factory, command, cwd=None):
+        ctx = ctx_factory(cwd=cwd or ctx_factory.main, payload=bash_payload(command))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, command
+        return verdict
+
+    def assert_same_command(self, verdict):
+        assert self.SAME in verdict.detail, verdict.detail
+        assert "runs before the command" in verdict.detail
+        assert verdict.fixes == (
+            "write the file in a separate call first, then commit with -F",
+            "or write the message inline with -m '<message>'",
+        )
+
+    def assert_generic(self, verdict):
+        assert self.GENERIC in verdict.detail, verdict.detail
+        assert verdict.fixes == ("write the message inline with -m '<message>'",)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "printf x > msg.txt",
+            "printf x >> msg.txt",
+            "printf x >| msg.txt",
+            "printf x >msg.txt",
+            "printf x >>msg.txt",
+            "printf x >|msg.txt",
+            "printf x | tee msg.txt",
+            "printf x | tee -a other.txt msg.txt",
+            "printf x | /usr/bin/tee --append msg.txt",
+        ],
+    )
+    def test_each_write_spelling_names_the_same_command(self, ctx_factory, write):
+        verdict = self.refusal(ctx_factory, f"{write} && git commit -F msg.txt")
+        self.assert_same_command(verdict)
+
+    def test_a_heredoc_fed_cat_names_the_same_command(self, ctx_factory):
+        command = "cat > msg.txt <<'EOF'\nhello\nEOF\ngit commit -F msg.txt"
+        self.assert_same_command(self.refusal(ctx_factory, command))
+
+    def test_the_long_file_option_names_the_same_command(self, ctx_factory):
+        verdict = self.refusal(ctx_factory, "printf x > m.txt && git commit --file=m.txt")
+        self.assert_same_command(verdict)
+
+    def test_an_absolute_write_matches_a_relative_dash_f(self, ctx_factory):
+        msg = ctx_factory.main / "msg.txt"
+        verdict = self.refusal(ctx_factory, f"printf x > {msg} && git commit -F msg.txt")
+        self.assert_same_command(verdict)
+
+    def test_a_write_to_another_file_keeps_the_generic_wording(self, ctx_factory):
+        verdict = self.refusal(
+            ctx_factory, "printf x > other.txt && git commit -F msg.txt"
+        )
+        self.assert_generic(verdict)
+
+    def test_tee_stops_at_its_own_redirect_and_at_a_separator(self, ctx_factory):
+        for command in (
+            "printf x | tee a.txt > /dev/null && git commit -F msg.txt",
+            "printf x | tee a.txt && git commit -F msg.txt",
+        ):
+            self.assert_generic(self.refusal(ctx_factory, command))
+
+    def test_a_dangling_redirect_keeps_the_generic_wording(self, ctx_factory):
+        self.assert_generic(self.refusal(ctx_factory, "git commit -F msg.txt >"))
+
+    def test_dash_c_moves_the_dash_f_read_but_not_the_shell_write(self, ctx_factory):
+        """git reads ``-F msg.txt`` from the ``-C`` tree; the shell writes
+        ``> msg.txt`` in its own cwd. Different files: no same-command claim."""
+        wt = ctx_factory.wt
+        apart = self.refusal(
+            ctx_factory, f"printf x > msg.txt && git -C {wt} commit -F msg.txt"
+        )
+        self.assert_generic(apart)
+        together = self.refusal(
+            ctx_factory, f"printf x > {wt}/msg.txt && git -C {wt} commit -F msg.txt"
+        )
+        self.assert_same_command(together)
+
+    def test_stdin_keeps_its_wording_even_beside_a_write(self, ctx_factory):
+        verdict = self.refusal(ctx_factory, "printf x > - ; git commit -F -")
+        assert "reads the message from stdin" in verdict.detail
+        assert verdict.fixes == ("write the message inline with -m '<message>'",)
+
+
 class TestPrivacyScreensTheIndexTheCommitNames:
     """BUG_048 — see docs/backlog/BUG_048.md.
 

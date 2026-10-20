@@ -2885,10 +2885,6 @@ class TestBUG_067_DashFWrittenByTheSameCommand:
         assert not msg.exists()  # the hook ran before the command, as on a host
         assert block.startswith("privacy.clean: the commit message could not be scanned")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_067 is live — delete this marker with the fix",
-    )
     def test_BUG_067_refusal_names_the_same_command_write_and_a_separate_call(
         self, project, capsys, monkeypatch
     ):

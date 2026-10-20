@@ -243,7 +243,13 @@ follows the declaration, which is the whole point.
   clusters like `-am`, and `-F <file>` by reading the file. A message the
   gate is configured to scan and cannot read (`-F` on an absent file, `-F -`
   from stdin) FAILS rather than passing unread, in the same do-not-relax
-  convention as the git helpers (AUD-09); `all`, which scans everything.
+  convention as the git helpers (AUD-09). When the same command writes the
+  `-F` file — a `>`, `>>` or `>|` redirect (a heredoc-fed `cat >` included)
+  or a `tee [-a]` argument landing on the path git would read — the refusal
+  names that cause: the hook runs before the command, so the file cannot
+  exist yet, and the remedy is to write it in a separate call first, or use
+  `-m`. Any write it does not recognise keeps the generic wording (BUG_067);
+  `all`, which scans everything.
 - **Literal project-relative path prefixes** — any entry that is not a
   keyword. This is how a project widens scope beyond what `paths.*` names:
   a repository whose `paths.docs` is `docs/architecture` can declare `docs/`

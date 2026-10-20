@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import codecs
 import fnmatch
+import os
 import re
 import shlex
 import time
@@ -2075,8 +2076,11 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
     if "commit_messages" in scope:
         message = ctx.extra.get("commit_message")
         problem = None
+        fixes: tuple[str, ...] = (_INLINE_MESSAGE_FIX,)
         if not message and ctx.tool_name == "Bash":
-            message, problem = _extract_commit_message(command, cwd=commit_cwd)
+            message, problem, fixes = _extract_commit_message(
+                command, cwd=commit_cwd, shell_cwd=ctx.cwd
+            )
         if problem:
             # Fail closed, per the do-not-relax convention every other
             # unanswerable question here follows (AUD-07/08): a message this
@@ -2084,7 +2088,7 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
             return Verdict.fail(
                 "the commit message could not be scanned",
                 detail=problem,
-                fixes=("write the message inline with -m '<message>'",),
+                fixes=fixes,
             )
         if message:
             scanned.append("commit message")
@@ -3886,29 +3890,119 @@ def _git_command_cwd(command: str, cwd: Path) -> tuple[Path, str | None]:
     return Path(cwd), None
 
 
-def _extract_commit_message(command: str, cwd: Path | None = None) -> tuple[str, str | None]:
+_INLINE_MESSAGE_FIX = "write the message inline with -m '<message>'"
+
+#: The remedy when the ``-F`` file is written by the very command that commits.
+#: A retry of the same call cannot help: a denied call never ran, so the file
+#: is still missing the next time the hook looks (BUG_067).
+_SEPARATE_CALL_FIXES = (
+    "write the file in a separate call first, then commit with -F",
+    "or " + _INLINE_MESSAGE_FIX,
+)
+
+#: Shell words that end one command of a chain, so a ``tee`` stops reading
+#: its file arguments there.
+_SHELL_SEPARATORS = frozenset({"|", "||", "&&", ";", "&"})
+
+#: An output redirection: ``>``, ``>>`` or ``>|``, with or without its target
+#: attached to the operator in the same word.
+_OUTPUT_REDIRECT = re.compile(r"(>>|>\|?)(.*)", re.DOTALL)
+
+
+def _shell_write_targets(tokens: list[str]) -> list[str]:
+    """The files a shell command writes, as spelled in its words.
+
+    Deliberately narrow: an output redirection (``>``, ``>>``, ``>|`` — which
+    is also how a heredoc-fed ``cat > f <<EOF`` writes) and a ``tee [-a]``
+    file argument. Anything else is not recognised, and the caller keeps its
+    generic wording for it: a cause named wrongly is worse than one left
+    general.
+    """
+    targets: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        redirect = _OUTPUT_REDIRECT.fullmatch(token)
+        if redirect:
+            attached = redirect.group(2)
+            if attached:
+                targets.append(attached)
+            elif index + 1 < len(tokens):
+                targets.append(tokens[index + 1])
+                index += 1
+        elif PurePosixPath(token).name == "tee":
+            index += 1
+            while index < len(tokens) and tokens[index] not in _SHELL_SEPARATORS:
+                word = tokens[index]
+                if word.startswith((">", "<")):
+                    break  # a redirection of tee itself: read it as one
+                if not word.startswith("-"):
+                    targets.append(word)
+                index += 1
+            continue
+        index += 1
+    return targets
+
+
+def _joined(name: str, base: Path | None) -> Path:
+    """``name`` as the shell or git would spell it from ``base``."""
+    path = Path(name)
+    if not path.is_absolute():
+        path = Path(base or Path.cwd()) / path
+    return path
+
+
+def _extract_commit_message(
+    command: str, cwd: Path | None = None, shell_cwd: Path | None = None
+) -> tuple[str, str | None, tuple[str, ...]]:
     """The message a ``git commit`` invocation carries, or why it is unreadable.
 
-    Returns ``(message, problem)``. ``problem`` is set when the command names
-    a message this scan cannot read — a ``-F`` file that is absent at hook
-    time, or ``-F -`` (stdin, which a hook never sees). The caller fails
+    Returns ``(message, problem, fixes)``. ``problem`` is set when the command
+    names a message this scan cannot read — a ``-F`` file that is absent at
+    hook time, or ``-F -`` (stdin, which a hook never sees). The caller fails
     closed on it: the scan's whole subject exists and could not be looked at,
-    and an unanswered question is not a pass (AUD-09).
+    and an unanswered question is not a pass (AUD-09). ``fixes`` is the
+    remedy for that cause.
+
+    ``cwd`` is where git reads a relative ``-F`` path (``-C`` applied);
+    ``shell_cwd`` is where the shell resolves a relative redirection target.
     """
     if not _is_git_commit(command):
-        return "", None
+        return "", None, (_INLINE_MESSAGE_FIX,)
     tokens = _shell_tokens(command)
     for index, token in enumerate(tokens):
         following = tokens[index + 1] if index + 1 < len(tokens) else ""
         if token == "--message" or _COMMIT_MESSAGE_CLUSTER.fullmatch(token):
-            return following, None
+            return following, None, (_INLINE_MESSAGE_FIX,)
         if token.startswith("--message="):
-            return token.split("=", 1)[1], None
+            return token.split("=", 1)[1], None, (_INLINE_MESSAGE_FIX,)
+        name = None
         if token == "--file" or _COMMIT_FILE_CLUSTER.fullmatch(token):
-            return _read_commit_message_file(following, cwd)
-        if token.startswith("--file="):
-            return _read_commit_message_file(token.split("=", 1)[1], cwd)
-    return "", None
+            name = following
+        elif token.startswith("--file="):
+            name = token.split("=", 1)[1]
+        if name is None:
+            continue
+        message, problem = _read_commit_message_file(name, cwd)
+        if problem and name not in ("", "-") and _written_by(
+            tokens, _joined(name, cwd), shell_cwd or cwd
+        ):
+            return "", (
+                f"-F names {name!r}, which this same command writes. A hook "
+                "runs before the command, so the file cannot exist at scan "
+                "time, and the message would land in history unscanned."
+            ), _SEPARATE_CALL_FIXES
+        return message, problem, (_INLINE_MESSAGE_FIX,)
+    return "", None, (_INLINE_MESSAGE_FIX,)
+
+
+def _written_by(tokens: list[str], path: Path, shell_cwd: Path | None) -> bool:
+    """Whether one of the command's own writes lands on ``path``."""
+    wanted = os.path.realpath(path)
+    return any(
+        os.path.realpath(_joined(target, shell_cwd)) == wanted
+        for target in _shell_write_targets(tokens)
+    )
 
 
 def _read_commit_message_file(name: str, cwd: Path | None) -> tuple[str, str | None]:
@@ -3920,11 +4014,8 @@ def _read_commit_message_file(name: str, cwd: Path | None) -> tuple[str, str | N
             "-F - reads the message from stdin, which a hook cannot see. "
             "The message would land in history unscanned."
         )
-    path = Path(name)
-    if not path.is_absolute():
-        path = Path(cwd or Path.cwd()) / path
     try:
-        return path.read_text(encoding="utf-8"), None
+        return _joined(name, cwd).read_text(encoding="utf-8"), None
     except (OSError, UnicodeDecodeError):
         return "", (
             f"-F names {name!r}, which could not be read at scan time. The "
