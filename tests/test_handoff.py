@@ -652,16 +652,10 @@ class TestBUG069SuccessorEnvironment:
     harness — must start without them, while the user's own variables and the
     claim token still arrive.
 
-    Fails while the defect is live. When the fix lands, delete the xfail
-    marker; the assertions must then pass unchanged.
     """
 
     MARKERS = (("CLAUDE_EFFORT", "medium"), ("GIT_EDITOR", "true"))
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_069 is live — delete this marker with the fix",
-    )
     def test_BUG_069_successor_starts_without_claude_effort_and_git_editor(
         self, tmp_path, monkeypatch
     ):

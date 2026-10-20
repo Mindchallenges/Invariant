@@ -108,7 +108,10 @@ typed line runs `claude` through `env -u <each>`, and `osascript` is run with
 them removed. A named list rather than a prefix match, because `CLAUDE_CODE_`
 also carries the user's own settings; `env -u` rather than shell syntax,
 because the window's shell is the user's. The two quoting proofs cover the new
-line unchanged.
+line unchanged. BUG_069 added `CLAUDE_EFFORT` and `GIT_EDITOR` to the list:
+Claude Code sets both for its own tool shells, and `GIT_EDITOR=true` makes git
+skip the editor, so the successor's window committed without one. Same
+mechanism, two names the first list missed.
 
 ### D4 — The name is derived from the `next:` item, deterministically
 

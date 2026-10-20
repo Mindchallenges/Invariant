@@ -393,7 +393,11 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     a real run adds. The JSON result carries `token` (`null` on a dry run).
     `env -u` removes the launching host's markers (`HOST_MARKERS`: `CLAUDECODE`,
     the `CLAUDE_CODE_*` session variables, `COLORTERM`), so the successor
-    starts as a top-level session, not as a child of this one (BUG_068).
+    starts as a top-level session, not as a child of this one (BUG_068). The
+    list also names `CLAUDE_EFFORT` and `GIT_EDITOR`, which Claude Code sets
+    for its own tool shells: the first would pin the successor's effort level,
+    and `GIT_EDITOR=true` makes git skip the editor, so git falls back to the
+    user's configured one instead (BUG_069).
 
     Once the launch has succeeded, the old session ends itself (IDEA_009).
     The output is printed in full; then, 20 seconds later

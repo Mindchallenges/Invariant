@@ -556,10 +556,13 @@ from opening a window (ADR-005).
 
 The module also owns `HOST_MARKERS`: the variables a running Claude Code
 session sets for its children — `CLAUDECODE`, the `CLAUDE_CODE_*` session
-markers, `CLAUDE_PID`, `AI_AGENT` — and `COLORTERM`, which Terminal.app never
-sets. `handoff` runs inside a host session, so without this the successor
+markers, `CLAUDE_PID`, `AI_AGENT`, and `CLAUDE_EFFORT` and `GIT_EDITOR`,
+which it exports for its own tool shells — and `COLORTERM`, which Terminal.app
+never sets. `handoff` runs inside a host session, so without this the successor
 inherited them and started as that session's child, with transcripts off and
-colour its terminal could not draw (BUG_068). They are removed twice from one
+colour its terminal could not draw (BUG_068), its effort level pinned, and
+`GIT_EDITOR=true`, which makes git skip the editor, so a `git commit` without
+`-m` finished silently (BUG_069). They are removed twice from one
 list: `env -u` on the typed line, which cleans the successor even when
 Terminal.app is already polluted, and the environment `osascript` is run with,
 which keeps a Terminal.app the launch starts clean for every window opened

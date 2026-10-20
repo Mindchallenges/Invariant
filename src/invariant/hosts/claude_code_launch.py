@@ -33,8 +33,9 @@ command runs inside a Claude Code session, so its environment carries that
 session's markers, and ``osascript`` — a child of it — hands them to a
 Terminal.app it starts, which hands them to every window it opens afterwards
 (BUG_068). An inherited ``CLAUDE_CODE_CHILD_SESSION`` turns the successor's
-transcripts off, and an inherited ``COLORTERM=truecolor`` makes it draw colour
-the terminal cannot render. ``HOST_MARKERS`` names them, and they are removed
+transcripts off, an inherited ``COLORTERM=truecolor`` makes it draw colour
+the terminal cannot render, and an inherited ``GIT_EDITOR=true`` makes git skip
+the editor (BUG_069). ``HOST_MARKERS`` names them, and they are removed
 twice: ``env -u`` on the typed line, which cleans the successor even under a
 Terminal.app that is already polluted, and from the environment ``osascript``
 is run with, which keeps a Terminal.app started by the launch clean for the
@@ -90,6 +91,11 @@ HANDOFF_ENV = "INVARIANT_HANDOFF"
 #: later leaks until it is listed here, which is the behaviour before the list
 #: existed, not a new failure. ``COLORTERM`` is here because Terminal.app never
 #: sets it, so in the successor's window it can only be the launcher's.
+#: ``CLAUDE_EFFORT`` and ``GIT_EDITOR`` are Claude Code's exports for its own
+#: tool shells (BUG_069): the first would pin the successor's effort level, and
+#: ``GIT_EDITOR=true`` makes git skip the editor, so a ``git commit`` without
+#: ``-m`` in the new window would finish silently. Unsetting it lets git fall
+#: back to the user's own ``core.editor`` / ``VISUAL`` / ``EDITOR``.
 HOST_MARKERS: tuple[str, ...] = (
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -104,6 +110,8 @@ HOST_MARKERS: tuple[str, ...] = (
     "CLAUDE_PID",
     "AI_AGENT",
     "COLORTERM",
+    "CLAUDE_EFFORT",
+    "GIT_EDITOR",
 )
 
 
