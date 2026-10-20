@@ -546,13 +546,26 @@ touching the other.
 relationship: `claude_code` drives a running host, the telemetry reader reads
 back what one wrote, and this one STARTS one. It turns a handoff into a
 `LaunchPlan` — the `claude --name <slug> --remote-control <slug> "<note>"`
-argv, the `cd <main checkout> && INVARIANT_HANDOFF=<token> …` line quoted
-with `shlex` (the token is set only once the note is recorded), and the
-AppleScript that types that line into a new macOS Terminal window — and
+argv, the `cd <main checkout> && env -u <marker> … INVARIANT_HANDOFF=<token> …`
+line quoted with `shlex` (the token is set only once the note is recorded), and
+the AppleScript that types that line into a new macOS Terminal window — and
 `TerminalLauncher` runs `osascript` on it. Claude Code has no flag for a
 working directory or a window, so those two are this module's. The CLI reaches
 it through one replaceable function, which is how the suite keeps every test
 from opening a window (ADR-005).
+
+The module also owns `HOST_MARKERS`: the variables a running Claude Code
+session sets for its children — `CLAUDECODE`, the `CLAUDE_CODE_*` session
+markers, `CLAUDE_PID`, `AI_AGENT` — and `COLORTERM`, which Terminal.app never
+sets. `handoff` runs inside a host session, so without this the successor
+inherited them and started as that session's child, with transcripts off and
+colour its terminal could not draw (BUG_068). They are removed twice from one
+list: `env -u` on the typed line, which cleans the successor even when
+Terminal.app is already polluted, and the environment `osascript` is run with,
+which keeps a Terminal.app the launch starts clean for every window opened
+afterwards. The list is named rather than matched by prefix because
+`CLAUDE_CODE_` also prefixes the user's own configuration, which the new
+window's login shell re-exports before the typed line runs.
 
 The telemetry reader is also the library's only dependency on another program's **undocumented**
 format, and that shapes the code: every field access tolerates absence, an

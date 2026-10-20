@@ -27,10 +27,24 @@ is called and whether the note may be written down are ``domains/session``'s
 questions; this module is handed the answers and turns them into a process.
 The CLI injects it through one function so a test can replace it, and the
 suite does so for every test that reaches the command: no test opens a window.
+
+**The successor starts as a top-level host, not as this one's child.** The
+command runs inside a Claude Code session, so its environment carries that
+session's markers, and ``osascript`` — a child of it — hands them to a
+Terminal.app it starts, which hands them to every window it opens afterwards
+(BUG_068). An inherited ``CLAUDE_CODE_CHILD_SESSION`` turns the successor's
+transcripts off, and an inherited ``COLORTERM=truecolor`` makes it draw colour
+the terminal cannot render. ``HOST_MARKERS`` names them, and they are removed
+twice: ``env -u`` on the typed line, which cleans the successor even under a
+Terminal.app that is already polluted, and from the environment ``osascript``
+is run with, which keeps a Terminal.app started by the launch clean for the
+windows the user opens by hand. Everything else — the user's own variables and
+``HANDOFF_ENV`` — is left as it is.
 """
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -53,6 +67,34 @@ CLAUDE_BINARY = "claude"
 #: ``session resume``, and the session domain marks exactly that note claimed.
 HANDOFF_ENV = "INVARIANT_HANDOFF"
 
+#: What a running Claude Code session sets in its children's environment and a
+#: new top-level session must not inherit (BUG_068). Named one by one rather
+#: than matched by the ``CLAUDE_CODE_`` prefix, because the same prefix carries
+#: the user's own configuration — ``CLAUDE_CODE_USE_BEDROCK``,
+#: ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` and their kin — which the new window's
+#: login shell re-exports and the typed line runs AFTER: a prefix strip there
+#: would erase the user's settings rather than the parent's markers. ``env -u``
+#: takes names, not patterns, and a shell loop over the environment is spelled
+#: differently in every shell the window might run. A marker Claude Code adds
+#: later leaks until it is listed here, which is the behaviour before the list
+#: existed, not a new failure. ``COLORTERM`` is here because Terminal.app never
+#: sets it, so in the successor's window it can only be the launcher's.
+HOST_MARKERS: tuple[str, ...] = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_PID",
+    "AI_AGENT",
+    "COLORTERM",
+)
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -66,7 +108,8 @@ class LaunchPlan:
     argv: tuple[str, ...]
     #: The directory the new session starts in — the main checkout.
     cwd: str
-    #: ``cd <cwd> && [NAME=value ...] <argv>``, quoted for a POSIX shell.
+    #: ``cd <cwd> && env -u <marker> ... [NAME=value ...] <argv>``, quoted for
+    #: a POSIX shell.
     shell_line: str
     #: The script ``osascript`` runs to type ``shell_line`` into a new window.
     applescript: str
@@ -102,6 +145,11 @@ def applescript_string(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def without_host_markers(environ: dict[str, str]) -> dict[str, str]:
+    """``environ`` with every ``HOST_MARKERS`` name removed, nothing else."""
+    return {key: value for key, value in environ.items() if key not in HOST_MARKERS}
+
+
 def plan_launch(
     claude: str,
     name: str,
@@ -121,11 +169,18 @@ def plan_launch(
     of ``claude`` — a prefix assignment, so it reaches that one process and the
     hooks it spawns, and not the window's shell. ``None`` sets nothing: a plan
     built before the note is recorded has no note to name.
+
+    ``claude`` is run through ``env``, which first unsets ``HOST_MARKERS``. It
+    is a program rather than shell syntax, so the line means the same in
+    whichever shell the window opens, and an unset name is not an error.
     """
     argv = (claude, "--name", name, "--remote-control", name, note)
     env = ((HANDOFF_ENV, token),) if token else ()
-    prefix = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
-    shell_line = f"cd {shlex.quote(str(cwd))} && {prefix}{shlex.join(argv)}"
+    unset = "".join(f"-u {name} " for name in HOST_MARKERS)
+    assign = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
+    shell_line = (
+        f"cd {shlex.quote(str(cwd))} && env {unset}{assign}{shlex.join(argv)}"
+    )
     applescript = "\n".join(
         [
             'tell application "Terminal"',
@@ -148,7 +203,9 @@ class TerminalLauncher:
 
     ``osascript`` is given the script as ONE argument, with no shell between
     this process and it, so the only quoting in play is the two layers the plan
-    already applied.
+    already applied. It runs without ``HOST_MARKERS``: a Terminal.app that this
+    call starts takes ``osascript``'s environment, and keeps it for every window
+    it opens until it is quit.
     """
 
     def launch(self, plan: LaunchPlan) -> None:
@@ -157,6 +214,7 @@ class TerminalLauncher:
             capture_output=True,
             text=True,
             check=False,
+            env=without_host_markers(dict(os.environ)),
         )
         if proc.returncode != 0:
             raise InvariantError(

@@ -406,8 +406,10 @@ class TestTheLaunchPlan:
     def test_the_shell_line_round_trips_through_shlex(self):
         plan = self.plan()
         tokens = shlex.split(plan.shell_line)
-        assert tokens[:3] == ["cd", "/work/a dir/it's here", "&&"]
-        assert tuple(tokens[3:]) == plan.argv
+        unset = [arg for name in launch.HOST_MARKERS for arg in ("-u", name)]
+        assert tokens[:4] == ["cd", "/work/a dir/it's here", "&&", "env"]
+        assert tokens[4 : 4 + len(unset)] == unset
+        assert tuple(tokens[4 + len(unset) :]) == plan.argv
 
     def test_the_applescript_string_round_trips(self):
         plan = self.plan()
@@ -438,6 +440,38 @@ class TestTheLaunchPlan:
         got = json.loads(captured.read_text(encoding="utf-8"))
         assert got["argv"] == list(plan.argv[1:])
         assert Path(got["cwd"]).resolve() == workdir.resolve()
+
+    def test_a_polluted_terminal_still_starts_a_clean_claude(self, tmp_path):
+        """The typed line alone cleans the successor: Terminal is already dirty."""
+        captured = tmp_path / "env.json"
+        fake = tmp_path / "claude"
+        fake.write_text(
+            f"#!{sys.executable}\nimport json, os\n"
+            f"json.dump(dict(os.environ), open({str(captured)!r}, 'w'))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        polluted = {name: "1" for name in launch.HOST_MARKERS}
+        polluted.update(
+            PATH=os.environ["PATH"], FOO="bar", CLAUDE_CODE_USE_BEDROCK="1"
+        )
+
+        plan = launch.plan_launch(str(fake), "x", NASTY, tmp_path, token="s:t")
+        subprocess.run(["/bin/sh", "-c", plan.shell_line], check=True, env=polluted)
+
+        got = json.loads(captured.read_text(encoding="utf-8"))
+        assert not set(launch.HOST_MARKERS) & set(got)
+        assert got["FOO"] == "bar"
+        assert got["CLAUDE_CODE_USE_BEDROCK"] == "1"
+        assert got[launch.HANDOFF_ENV] == "s:t"
+
+    def test_without_host_markers_removes_only_the_markers(self):
+        environ = {name: "1" for name in launch.HOST_MARKERS}
+        environ.update(FOO="bar", CLAUDE_CODE_USE_BEDROCK="1")
+        assert launch.without_host_markers(environ) == {
+            "FOO": "bar",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+        }
 
     @pytest.mark.skipif(
         sys.platform != "darwin" or shutil.which("osascript") is None,
@@ -482,6 +516,27 @@ class TestTheTerminalLauncher:
             launch.TerminalLauncher().launch(plan)
         assert "not allowed" in str(caught.value)
         assert plan.shell_line in str(caught.value)
+
+    def test_osascript_runs_without_the_host_markers(self, monkeypatch):
+        """A Terminal.app the call starts keeps this environment for good."""
+        for name in launch.HOST_MARKERS:
+            monkeypatch.setenv(name, "1")
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        monkeypatch.setenv("FOO", "bar")
+        calls = []
+        monkeypatch.setattr(
+            launch.subprocess,
+            "run",
+            lambda argv, **kw: calls.append(kw)
+            or subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        plan = launch.plan_launch("/opt/bin/claude", "x", "next: x", Path("/w"))
+        launch.TerminalLauncher().launch(plan)
+
+        (kwargs,) = calls
+        assert not set(launch.HOST_MARKERS) & set(kwargs["env"])
+        assert kwargs["env"]["FOO"] == "bar"
+        assert kwargs["env"]["CLAUDE_CODE_USE_BEDROCK"] == "1"
 
     def test_resolve_claude_reads_path(self, monkeypatch):
         monkeypatch.setattr(launch.shutil, "which", lambda name: f"/found/{name}")
@@ -573,10 +628,6 @@ class TestBUG068SuccessorEnvironment:
         assert got.get("FOO") == "bar"
         assert got.get(launch.HANDOFF_ENV) == self.TOKEN
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_068 is live — delete this marker with the fix",
-    )
     def test_BUG_068_successor_claude_starts_without_the_launchers_host_markers(
         self, tmp_path, monkeypatch
     ):

@@ -99,6 +99,17 @@ prints the plan and needs neither macOS nor `claude`.
 disk with a lifetime nobody owns, and the two quoting layers are provable
 without it.
 
+*Note (BUG_068, implementation detail, not a new decision):* the launch runs
+inside a Claude Code session, and its host markers — `CLAUDECODE`, the
+`CLAUDE_CODE_*` session variables, `COLORTERM` — reached the successor through
+`osascript` and the Terminal.app it started, so the successor ran as a child
+session with transcripts off. `claude_code_launch.HOST_MARKERS` names them, the
+typed line runs `claude` through `env -u <each>`, and `osascript` is run with
+them removed. A named list rather than a prefix match, because `CLAUDE_CODE_`
+also carries the user's own settings; `env -u` rather than shell syntax,
+because the window's shell is the user's. The two quoting proofs cover the new
+line unchanged.
+
 ### D4 — The name is derived from the `next:` item, deterministically
 
 The text after `next:` up to the first separator (`·`, `•`, `|`, `;`, an

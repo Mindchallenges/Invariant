@@ -383,7 +383,7 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--id <id>
 
     The line actually typed carries the claim token in front of `claude`:
 
-        cd <main> && INVARIANT_HANDOFF=<session-id>:<at> claude --name …
+        cd <main> && env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> claude --name …
 
     naming the note just recorded, so the launched host's first `session
     start` or `session resume` marks THAT note consumed and the greeting stops
@@ -391,6 +391,9 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--id <id>
     `--dry-run` and the by-hand line printed on another platform carry no
     token, because nothing was recorded for one to name; the dry run says what
     a real run adds. The JSON result carries `token` (`null` on a dry run).
+    `env -u` removes the launching host's markers (`HOST_MARKERS`: `CLAUDECODE`,
+    the `CLAUDE_CODE_*` session variables, `COLORTERM`), so the successor
+    starts as a top-level session, not as a child of this one (BUG_068).
 
 invariant session handoff --dismiss [--dry-run] [--json]
     Retire the note the unbound greeting is showing — the latest fresh,
