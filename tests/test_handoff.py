@@ -491,6 +491,102 @@ class TestTheTerminalLauncher:
         assert launch.host_platform() == sys.platform
 
 
+# -- BUG_068: the successor must not inherit the launcher's host markers ----
+
+
+class TestBUG068SuccessorEnvironment:
+    """Repro for BUG_068 — see the work-item entry.
+
+    A launch is run from INSIDE a Claude Code session, so the caller's
+    environment carries that session's host markers. The successor ``claude``
+    must start as a fresh, top-level host session: none of those markers, while
+    the user's own variables and ``INVARIANT_HANDOFF`` still arrive.
+
+    The harness follows the environment along the real chain, without opening
+    a window: ``TerminalLauncher`` runs ``osascript`` (recorded, not run), the
+    Terminal it drives inherits the environment ``osascript`` was given — the
+    ``env=`` it was passed, or this process's own when none was — and that
+    Terminal's shell runs ``plan.shell_line``. Here a real ``/bin/sh`` runs the
+    line in that environment, and a fake ``claude`` dumps what it received. A
+    fix that strips the markers in the shell line, or one that hands
+    ``osascript`` a clean environment, both turn it green.
+
+    The repro is a strict xfail: it fails while the defect is live. When the
+    fix lands, delete the xfail marker; the assertions must then pass
+    unchanged. The guard is deliberately NOT xfail: it pins that the user's
+    own environment and the claim token reach ``claude`` today, so a fix that
+    wipes the whole environment cannot pass as one.
+    """
+
+    MARKERS = (
+        ("CLAUDECODE", "1"),
+        ("CLAUDE_CODE_CHILD_SESSION", "1"),
+        ("CLAUDE_CODE_SESSION_ID", "x"),
+        ("COLORTERM", "truecolor"),
+    )
+    TOKEN = "s-bug068:2026-10-20"
+
+    def successor_env(self, tmp_path, monkeypatch):
+        """The environment the successor ``claude`` starts with, end to end."""
+        for key, value in self.MARKERS:
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("FOO", "bar")
+
+        captured = tmp_path / "env.json"
+        fake = tmp_path / "claude"
+        fake.write_text(
+            f"#!{sys.executable}\nimport json, os\n"
+            f"json.dump(dict(os.environ), open({str(captured)!r}, 'w'))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        workdir = tmp_path / "main"
+        workdir.mkdir()
+
+        real_run = subprocess.run
+        calls = []
+
+        def record(argv, **kwargs):
+            calls.append((list(argv), kwargs))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(launch.subprocess, "run", record)
+        plan = launch.plan_launch(
+            str(fake), "bug-068", "next: x", workdir, token=self.TOKEN
+        )
+        launch.TerminalLauncher().launch(plan)
+        monkeypatch.setattr(launch.subprocess, "run", real_run)
+
+        osascript = [kw for argv, kw in calls if argv and argv[0] == "osascript"]
+        assert len(osascript) == 1, calls
+        terminal_env = osascript[0].get("env")
+        if terminal_env is None:
+            terminal_env = dict(os.environ)
+
+        real_run(["/bin/sh", "-c", plan.shell_line], check=True, env=terminal_env)
+        return json.loads(captured.read_text(encoding="utf-8"))
+
+    def test_BUG_068_guard_user_env_and_token_reach_claude(
+        self, tmp_path, monkeypatch
+    ):
+        got = self.successor_env(tmp_path, monkeypatch)
+        assert got.get("FOO") == "bar"
+        assert got.get(launch.HANDOFF_ENV) == self.TOKEN
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_068 is live — delete this marker with the fix",
+    )
+    def test_BUG_068_successor_claude_starts_without_the_launchers_host_markers(
+        self, tmp_path, monkeypatch
+    ):
+        got = self.successor_env(tmp_path, monkeypatch)
+        leaked = {key: got[key] for key, _ in self.MARKERS if key in got}
+        assert leaked == {}, f"successor claude inherited host markers: {leaked}"
+        assert got.get("FOO") == "bar"
+        assert got.get(launch.HANDOFF_ENV) == self.TOKEN
+
+
 # -- the command -------------------------------------------------------
 
 
