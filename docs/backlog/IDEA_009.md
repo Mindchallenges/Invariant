@@ -2,7 +2,7 @@
 id: IDEA_009
 type: idea
 title: session handoff ends the old Claude Code session once the successor has launched
-status: in_progress
+status: done
 residue: []
 history:
 - from: proposed
@@ -12,6 +12,10 @@ history:
 - from: accepted
   to: in_progress
   reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: done in 317e1e8
   forced: false
 area: hosts/claude_code_launch,cli/main
 priority: high
