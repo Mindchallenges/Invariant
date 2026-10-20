@@ -638,6 +638,57 @@ class TestBUG068SuccessorEnvironment:
         assert got.get(launch.HANDOFF_ENV) == self.TOKEN
 
 
+# -- BUG_069: two Claude Code exports the BUG_068 list missed ----------
+
+
+class TestBUG069SuccessorEnvironment:
+    """Repro for BUG_069 — see the work-item entry.
+
+    Inside a Claude Code session the environment also carries
+    ``CLAUDE_EFFORT=medium`` and ``GIT_EDITOR=true``, which the launching host
+    sets and the user does not. The successor must not inherit them: the typed
+    line must unset both, ``without_host_markers`` must drop both, and the
+    successor ``claude`` — followed along the real chain by the BUG_068
+    harness — must start without them, while the user's own variables and the
+    claim token still arrive.
+
+    Fails while the defect is live. When the fix lands, delete the xfail
+    marker; the assertions must then pass unchanged.
+    """
+
+    MARKERS = (("CLAUDE_EFFORT", "medium"), ("GIT_EDITOR", "true"))
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_069 is live — delete this marker with the fix",
+    )
+    def test_BUG_069_successor_starts_without_claude_effort_and_git_editor(
+        self, tmp_path, monkeypatch
+    ):
+        names = [key for key, _ in self.MARKERS]
+
+        kept = launch.without_host_markers({"FOO": "bar", **dict(self.MARKERS)})
+        assert kept == {"FOO": "bar"}, (
+            f"without_host_markers kept launcher exports: {kept}"
+        )
+
+        plan = launch.plan_launch(
+            "/bin/claude", "bug-069", "next: x", tmp_path, token="t"
+        )
+        words = shlex.split(plan.shell_line)
+        unset = {words[i + 1] for i, word in enumerate(words) if word == "-u"}
+        missing = [name for name in names if name not in unset]
+        assert missing == [], f"typed line does not unset {missing}"
+
+        harness = TestBUG068SuccessorEnvironment()
+        harness.MARKERS = self.MARKERS
+        got = harness.successor_env(tmp_path, monkeypatch)
+        leaked = {name: got[name] for name in names if name in got}
+        assert leaked == {}, f"successor claude inherited: {leaked}"
+        assert got.get("FOO") == "bar"
+        assert got.get(launch.HANDOFF_ENV) == harness.TOKEN
+
+
 # -- the command -------------------------------------------------------
 
 
