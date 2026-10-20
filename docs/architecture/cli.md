@@ -239,6 +239,10 @@ invariant session transition <state> [--reason <text>] [--force]
     are evaluated inside the domain, so this route is exactly as gated as
     `session review` / `session merge` (AUD-05 — it used to carry no gates at
     all). --force records an override naming the gates it went past.
+    `isolated -> working` normally needs no command: the first edit tool call
+    completing inside the session's own worktree walks it from the
+    PostToolUse hook (BUG_062). Naming it here is for a session that edits
+    only through the shell, which that hook deliberately does not count.
 invariant session files add <path>...    Declare this session's file set.
 invariant session review              Evaluate the review gates and advance to
                                       `reviewed`. The gate list is the

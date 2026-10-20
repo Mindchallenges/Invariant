@@ -68,10 +68,6 @@ def _ctx(root: Path):
     return Context(cwd=root, host_session_id=HOST_ID)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_062 is live — delete this marker with the fix",
-)
 def test_BUG_062_first_edit_in_isolated_worktree_leaves_session_working(project):
     root = project
     ctx = _ctx(root)

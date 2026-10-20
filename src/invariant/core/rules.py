@@ -2594,6 +2594,18 @@ def _is_outside_project(ctx: RuleContext, target: Path | None) -> bool:
     return True
 
 
+def is_exempt_path(manifest: Manifest, cwd: Path, target: Path | str) -> bool:
+    """Is ``target`` a path the project declared exempt from session isolation?
+
+    The isolation rules' own question, asked through the same helper by a
+    caller outside a rule: `domains/session` will not count a write to the
+    work-item store or to `session.exempt_paths` as a session's first edit,
+    because the exemption exists precisely because such a write is not work on
+    the branch (BUG_062). Two definitions of "exempt" would drift.
+    """
+    return _is_exempt(RuleContext(manifest=manifest, cwd=Path(cwd)), Path(target))
+
+
 def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     """Paths a project has declared exempt from session isolation.
 

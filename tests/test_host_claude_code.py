@@ -407,6 +407,8 @@ class FakeSessions:
         self.adopted: list[tuple[str, str]] = []
         self.resumed: list[tuple[str, str | None]] = []
         self.ended: list[str] = []
+        #: Every edit the host reported as landed: (target, cwd, host id).
+        self.edits: list[tuple] = []
         self.raises = None
 
     def adopt_host_session(self, session_id, host_session_id, force=False):
@@ -428,6 +430,11 @@ class FakeSessions:
     def end_host_session(self, host_session_id):
         self.ended.append(host_session_id)
 
+    def advance_on_edit(self, target, *, cwd=None, host_session_id=None):
+        if self.raises:
+            raise self.raises
+        self.edits.append((target, cwd, host_session_id))
+
 
 class FakeCtx:
     """Deliberately answers only the question the host is supposed to ask.
@@ -439,6 +446,7 @@ class FakeCtx:
     """
 
     def __init__(self, host_session_id="host-1111", how="host"):
+        self.cwd = Path("/proj")
         self.pipelines = FakePipelines()
         self.sessions = FakeSessions()
         self.host_session_id = host_session_id
@@ -1737,6 +1745,207 @@ class TestSessionEndReleasesTheBinding:
         host.handle("session-end", "{}", ctx)
         assert ctx.sessions.ended == []
 
+
+
+class TestBUG062AnEditThatLandedIsReported:
+    """The host reports a completed edit; the domain decides what it means.
+
+    The host adapter stays thin: it says WHERE an edit tool's bytes landed and
+    who it is, and `SessionDomain.advance_on_edit` owns every judgement about
+    whether that was a session's first edit. These use the fake context with no
+    host identifier, so the binding path above stays out of the way.
+    """
+
+    def post(self, host, payload, ctx=None):
+        ctx = ctx or FakeCtx(host_session_id=None)
+        result = host._post_tool_use(payload, ctx)
+        return ctx, result
+
+    @pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit"])
+    def test_an_edit_tool_reports_the_path_it_wrote(self, host, tool):
+        ctx, _ = self.post(
+            host, {"tool_name": tool, "tool_input": {"file_path": "/wt/src/a.py"}}
+        )
+        assert ctx.sessions.edits == [(Path("/wt/src/a.py"), Path("/proj"), None)]
+
+    def test_a_notebook_edit_reports_its_notebook(self, host):
+        ctx, _ = self.post(
+            host,
+            {"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/wt/n.ipynb"}},
+        )
+        assert ctx.sessions.edits == [(Path("/wt/n.ipynb"), Path("/proj"), None)]
+
+    def test_an_edit_naming_no_path_reports_nothing(self, host):
+        ctx, _ = self.post(host, {"tool_name": "Edit", "tool_input": {}})
+        assert ctx.sessions.edits == []
+
+    def test_a_shell_write_is_not_a_first_edit(self, host):
+        """Decided, not overlooked: only an edit tool's own path fires the edge.
+
+        A shell command names no destination the hook can trust, and a write
+        recovered by parsing one would be a guess about where bytes landed —
+        the same reason BUG_027 screened STAGED content rather than widening a
+        list of command shapes. A session that edits only through the shell
+        still reaches `working` by `invariant session transition working`.
+        """
+        ctx, _ = self.post(
+            host,
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo x > /wt/src/a.py"},
+                "tool_response": "",
+            },
+        )
+        assert ctx.sessions.edits == []
+
+    def test_a_read_is_not_an_edit(self, host):
+        ctx, _ = self.post(
+            host, {"tool_name": "Read", "tool_input": {"file_path": "/wt/src/a.py"}}
+        )
+        assert ctx.sessions.edits == []
+
+    def test_a_failure_to_advance_never_fails_the_tool_call(self, host):
+        """BUG_001's posture: the edit already happened; the hook must not raise.
+
+        And the failure is contained to this one side effect — the acting
+        agent is still recorded on the same call.
+        """
+        ctx = FakeCtx(host_session_id=None)
+        ctx.sessions.raises = InvariantError("state store is unwritable")
+        _, result = self.post(
+            host,
+            {
+                "tool_name": "Edit",
+                "agent_type": "feature-architect",
+                "tool_input": {"file_path": "/wt/src/a.py"},
+            },
+            ctx,
+        )
+        assert result == {}
+        assert ctx.pipelines.agents == [("s1", "feature-architect")]
+
+
+class TestBUG062OnlyACompletedEditAdvances:
+    """Against a real repository: what does NOT move an isolated session.
+
+    The repro (tests/test_bug_062_repro.py) proves the edge fires on the
+    pre-tool-use / post-tool-use pair around a completed edit. These pin the
+    other half of the decision — a call that never completed, or that wrote
+    through the shell, leaves the session where it was.
+    """
+
+    HOST_ID = "host-bug-062-host"
+
+    @pytest.fixture
+    def world(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from invariant.cli.main import Context
+        from invariant.core.manifest import MANIFEST_RELPATH
+
+        monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+        (tmp_path / MANIFEST_RELPATH).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo"},
+                    "session": {"worktree_dir": ".claude/worktrees"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "thing.py").write_text("x = 1\n", encoding="utf-8")
+
+        def git(*args):
+            subprocess.run(
+                ["git", *args], cwd=str(tmp_path), check=True, capture_output=True
+            )
+
+        git("init", "-q", "-b", "master")
+        git("config", "user.email", "dev@example.invalid")
+        git("config", "user.name", "Dev")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+        ctx = Context(cwd=tmp_path, host_session_id=self.HOST_ID)
+        session = ctx.sessions.start("only-completed")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.sessions.isolate(session.id, execute=True)
+        return tmp_path, session.id
+
+    def hook(self, world, event, payload):
+        from invariant.cli.main import Context
+
+        root, _ = world
+        return ClaudeCodeHost(root).handle(
+            event,
+            json.dumps(payload),
+            Context(cwd=root, host_session_id=self.HOST_ID),
+        )
+
+    def state(self, world):
+        from invariant.cli.main import Context
+
+        root, session_id = world
+        return Context(cwd=root, host_session_id=self.HOST_ID).sessions.get(
+            session_id
+        ).state
+
+    def worktree(self, world):
+        from invariant.cli.main import Context
+
+        root, session_id = world
+        return Path(Context(cwd=root).sessions.get(session_id).worktree)
+
+    def edit(self, world, target):
+        return {
+            "session_id": self.HOST_ID,
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": str(target),
+                "old_string": "x = 1",
+                "new_string": "x = 2",
+            },
+        }
+
+    def test_an_allowed_edit_that_has_not_run_yet_does_not_advance(self, world):
+        """Pre-tool-use only ASKS. The edge waits for the tool to have run."""
+        target = self.worktree(world) / "src" / "thing.py"
+        pre = self.hook(world, "pre-tool-use", self.edit(world, target))
+        assert (pre.get("hookSpecificOutput") or {}).get("permissionDecision") != "deny"
+        assert self.state(world) == "isolated"
+
+    def test_a_refused_edit_does_not_advance(self, world):
+        """Denied at pre-tool-use, so the host never reports it as completed."""
+        root, _ = world
+        target = root / "src" / "thing.py"  # the shared main checkout
+        pre = self.hook(world, "pre-tool-use", self.edit(world, target))
+        assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert self.state(world) == "isolated"
+
+    def test_a_completed_edit_in_the_main_checkout_does_not_advance(self, world):
+        """Even reported as completed, an edit outside the worktree is no first edit."""
+        root, _ = world
+        self.hook(world, "post-tool-use", self.edit(world, root / "src" / "thing.py"))
+        assert self.state(world) == "isolated"
+
+    def test_a_shell_write_into_the_worktree_does_not_advance(self, world):
+        target = self.worktree(world) / "src" / "thing.py"
+        target.write_text("x = 2\n", encoding="utf-8")
+        self.hook(
+            world,
+            "post-tool-use",
+            {
+                "session_id": self.HOST_ID,
+                "tool_name": "Bash",
+                "tool_input": {"command": f"echo 'x = 2' > {target}"},
+                "tool_response": {"stdout": ""},
+            },
+        )
+        assert self.state(world) == "isolated"
 
 
 class TestHooksActuallyRun:

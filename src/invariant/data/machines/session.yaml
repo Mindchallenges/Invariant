@@ -18,11 +18,21 @@ states:
     description: The session exists and is named, but owns no worktree yet.
     next: [isolated, abandoned]
   isolated:
-    description: A worktree and branch exist and belong to this session.
+    description: >
+      A worktree and branch exist and belong to this session, and nothing has
+      been edited in it yet. Left automatically: the first edit tool call that
+      completes inside this session's own worktree, on a path not exempt from
+      isolation, advances the session to `working` (SessionDomain.advance_on_edit,
+      from the PostToolUse hook). A shell write does not; `session transition
+      working` is the route for a session that edits only through the shell.
     entry_gates: [session.named_after_isolating]
     next: [working, abandoned]
   working:
-    description: Edits and local commits. Commits are cheap; keep them granular.
+    description: >
+      Edits and local commits. Commits are cheap; keep them granular. Entered
+      by the session's first edit (see `isolated`); further edits and commits
+      write nothing to the record — `working -> working` is walked only by an
+      explicit transition.
     next: [working, reviewed, abandoned]
   reviewed:
     description: The review gates have passed against the declared file set.

@@ -1046,13 +1046,12 @@ class ClaudeCodeHost:
         """
         if not ctx.host_session_id:
             return
-        tool_input = payload.get("tool_input") or {}
-        raw = tool_input.get("file_path") or tool_input.get("notebook_path")
-        if not raw:
+        target = _edit_target(payload)
+        if target is None:
             return
 
         resolution = ctx.sessions.resolve(
-            ctx.cwd, target=Path(str(raw)), host_session_id=ctx.host_session_id
+            ctx.cwd, target=target, host_session_id=ctx.host_session_id
         )
         session = resolution.session
         # Only the path-based answer, and only for a session nobody owns. Any
@@ -1064,6 +1063,35 @@ class ClaudeCodeHost:
         except InvariantError:
             # Already bound, or this host owns one. Both are the 1:1 rule
             # working, and neither is a reason to fail a completed tool call.
+            pass
+
+    def _report_landed_edit(self, payload: dict, ctx) -> None:
+        """Tell the session domain an edit tool's bytes landed, and where.
+
+        That is all this does. Whether the edit was a session's FIRST — the
+        writer identified, the session in ``isolated``, the path inside its own
+        worktree and not exempt — is `SessionDomain.advance_on_edit`'s
+        judgement, made where the transition lives (BUG_062).
+
+        PostToolUse is the right moment for the reason it is for
+        `_bind_by_successful_edit` above: the tool has provably run. A call
+        refused at pre-tool-use never gets here, so a refused edit cannot
+        advance anything. A write made through a shell is deliberately not
+        reported — a command line names no destination the hook can trust,
+        and recovering one by parsing it would be a guess about where bytes
+        landed (the reason BUG_027 screened staged content instead).
+        """
+        target = _edit_target(payload)
+        if target is None:
+            return
+        try:
+            ctx.sessions.advance_on_edit(
+                target, cwd=ctx.cwd, host_session_id=ctx.host_session_id
+            )
+        except InvariantError:
+            # The edit has already happened. Failing to record that it moved
+            # the session is a lifecycle row missed, and the operator can still
+            # walk the edge by hand; raising would fail a completed tool call.
             pass
 
     def _session_end(self, ctx) -> dict:
@@ -1148,6 +1176,9 @@ class ClaudeCodeHost:
             self._bind_claimed_session(payload, ctx)
         elif tool in EDIT_TOOLS:
             self._bind_by_successful_edit(payload, ctx)
+            # After the binding, so an edit that just taught the host which
+            # session it is can also be that session's first edit.
+            self._report_landed_edit(payload, ctx)
 
         self._record_acting_agent(payload, ctx)
 
@@ -1367,10 +1398,7 @@ class ClaudeCodeHost:
         if not getattr(session, "worktree", None):
             return session
 
-        tool_input = payload.get("tool_input") or {}
-        raw = tool_input.get("file_path") or tool_input.get("notebook_path")
-        here = Path(str(raw)) if raw else ctx.cwd
-        return ctx.sessions.by_worktree_containing(here)
+        return ctx.sessions.by_worktree_containing(_edit_target(payload) or ctx.cwd)
 
 
 #: Said to the session that made a dispatch nothing could file. Both are the
@@ -1432,6 +1460,19 @@ _SESSION_CLAIM = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+(start|resume)\b"
 #: The identifier a claiming command prints. Parsed rather than guessed, so
 #: the binding names the session that command actually created or picked up.
 _STARTED_ID = re.compile(r"session\s+([0-9a-z]+)\s+\(")
+
+
+def _edit_target(payload: dict) -> Path | None:
+    """The path a call names as its destination, or ``None``.
+
+    ``file_path`` for the edit tools and a Read, ``notebook_path`` for a
+    notebook edit. One spelling, read by every hook that places a call, so the
+    binding, the first-edit report and the actor check cannot disagree about
+    where a call landed.
+    """
+    tool_input = payload.get("tool_input") or {}
+    raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+    return Path(str(raw)) if raw else None
 
 
 def _spend_overrides(stopped, rule_ctx, ctx, *, surface: str):

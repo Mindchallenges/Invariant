@@ -132,7 +132,7 @@ cross-process concurrency — several sessions may run against one checkout.
 stateDiagram-v2
     [*] --> registered
     registered --> isolated: isolate (worktree + branch)
-    isolated --> working: first edit
+    isolated --> working: first edit (an edit tool lands in its own worktree)
     working --> working: commit (local, granular)
     working --> reviewed: review gate passes
     reviewed --> merged: rebase + fast-forward merge
@@ -159,6 +159,54 @@ Invariants this domain enforces:
 | `session.branch_is_current` | A session branch has not fallen behind the base it will merge into | warn |
 | `session.named_after_isolating` | Session has a task-derived name and color | warn |
 | `session.teardown_complete` | Worktree removed after push | warn |
+
+### The one edge a hook walks: the first edit
+
+`isolated --> working` is fired by the work itself, not by a command. Every
+other edge is walked by a verb somebody runs; this one was drawn as automatic
+from the start and, until BUG_062, nothing fired it — so a session sat in
+`isolated` through every commit it made, `session review` refused it from
+there, and every session that ever merged had either had `session transition
+working` typed by hand or been forced past the edge. The decision (2026-10-20)
+was to implement the trigger rather than redraw the edge as manual, because a
+state that records nothing about progress is an instrument that reads the
+same whatever happened.
+
+What fires it, exactly: the **PostToolUse of an edit tool** (`Edit`, `Write`,
+`MultiEdit`, `NotebookEdit`) whose destination path lies inside a session's
+own worktree. The host adapter reports only *where the bytes landed and who it
+is*; `SessionDomain.advance_on_edit` makes every judgement, and advances only
+when all of these hold:
+
+| Condition | Why |
+|---|---|
+| The writer is **identified** — `Resolution.proven`, so not the `origin` guess | An edit aimed at the shared checkout resolves to "the only session left standing", which names a session without identifying one (the BUG_028 distinction) |
+| That session is in **`isolated`** | `working --> working` is the commit loop, not an edit counter, and a row per edit would stamp the heartbeat the next transition's `elapsed` is measured from; an edit after `reviewed` must not quietly retreat the session |
+| The path is inside **that session's own** worktree | An edit into a peer's worktree is nobody's first edit: the writer did not edit its own tree, and the owner did not edit at all |
+| The path is **not exempt** — `session.exempt_paths`, the work-item store, the report store | The exemption exists because writing those is not work on the branch, so writing one is not the session starting its work. Asked through `core.rules.is_exempt_path`, the isolation rules' own helper |
+
+Three properties are decisions rather than consequences:
+
+- **Only a completed call.** PostToolUse fires after the tool has run, so an
+  edit refused at pre-tool-use — or one a rule is still deciding — advances
+  nothing; that is the same reason `_bind_by_successful_edit` lives there.
+  Pre-tool-use stays a question that does not change the world.
+- **A shell write does not fire it.** A command line names no destination a
+  hook can trust, and recovering one by parsing it is a guess about where
+  bytes landed — the reason BUG_027 fixed `privacy.clean` by reading staged
+  content rather than by widening a list of command shapes. A session that
+  edits only through the shell still reaches `working` by
+  `invariant session transition working`, which remains the generic route.
+- **Never forced, never raised.** The edge goes through `_advance` like any
+  other, so a project whose session machine gates it, or lacks it, keeps the
+  session where it was; and the hook absorbs a store failure rather than fail
+  a tool call that has already run (BUG_001's posture).
+
+No migration. A record already sitting in `isolated` — with commits, as every
+session before this fix did — advances on its next qualifying edit, and until
+then reads as it always did. Two hooks racing on a session's first two edits
+can each write the row; per-session documents are written by their owner, so
+the worst case is a duplicated `isolated -> working` row, not a wrong state.
 
 ### What the record carries beyond the state
 

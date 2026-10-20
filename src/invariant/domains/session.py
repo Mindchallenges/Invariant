@@ -24,7 +24,7 @@ from ..core import plan as plan_reader
 from ..core.errors import GateFailure, StateError, TransitionError, UsageError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_session_machine
-from ..core.rules import Evaluated, RuleContext, evaluate, get_rule
+from ..core.rules import Evaluated, RuleContext, evaluate, get_rule, is_exempt_path
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore, PreservesUnknownKeys
 
@@ -33,6 +33,12 @@ REGISTRY = "registry.json"
 #: The two states a session does not come back from. The registry indexes
 #: sessions in flight, so a write to a finished record must not re-register it.
 _FINISHED = frozenset({"torn_down", "abandoned"})
+
+#: The edge an edit fires, ``isolated --> working: first edit``. Named once so
+#: that :meth:`SessionDomain.advance_on_edit` and its documentation cannot
+#: disagree about which edge it is.
+_FIRST_EDIT_FROM = "isolated"
+_FIRST_EDIT_TO = "working"
 
 #: Context a gate needs to know which question it is being asked, derived from
 #: the state being ENTERED. ``session.ff_merge_target`` and
@@ -1047,6 +1053,70 @@ class SessionDomain:
     ) -> Session:
         session = self.require(session_id)
         self._advance(session, target, reason=reason, force=force, cwd=cwd)
+        return session
+
+    def advance_on_edit(
+        self,
+        target: Path | str,
+        *,
+        cwd: Path | None = None,
+        host_session_id: str | None = None,
+    ) -> Session | None:
+        """Fire ``isolated --> working: first edit`` for an edit that landed.
+
+        The state model drew this edge from the start and nothing fired it, so
+        a session sat in ``isolated`` through every commit it made and
+        ``session review`` refused it until somebody named the edge by hand
+        (BUG_062). The caller is a host hook that has watched an edit tool
+        complete; it reports WHERE the bytes landed and WHO it is, and every
+        judgement about whether that was this session's first edit is made
+        here, where the transition lives.
+
+        Advances only when all of these hold, and otherwise returns ``None``
+        having written nothing:
+
+        * the writer is IDENTIFIED (:attr:`Resolution.proven`) — the ``origin``
+          route names the only session left standing, which is a guess;
+        * that session is in ``isolated``. Any other state is left alone: a
+          ``working`` session's next edit is not an event the machine records
+          (``working --> working`` is the commit loop), and an edit after
+          ``reviewed`` must not quietly retreat the session;
+        * the edit landed in THAT session's own worktree. An edit into a peer's
+          worktree is nobody's first edit — the writer did not edit its own
+          tree and the owner did not edit at all;
+        * the path is not exempt from isolation. The work-item store and
+          ``session.exempt_paths`` are exempt because writing them is not work
+          on the branch, so writing them is not the session starting its work.
+
+        Never forced, and a refusal is not an error: a blocking gate or a
+        machine without the edge leaves the session where it was, because the
+        caller is a hook and a hook must never fail a tool call that has
+        already run. A store that cannot be read or written still raises, as
+        it does everywhere in this domain; the hook absorbs that one.
+        """
+        cwd = Path(cwd or Path.cwd())
+        path = Path(target)
+        if not path.is_absolute():
+            path = cwd / path
+
+        resolution = self.resolve(cwd, target=path, host_session_id=host_session_id)
+        session = resolution.session
+        if not resolution.proven or session.state != _FIRST_EDIT_FROM:
+            return None
+        owner = self.by_worktree_containing(path)
+        if owner is None or owner.id != session.id:
+            return None
+        worktree = Path(session.worktree).resolve()
+        if is_exempt_path(self.manifest, worktree, path):
+            return None
+
+        relative = path.resolve().relative_to(worktree)
+        try:
+            self._advance(
+                session, _FIRST_EDIT_TO, reason=f"first edit: {relative}", cwd=cwd
+            )
+        except (GateFailure, TransitionError):
+            return None
         return session
 
     #: Longer than any path this could name. macOS caps a path at 1024 bytes

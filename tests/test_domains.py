@@ -3126,3 +3126,171 @@ class TestBUG066AReproOnlyPipelineLands:
         # one is terminal, and its own red phase records from scratch.
         fresh = pipelines.start(session.id, methodology="bugfix")
         assert fresh.state == "triaging"
+
+
+class TestBUG062TheFirstEditAdvancesAnIsolatedSession:
+    """``isolated --> working: first edit`` is an edge something fires.
+
+    The state model drew it from the start and nothing implemented it, so every
+    session sat in ``isolated`` through all of its commits and ``session
+    review`` refused it until somebody named the edge by hand. The decision
+    (2026-10-20) was to implement the trigger rather than correct the diagram:
+    the domain owns the transition, and a host only reports that an edit
+    landed. These pin the edge AND its narrowness — the path must not advance a
+    session that is anywhere but ``isolated``, must not advance on an edit that
+    landed outside the session's own worktree, and must not raise.
+    """
+
+    HOST = "host-bug-062-domain"
+
+    def isolated(self, m, name="first-edit"):
+        domain = SessionDomain(m)
+        session = domain.start(name)
+        domain.isolate(session.id, execute=True)
+        return domain, domain.get(session.id)
+
+    def test_an_edit_in_its_own_worktree_moves_an_isolated_session_to_working(self, m):
+        domain, session = self.isolated(m)
+        target = Path(session.worktree) / "src" / "thing.py"
+
+        advanced = domain.advance_on_edit(target, cwd=m.root)
+
+        assert advanced is not None and advanced.id == session.id
+        record = domain.get(session.id)
+        assert record.state == "working"
+        row = record.history[-1]
+        assert (row["from"], row["to"]) == ("isolated", "working")
+        assert row["reason"] == "first edit: src/thing.py"
+        assert record.overrides == [], "the edge is legal; nothing was forced"
+
+    def test_the_host_route_advances_the_session_the_host_owns(self, m):
+        domain, session = self.isolated(m)
+        domain.adopt_host_session(session.id, self.HOST)
+        target = Path(session.worktree) / "f.py"
+
+        domain.advance_on_edit(target, cwd=m.root, host_session_id=self.HOST)
+
+        assert domain.get(session.id).state == "working"
+
+    def test_a_relative_target_is_read_against_the_callers_directory(self, m):
+        domain, session = self.isolated(m)
+
+        domain.advance_on_edit(Path("src/thing.py"), cwd=Path(session.worktree))
+
+        assert domain.get(session.id).state == "working"
+
+    def test_the_second_edit_writes_nothing(self, m):
+        """`working --> working` is the COMMIT loop, not an edit counter.
+
+        A row per edit would bury the history the per-state telemetry reads,
+        and stamp the heartbeat that anchors the next transition's `elapsed`.
+        """
+        domain, session = self.isolated(m)
+        target = Path(session.worktree) / "f.py"
+        domain.advance_on_edit(target, cwd=m.root)
+        before = domain.get(session.id).to_dict()
+
+        assert domain.advance_on_edit(target, cwd=m.root) is None
+        assert domain.get(session.id).to_dict() == before
+
+    @pytest.mark.parametrize("state", ["working", "reviewed", "merged", "pushed"])
+    def test_a_session_not_in_isolated_is_never_moved(self, m, state):
+        """In particular an edit after review does not quietly retreat it."""
+        domain, session = self.isolated(m)
+        session.state = state
+        domain._save(session)
+
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == state
+
+    def test_a_registered_session_is_not_moved_by_an_edit_in_the_checkout(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("never-isolated")
+
+        assert domain.advance_on_edit(m.root / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "registered"
+
+    def test_an_edit_in_the_main_checkout_does_not_advance(self, m):
+        """The origin route names the only session left standing — a guess."""
+        domain, session = self.isolated(m)
+
+        assert domain.advance_on_edit(m.root / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_an_edit_into_a_peers_worktree_advances_neither(self, m):
+        """The writer is not the owner, so the edit is nobody's first edit.
+
+        The writer did not edit its own worktree; the owner did not edit at
+        all. Advancing either would record work that did not happen there.
+        """
+        domain, writer = self.isolated(m, "writer")
+        _, owner = self.isolated(m, "owner")
+        domain.adopt_host_session(writer.id, self.HOST)
+        target = Path(owner.worktree) / "f.py"
+
+        assert domain.advance_on_edit(target, cwd=m.root, host_session_id=self.HOST) is None
+        assert domain.get(writer.id).state == "isolated"
+        assert domain.get(owner.id).state == "isolated"
+
+    def test_an_unknown_explicit_session_is_not_an_error(self, m, monkeypatch):
+        domain, session = self.isolated(m)
+        monkeypatch.setenv("INVARIANT_SESSION_ID", "nosuchid")
+
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    @pytest.mark.parametrize(
+        "relative", [".claude/notes.md", "MEMORY.md", "docs/backlog/BUG_001.md"]
+    )
+    def test_an_exempt_path_inside_the_worktree_does_not_advance(self, m, relative):
+        """Data every session touches is not work on the branch.
+
+        `session.exempt_paths` and the work-item store are exempt from
+        isolation for exactly that reason, so writing one is not the session
+        starting its work.
+        """
+        domain, session = self.isolated(m)
+
+        target = Path(session.worktree) / relative
+        assert domain.advance_on_edit(target, cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_blocking_gate_on_the_edge_leaves_the_session_where_it_was(
+        self, m, monkeypatch
+    ):
+        """Never forced. A project whose machine gates the edge keeps it."""
+        domain, session = self.isolated(m)
+
+        def refuse(*args, **kwargs):
+            raise GateFailure("1 gate(s) block 'isolated' -> 'working'")
+
+        monkeypatch.setattr(domain, "_advance", refuse)
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_machine_without_the_edge_is_not_an_error(self, m, monkeypatch):
+        domain, session = self.isolated(m)
+
+        def no_edge(machine, source, target):
+            raise TransitionError(f"{source!r} -> {target!r} is not an edge")
+
+        # The machine is a frozen dataclass, so the edge goes on its type;
+        # monkeypatch puts it back.
+        monkeypatch.setattr(type(domain.machine), "require_edge", no_edge)
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_session_already_sitting_in_isolated_with_commits_needs_no_migration(
+        self, m
+    ):
+        """Existing records advance on their next edit, and not before."""
+        domain, session = self.isolated(m)
+        worktree = Path(session.worktree)
+        (worktree / "done.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "work"], cwd=worktree, check=True)
+        assert domain.get(session.id).state == "isolated"
+
+        domain.advance_on_edit(worktree / "more.py", cwd=m.root)
+
+        assert domain.get(session.id).state == "working"

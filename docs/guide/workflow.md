@@ -12,7 +12,7 @@ stateDiagram-v2
     direction LR
     state Session {
         registered --> isolated
-        isolated --> working
+        isolated --> working : first edit
         working --> working
         working --> reviewed
         reviewed --> merged
@@ -76,6 +76,13 @@ to put them inside the repository). Until it has run, the
 `session.isolated_before_edit` rule refuses every edit, and the
 `session.no_edit_in_main_checkout` rule keeps refusing edits in the main
 checkout for the life of the session — a second checkout is the whole point.
+
+The session moves from `isolated` to `working` on its own: the first
+`Edit`, `Write`, `MultiEdit` or `NotebookEdit` that completes inside the
+session's worktree advances it. Edits to exempt paths (`.claude/`, the
+work-item store) and writes made through the shell do not count; a session
+that only ever writes through the shell runs
+`invariant session transition working` before `session review`.
 
 One Claude Code session owns at most one live invariant session. The binding
 happens automatically when the agent runs `session start`; `session status`
