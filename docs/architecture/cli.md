@@ -353,7 +353,7 @@ invariant session resume <name> [--id <id>] [--force]
     a refusal carrying it would bind the caller to the session it just declined
     to give them.
 
-invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--id <id>]
+invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-open] [--id <id>]
     Hand the work to a fresh Claude Code session, in one command. The note is
     privacy-scanned with the project's own patterns and REFUSED on a finding
     (exit 1, findings redacted); it must be one line, and may not carry the
@@ -394,6 +394,21 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--id <id>
     `env -u` removes the launching host's markers (`HOST_MARKERS`: `CLAUDECODE`,
     the `CLAUDE_CODE_*` session variables, `COLORTERM`), so the successor
     starts as a top-level session, not as a child of this one (BUG_068).
+
+    Once the launch has succeeded, the old session ends itself (IDEA_009).
+    The output is printed in full; then, 20 seconds later
+    (`CLOSE_DELAY_SECONDS`), the Claude Code process named by `CLAUDE_PID` is
+    sent SIGTERM and exits, and its terminal window stays at a shell prompt.
+    The delay is the 15-second budget of the PostToolUse hook that records the
+    call, plus a margin; the note itself was recorded before the launch. The
+    wait is a detached `sleep 20; <check>; kill -TERM <pid>` that exits on its
+    own, and the check — `ps -p <pid> -o comm=` names `claude` — runs
+    immediately before the signal, so a pid reused in the meantime is spared.
+    `--keep-open` launches and leaves the session running. A `--dry-run`, any
+    refusal and a failed launch never end it. When `CLAUDE_PID` is unset,
+    unusable, or names something other than `claude`, the handoff still
+    succeeds, prints why it is leaving the session open, and signals nothing.
+    The JSON result carries `close`: `scheduled`, `pid` and `delay`.
 
 invariant session handoff --dismiss [--dry-run] [--json]
     Retire the note the unbound greeting is showing — the latest fresh,

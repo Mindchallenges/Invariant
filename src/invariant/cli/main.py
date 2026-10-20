@@ -1337,6 +1337,57 @@ def _handoff_launcher():
     return _real_handoff_launcher()
 
 
+def _real_handoff_closer():
+    from ..hosts.claude_code_launch import DetachedCloser
+
+    return DetachedCloser()
+
+
+def _handoff_closer():
+    """The closer that ends the launching host after a handoff. A seam, like
+    `_handoff_launcher`: the suite replaces it everywhere, so no test signals
+    a process (IDEA_009)."""
+    return _real_handoff_closer()
+
+
+def _close_launching_host(launch, keep_open: bool) -> tuple[dict, str]:
+    """After a successful launch, schedule the end of the host that ran it.
+
+    Returns the JSON `close` document and the one line the output carries.
+    Every route that does not schedule says why and leaves the session open:
+    `--keep-open`, no usable `CLAUDE_PID`, or a pid that does not name a
+    `claude` process now. The closer checks the name again at kill time.
+    """
+    close = {"scheduled": False, "pid": None, "delay": None}
+    if keep_open:
+        return close, "  left this session open (--keep-open)"
+    raw = os.environ.get(launch.HOST_PID_ENV)
+    pid = launch.host_pid(os.environ)
+    if pid is None:
+        why = (
+            f"{launch.HOST_PID_ENV} is not set"
+            if not (raw or "").strip()
+            else f"{launch.HOST_PID_ENV}={raw!r} names no process"
+        )
+        return close, f"  leaving this session open: {why}, so there is no claude to end"
+    close["pid"] = pid
+    closer = _handoff_closer()
+    name = closer.process_name(pid)
+    if not launch.is_claude_process_name(name):
+        what = name or "no running process"
+        return close, (
+            f"  leaving this session open: {launch.HOST_PID_ENV} {pid} names "
+            f"{what}, not claude"
+        )
+    delay = launch.CLOSE_DELAY_SECONDS
+    closer.close(pid, delay)
+    close.update({"scheduled": True, "delay": delay})
+    return close, (
+        f"  this session ends in {delay}s: SIGTERM to claude (pid {pid}); "
+        f"--keep-open keeps it next time"
+    )
+
+
 def _dismiss_handoff(args) -> int:
     """`session handoff --dismiss`: retire the note the greeting is showing.
 
@@ -1347,7 +1398,12 @@ def _dismiss_handoff(args) -> int:
     """
     stray = [
         flag
-        for flag, value in (("--note", args.note), ("--name", args.name), ("--id", args.id))
+        for flag, value in (
+            ("--note", args.note),
+            ("--name", args.name),
+            ("--id", args.id),
+            ("--keep-open", args.keep_open),
+        )
         if value
     ]
     if stray:
@@ -1404,6 +1460,13 @@ def cmd_session_handoff(args) -> int:
     3. **Record, then launch.** If the launch fails the note is already on
        the record, and the greeting of whatever session starts next shows it —
        which is the fallback for a lost prompt argument, too.
+    4. **End the old host, last, and only after a launch that succeeded**
+       (IDEA_009). The output is printed first; the launching `claude`
+       (`CLAUDE_PID`) is sent SIGTERM `CLOSE_DELAY_SECONDS` later, by a
+       detached sleeper that checks the pid still names `claude` before it
+       signals. `--keep-open` opts out; a dry run, a refusal and a failed
+       launch never get here, and a missing or foreign pid is reported and
+       left alone.
 
     The launched line carries the claim token naming the note just recorded,
     so the new host's first `session start` / `session resume` consumes that
@@ -1469,6 +1532,7 @@ def cmd_session_handoff(args) -> int:
         "applescript": plan.applescript,
         "token": None,
         "dry_run": bool(args.dry_run),
+        "close": {"scheduled": False, "pid": None, "delay": None},
     }
 
     if args.dry_run:
@@ -1483,6 +1547,15 @@ def cmd_session_handoff(args) -> int:
             (
                 f"  a real run sets {launch.HANDOFF_ENV}=<session>:<recorded-at> "
                 f"before claude, so the new session claims this note"
+            ),
+            (
+                "  --keep-open: a real run leaves this session open"
+                if args.keep_open
+                else (
+                    f"  a real run then ends this session: SIGTERM to "
+                    f"{launch.HOST_PID_ENV} after {launch.CLOSE_DELAY_SECONDS}s, "
+                    f"unless --keep-open"
+                )
             ),
         ]
         if claude is None:
@@ -1522,6 +1595,8 @@ def cmd_session_handoff(args) -> int:
         }
     )
     _handoff_launcher().launch(plan)
+    close, close_line = _close_launching_host(launch, args.keep_open)
+    result["close"] = close
     return emit(
         args,
         result,
@@ -1531,6 +1606,7 @@ def cmd_session_handoff(args) -> int:
                 f"  recorded on {updated.name} [{updated.state}]",
                 f"  opened a new Terminal window in {plan.cwd}:",
                 f"    {plan.shell_line}",
+                close_line,
             ]
         ),
     )
@@ -2623,8 +2699,9 @@ def build_parser() -> argparse.ArgumentParser:
             "down included), then open a new macOS Terminal window in the main "
             "checkout running: claude --name <slug> --remote-control <slug> "
             "\"<note>\". The slug comes from the note's 'next:' item unless "
-            "--name gives one. --dismiss instead retires the latest fresh note "
-            "without acting on it."
+            "--name gives one. Once the launch succeeds, this Claude Code session "
+            "(CLAUDE_PID) is sent SIGTERM after a short delay unless --keep-open. "
+            "--dismiss instead retires the latest fresh note without acting on it."
         ),
     )
     q.add_argument(
@@ -2642,6 +2719,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="print the exact command and AppleScript; record and launch nothing",
+    )
+    q.add_argument(
+        "--keep-open",
+        action="store_true",
+        help="launch the successor but leave this Claude Code session running; "
+        "by default it is sent SIGTERM shortly after a successful launch",
     )
     q.add_argument("--id", help="the session handing off, when the directory cannot say")
     q.set_defaults(func=cmd_session_handoff)

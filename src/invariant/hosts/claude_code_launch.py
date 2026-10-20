@@ -40,6 +40,17 @@ Terminal.app that is already polluted, and from the environment ``osascript``
 is run with, which keeps a Terminal.app started by the launch clean for the
 windows the user opens by hand. Everything else — the user's own variables and
 ``HANDOFF_ENV`` — is left as it is.
+
+**Once the successor is running, the old host ends (IDEA_009).** Claude Code
+names its own process in ``CLAUDE_PID`` for the tools it runs, and after a
+successful launch the CLI hands that pid to a ``HostCloser``. The real one
+starts ``close_script``: a detached ``sleep``, a ``ps`` check that the pid
+still names ``claude``, and a SIGTERM — the check at kill time, because a pid
+can be reused while the script sleeps. It signals the process rather than
+closing a window, so it works in any terminal and over Remote Control, and the
+window stays at a shell prompt. The CLI reaches the closer through one
+replaceable function, the way it reaches the launcher, and the suite replaces
+it everywhere: no test signals a process.
 """
 
 from __future__ import annotations
@@ -94,6 +105,25 @@ HOST_MARKERS: tuple[str, ...] = (
     "AI_AGENT",
     "COLORTERM",
 )
+
+
+#: The variable naming the launching Claude Code process, which Claude Code
+#: exports to the tools it runs (IDEA_009). It is also one of ``HOST_MARKERS``,
+#: for the opposite reason: there it is a value the successor must not inherit,
+#: here it is the process this handoff ends. Two concerns, two names, one
+#: spelling — a rename on either side must not silently move the other.
+HOST_PID_ENV = "CLAUDE_PID"
+
+#: Seconds between a successful launch and the SIGTERM to the launching host.
+#: The note is claimed and recorded BEFORE the launch (IDEA_008), so two things
+#: are still in flight when the command returns: its output, which the host
+#: shows as soon as the tool call ends, and the PostToolUse hook the host runs
+#: on that call, which records it. The hook is bounded by the timeout this
+#: library installs it with — 15 seconds — after which the host abandons it
+#: anyway, so the delay is that budget plus a margin. A shorter one could end
+#: the host while its hook is still writing; the suite pins the relation by
+#: reading the installed timeout back.
+CLOSE_DELAY_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -223,3 +253,86 @@ class TerminalLauncher:
                 f"  The note is recorded. Run it by hand:\n"
                 f"    {plan.shell_line}"
             )
+
+
+
+def host_pid(environ) -> int | None:
+    """The launching Claude Code process named by ``HOST_PID_ENV``, or ``None``.
+
+    Only a positive integer names a process. ``0`` and a negative value are
+    refused rather than passed on, because ``kill`` reads both as a process
+    GROUP — a signal to every process the user owns, in the ``-1`` case.
+    """
+    raw = (environ.get(HOST_PID_ENV) or "").strip()
+    if not raw.isdigit():
+        return None
+    pid = int(raw)
+    return pid if pid > 0 else None
+
+
+def is_claude_process_name(name: str | None) -> bool:
+    """Whether ``ps -o comm=`` output names a ``claude`` executable.
+
+    Linux prints the bare name and macOS may print the full path, so the last
+    path component is compared, exactly. ``close_script`` makes the same test
+    in the shell, with a ``case`` over the same two spellings.
+    """
+    if not name:
+        return False
+    return name.strip().rsplit("/", 1)[-1] == CLAUDE_BINARY
+
+
+def close_script(pid: int, delay: int) -> str:
+    """The detached shell line that ends the launching host: sleep, check, TERM.
+
+    The identity check runs immediately before the signal, not only when the
+    close is scheduled: the pid could be reused in between, and a process that
+    is not ``claude`` any more is left alone. ``sleep`` bounds the script's
+    life, and it exits on its own whatever the check answers.
+    """
+    return (
+        f"sleep {int(delay)}; "
+        f'case "$(ps -p {int(pid)} -o comm= 2>/dev/null)" in '
+        f"{CLAUDE_BINARY}|*/{CLAUDE_BINARY}) kill -TERM {int(pid)} ;; esac"
+    )
+
+
+class HostCloser(Protocol):
+    """The seam that ends the launching host. A test passes an inert recorder."""
+
+    def process_name(self, pid: int) -> str | None: ...
+
+    def close(self, pid: int, delay: int) -> None: ...
+
+
+class DetachedCloser:
+    """Ends the launching host through a short, detached ``close_script``.
+
+    The script runs in its own session (``start_new_session``), so it outlives
+    this command and is not in the process group the host's tool runner tears
+    down when the command returns. It holds none of this command's streams: an
+    inherited stdout would keep the host's tool call open until the sleep
+    ended, which is the output being held back rather than printed first.
+    """
+
+    def process_name(self, pid: int) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return None
+        name = proc.stdout.strip()
+        return name if proc.returncode == 0 and name else None
+
+    def close(self, pid: int, delay: int) -> None:
+        subprocess.Popen(
+            ["/bin/sh", "-c", close_script(pid, delay)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )

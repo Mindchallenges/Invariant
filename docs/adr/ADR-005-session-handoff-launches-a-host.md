@@ -163,6 +163,38 @@ carries no token and leaves only by dismissal or staleness.
 not told it, and two hosts launched from two handoffs would be told apart only
 by a name somebody may have overridden.
 
+### D7 — The launching host ends once its successor is running (amendment, IDEA_009)
+
+*Added after acceptance. The maintainer settled the four decisions on IDEA_009,
+and they extend D3 without reversing it, so they are recorded here rather than
+in a new ADR, as D6 was.*
+
+Only a launch that succeeded ends the old session. A dry run, a refusal and a
+failed launch leave it running, so the user is never left without a session.
+After the output is printed, the Claude Code process named by `CLAUDE_PID`,
+which Claude Code exports to its tools, is sent SIGTERM `CLOSE_DELAY_SECONDS`
+later. `--keep-open` opts out. A pid that is missing, unusable or not `claude`
+is reported, and nothing is signalled.
+
+The delay is a detached, bounded `sleep N; <check>; kill -TERM <pid>`, and
+nothing outlives it. `N` is 20. IDEA_008's claim and record land before the
+launch, so only two things are still in flight when the command returns: the
+output, which the host shows when the tool call ends, and the PostToolUse hook
+that records the call. The hook is installed with a 15-second timeout, so 20
+seconds covers its whole budget. The suite reads the installed timeout back and
+fails if the delay stops exceeding it. The check, `ps -p <pid> -o comm=` naming
+`claude`, runs immediately before the signal as well as before scheduling,
+because a pid can be reused while the script sleeps. The process is signalled
+and the window is not closed, so this works in any terminal and over Remote
+Control.
+
+The closer is a seam beside the launcher (`_handoff_closer`), and the suite
+replaces it for every test.
+
+*Rejected:* closing the Terminal window through AppleScript. It ends the shell
+along with the host, does nothing over Remote Control, and needs the window to
+be the one the host runs in, which nothing here knows.
+
 ## Consequences
 
 - A host process is started by this library for the first time. It is macOS

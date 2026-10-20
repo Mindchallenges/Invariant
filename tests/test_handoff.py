@@ -818,6 +818,285 @@ class TestTheCommand:
         assert isinstance(cli._real_handoff_launcher(), launch.TerminalLauncher)
 
 
+# -- ending the old session (IDEA_009) ----------------------------------
+#
+# After a successful launch the launching Claude Code process — CLAUDE_PID —
+# is sent SIGTERM a bounded delay later, unless --keep-open says otherwise.
+# Never on a dry run, a refusal or a failed launch. No test signals anything:
+# the closer is replaced suite-wide (conftest), and the real one is proved by
+# running its script in a shell whose `kill` is a function that only records.
+
+
+@pytest.fixture
+def closer(_no_real_host_close, monkeypatch):
+    """The suite's inert closer, with a launching host that answers `claude`."""
+    monkeypatch.setenv("CLAUDE_PID", "4242")
+    return _no_real_host_close
+
+
+class TestTheOldSessionEnds:
+    def test_a_launch_schedules_sigterm_to_the_launching_claude(
+        self, project, capsys, launcher, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        text = capsys.readouterr().out
+
+        assert len(launcher.plans) == 1
+        assert [pid for pid, _ in closer.closed] == [4242]
+        assert closer.asked == [4242]
+        assert "4242" in text and "--keep-open" in text
+
+    def test_the_output_is_printed_before_anything_is_closed(
+        self, project, capsys, launcher, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        text = capsys.readouterr().out
+        assert text.index("handed off as ship-it") < text.index("4242")
+
+    def test_the_delay_outlasts_the_hook_that_records_the_handoff(
+        self, project, capsys, closer, macos_with_claude, tmp_path
+    ):
+        from invariant.hosts.claude_code import ClaudeCodeHost
+
+        host_root = tmp_path / "host"
+        host_root.mkdir()
+        ClaudeCodeHost(host_root).install_hooks()
+        settings = json.loads(
+            (host_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+        )
+        (entry,) = settings["hooks"]["PostToolUse"]
+        hook_budget = entry["hooks"][0]["timeout"]
+
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        ((_, delay),) = closer.closed
+        assert hook_budget < delay <= 30
+
+    def test_keep_open_launches_and_closes_nothing(
+        self, project, capsys, launcher, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it", "--keep-open") == 0
+        text = capsys.readouterr().out
+        assert len(launcher.plans) == 1
+        assert closer.closed == []
+        assert "--keep-open" in text and "open" in text
+
+    def test_a_dry_run_closes_nothing_and_says_what_a_real_run_would(
+        self, project, capsys, launcher, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it", "--dry-run") == 0
+        text = capsys.readouterr().out
+        assert closer.closed == []
+        assert "SIGTERM" in text and "--keep-open" in text
+
+    def test_a_refusal_closes_nothing(
+        self, project, capsys, launcher, closer, monkeypatch
+    ):
+        started(project, capsys)
+        monkeypatch.setattr(launch, "host_platform", lambda: "linux")
+        monkeypatch.setattr(launch, "resolve_claude", lambda: "/opt/bin/claude")
+        assert run("session", "handoff", "--note", "next: ship it") == 2
+        assert closer.closed == []
+
+    def test_a_failed_launch_closes_nothing(
+        self, project, capsys, closer, macos_with_claude, monkeypatch
+    ):
+        started(project, capsys)
+
+        class Broken:
+            def launch(self, plan):
+                raise InvariantError("osascript refused")
+
+        monkeypatch.setattr("invariant.cli.main._handoff_launcher", lambda: Broken())
+        assert run("session", "handoff", "--note", "next: ship it") == 1
+        assert closer.closed == []
+
+    def test_no_claude_pid_leaves_the_session_open_and_says_why(
+        self, project, capsys, launcher, closer, macos_with_claude, monkeypatch
+    ):
+        monkeypatch.delenv("CLAUDE_PID")
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        text = capsys.readouterr().out
+        assert len(launcher.plans) == 1
+        assert closer.closed == []
+        assert "CLAUDE_PID" in text and "leaving this session open" in text
+
+    @pytest.mark.parametrize("value", ["abc", "0", "-7", ""])
+    def test_an_unusable_claude_pid_leaves_it_open(
+        self, project, capsys, closer, macos_with_claude, monkeypatch, value
+    ):
+        monkeypatch.setenv("CLAUDE_PID", value)
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        text = capsys.readouterr().out
+        assert closer.closed == [] and closer.asked == []
+        assert "leaving this session open" in text
+
+    @pytest.mark.parametrize(
+        ("name", "said"), [("python3", "python3"), (None, "no running process")]
+    )
+    def test_a_pid_that_is_not_claude_leaves_it_open(
+        self, project, capsys, closer, macos_with_claude, name, said
+    ):
+        closer.name = name
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        text = capsys.readouterr().out
+        assert closer.closed == []
+        assert said in text and "leaving this session open" in text
+
+    def test_json_says_what_was_scheduled(
+        self, project, capsys, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        run("session", "handoff", "--note", "next: ship it", "--json")
+        close = last_json(capsys)["close"]
+        assert close["scheduled"] is True
+        assert close["pid"] == 4242
+        assert close["delay"] == closer.closed[0][1]
+
+    def test_json_on_keep_open_and_dry_run_schedules_nothing(
+        self, project, capsys, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        run("session", "handoff", "--note", "next: ship it", "--keep-open", "--json")
+        assert last_json(capsys)["close"]["scheduled"] is False
+        run("session", "handoff", "--note", "next: ship it", "--dry-run", "--json")
+        assert last_json(capsys)["close"]["scheduled"] is False
+
+    def test_dismiss_takes_no_keep_open(self, project, capsys, closer):
+        started(project, capsys)
+        assert run("session", "handoff", "--dismiss", "--keep-open") == 2
+        assert "--keep-open" in capsys.readouterr().err
+
+    def test_the_real_closer_is_the_detached_one(self):
+        from invariant.cli import main as cli
+
+        assert isinstance(cli._real_handoff_closer(), launch.DetachedCloser)
+
+
+def _run_close_script(script: str, comm: str | None, tmp_path) -> list[str]:
+    """Run ``script`` in a real shell whose ``kill`` only records its arguments.
+
+    ``kill`` is a regular built-in, so a function of the same name shadows it;
+    ``ps`` is replaced the same way when ``comm`` is given, and is the real
+    ``ps`` otherwise. Nothing is signalled either way.
+    """
+    log = tmp_path / "kill.log"
+    stubs = [f'kill() {{ echo "$*" >> {shlex.quote(str(log))}; }}']
+    if comm is not None:
+        stubs.append(f"ps() {{ printf '%s\\n' {shlex.quote(comm)}; }}")
+    proc = subprocess.run(
+        ["/bin/sh", "-c", "\n".join([*stubs, script])],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+class TestTheHostCloser:
+    @pytest.mark.parametrize(
+        ("environ", "pid"),
+        [
+            ({"CLAUDE_PID": "123"}, 123),
+            ({"CLAUDE_PID": " 77 "}, 77),
+            ({}, None),
+            ({"CLAUDE_PID": "abc"}, None),
+            ({"CLAUDE_PID": "0"}, None),
+            ({"CLAUDE_PID": "-3"}, None),
+        ],
+    )
+    def test_host_pid_reads_claude_pid(self, environ, pid):
+        assert launch.host_pid(environ) == pid
+
+    @pytest.mark.parametrize(
+        ("name", "verdict"),
+        [
+            ("claude", True),
+            ("/usr/local/bin/claude", True),
+            ("python3", False),
+            ("claude-helper", False),
+            ("", False),
+            (None, False),
+        ],
+    )
+    def test_only_claude_is_a_claude_process(self, name, verdict):
+        assert launch.is_claude_process_name(name) is verdict
+
+    def test_the_script_is_a_bounded_sleep_then_a_checked_term(self):
+        script = launch.close_script(4242, 20)
+        assert script.startswith("sleep 20;")
+        assert "ps -p 4242 -o comm=" in script
+        assert "kill -TERM 4242" in script
+
+    @pytest.mark.parametrize("comm", ["claude", "/opt/homebrew/bin/claude"])
+    def test_the_script_signals_a_claude_process(self, comm, tmp_path):
+        assert _run_close_script(launch.close_script(4242, 0), comm, tmp_path) == [
+            "-TERM 4242"
+        ]
+
+    @pytest.mark.parametrize("comm", ["python3", "claude-helper", ""])
+    def test_the_script_spares_anything_else(self, comm, tmp_path):
+        assert _run_close_script(launch.close_script(4242, 0), comm, tmp_path) == []
+
+    def test_a_reused_pid_is_spared_at_kill_time_by_the_real_ps(self, tmp_path):
+        # This process is python, not claude: the check the script makes
+        # immediately before the signal must refuse it.
+        script = launch.close_script(os.getpid(), 0)
+        assert _run_close_script(script, None, tmp_path) == []
+
+    def test_process_name_reads_ps(self):
+        name = launch.DetachedCloser().process_name(os.getpid())
+        assert name
+        assert not launch.is_claude_process_name(name)
+
+    def test_process_name_is_none_without_a_process(self, monkeypatch):
+        def fake_run(argv, **kwargs):
+            assert argv == ["ps", "-p", "999999", "-o", "comm="]
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+        monkeypatch.setattr(launch.subprocess, "run", fake_run)
+        assert launch.DetachedCloser().process_name(999999) is None
+
+    def test_process_name_is_none_without_ps(self, monkeypatch):
+        def fake_run(argv, **kwargs):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(launch.subprocess, "run", fake_run)
+        assert launch.DetachedCloser().process_name(42) is None
+
+    def test_close_spawns_a_detached_sleeper_holding_no_pipe(self, monkeypatch):
+        calls = []
+
+        def fake_popen(argv, **kwargs):
+            calls.append((argv, kwargs))
+
+        monkeypatch.setattr(launch.subprocess, "Popen", fake_popen)
+        launch.DetachedCloser().close(4242, 20)
+
+        ((argv, kwargs),) = calls
+        assert argv == ["/bin/sh", "-c", launch.close_script(4242, 20)]
+        assert kwargs["start_new_session"] is True
+        for stream in ("stdin", "stdout", "stderr"):
+            assert kwargs[stream] is subprocess.DEVNULL
+
+
+def test_no_test_here_can_end_the_host_session():
+    """A guard on the guard: conftest's inert closer is what keeps the host up."""
+    from invariant.cli import main as cli
+
+    assert cli._handoff_closer().closed == []
+    assert os.environ.get("CLAUDE_PID") is None
+
+
 # -- surfacing ---------------------------------------------------------
 
 

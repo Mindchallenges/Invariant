@@ -567,6 +567,19 @@ afterwards. The list is named rather than matched by prefix because
 `CLAUDE_CODE_` also prefixes the user's own configuration, which the new
 window's login shell re-exports before the typed line runs.
 
+It also ends the host that ran the handoff, once the launch has succeeded
+(IDEA_009). `HostCloser` is a second seam beside `Launcher`, reached through
+`_handoff_closer` the way the launcher is through `_handoff_launcher`, and the
+suite replaces it everywhere, so no test signals a process. The real
+`DetachedCloser` starts `close_script` in a session of its own, holding none
+of the command's streams: `sleep CLOSE_DELAY_SECONDS`, then `ps -p` to check
+that `CLAUDE_PID` still names `claude`, then SIGTERM. The check runs at kill
+time because a pid can be reused while the script sleeps. The CLI checks once
+too, before scheduling, so a missing or foreign pid is reported instead of
+being left to fail silently. `CLAUDE_PID` is read as `HOST_PID_ENV`, a constant
+of its own: the same spelling is in `HOST_MARKERS`, but there it is a value the
+successor must not inherit, and here it is the process to end.
+
 The telemetry reader is also the library's only dependency on another program's **undocumented**
 format, and that shapes the code: every field access tolerates absence, an
 unparseable record is skipped rather than fatal, and the file is a cache keyed

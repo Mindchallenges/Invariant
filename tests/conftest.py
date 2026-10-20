@@ -46,6 +46,41 @@ def _no_ambient_session_id(monkeypatch):
     monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
 
 
+class InertCloser:
+    """A host closer that signals nothing and records what it was asked."""
+
+    def __init__(self, name: str | None = "claude") -> None:
+        self.name = name
+        self.asked: list[int] = []
+        self.closed: list[tuple[int, int]] = []
+
+    def process_name(self, pid: int) -> str | None:
+        self.asked.append(pid)
+        return self.name
+
+    def close(self, pid: int, delay: int) -> None:
+        self.closed.append((pid, delay))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_host_close(monkeypatch):
+    """No test anywhere may end the Claude Code session it runs inside.
+
+    A successful `session handoff` schedules a SIGTERM to `CLAUDE_PID`
+    (IDEA_009), and this suite runs inside a Claude Code session that exports
+    it — so a test reaching the command with the real closer in place would end
+    the host running the suite. The closer is replaced suite-wide, not only in
+    the handoff tests, and the ambient pid is removed: a test that wants one
+    sets it.
+    """
+    monkeypatch.delenv("CLAUDE_PID", raising=False)
+    inert = InertCloser()
+    monkeypatch.setattr(
+        "invariant.cli.main._handoff_closer", lambda: inert, raising=False
+    )
+    return inert
+
+
 def write_manifest(root: Path, body: dict) -> Path:
     path = root / MANIFEST_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
