@@ -176,7 +176,7 @@ class TestRegistry:
 
         reachable = {
             gate
-            for injected in (DOCS_FIRST_GATES, AGENT_ROLE_GATES)
+            for injected in (DOCS_FIRST_GATES, *AGENT_ROLE_GATES.values())
             for spec in injected.values()
             for gates in spec.values()
             for gate in gates

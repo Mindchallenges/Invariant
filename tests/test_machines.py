@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import pytest
 import yaml
 
@@ -186,7 +188,102 @@ class TestAgentRoleGates:
         assert not {g for g in exit_ if g.startswith("agents.")}
 
     def test_injection_targets_roles_not_names(self):
-        assert set(AGENT_ROLE_GATES) == {"landing"}
+        """Keyed by the role a machine must declare; injected onto `landing`."""
+        assert set(AGENT_ROLE_GATES) == {"design", "landing"}
+        for by_role in AGENT_ROLE_GATES.values():
+            assert set(by_role) == {"landing"}
+
+    #: Every shipped pipeline machine's landing-entry agent gates, spelled out.
+    #: The failure mode this guards against is a machine SILENTLY losing the
+    #: design gate, so the expected set is exhaustive rather than "chore lacks
+    #: it": a new machine, or a renamed role, has to be added here by hand.
+    AGENT_GATES_BY_MACHINE: ClassVar[dict[str, set[str]]] = {
+        "tdd": {"agents.design_agent_ran", "agents.review_agent_ran"},
+        "bugfix": {"agents.design_agent_ran", "agents.review_agent_ran"},
+        "spec-first": {"agents.design_agent_ran", "agents.review_agent_ran"},
+        "docs": {"agents.design_agent_ran", "agents.review_agent_ran"},
+        "chore": {"agents.review_agent_ran"},
+        "none": set(),
+    }
+
+    def test_the_table_covers_every_shipped_pipeline_machine(self):
+        pipelines = {
+            machine_id
+            for machine_id in shipped_ids()
+            if load_machine(machine_id).kind == "pipeline"
+        }
+        assert pipelines == set(self.AGENT_GATES_BY_MACHINE)
+
+    @pytest.mark.parametrize("methodology", sorted(AGENT_GATES_BY_MACHINE))
+    def test_each_shipped_machine_carries_exactly_its_agent_gates(
+        self, make_manifest, methodology
+    ):
+        machine = load_pipeline_machine(make_manifest({}), methodology)
+        gates = {
+            g
+            for s in machine.states.values()
+            for g in s.entry_gates + s.exit_gates
+            if g.startswith("agents.")
+        }
+        assert gates == self.AGENT_GATES_BY_MACHINE[methodology], methodology
+        for landing in machine.states_with_role("landing"):
+            assert gates <= set(machine.state(landing).entry_gates), methodology
+
+    def test_BUG_064_chore_declares_no_design_state_so_owes_no_design_agent(
+        self, make_manifest
+    ):
+        """The same boundary `docs.read_architecture` already had.
+
+        `chore` declares no design state, which is its claim that the work has
+        no design content. Before ADR-003 moved the design gate to landing it
+        sat on the design state and so was absent here by construction; the
+        move widened it to every machine with a landing state, and a
+        LICENSE-only chore could not land without `--force`.
+        """
+        machine = load_pipeline_machine(make_manifest({}), "chore")
+        landing = machine.states_with_role("landing")[0]
+        entry = set(machine.state(landing).entry_gates)
+        assert "agents.design_agent_ran" not in entry
+        assert "agents.review_agent_ran" in entry
+        assert "docs.updated" in entry
+
+    def test_a_project_machine_with_a_design_state_gets_the_design_gate(
+        self, make_manifest, tmp_path
+    ):
+        """Injection reads the role, so a machine this library has never seen
+        receives the gate as soon as it declares a design state — and not
+        before. The pair below is the boundary, on one machine shape."""
+        machine_dir = tmp_path / "machines"
+        machine_dir.mkdir()
+
+        def write(machine_id, first_roles):
+            (machine_dir / f"{machine_id}.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "id": machine_id,
+                        "kind": "pipeline",
+                        "initial": "planning",
+                        "terminal": ["shipped"],
+                        "states": {
+                            "planning": {"roles": first_roles, "next": ["checking"]},
+                            "checking": {"roles": ["review"], "next": ["shipped"]},
+                            "shipped": {"roles": ["landing"]},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        write("designed", ["design"])
+        write("undesigned", [])
+        m = make_manifest({"methodology": {"extra_machines": [str(machine_dir)]}})
+
+        designed = load_pipeline_machine(m, "designed").state("shipped").entry_gates
+        undesigned = load_pipeline_machine(m, "undesigned").state("shipped").entry_gates
+        assert "agents.design_agent_ran" in designed
+        assert "agents.design_agent_ran" not in undesigned
+        assert "agents.review_agent_ran" in designed
+        assert "agents.review_agent_ran" in undesigned
 
     def test_the_design_gate_does_not_sit_on_the_design_state(self, make_manifest):
         """ADR-003 D1 — a gate an agent clears by RETURNING cannot guard the
@@ -285,7 +382,7 @@ class TestBUG037ABackwardEdgeIsNotGatedByTheShipGates:
     treats as the defect rather than as the escape.
     """
 
-    LANDING = {
+    LANDING: ClassVar[dict[str, tuple[str, str]]] = {
         "tdd": ("reviewing", "committed"),
         "bugfix": ("verifying", "committed"),
         "spec-first": ("reviewing", "committed"),
@@ -304,7 +401,7 @@ class TestBUG037ABackwardEdgeIsNotGatedByTheShipGates:
     #: it. It is satisfiable on that edge (the spec was written to get to
     #: review at all), which is the property that separates a real precondition
     #: from the wedge BUG_037 is about.
-    RETREATS = {
+    RETREATS: ClassVar[dict[str, dict[str, set[str]]]] = {
         "tdd": {"red": set(), "refactor": {"test.all_pass"}},
         "bugfix": {"fixing": {"test.new_test_fails"}},
         "spec-first": {"implementing": {"docs.updated"}},
@@ -314,7 +411,7 @@ class TestBUG037ABackwardEdgeIsNotGatedByTheShipGates:
 
     #: The gates that exist to permit LANDING. None of these may fire on a
     #: retreat, whatever else does.
-    SHIP_GATES = {
+    SHIP_GATES: ClassVar[set[str]] = {
         "coverage.meets_floor",
         "docs.diagrams_current",
         "agents.design_agent_ran",
@@ -397,7 +494,7 @@ class TestBUG037ABackwardEdgeIsNotGatedByTheShipGates:
     #: Spelled as the exact expected set, not as "empty", because `drafting`
     #: carries the injected docs-first read gate and always has — the claim is
     #: that these edges owe what they owed, not that they owe nothing.
-    ALREADY_FREE = [
+    ALREADY_FREE: ClassVar[list[tuple[str, str, str, set[str]]]] = [
         ("chore", "doing", "reviewing", set()),
         ("docs", "drafting", "reviewing", {"docs.read_architecture"}),
         ("bugfix", "reproducing", "not_reproducible", set()),

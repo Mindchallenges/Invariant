@@ -208,7 +208,10 @@ pipeline instead of warning on every call. It is refused for a blocking gate
 Two states carry a *role*: the design state (`designing`, `triaging` or `drafting`) is
 owned by `agents.roles.design` and the review state by `agents.roles.review`.
 The rules `agents.design_agent_ran` and `agents.review_agent_ran` check that
-the matching agent was dispatched before the state is left. They are advisory
+the matching agent ran before the change lands: both are entry gates on the
+landing state (`committed`), because a dispatch is recorded when the agent
+returns. A methodology with no design state — `chore` — is not asked about a
+design agent at all. They are advisory
 in every shipped profile, because "an agent was needed for this change" is a
 judgement; a project that has decided it always is sets them to `block`.
 

@@ -86,7 +86,9 @@ Two pipeline states carry a role: the design state is owned by
 `agents.roles.design` and the review state by `agents.roles.review`. When
 Claude Code dispatches a subagent, the `PostToolUse` hook records which one
 against the current pipeline, and `agents.design_agent_ran` /
-`agents.review_agent_ran` check for it when the state is left. Both are
+`agents.review_agent_ran` check for it on the way into the landing state
+(`committed`). A methodology with no design state, such as `chore`, carries
+only the review-agent check. Both are
 advisory in every shipped profile — set them to `block` once the project has
 decided that coding always goes through the agents.
 

@@ -951,8 +951,9 @@ Details that are load-bearing rather than incidental:
 - **Injection is by role, not by state name.** A methodology this library has
   never seen still receives the gates, provided it labels its states. A
   methodology that declares *no* design state — `chore` — is asserting there is
-  no design content, and is exempt from the read gate but not from the review
-  gate. That exemption is deliberate: forcing an architecture read onto a
+  no design content, and is exempt from the read gate and from the
+  design-agent gate (BUG_064, below) but not from the update gate or the
+  review-agent gate. That exemption is deliberate: forcing an architecture read onto a
   formatter pass makes `chore` useless and pushes people to `none`, which drops
   every gate. A narrower rule that gets used beats a broader one that gets
   bypassed.
@@ -1076,7 +1077,21 @@ They exist because installing an agent and using one are different events, and
 only the second changes any outcome. A project can carry four correctly
 installed agents and never dispatch one.
 
-Five properties, each deliberate:
+Six properties, each deliberate:
+
+- **The design gate applies only where a design state exists.** Both gates
+  hang on landing, but a machine receives `agents.design_agent_ran` only if it
+  declares a `design`-role state; `agents.review_agent_ran` needs only the
+  landing state it rides. `chore` declares no design state, so it carries the
+  review-agent gate alone — the same boundary the read gate has always had.
+  When the design gate lived on the design state that boundary held by
+  construction; moving it to landing silently widened it to every machine, and
+  a `LICENSE`-only chore needed `--force` to land (BUG_064, ADR-003 D2
+  amendment). The decision is made at injection, not by the rule answering
+  "not applicable", so `invariant pipeline gates` does not list the gate on a
+  machine that cannot owe it. Shipped result: `tdd`, `bugfix`, `spec-first`
+  and `docs` carry both; `chore` carries the review-agent gate; `none` carries
+  neither.
 
 - **Two events, not one: the dispatch and the actor.** A dispatch is observed
   from the *parent's* tool call. An agent that starts its own session and

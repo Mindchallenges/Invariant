@@ -49,7 +49,8 @@ DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
 }
 
 #: Attached the same way — and BOTH hang off the landing state, including the
-#: one that asks about the *design* agent. See ADR-003 D1.
+#: one that asks about the *design* agent. See ADR-003 D1, and D2's BUG_064
+#: amendment for which machines receive each.
 #:
 #: The docs-first note above turns on evidence the agent produces WHILE it
 #: runs: a design agent satisfies ``docs.read_architecture`` by reading, and
@@ -79,8 +80,20 @@ DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
 #: one-line change made inline is a legitimate exception rather than a
 #: violation. ``strict`` already holds that line for its other heuristics, on
 #: the grounds that a blocking heuristic is a false positive with authority.
-AGENT_ROLE_GATES: dict[str, dict[str, list[str]]] = {
-    "landing": {"entry": ["agents.design_agent_ran", "agents.review_agent_ran"]},
+#:
+#: Keyed by the role a machine must DECLARE for the gates under it to be
+#: injected (BUG_064); each value is an ordinary by-role injection. The design
+#: gate requires a ``design`` state. A methodology with none — ``chore`` — is
+#: asserting the work has no design content, so "did a design agent run" has
+#: nothing to ask there, exactly as ``docs.read_architecture`` has nothing to
+#: ask. Before ADR-003 moved it the design gate sat on the design state and was
+#: absent from ``chore`` by construction; moving it to landing widened it to
+#: every machine, which was never decided. The review gate requires only the
+#: landing state it rides, so its reach is what it was. Either way a gate is on
+#: the machine or not, and ``pipeline gates`` shows which.
+AGENT_ROLE_GATES: dict[str, dict[str, dict[str, list[str]]]] = {
+    "design": {"landing": {"entry": ["agents.design_agent_ran"]}},
+    "landing": {"landing": {"entry": ["agents.review_agent_ran"]}},
 }
 
 
@@ -128,7 +141,11 @@ def load_pipeline_machine(manifest, machine_id: str | None = None) -> Machine:
             f"machine {machine_id!r} is of kind {machine.kind!r}, not 'pipeline'"
         )
     _require_a_landing_state(machine)
-    return machine.inject_gates(DOCS_FIRST_GATES).inject_gates(AGENT_ROLE_GATES)
+    machine = machine.inject_gates(DOCS_FIRST_GATES)
+    for required_role, by_role in AGENT_ROLE_GATES.items():
+        if machine.states_with_role(required_role):
+            machine = machine.inject_gates(by_role)
+    return machine
 
 
 def _require_a_landing_state(machine: Machine) -> None:
@@ -136,8 +153,8 @@ def _require_a_landing_state(machine: Machine) -> None:
 
     Injection is by role, so a role nothing carries injects nothing — silently.
     That is fine for ``design``: ``chore`` declares no design state because it
-    is asserting there is no design content, and the read gate not applying is
-    the point. It is NOT fine for ``landing``, because the gates that ride it
+    is asserting there is no design content, and neither the read gate nor the
+    design-agent gate applying is the point (BUG_064). It is NOT fine for ``landing``, because the gates that ride it
     are the ones docs-first policy says a methodology cannot opt out of
     (ADR-001 D12). A machine that declares a review state and forgets the
     landing role would ship with `docs.updated` and both agent gates absent and

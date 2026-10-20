@@ -133,6 +133,37 @@ now REFUSED at load rather than silently ungated, because unlike the design
 role — which `chore` omits deliberately — there is no reading of "no landing
 state" that means "this methodology lands nothing".
 
+**Amendment (BUG_064): the design gate applies only where a design state
+exists.** Moving the gate from the design state to landing changed WHERE it is
+asked and, without anyone deciding it, also WHICH machines ask it. On the
+design state it was absent from `chore` by construction, because `chore`
+declares no design state — its claim that the work has no design content, the
+same claim that exempts it from `docs.read_architecture`. On the landing state
+it reached every machine with one, so a `LICENSE`-only chore was refused
+`reviewing → committed` by "no design agent ran" and could only land with
+`--force`.
+
+The boundary is now explicit in `AGENT_ROLE_GATES`, which is keyed by the role a
+machine must declare for a gate to be injected: `agents.design_agent_ran`
+requires a `design`-role state, `agents.review_agent_ran` requires only the
+`landing` state it rides (its reach is unchanged). The gate is decided at
+injection rather than by the rule returning "not applicable", so `invariant
+pipeline gates` on a `chore` pipeline does not list it at all — a gate is on
+the machine or it is not, symmetric with the read gate. The resulting sets for
+the shipped pipeline machines, pinned in `test_machines.py`:
+
+| Machine | Landing-entry agent gates |
+|---|---|
+| `tdd`, `bugfix`, `spec-first`, `docs` | `agents.design_agent_ran`, `agents.review_agent_ran` |
+| `chore` | `agents.review_agent_ran` |
+| `none` | none (no landing state) |
+
+D2's verification above checked one direction — every machine with a design
+role also has a review role, so none LOSES the gate — and not the converse,
+which machines without a design role GAIN it. `chore` was the one that did.
+After this amendment nothing that declares a design state loses the gate, and
+nothing that declares none acquires it.
+
 ### D3 — `agents.design_agent_ran` stays a distinct rule from `agents.review_agent_ran`
 
 Both now hang off the same state's exit, so collapsing them into one rule that

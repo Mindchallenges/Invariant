@@ -15,18 +15,12 @@ into every machine with a landing state). Half (b), ``docs.updated``, is
 fixed and not asserted here.
 """
 
-import pytest
-
 from test_domains import git_project
 
 from invariant.domains.pipeline import PipelineDomain
 from invariant.domains.session import SessionDomain
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_064 (a) is live — delete this line with the fix",
-)
 def test_BUG_064_a_chore_landing_is_not_gated_on_a_design_agent(tmp_path):
     # This repository's configuration: a design role configured, its gate raised
     # to block — the setting under which the symptom was observed.
