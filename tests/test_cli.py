@@ -2830,3 +2830,89 @@ class TestSessionStartDerivesItsBase:
         subprocess.run(["git", "switch", "-q", "--detach"], cwd=project, check=True)
         assert run("session", "start", "x") == 2
         assert "--base" in capsys.readouterr().err
+
+
+class TestBUG_067_DashFWrittenByTheSameCommand:
+    """Repro for BUG_067 — see docs/backlog/BUG_067.md.
+
+    The PreToolUse hook runs before the command, so a ``-F`` file that the same
+    Bash command writes can never exist at scan time. The refusal must stay a
+    BLOCK (fail closed, AUD-09; docs/architecture/manifest.md "Privacy scope":
+    "A message the gate is configured to scan and cannot read ... FAILS rather
+    than passing unread"), but its reason and ``try:`` line should name that
+    cause instead of pointing only at ``-m``.
+
+    The repro is a strict xfail: it fails while the defect is live. When the
+    fix lands, delete the xfail marker; the assertions must then pass
+    unchanged. The guards below are deliberately NOT xfail — a strict xfail
+    counts a setup failure as the expected one, so the precondition (the hook
+    really blocks on privacy.clean, the file really is absent) and today's
+    wording for the other unreadable cases are asserted separately.
+    """
+
+    def privacy_refusal(self, project, capsys, monkeypatch, command: str) -> str:
+        """The privacy.clean block of the hook's deny reason, for ``command``."""
+        run("init", "--ecosystem", "python")
+        commit_all(project, "adopt")
+        payload_in = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        monkeypatch.setattr("sys.stdin", _Stdin(payload_in))
+        assert run("hook", "pre-tool-use") == 0
+        decision = payload(capsys)["hookSpecificOutput"]
+        assert decision["permissionDecision"] == "deny"
+        reason = decision["permissionDecisionReason"]
+        blocks = reason.split("[BLOCK] ")
+        mine = [b for b in blocks if b.startswith("privacy.clean:")]
+        assert len(mine) == 1, reason
+        return mine[0]
+
+    @staticmethod
+    def try_lines(block: str) -> list[str]:
+        return [
+            line.strip()[len("try:"):].strip()
+            for line in block.splitlines()
+            if line.strip().startswith("try:")
+        ]
+
+    def same_command_write(self, project) -> tuple[Path, str]:
+        msg = project.parent / "m.txt"
+        return msg, f"printf 'msg' > {msg} && git commit -F {msg}"
+
+    def test_BUG_067_guard_the_same_command_write_is_blocked_unread(
+        self, project, capsys, monkeypatch
+    ):
+        msg, command = self.same_command_write(project)
+        block = self.privacy_refusal(project, capsys, monkeypatch, command)
+        assert not msg.exists()  # the hook ran before the command, as on a host
+        assert block.startswith("privacy.clean: the commit message could not be scanned")
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_067 is live — delete this marker with the fix",
+    )
+    def test_BUG_067_refusal_names_the_same_command_write_and_a_separate_call(
+        self, project, capsys, monkeypatch
+    ):
+        _, command = self.same_command_write(project)
+        block = self.privacy_refusal(project, capsys, monkeypatch, command)
+        # The reason names the cause: this same command writes the -F file,
+        # and the hook runs before it.
+        assert "same command" in block.lower(), block
+        # The remedy: write the file in a separate call first, then commit.
+        fixes = self.try_lines(block)
+        assert any("separate" in fix.lower() for fix in fixes), block
+
+    def test_BUG_067_guard_a_plain_missing_file_keeps_its_wording(
+        self, project, capsys, monkeypatch
+    ):
+        block = self.privacy_refusal(
+            project, capsys, monkeypatch, "git commit -F does-not-exist.txt"
+        )
+        assert "could not be read at scan time" in block
+        assert "same command" not in block.lower()
+        assert self.try_lines(block) == ["write the message inline with -m '<message>'"]
+
+    def test_BUG_067_guard_stdin_keeps_its_wording(self, project, capsys, monkeypatch):
+        block = self.privacy_refusal(project, capsys, monkeypatch, "git commit -F -")
+        assert "reads the message from stdin, which a hook cannot see" in block
+        assert "same command" not in block.lower()
+        assert self.try_lines(block) == ["write the message inline with -m '<message>'"]
