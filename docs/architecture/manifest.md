@@ -902,3 +902,59 @@ format it already uses.
 A backend implements read, write, list, and transition-persist. The lifecycle
 FSM and the id scheme live above it in `domains/workitem`, so switching
 backends does not change item semantics.
+
+### The `sphinx_needs` round trip
+
+A reStructuredText backlog is usually written by hand, so the backend's
+guarantee is about bytes, not just fields: **a save rewrites only the lines
+holding a value that changed.** A transition replaces the `:status:` line (or
+inserts one after `:id:` if there was none) and nothing else — a wrapped
+option, its continuation indentation, inline roles, trailing whitespace, the
+blank lines around the entry, neighbouring entries and the file's line endings
+survive byte for byte. A changed field rewrites that option's lines, a removed
+one deletes them, a new one is inserted after the last option; a changed body
+replaces the body and keeps the separation from whatever follows. Re-rendering
+an entry from its parsed fields is what reflowed wrapped values and dropped the
+blank line before the next heading (BUG_065).
+
+**A save never removes or rewrites a line outside the spans it means to
+change.** The lines an edit replaces are exactly the lines the read assigned
+to that option, the title or the body; a line the read cannot classify belongs
+to none of them and is never touched. Before writing, the backend re-reads its
+own result: if the entry is not found again, the entry count moved, or the
+title, status or a field would read back differently from the item being
+saved, it refuses with an error and the file is unchanged — a stray line is
+worse than no write. An item without an id is refused outright. A value or
+title holding a line break is written on one line, joined the way a re-read
+joins a wrapped value.
+
+Reading follows indentation rather than leading characters. The option block
+ends at the first blank line (BUG_007). Inside it, each line is one of three
+things:
+
+- **An option** — `:name:` at the option column, followed by the value. The
+  space after the marker is optional (`:area:value` reads as `area` =
+  `value`, as this backend always has), with one exception: a backtick right
+  after the closing colon makes the line an inline role (`` :doc:`x` ``,
+  `` :ref:`y` ``, `` :py:func:`z` ``), never an option.
+- **A continuation** — any line indented deeper than the option column. It
+  continues the line above it whatever it opens with, so a wrapped value
+  whose next line begins with an inline role stays in that value.
+- **Unclassified** — any other line at the option column (an inline role,
+  stray prose). It joins no value and is preserved verbatim by every save,
+  and so is a deeper line continuing it.
+
+Lines are split on CRLF, a lone CR and LF, and each keeps its own terminator
+on write, so a CR-only file stays CR-only and a file with mixed endings keeps
+them line by line. A form feed, `\x85` and the Unicode line and paragraph
+separators are not line breaks here: `str.splitlines` would split a title on
+them and write it back joined by a newline that was never in the file.
+
+A new entry lands after the last entry of its own type, separated from what
+precedes and follows it by a blank line (BUG_006); with no entry of that type
+it is appended to the end.
+
+**`history` is not persisted by this backend.** The directive has no
+representation for a transition log yet, so `item.history_matches_status`
+cannot be satisfied on a `sphinx_needs` project for any item past its initial
+status, and an item's audit trail lives only in version control.

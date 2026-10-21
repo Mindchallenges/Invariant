@@ -38,7 +38,7 @@ class Item:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Item":
+    def from_dict(cls, raw: dict) -> Item:
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in raw.items() if k in known})
 
@@ -104,7 +104,7 @@ class MarkdownBackend:
 
     def _parse(self, path: Path) -> Item:
         text = path.read_text(encoding="utf-8")
-        match = re.match(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", text, re.S)
+        match = re.match(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", text, re.DOTALL)
         if not match:
             raise UsageError(f"{path.name}: no frontmatter")
         meta = yaml.safe_load(match.group(1)) or {}
@@ -166,9 +166,245 @@ class JsonBackend:
 
 # -- sphinx-needs ------------------------------------------------------
 
-DIRECTIVE_RE = re.compile(
-    r"^\.\.\s+(?P<type>idea|bug)::\s*(?P<title>.*)$", re.M
-)
+DIRECTIVE_RE = re.compile(r"^\.\.\s+(?P<type>idea|bug)::\s*(?P<title>.*)$")
+
+#: An option line: a name between colons standing at the option column. The
+#: value may follow after whitespace or, as hand-written backlogs spell it,
+#: directly (``:area:value``) — this backend has always read that leniently.
+OPTION_RE = re.compile(r"^:(?P<name>[\w-]+):(?P<value>.*)$")
+
+#: An inline role — :doc:`x`, :ref:`y`, :py:func:`z` — opening a line. Its
+#: closing colon is followed by a backtick, which no option's is; that is what
+#: tells a role from an option when one opens a line (BUG_065).
+ROLE_RE = re.compile(r"^:[\w.+-]+(?::[\w.+-]+)*:`")
+
+_RESERVED = ("id", "status", "residue")
+_INDENT = "   "
+
+#: The line breaks a backlog is split on: CRLF, a lone CR, LF. ``str.splitlines``
+#: also breaks on a form feed, ``\x85`` and the Unicode line separators, which
+#: would cut a title holding one in two and write it back joined by a newline
+#: that was never in the file.
+_BREAK = r"\r\n|\r|\n"
+
+
+def _split_lines(text: str) -> list[str]:
+    """Lines with their own terminators: ``\\r\\n``, ``\\r`` or ``\\n``."""
+    return re.findall(rf"[^\r\n]*(?:{_BREAK})|[^\r\n]+\Z", text)
+
+
+def _one_line(value: str) -> str:
+    """A value as one line, its own breaks folded the way a re-read joins them.
+
+    An option or a title cannot span lines; writing one that did would put its
+    tail outside the entry.
+    """
+    parts = [part.strip() for part in re.split(_BREAK, value)]
+    return " ".join(part for part in parts if part)
+
+
+def _marker(stripped: str) -> re.Match | None:
+    return None if ROLE_RE.match(stripped) else OPTION_RE.match(stripped)
+
+
+def _content(line: str) -> str:
+    return line.removesuffix("\n").removesuffix("\r")
+
+
+def _ending(line: str) -> str:
+    return line[len(_content(line)) :]
+
+
+def _leading(line: str) -> str:
+    content = _content(line)
+    return content[: len(content) - len(content.lstrip())]
+
+
+def _width(content: str) -> int:
+    expanded = content.expandtabs(8)
+    return len(expanded) - len(expanded.lstrip())
+
+
+@dataclass
+class _Option:
+    name: str
+    value: str
+    start: int
+    end: int
+
+
+@dataclass
+class _Entry:
+    """One directive, and where each of its parts sits among the file's lines.
+
+    The parse and the write read the same structure, so the lines a save
+    rewrites are exactly the lines the parse said held the field.
+    """
+
+    type: str
+    title: str
+    title_at: int  # where the title starts on the directive line
+    start: int
+    options: list[_Option]
+    head_end: int  # one past the option block's last line
+    body: str
+    content_end: int  # one past the last non-blank line of the entry
+    end: int  # one past the block, trailing blank lines included
+
+    def value(self, name: str) -> str | None:
+        found = [o.value for o in self.options if o.name == name]
+        return found[-1] if found else None
+
+    @property
+    def id(self) -> str:
+        return self.value("id") or ""
+
+    def item(self) -> Item:
+        residue = self.value("residue") or ""
+        return Item(
+            id=self.id,
+            type=self.type,
+            title=self.title,
+            status=self.value("status") or "",
+            residue=[r.strip() for r in residue.split(";") if r.strip()],
+            fields={o.name: o.value for o in self.options if o.name not in _RESERVED},
+            body=self.body,
+        )
+
+
+def _scan(lines: list[str]) -> list[_Entry]:
+    entries: list[_Entry] = []
+    index = 0
+    while index < len(lines):
+        match = DIRECTIVE_RE.match(_content(lines[index]))
+        if not match:
+            index += 1
+            continue
+        entry = _read_entry(lines, index, match)
+        entries.append(entry)
+        index = entry.end
+    return entries
+
+
+def _read_entry(lines: list[str], start: int, match: re.Match) -> _Entry:
+    """Read one directive's option block and body.
+
+    The option block runs until the first blank line, which is what ends it in
+    reStructuredText (BUG_007); everything after that is body. Inside it, a
+    line is classified by where it stands, not by how it opens:
+
+    * at the option column, an option marker (``:name: value``, or leniently
+      ``:name:value``) starts a new option — unless the closing colon is
+      followed by a backtick, which makes it an inline role (BUG_065);
+    * indented deeper, it continues whatever line is above it, so a wrapped
+      value whose next line opens with :doc:`...` stays in that value;
+    * at the option column but not an option, it is nothing this backend
+      understands. It joins no value and belongs to no option's lines, so no
+      save rewrites or removes it.
+    """
+    options: list[_Option] = []
+    body: list[str] = []
+    column: int | None = None
+    in_options = True
+    continues: _Option | None = None  # what a deeper line continues, if anything
+    head_end = start + 1
+    content_end = start + 1
+    index = start + 1
+    while index < len(lines):
+        content = _content(lines[index])
+        stripped = content.strip()
+        if stripped and not content.startswith((" ", "\t")):
+            break
+        if stripped:
+            content_end = index + 1
+
+        if in_options:
+            if not stripped:
+                # A blank line ends the options only once one has been seen; a
+                # directive may be padded before its first.
+                if options:
+                    in_options = False
+                index += 1
+                continue
+            width = _width(content)
+            marker = _marker(stripped)
+            deeper = column is not None and width > column
+            if marker and not deeper:
+                if column is None:
+                    column = width
+                option = _Option(
+                    marker.group("name"), marker.group("value").strip(), index, index + 1
+                )
+                options.append(option)
+                continues = option
+            elif deeper and continues is not None:
+                continues.value = (
+                    f"{continues.value} {stripped}" if continues.value else stripped
+                )
+                continues.end = index + 1
+            elif options:
+                continues = None  # unclassified; a deeper line now continues it
+            else:
+                in_options = False
+            if in_options:
+                head_end = index + 1
+                index += 1
+                continue
+
+        if stripped or body:
+            body.append(content[3:] if content.startswith("   ") else stripped)
+        index += 1
+    return _Entry(
+        type=match.group("type"),
+        title=match.group("title").strip(),
+        title_at=match.start("title"),
+        start=start,
+        options=options,
+        head_end=head_end,
+        body="\n".join(body).strip(),
+        content_end=content_end,
+        end=index,
+    )
+
+
+def _option_line(indent: str, name: str, value: str, ending: str) -> str:
+    return f"{indent}:{name}:" + (f" {value}" if value else "") + ending
+
+
+def _wanted_options(item: Item) -> dict[str, str | None]:
+    """What each option should hold, in the form the file spells it."""
+    wanted: dict[str, str | None] = {"status": _one_line(item.status) or None}
+    for key, value in item.fields.items():
+        if key not in _RESERVED:
+            wanted[key] = _one_line(str(value))
+    wanted["residue"] = _one_line("; ".join(item.residue)) or None
+    return wanted
+
+
+def _apply(lines: list[str], edits: list[tuple[int, int, list[str]]], eol: str) -> str:
+    """Splice ``(start, end, replacement)`` edits into the lines.
+
+    Edits are non-overlapping. At one position an insertion (``start == end``)
+    lands before a replacement, and insertions keep the order they were made.
+    A file that ended without a terminator still does.
+    """
+    unterminated = bool(lines) and not _ending(lines[-1])
+    ordered = sorted(
+        enumerate(edits), key=lambda e: (e[1][0], e[1][1] != e[1][0], e[0])
+    )
+    out: list[str] = []
+    cursor = 0
+    for _, (start, end, replacement) in ordered:
+        out.extend(lines[cursor:start])
+        if replacement and out and not _ending(out[-1]):
+            out[-1] += eol
+        out.extend(replacement)
+        cursor = max(cursor, end)
+    out.extend(lines[cursor:])
+    text = "".join(out)
+    if unterminated and text.endswith(eol):
+        text = text[: -len(eol)]
+    return text
 
 
 class SphinxNeedsBackend:
@@ -178,6 +414,16 @@ class SphinxNeedsBackend:
     tolerant: it round-trips the fields it understands and preserves any option
     it does not, so a project's own directive options survive an edit made
     through this library.
+
+    A save is a patch, not a re-render. Only the lines holding a value that
+    changed are rewritten; every other byte — a wrapped option, its
+    continuation indentation, an inline role, the blank lines around the
+    entry, the file's line endings — is the file's own and stays put. Writing
+    an entry back from its parsed fields is what reflowed hand-wrapped values
+    and dropped the blank line before the next heading (BUG_065).
+
+    ``history`` is not persisted by this backend: the directive has no
+    representation for it yet.
     """
 
     def __init__(
@@ -187,32 +433,79 @@ class SphinxNeedsBackend:
         self.path = Path(path)
         self.id_prefix = id_prefix
 
-    def load_all(self) -> list[Item]:
+    def _read(self) -> str:
         if not self.path.is_file():
-            return []
-        return self._parse(self.path.read_text(encoding="utf-8"))
+            return ""
+        # newline="" keeps CRLF as written, so a save can hand it back.
+        with self.path.open(encoding="utf-8", newline="") as handle:
+            return handle.read()
+
+    def load_all(self) -> list[Item]:
+        return [entry.item() for entry in _scan(_split_lines(self._read()))]
 
     def get(self, item_id: str) -> Item | None:
         return next((i for i in self.load_all() if i.id == item_id), None)
 
     def save(self, item: Item) -> None:
-        text = self.path.read_text(encoding="utf-8") if self.path.is_file() else ""
-        rendered = self._render(item)
-        existing = self._locate(text, item.id)
-        if existing:
-            start, end = existing
-            text = text[:start] + rendered + text[end:]
+        if not _one_line(item.id):
+            raise UsageError(
+                f"{self.path.name}: an item needs an id to be saved; nothing written"
+            )
+        lines = _split_lines(self._read())
+        eol = next((_ending(line) for line in lines if _ending(line)), "\n")
+        entries = _scan(lines)
+        entry = next((e for e in entries if e.id == item.id), None)
+        if entry is None:
+            text = self._insert_new(lines, entries, item, eol)
         else:
-            text = self._insert_new(text, item, rendered)
+            text = _apply(lines, self._patch(lines, entry, item, eol), eol)
+        self._check(text, item, len(entries) + (entry is None))
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(text, encoding="utf-8")
+        with self.path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
 
     def next_id(self, item_type: str, title: str = "") -> str:
         return _next_id(
             self.load_all(), item_type, self.id_prefix, self.id_strategy, title
         )
 
-    def _insert_new(self, text: str, item: Item, rendered: str) -> str:
+    def _check(self, text: str, item: Item, count: int) -> None:
+        """Refuse a save whose result would not read back as the item saved.
+
+        A patch edits the lines the scan located. If the scan located the wrong
+        ones, the result reads back differently from what was meant — a status
+        that did not land, an option that is not there, an entry too many — and
+        writing it would leave a stray line for a person to find. Nothing is
+        written instead.
+        """
+        entries = _scan(_split_lines(text))
+        entry = next((e for e in entries if e.id == item.id), None)
+        problem = None
+        if len(entries) != count:
+            problem = f"{len(entries)} entries where {count} were expected"
+        elif entry is None:
+            problem = "the entry is not found again"
+        else:
+            had = _wanted_options(entry.item())
+            wanted = _wanted_options(item)
+            wrong = [
+                name
+                for name in ["status", *item.fields]
+                if name in wanted and had.get(name) != wanted[name]
+            ]
+            if entry.title != _one_line(item.title):
+                wrong.insert(0, "title")
+            if wrong:
+                problem = "it would read back with a different " + ", ".join(wrong)
+        if problem:
+            raise UsageError(
+                f"{self.path.name}: refusing to save {item.id}: {problem}. "
+                "The file is unchanged."
+            )
+
+    def _insert_new(
+        self, lines: list[str], entries: list[_Entry], item: Item, eol: str
+    ) -> str:
         """Place a new entry beside its own kind, not at the end of the file.
 
         Appending to the end put an entry outside whatever section it belonged
@@ -225,141 +518,89 @@ class SphinxNeedsBackend:
         it inserts after the LAST directive of the same type, which keeps the
         entry inside whichever section that type already lives in. With no
         entry of that type to anchor to, it falls back to the end and says
-        nothing clever.
+        nothing clever. Either way the new entry is separated from what comes
+        before and after it by a blank line, and nothing already in the file
+        is rewritten.
         """
-        lines = text.splitlines(keepends=True)
-        anchor_end: int | None = None
-        for index, line in enumerate(lines):
-            match = DIRECTIVE_RE.match(line.rstrip("\n"))
-            if not match or match.group("type") != item.type:
-                continue
-            end = index + 1
-            while end < len(lines):
-                if lines[end].strip() and not lines[end].startswith((" ", "\t")):
-                    break
-                end += 1
-            anchor_end = end
+        rendered = self._render(item, eol)
+        if not "".join(lines).strip():
+            return "".join(rendered)
+        anchors = [e for e in entries if e.type == item.type]
+        if not anchors:
+            last_blank = not _content(lines[-1]).strip()
+            lead = [] if last_blank else [eol]
+            return _apply(lines, [(len(lines), len(lines), lead + rendered)], eol)
+        position = anchors[-1].content_end
+        follows = position < len(lines) and bool(_content(lines[position]).strip())
+        insert = [eol] + rendered + ([eol] if follows else [])
+        return _apply(lines, [(position, position, insert)], eol)
 
-        if anchor_end is None:
-            return text.rstrip() + "\n\n" + rendered
+    def _patch(
+        self, lines: list[str], entry: _Entry, item: Item, eol: str
+    ) -> list[tuple[int, int, list[str]]]:
+        """The line edits that turn ``entry`` into ``item``, and no others."""
+        edits: list[tuple[int, int, list[str]]] = []
 
-        head = "".join(lines[:anchor_end]).rstrip() + "\n\n"
-        tail = "".join(lines[anchor_end:]).lstrip("\n")
-        return head + rendered.rstrip() + "\n\n" + tail
-
-    # -- parsing ------------------------------------------------------
-
-    def _parse(self, text: str) -> list[Item]:
-        items: list[Item] = []
-        lines = text.splitlines()
-        index = 0
-        while index < len(lines):
-            match = DIRECTIVE_RE.match(lines[index])
-            if not match:
-                index += 1
-                continue
-            item_type, title = match.group("type"), match.group("title").strip()
-            index += 1
-            options: dict[str, str] = {}
-            body: list[str] = []
-            # The option block runs until the first blank line, which is what
-            # ends it in reStructuredText. Everything after that is body.
-            #
-            # This used to end the option block at the first line that did not
-            # itself look like an option — so a WRAPPED option value fell into
-            # the body, and because the test was `option and not body`, every
-            # option after it fell in too. Silent, and on data this library did
-            # not write: entries authored by hand round-tripped with their
-            # fields moved into prose and nothing reported it.
-            in_options = True
-            last_option: str | None = None
-            while index < len(lines):
-                line = lines[index]
-                if line.strip() and not line.startswith((" ", "\t")):
-                    break
-                stripped = line.strip()
-
-                if in_options:
-                    if not stripped:
-                        # A blank line ends the options only once one has been
-                        # seen; a directive may be padded before its first.
-                        if options:
-                            in_options = False
-                        index += 1
-                        continue
-                    option = re.match(r"^:([\w-]+):\s*(.*)$", stripped)
-                    if option:
-                        last_option = option.group(1)
-                        options[last_option] = option.group(2).strip()
-                        index += 1
-                        continue
-                    if last_option is not None:
-                        # A continuation of the option above it.
-                        existing = options[last_option]
-                        options[last_option] = (
-                            f"{existing} {stripped}".strip() if existing else stripped
-                        )
-                        index += 1
-                        continue
-                    in_options = False
-
-                if stripped or body:
-                    body.append(line[3:] if line.startswith("   ") else stripped)
-                index += 1
-            reserved = {"id", "status", "residue"}
-            items.append(
-                Item(
-                    id=options.get("id", ""),
-                    type=item_type,
-                    title=title,
-                    status=options.get("status", ""),
-                    residue=[
-                        r.strip() for r in options.get("residue", "").split(";") if r.strip()
-                    ],
-                    fields={k: v for k, v in options.items() if k not in reserved},
-                    body="\n".join(body).strip(),
-                )
+        title = _one_line(item.title)
+        if entry.title != title:
+            line = lines[entry.start]
+            prefix = _content(line)[: entry.title_at]
+            if not prefix.endswith((" ", "\t")):
+                prefix += " "
+            edits.append(
+                (entry.start, entry.start + 1, [prefix + title + _ending(line)])
             )
-        return items
 
-    def _locate(self, text: str, item_id: str) -> tuple[int, int] | None:
-        lines = text.splitlines(keepends=True)
-        offsets, position = [], 0
-        for line in lines:
-            offsets.append(position)
-            position += len(line)
+        indent = _leading(lines[entry.options[0].start]) if entry.options else _INDENT
+        last_option = entry.options[-1].end if entry.options else entry.start + 1
+        id_spans = [o for o in entry.options if o.name == "id"]
+        status_at = id_spans[-1].end if id_spans else last_option
 
-        for index, line in enumerate(lines):
-            if not DIRECTIVE_RE.match(line.rstrip("\n")):
+        had = _wanted_options(entry.item())
+        wanted = _wanted_options(item)
+        present = [o.name for o in entry.options if o.name != "id"]
+        for name in dict.fromkeys(present + list(wanted)):
+            old, new = had.get(name), wanted.get(name)
+            if old == new:
                 continue
-            end = index + 1
-            found_id = None
-            while end < len(lines):
-                stripped = lines[end].strip()
-                if stripped and not lines[end].startswith((" ", "\t")):
-                    break
-                option = re.match(r"^:id:\s*(.*)$", stripped)
-                if option:
-                    found_id = option.group(1).strip()
-                end += 1
-            if found_id == item_id:
-                stop = offsets[end] if end < len(lines) else position
-                return offsets[index], stop
-        return None
+            spans = [o for o in entry.options if o.name == name]
+            if new is None:
+                edits.extend((o.start, o.end, []) for o in spans)
+            elif spans:
+                span = spans[-1]
+                own = _leading(lines[span.start])
+                ending = _ending(lines[span.end - 1])
+                edits.append(
+                    (span.start, span.end, [_option_line(own, name, new, ending)])
+                )
+            else:
+                at = status_at if name == "status" else last_option
+                edits.append((at, at, [_option_line(indent, name, new, eol)]))
 
-    def _render(self, item: Item) -> str:
-        lines = [f".. {item.type}:: {item.title}", f"   :id: {item.id}"]
-        if item.status:
-            lines.append(f"   :status: {item.status}")
-        for key, value in item.fields.items():
-            lines.append(f"   :{key}: {value}")
-        if item.residue:
-            lines.append(f"   :residue: {'; '.join(item.residue)}")
-        lines.append("")
-        for line in (item.body or "").splitlines():
-            lines.append(f"   {line}" if line.strip() else "")
-        lines.append("")
-        return "\n".join(lines)
+        body = (item.body or "").strip()
+        if entry.body != body:
+            stop = max(entry.content_end, entry.head_end)
+            edits.append((entry.head_end, stop, self._render_body(body, eol)))
+        return edits
+
+    @staticmethod
+    def _render_body(body: str, eol: str) -> list[str]:
+        if not body:
+            return []
+        return [eol] + [
+            f"{_INDENT}{line}{eol}" if line.strip() else eol
+            for line in re.split(_BREAK, body)
+        ]
+
+    def _render(self, item: Item, eol: str = "\n") -> list[str]:
+        lines = [
+            f".. {item.type}:: {_one_line(item.title)}{eol}",
+            _option_line(_INDENT, "id", _one_line(item.id), eol),
+        ]
+        for name, value in _wanted_options(item).items():
+            if value is not None:
+                lines.append(_option_line(_INDENT, name, value, eol))
+        return lines + self._render_body((item.body or "").strip(), eol)
 
 
 # -- null --------------------------------------------------------------

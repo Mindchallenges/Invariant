@@ -73,6 +73,15 @@ format:
 
 Switching backends changes nothing about what a status means.
 
+The `sphinx_needs` backend edits a hand-written page surgically: a transition
+rewrites the entry's `:status:` line and leaves every other byte alone —
+wrapped options, inline roles, blank lines, line endings (LF, CRLF or CR).
+A save that would not read back as the item saved is refused and the file
+left unchanged. It does not yet persist an item's transition history, so
+`item.history_matches_status` reports every item past its initial status
+there. See the manifest reference
+(`docs/architecture/manifest.md`, "The `sphinx_needs` round trip").
+
 ## Memory
 
 A directory of small markdown files, one fact per file, with frontmatter and

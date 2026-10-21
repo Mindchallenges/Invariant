@@ -20,7 +20,6 @@ user saw: the field ``show`` prints, and the file diff after a transition.
 
 import difflib
 
-import pytest
 from test_domains import git_project
 
 from invariant.domains.workitem import WorkItemDomain
@@ -71,10 +70,6 @@ def _domain(tmp_path):
     return WorkItemDomain(m), path, m
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_065 is live — delete this line with the fix",
-)
 def test_BUG_065_show_reads_the_whole_wrapped_area_and_no_doc_field(tmp_path):
     domain, _, _ = _domain(tmp_path)
     item = domain.get("BUG_WRAPPED")
@@ -85,10 +80,6 @@ def test_BUG_065_show_reads_the_whole_wrapped_area_and_no_doc_field(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_065 is live — delete this line with the fix",
-)
 def test_BUG_065_transition_changes_only_the_status_line(tmp_path):
     domain, path, m = _domain(tmp_path)
     before = path.read_text(encoding="utf-8").splitlines()
