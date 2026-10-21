@@ -229,6 +229,83 @@ a project that already keeps hand-written prose at that path would find it
 exempt from isolation. Point the key somewhere else if so — the exemption
 follows the declaration, which is the whole point.
 
+### A declared path means the same thing however it is spelled
+
+The exemption follows the declaration, not the declaration's spelling. A
+manifest path is used two ways, and only one of them used to be safe:
+
+- **Joined onto the root** to find a store on disk (`path_for`, the item
+  backends). Joining and resolving accepts every spelling, so this half was
+  never affected.
+- **Compared with a target** to decide whether that target is exempt, in
+  scope, or held out of a gate. The target's side of that comparison is its
+  project-relative spelling (`_project_relative_forms`), which never starts
+  with `./`, never ends with `/` and never carries an empty or `..` segment.
+  The declaration's side was compared as written. So `items.path:
+  ./docs/backlog` exempted nothing: every write to the work-item store in the
+  main checkout was refused by an isolation rule that named neither the path
+  nor its spelling (BUG_071).
+
+Every comparison now goes through one normaliser, `project_relative` in
+`core/manifest`, applied to both declared stores and declared globs:
+
+```mermaid
+graph TD
+    D["a declared path or glob"] --> A{"absolute?"}
+    A -- no --> N["normalise: drop ./ and a trailing /,<br/>collapse //, resolve .. lexically"]
+    A -- yes --> B{"under one of the project's checkouts?<br/>(manifest root, git top level, main checkout)"}
+    B -- yes --> R["spell it relative to that checkout"] --> N
+    B -- no --> X["names nothing in the project:<br/>DROPPED, matches nothing"]
+    N --> C{"climbs out with ..,<br/>or is the root itself?"}
+    C -- "climbs out" --> X
+    C -- "the root" --> X
+    C -- no --> M["compared with the target's<br/>project-relative spelling"]
+```
+
+| Declaration | Where it is compared | `x` | `./x` | `x/` |
+|---|---|---|---|---|
+| `items.path` | `_is_exempt` (isolation, push barrier, a session's first edit) | exempt | **was not exempt**; now exempt | exempt (a trailing `/` was already stripped) |
+| `paths.reports` | `_is_exempt` | exempt | **was not exempt**; now exempt | exempt |
+| `session.exempt_paths` | `_is_exempt` | exempt | **was not exempt**; now exempt | **was not exempt**; now exempt |
+| `methodology.gates.non_source` | `coverage.meets_floor`, `docs.updated` | held out | **was not held out**; now held out | **was not held out**; now held out |
+| `methodology.gates.coverage_exclude` | `coverage.meets_floor` | held out | **was not held out**; now held out | **was not held out**; now held out |
+| `privacy.scope` entries and the `paths.*` its keywords name | `privacy.clean` | in scope | in scope (`Path()` already absorbed it) | in scope |
+| `paths.docs` | `docs.read_architecture`, `docs.updated` | every tree | every tree (resolved on join) | every tree |
+| `coverage_baseline` entries | `coverage.meets_floor` | matched | matched (`_same_file`); `x` and `./x` together are now refused as one file recorded twice | matched |
+
+The spellings the first rows' columns do not show broke the same way and are
+fixed by the same change: `x//y` and `x/z/../y` everywhere, and an absolute
+in-project path in `privacy.scope`, in the stores and globs, and in `paths.docs`
+read from a linked worktree, where the manifest root is the worktree and the
+old relativisation answered "outside the project" for a path naming the main
+checkout.
+
+**Normalised, not refused at load.** Refusing would have turned a spelling
+that already worked — a trailing `/` on `items.path` — into a manifest that no
+longer loads, for every command and every hook, and a spelling the library
+can read unambiguously is not an error the operator should be made to fix.
+Refusal is the right answer only where reading is ambiguous, and nothing here
+is.
+
+**Nothing outside the project is exempted, scoped or excluded.** An absolute
+path under none of the project's checkouts, or a relative one whose `..`
+climbs out, is dropped from the comparison rather than matched against
+anything. It used to be compared with the absolute spelling a path outside
+every checkout falls back to, so `session.exempt_paths: ["/some/parent/**"]`
+answered "exempt" for files in unrelated directories. Such a declaration can
+still name a STORE outside the project — joining it onto the root still finds
+it — and edits there are outside this project's isolation rules anyway
+(`_is_outside_project`). **The project root itself is dropped too**: a store
+declared as `.` used to exempt nothing, and normalising it must not quietly
+make it exempt everything.
+
+`paths.memory` is listed above among the declared stores, but `_is_exempt`
+does not add it the way it adds `items.path` and `paths.reports`: the default,
+`.claude/memory`, is exempt through `session.exempt_paths`' `.claude/*`, and a
+memory store declared anywhere else is not exempt today. That is a gap between
+this section and the code, recorded rather than closed here, because closing
+it widens an exemption and is its own decision.
+
 ### Privacy scope
 
 `privacy.scope` is a list of two kinds of entry:

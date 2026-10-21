@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import copy
 import os
+import posixpath
 import sys
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 import yaml
 
@@ -58,7 +60,7 @@ class Level(str, Enum):
     OFF = "off"
 
     @classmethod
-    def parse(cls, value: Any) -> "Level":
+    def parse(cls, value: Any) -> Level:
         # YAML 1.1 resolves a bare `off` to the boolean False (and `on` to
         # True). Someone writing the obvious thing in a manifest would
         # otherwise get an error about a value they never typed, so accept the
@@ -321,7 +323,7 @@ class Manifest:
         return None
 
     @classmethod
-    def load(cls, start: Path | None = None, *, required: bool = True) -> "Manifest":
+    def load(cls, start: Path | None = None, *, required: bool = True) -> Manifest:
         root = cls.find_root(start)
         if root is None:
             if required:
@@ -351,7 +353,7 @@ class Manifest:
         root: Path,
         path: Path,
         env: Mapping[str, str] | None = None,
-    ) -> "Manifest":
+    ) -> Manifest:
         env = os.environ if env is None else env
 
         data = copy.deepcopy(DEFAULTS)
@@ -543,6 +545,7 @@ class Manifest:
                 capture_output=True,
                 text=True,
                 timeout=60,
+                check=False,  # the exit status is read below, with its stderr
             )
         except subprocess.TimeoutExpired as exc:
             raise ManifestError(
@@ -595,6 +598,79 @@ class Manifest:
 
 
 # -- helpers -----------------------------------------------------------
+
+
+def project_relative(value: Any, bases: Iterable[Path | str | None] = ()) -> str | None:
+    """The canonical project-relative spelling of a declared path or glob.
+
+    Every manifest value that is MATCHED against a path — an exempt pattern, a
+    store a rule tests membership of, a scope prefix, a coverage glob — is
+    compared against the project-relative spelling of the target, and that
+    spelling never starts with ``./``, never ends with ``/`` and never carries
+    an empty or ``..`` segment. A declaration spelled any of those ways used to
+    be compared as written and could therefore match nothing: the exemption,
+    scope or exclusion it declared was off, and nothing said so (BUG_071).
+
+    So equivalent spellings are reduced to one before anything is compared:
+    ``./docs/backlog``, ``docs/backlog/``, ``docs//backlog`` and
+    ``docs/x/../backlog`` are all ``docs/backlog``. Normalised rather than
+    refused at load, because refusing would turn spellings that already
+    worked — a trailing ``/`` on ``items.path`` — into a manifest that no
+    longer loads, and because a spelling the library can read unambiguously is
+    not an error the operator should have to fix.
+
+    An absolute value is spelled against the first of ``bases`` (the project's
+    checkouts) that contains it. ``None`` means the value names nothing inside
+    the project — an absolute path under none of the bases, or a relative one
+    whose ``..`` climbs out — and a caller building match patterns must DROP
+    it: a declaration outside the project cannot exempt, scope or exclude a
+    path outside it either. The project root itself comes back as ``"."``,
+    which no project-relative target spells, so it stays exactly as inert as
+    it always was rather than widening to "everything".
+
+    Lexical only: nothing is read from disk, so a glob is normalised the same
+    way as a path. Storage is a different question and is not asked here —
+    `path_for` and the item backends join the raw value onto the root, which
+    already accepts every one of these spellings.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if posixpath.isabs(text):
+        # POSIX keeps a leading `//` as implementation-defined; nothing here
+        # means that, so collapse it before normalising.
+        candidate = posixpath.normpath("/" + text.lstrip("/"))
+        for base in bases:
+            if base is None:
+                continue
+            for spelling in _base_spellings(Path(base)):
+                if candidate == spelling:
+                    return "."
+                if candidate.startswith(spelling.rstrip("/") + "/"):
+                    return candidate[len(spelling.rstrip("/")) + 1 :]
+        return None
+    normal = posixpath.normpath(text)
+    if normal == ".." or normal.startswith("../"):
+        return None
+    return normal
+
+
+def _base_spellings(base: Path) -> list[str]:
+    """A checkout's absolute spelling as written and as resolved.
+
+    Both, because the declaration may have been written through a symlinked
+    prefix the resolved root no longer carries, or the other way round.
+    """
+    spellings = [posixpath.normpath(str(base))]
+    try:
+        resolved = posixpath.normpath(str(base.resolve()))
+    except OSError:  # pragma: no cover - a resolve that cannot answer
+        return spellings
+    if resolved not in spellings:
+        spellings.append(resolved)
+    return spellings
 
 
 def _ecosystems(raw: Mapping[str, Any]) -> list[str]:

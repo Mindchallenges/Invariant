@@ -30,7 +30,7 @@ from . import plan as plan_reader
 from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
-from .manifest import Level, Manifest
+from .manifest import Level, Manifest, project_relative
 from .privacy import EXEMPTION_MARKER, PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -2496,11 +2496,29 @@ def _docs_root(ctx: RuleContext) -> Path:
     :func:`docs_roots` for it.
     """
     configured = ctx.manifest.path_for("docs")
-    try:
-        relative = configured.relative_to(ctx.manifest.root)
-    except ValueError:
+    relative = _docs_relative(ctx.manifest, ctx.cwd)
+    if relative is None:
         return configured  # an absolute path outside the project: use as given
     return (_repo_root(ctx) / relative).resolve()
+
+
+def _docs_relative(manifest: Manifest, cwd: Path) -> Path | None:
+    """``paths.docs`` spelled project-relative, or ``None`` outside the project.
+
+    Through the shared normaliser (`core.manifest.project_relative`) rather
+    than by relativising the resolved path against the manifest root alone. An
+    absolute value naming the main checkout is a spelling of the same
+    directory, but from inside a linked worktree the manifest root is the
+    worktree, so the old test answered "outside the project" and the gate
+    accepted reads of the main checkout's copy only (BUG_071, the BUG_046
+    shape).
+    """
+    raw = manifest.get("paths.docs")
+    bases: list[Path | None] = [manifest.root]
+    if PurePosixPath(str(raw).strip()).is_absolute():
+        bases += [git.toplevel(cwd), git.main_checkout(cwd)]
+    relative = project_relative(raw, bases)
+    return None if relative is None else Path(relative)
 
 
 def docs_roots(manifest: Manifest, cwd: Path) -> list[Path]:
@@ -2523,9 +2541,8 @@ def docs_roots(manifest: Manifest, cwd: Path) -> list[Path]:
     disjointness this fixes.
     """
     configured = manifest.path_for("docs")
-    try:
-        relative = configured.relative_to(manifest.root)
-    except ValueError:
+    relative = _docs_relative(manifest, cwd)
+    if relative is None:
         # An absolute path outside the project: there is one copy by
         # construction, so there is nothing to spell two ways.
         return [configured]
@@ -2615,7 +2632,12 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     """
     if target is None:
         return False
-    patterns = list(ctx.manifest.get("session.exempt_paths") or [])
+    patterns = [
+        canonical
+        for _written, canonical in _declared_in_project(
+            ctx, ctx.manifest.get("session.exempt_paths") or []
+        )
+    ]
 
     # The work-item store is exempt for the same stated reason as config and
     # memory: it is data every session touches, and routing it through a branch
@@ -2626,9 +2648,7 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     # A project that wants backlog edits reviewed can say so with
     # items.exempt: false.
     if ctx.manifest.get("items.exempt", True):
-        items_path = ctx.manifest.get("items.path")
-        if items_path:
-            patterns.extend([str(items_path), f"{str(items_path).rstrip('/')}/**"])
+        patterns.extend(_store_patterns(ctx, ctx.manifest.get("items.path")))
 
     # The report store, for the same reason and by the same mechanism (ADR-002
     # D4). The write scope is "the state root and the stores the manifest
@@ -2639,9 +2659,7 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     # The report is a GENERATED artifact besides: a session that regenerates it
     # is running a command, not authoring code, and blocking that would make
     # the isolation rule refuse the one edit it has no review value over.
-    reports_path = ctx.manifest.get("paths.reports")
-    if reports_path:
-        patterns.extend([str(reports_path), f"{str(reports_path).rstrip('/')}/**"])
+    patterns.extend(_store_patterns(ctx, ctx.manifest.get("paths.reports")))
 
     if not patterns:
         return False
@@ -2650,6 +2668,49 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
         if any(fnmatch.fnmatch(rel, pattern) for pattern in patterns):
             return True
     return False
+
+
+def _store_patterns(ctx: RuleContext, declared: Any) -> list[str]:
+    """The exempt patterns a declared store contributes: itself and its tree."""
+    return [
+        pattern
+        for _written, canonical in _declared_in_project(ctx, [declared])
+        for pattern in (canonical, f"{canonical}/**")
+    ]
+
+
+def _declared_in_project(
+    ctx: RuleContext, values: Iterable[Any]
+) -> list[tuple[str, str]]:
+    """``(as written, canonical)`` for every declared path inside the project.
+
+    The one place a rule turns a manifest path into something it can compare
+    with a target's project-relative spelling, through the one normaliser,
+    `core.manifest.project_relative`. A declaration compared as written
+    matched nothing whenever it was spelled ``./x``, ``x//y`` or with a
+    climbing ``..`` — the exemption it declared was simply off (BUG_071).
+
+    The written form rides along so a verdict can name the pattern the way
+    the project wrote it. Entries naming nothing inside the project — an
+    absolute path under no checkout, a ``..`` that climbs out, the root itself
+    — are dropped: they cannot exempt or scope a path outside the project, and
+    the root would otherwise widen to every file in it. The checkouts an
+    absolute value is spelled against are the bases `_project_relative_forms`
+    spells targets against, asked only when an absolute value is present.
+    """
+    bases: list[Path | None] | None = None
+    declared: list[tuple[str, str]] = []
+    for value in values:
+        if value is None:
+            continue
+        written = str(value)
+        if bases is None and PurePosixPath(written.strip()).is_absolute():
+            bases = [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
+        canonical = project_relative(written, bases or ())
+        if canonical is None or canonical == ".":
+            continue
+        declared.append((written, canonical))
+    return declared
 
 
 def _coverage_roots(ctx: RuleContext) -> list[Path]:
@@ -2858,21 +2919,16 @@ def _excluded_as_declared_non_source(
     not run, and this one is a project's own policy rather than a fact the
     engine established — so the reader is owed both halves.
     """
-    patterns = ctx.manifest.get("methodology.gates.non_source") or []
+    patterns = _declared_in_project(
+        ctx, ctx.manifest.get("methodology.gates.non_source") or []
+    )
     if not patterns:
         return source_changed, []
 
     kept: set[str] = set()
     excluded: list[str] = []
     for rel in sorted(source_changed):
-        matched = next(
-            (
-                p
-                for p in patterns
-                if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, f"{p}/*")
-            ),
-            None,
-        )
+        matched = _first_matching_glob(rel, patterns)
         if matched is None:
             kept.add(rel)
         else:
@@ -2897,22 +2953,37 @@ def _excluded_by_manifest_globs(
     as a collapsing percentage next to its own exemption instead of vanishing
     from the verdict entirely.
     """
-    patterns = ctx.manifest.get("methodology.gates.coverage_exclude") or []
+    patterns = _declared_in_project(
+        ctx, ctx.manifest.get("methodology.gates.coverage_exclude") or []
+    )
     if not patterns:
         return touched, []
 
     kept: dict[str, float] = {}
     excluded: list[str] = []
     for rel, pct in touched.items():
-        matched = next(
-            (p for p in patterns if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, f"{p}/*")),
-            None,
-        )
+        matched = _first_matching_glob(rel, patterns)
         if matched is None:
             kept[rel] = pct
         else:
             excluded.append(f"{rel} {float(pct):g}% (coverage_exclude {matched!r})")
     return kept, excluded
+
+
+def _first_matching_glob(rel: str, patterns: list[tuple[str, str]]) -> str | None:
+    """The first declared glob ``rel`` falls under, named as it was written.
+
+    A glob matches the path itself or anything beneath it; the
+    comparison is against the canonical spelling (`_declared_in_project`).
+    """
+    return next(
+        (
+            written
+            for written, canonical in patterns
+            if fnmatch.fnmatch(rel, canonical) or fnmatch.fnmatch(rel, f"{canonical}/*")
+        ),
+        None,
+    )
 
 
 def _excluded_as_comment_only(
@@ -3007,7 +3078,8 @@ def _coverage_baseline(
     if not configured:
         return None, None
 
-    located = _first_existing(str(configured), _coverage_roots(ctx))
+    roots = _coverage_roots(ctx)
+    located = _first_existing(str(configured), roots)
     if located is None:
         return None, Verdict.fail(
             "the recorded coverage baseline is missing",
@@ -3056,7 +3128,13 @@ def _coverage_baseline(
         fields = line.split()
         if len(fields) != 2:
             return None, unreadable(number, raw, "expected exactly two fields")
-        rel, recorded = fields
+        written, recorded = fields
+        # Keyed by the canonical spelling, so `src/a.py` and `./src/a.py` are
+        # one file recorded twice and refused as such. Keyed as written, both
+        # were accepted and the lookup's `_same_file` took whichever came
+        # first — a silent pick of one record over the other, which is what
+        # the duplicate refusal exists to prevent (BUG_071).
+        rel = project_relative(written, roots) or written
         try:
             pct = float(recorded)
         except ValueError:
@@ -3530,17 +3608,19 @@ def _in_privacy_scope(ctx: RuleContext, target: Path, scope: set[str]) -> bool:
     if "all" in scope:
         return True
 
-    scoped_prefixes: list[str] = []
+    declared: list[Any] = []
     for key in scope:
         for manifest_key in _PRIVACY_SCOPE_PATHS.get(key, ()):
-            configured = ctx.manifest.get(manifest_key)
-            if configured:
-                scoped_prefixes.append(str(Path(configured)))
+            declared.append(ctx.manifest.get(manifest_key) or None)
         if key not in _PRIVACY_SCOPE_KEYWORDS:
             # A literal project-relative prefix. This is how a project widens
             # scope beyond what paths.* names — e.g. all of ``docs/`` when
             # paths.docs points at one subtree of it (AUD-15).
-            scoped_prefixes.append(str(Path(key)))
+            declared.append(key)
+    # Through the shared normaliser, like every other declared path a rule
+    # compares: `Path()` alone left a climbing `..` and an absolute in-project
+    # path spelled so that no target could ever fall under them (BUG_071).
+    scoped_prefixes = [canonical for _written, canonical in _declared_in_project(ctx, declared)]
 
     if not scoped_prefixes:
         return False

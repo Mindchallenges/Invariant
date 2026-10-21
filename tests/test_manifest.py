@@ -282,3 +282,111 @@ def test_path_for_resolves_against_the_root(tmp_path, minimal):
 def test_path_for_unknown_key(minimal):
     with pytest.raises(ManifestError, match="no path configured"):
         minimal.path_for("nonexistent")
+
+
+class TestDeclaredPathsHaveOneSpelling:
+    """`project_relative` — the one normaliser every matched declaration uses.
+
+    A project-relative target never starts with ``./``, never ends with ``/``
+    and carries no empty or ``..`` segment, so a declaration compared as
+    written matched nothing whenever it was spelled any of those ways, and the
+    exemption it declared was off without a word (BUG_071).
+    """
+
+    @pytest.mark.parametrize(
+        "written",
+        [
+            "docs/backlog",
+            "./docs/backlog",
+            "docs/backlog/",
+            "./docs/backlog/",
+            "docs//backlog",
+            "docs/./backlog",
+            "docs/x/../backlog",
+            " docs/backlog ",
+        ],
+    )
+    def test_equivalent_spellings_reduce_to_one(self, written):
+        from invariant.core.manifest import project_relative
+
+        assert project_relative(written) == "docs/backlog"
+
+    @pytest.mark.parametrize(
+        ("written", "canonical"),
+        [
+            ("./.claude/**", ".claude/**"),
+            (".claude/*", ".claude/*"),
+            ("design//**/", "design/**"),
+            ("MEMORY.md", "MEMORY.md"),
+        ],
+    )
+    def test_globs_are_normalised_lexically(self, written, canonical):
+        from invariant.core.manifest import project_relative
+
+        assert project_relative(written) == canonical
+
+    @pytest.mark.parametrize("written", ["../outside", "..", "docs/../../outside"])
+    def test_a_relative_path_that_climbs_out_names_nothing_inside(self, written):
+        from invariant.core.manifest import project_relative
+
+        assert project_relative(written) is None
+
+    @pytest.mark.parametrize("written", [None, "", "   "])
+    def test_an_empty_declaration_names_nothing(self, written):
+        from invariant.core.manifest import project_relative
+
+        assert project_relative(written) is None
+
+    @pytest.mark.parametrize("written", [".", "./", "docs/.."])
+    def test_the_root_itself_stays_the_root(self, written):
+        """Never widened to "everything": a caller building match patterns
+        drops it, so it stays as inert as it always was."""
+        from invariant.core.manifest import project_relative
+
+        assert project_relative(written) == "."
+
+    def test_an_absolute_path_inside_a_base_is_spelled_against_it(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        written = str(tmp_path / "docs" / "backlog") + "/"
+        assert project_relative(written, [tmp_path]) == "docs/backlog"
+
+    def test_an_absolute_path_is_tried_against_every_base(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        main, other = tmp_path / "main", tmp_path / "other"
+        written = str(main / "docs" / "backlog")
+        assert project_relative(written, [None, other, main]) == "docs/backlog"
+
+    def test_an_absolute_path_through_a_symlinked_base_is_recognised(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        assert project_relative(str(real / "docs"), [link]) == "docs"
+        assert project_relative(str(link / "docs"), [link]) == "docs"
+
+    def test_the_absolute_root_is_the_root(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        assert project_relative("/" + str(tmp_path), [tmp_path]) == "."
+
+    def test_an_absolute_path_outside_every_base_names_nothing(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        assert project_relative(str(tmp_path.parent / "elsewhere"), [tmp_path]) is None
+        assert project_relative(str(tmp_path / "docs"), []) is None
+
+    def test_a_sibling_sharing_the_bases_name_prefix_is_outside(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        base = tmp_path / "proj"
+        assert project_relative(str(tmp_path / "proj-other" / "docs"), [base]) is None
+
+    def test_a_climb_back_out_of_an_absolute_base_is_outside(self, tmp_path):
+        from invariant.core.manifest import project_relative
+
+        base = tmp_path / "proj"
+        assert project_relative(f"{base}/docs/../../escape", [base]) is None

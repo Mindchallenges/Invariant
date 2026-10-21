@@ -6131,3 +6131,298 @@ class TestTheBranchIsCurrentRule:
         verdict = only(evaluate(["session.branch_is_current"], ctx)).verdict
         assert not verdict.ok and not verdict.skipped
         assert "session machine could not be loaded" in verdict.message
+
+
+# -- BUG_071: a declared path matches however it is spelled ---------------
+
+#: Every spelling of one in-project directory a manifest author might write.
+#: ``{main}`` is the main checkout's absolute path.
+EQUIVALENT_SPELLINGS = (
+    "{rel}",
+    "./{rel}",
+    "{rel}/",
+    "./{rel}/",
+    "{first}//{rest}",
+    "{first}/x/../{rest}",
+    "{main}/{rel}",
+)
+
+
+def spell(template, rel, main):
+    first, rest = rel.split("/", 1)
+    return template.format(rel=rel, first=first, rest=rest, main=main)
+
+
+class TestADeclaredStoreIsExemptHoweverItIsSpelled:
+    """`items.path`, `paths.reports` and `session.exempt_paths` (BUG_071).
+
+    `_is_exempt` compared the target's project-relative spelling with the
+    declaration AS WRITTEN, and a project-relative spelling never starts with
+    ``./`` — so ``items.path: ./docs/backlog`` exempted nothing, and every
+    write to the work-item store in the main checkout was refused by an
+    isolation rule that named neither the path nor the spelling.
+    """
+
+    ISOLATION_RULES = ("session.isolated_before_edit", "session.no_edit_in_main_checkout")
+
+    def assert_exempt(self, ctx_factory, body, rel, cwd=None):
+        write_manifest(ctx_factory.main, {"version": 1, "project": {"name": "demo"}, **body})
+        ctx = ctx_factory(
+            cwd=cwd or ctx_factory.main, payload=edit_payload(ctx_factory.main / rel)
+        )
+        for rule_id in self.ISOLATION_RULES:
+            verdict = only(evaluate([rule_id], ctx)).verdict
+            assert verdict.skipped, f"{rule_id}: {verdict.message}"
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_work_item_store(self, ctx_factory, template):
+        written = spell(template, "docs/backlog", ctx_factory.main)
+        self.assert_exempt(
+            ctx_factory, {"items": {"path": written}}, "docs/backlog/BUG_001.md"
+        )
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_work_item_store_seen_from_a_worktree(self, ctx_factory, template):
+        written = spell(template, "docs/backlog", ctx_factory.main)
+        self.assert_exempt(
+            ctx_factory,
+            {"items": {"path": written}},
+            "docs/backlog/BUG_001.md",
+            cwd=ctx_factory.wt,
+        )
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_report_store(self, ctx_factory, template):
+        written = spell(template, "out/reports", ctx_factory.main)
+        self.assert_exempt(
+            ctx_factory, {"paths": {"reports": written}}, "out/reports/sessions.md"
+        )
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_a_declared_exempt_path(self, ctx_factory, template):
+        written = spell(template, "notes/shared", ctx_factory.main) + "/**"
+        self.assert_exempt(
+            ctx_factory,
+            {"session": {"exempt_paths": [written]}},
+            "notes/shared/today.md",
+        )
+
+    def test_items_exempt_false_still_withholds_the_exemption(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"items": {"path": "./docs/backlog", "exempt": False}},
+        )
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "docs" / "backlog" / "BUG_001.md")
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+    def test_a_sibling_of_the_store_is_not_exempt(self, ctx_factory):
+        """Normalising must not widen: `./docs/backlog` is not `docs/backlog*`."""
+        write_manifest(ctx_factory.main, {"items": {"path": "./docs/backlog"}})
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "docs" / "backlog-tools" / "a.py")
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+    @pytest.mark.parametrize("written", [".", "./", "docs/.."])
+    def test_a_store_declared_as_the_root_does_not_exempt_the_project(
+        self, ctx_factory, written
+    ):
+        write_manifest(ctx_factory.main, {"items": {"path": written}})
+        ctx = ctx_factory(payload=edit_payload(ctx_factory.main / "src" / "app.py"))
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+
+class TestADeclarationOutsideTheProjectExemptsNothing:
+    """Absolute paths and climbing ``..`` must not reach past the project.
+
+    Before the shared normaliser an absolute pattern was matched against the
+    absolute spelling `_project_relative_forms` falls back to for a path in no
+    checkout, so a sweeping declaration above the project answered "exempt"
+    for files in an unrelated directory.
+    """
+
+    def is_exempt(self, ctx_factory, body, target):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import is_exempt_path
+
+        write_manifest(ctx_factory.main, {"version": 1, **body})
+        return is_exempt_path(Manifest.load(ctx_factory.main), ctx_factory.main, target)
+
+    def test_an_absolute_exempt_glob_above_the_project(self, ctx_factory, tmp_path):
+        outside = tmp_path / "unrelated" / "a.md"
+        body = {"session": {"exempt_paths": [f"{tmp_path}/**"]}}
+        assert not self.is_exempt(ctx_factory, body, outside)
+        assert not self.is_exempt(ctx_factory, body, ctx_factory.main / "src" / "app.py")
+
+    @pytest.mark.parametrize("written", ["../unrelated", "{tmp}/unrelated"])
+    def test_a_store_outside_the_project(self, ctx_factory, tmp_path, written):
+        written = written.format(tmp=tmp_path)
+        outside = tmp_path / "unrelated" / "BUG_001.md"
+        for body in ({"items": {"path": written}}, {"paths": {"reports": written}}):
+            assert not self.is_exempt(ctx_factory, body, outside), body
+
+
+    def test_an_undeclared_store_contributes_nothing(self, ctx_factory):
+        """A null store adds no pattern; with nothing else declared, nothing
+        is exempt — not the whole project."""
+        body = {
+            "session": {"exempt_paths": []},
+            "items": {"path": None},
+            "paths": {"reports": None},
+        }
+        target = ctx_factory.main / "docs" / "backlog" / "BUG_001.md"
+        assert not self.is_exempt(ctx_factory, body, target)
+
+
+class TestAPrivacyScopeIsScannedHoweverItIsSpelled:
+    """`privacy.scope` literal prefixes and the `paths.*` keywords it resolves.
+
+    `Path()` already absorbed ``./`` and a trailing ``/``; it did not absorb a
+    climbing ``..`` or an absolute in-project path, either of which put a
+    document outside a scope that names it.
+    """
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_a_literal_prefix(self, ctx_factory, template):
+        written = spell(template, "notes/private", ctx_factory.main)
+        write_manifest(ctx_factory.main, {"privacy": {"scope": [written]}})
+        ctx = ctx_factory(
+            payload=edit_payload(
+                ctx_factory.main / "notes" / "private" / "a.md", "the crash fired at 14:05"
+            )
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, verdict.message
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_memory_keyword(self, ctx_factory, template):
+        written = spell(template, "kb/memory", ctx_factory.main)
+        write_manifest(
+            ctx_factory.main,
+            {"paths": {"memory": written}, "privacy": {"scope": ["memory"]}},
+        )
+        ctx = ctx_factory(
+            payload=edit_payload(
+                ctx_factory.main / "kb" / "memory" / "a.md", "the crash fired at 14:05"
+            )
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, verdict.message
+
+    def test_a_prefix_outside_the_project_scopes_nothing(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["../notes"]}})
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "notes" / "a.md", "at 14:05")
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestTheDocsRootIsFoundHoweverItIsSpelled:
+    """`paths.docs` in every tree, including an absolute main-checkout path.
+
+    Relativised against the manifest root alone, an absolute value naming the
+    main checkout read as "outside the project" from a linked worktree, whose
+    manifest root is the worktree — so reads of the worktree's own copy were
+    not evidence for `docs.read_architecture`.
+    """
+
+    def roots(self, ctx_factory, written):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import docs_roots
+
+        wt = ctx_factory.wt
+        write_manifest(wt, {"version": 1, "paths": {"docs": written}})
+        return docs_roots(Manifest.load(wt), wt)
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_every_tree_is_a_docs_root(self, ctx_factory, template):
+        written = spell(template, "docs/architecture", ctx_factory.main)
+        roots = self.roots(ctx_factory, written)
+        for tree in (ctx_factory.main, ctx_factory.wt):
+            assert (tree / "docs" / "architecture").resolve() in roots, (written, roots)
+
+    def test_a_docs_root_outside_the_project_is_used_as_given(self, ctx_factory, tmp_path):
+        elsewhere = tmp_path / "shared-docs"
+        assert self.roots(ctx_factory, str(elsewhere)) == [elsewhere.resolve()]
+
+
+    def test_the_gate_names_a_docs_root_outside_the_project_as_given(
+        self, ctx_factory, tmp_path
+    ):
+        elsewhere = tmp_path / "shared-docs"
+        write_manifest(ctx_factory.main, {"version": 1, "paths": {"docs": str(elsewhere)}})
+        ctx = ctx_factory(cwd=ctx_factory.wt)
+        verdict = only(evaluate(["docs.read_architecture"], ctx)).verdict
+        assert not verdict.ok
+        assert str(elsewhere.resolve()) in verdict.message
+
+
+class TestNonSourceGlobsMatchHoweverTheyAreSpelled:
+    """`methodology.gates.non_source` through the shared normaliser (BUG_071).
+
+    Uses its neighbour's fixtures through an instance rather than by
+    inheriting, so the neighbour's own tests are not collected twice.
+    """
+
+    def verdict_for(self, ctx_factory, written):
+        h = TestANonSourceAssetCommittedBesideCodeDoesNotBlock()
+        h.setup_bundle(ctx_factory)
+        return h.verdict(
+            h.ctx_for(
+                ctx_factory,
+                h.measured_row(ctx_factory),
+                [h.MEASURED, f"{h.BUNDLE}/src/ow-kit.jsx"],
+                gates={"non_source": [written]},
+            )
+        )
+
+    @pytest.mark.parametrize("written", ["./design/**", "design/", "./design", "design//"])
+    def test_the_spelling_does_not_decide_the_verdict(self, ctx_factory, written):
+        verdict = self.verdict_for(ctx_factory, written)
+        assert verdict.ok, verdict.message
+
+    def test_the_verdict_names_the_pattern_as_written(self, ctx_factory):
+        verdict = self.verdict_for(ctx_factory, "./design/**")
+        assert "'./design/**'" in (verdict.detail or "")
+
+
+class TestCoverageExcludeGlobsMatchHoweverTheyAreSpelled:
+    """`methodology.gates.coverage_exclude` through the shared normaliser."""
+
+    @pytest.mark.parametrize("written", ["./tests/**", "tests/", "./tests", "tests//"])
+    def test_the_spelling_does_not_decide_the_verdict(self, ctx_factory, written):
+        h = TestPathsTheManifestHoldsOutOfTheFloor()
+        verdict = h.verdict(
+            h.ctx_for(ctx_factory, [h.SRC, h.TEST], [written], h.wire(ctx_factory))
+        )
+        assert verdict.ok, verdict.message
+        assert repr(written) in (verdict.detail or "")
+
+
+class TestBaselineEntriesMatchHoweverTheyAreSpelled:
+    """A baseline entry is keyed by the spelling measured rows are keyed by.
+
+    The LOOKUP already tolerated ``./`` through `_same_file`; the duplicate
+    check did not, so ``x`` and ``./x`` were two records for one file and the
+    first one silently won — the last-wins ambiguity the duplicate refusal
+    exists to prevent, by another route.
+    """
+
+    def verdict_for(self, ctx_factory, baseline_text):
+        h = TestTheRecordedBaselineThatRatchetsTheFloor()
+        measured = h.wire(ctx_factory, {h.LEGACY: 70.99}, baseline_text)
+        return h.verdict(h.ctx_for(ctx_factory, [h.LEGACY], measured, h.BASELINE))
+
+    @pytest.mark.parametrize("prefix", ["./", ""])
+    def test_a_dot_slash_entry_is_the_files_entry(self, ctx_factory, prefix):
+        legacy = TestTheRecordedBaselineThatRatchetsTheFloor.LEGACY
+        verdict = self.verdict_for(ctx_factory, f"{prefix}{legacy} 69.17\n")
+        assert verdict.ok, verdict.message
+
+    def test_two_spellings_of_one_file_are_a_duplicate(self, ctx_factory):
+        legacy = TestTheRecordedBaselineThatRatchetsTheFloor.LEGACY
+        verdict = self.verdict_for(ctx_factory, f"{legacy} 69.17\n./{legacy} 40\n")
+        assert not verdict.ok
+        assert "already recorded" in (verdict.detail or "")

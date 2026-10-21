@@ -69,10 +69,6 @@ def project(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_071 is live — delete this marker with the fix",
-)
 def test_BUG_071_dot_slash_items_path_store_write_is_not_denied(project):
     from invariant.cli.main import Context
 
