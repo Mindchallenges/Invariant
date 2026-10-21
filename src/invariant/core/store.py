@@ -256,3 +256,45 @@ class JsonStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             finally:
                 handle.close()
+
+
+class InertStore(JsonStore):
+    """The state root, readable and unwritable: every write is discarded.
+
+    For a caller that must run the real code path and leave no trace — today,
+    ``doctor``'s probe of the installed hooks. A hook is a writer: it binds
+    sessions, records evidence, spends overrides and ends host bindings, and
+    which of those a given payload reaches depends on identity the hook
+    process inherits from its environment. A probe made inert by choosing a
+    harmless payload is inert only until one of those fallbacks finds the
+    caller anyway, which is how ``doctor`` came to end its caller's host
+    binding (BUG_059). Discarding at the store holds for every write path at
+    once, including ones added after this was written.
+
+    Discarded, not refused. A raised write would surface as a degraded hook
+    and fail the very liveness check this exists to serve, and the hooks catch
+    their own write failures by design, so a refusal would be indistinguishable
+    from a skipped path anyway. Path safety is still enforced: a path escaping
+    the state root is the caller's bug whether or not the bytes would land.
+    """
+
+    def ensure_root(self) -> None:
+        return None
+
+    def write(self, rel: str, data: Any) -> None:
+        self._path(rel)
+
+    def delete(self, rel: str) -> bool:
+        self._path(rel)
+        return False
+
+    @contextmanager
+    def locked(
+        self,
+        rel: str,
+        default: Any = None,
+        timeout: float = LOCK_TIMEOUT_SECONDS,
+    ) -> Iterator[dict]:
+        # No lock: nothing is written back, so there is no read-modify-write
+        # to protect, and a lock file is itself a write to the state root.
+        yield self.read(rel, default if default is not None else {})

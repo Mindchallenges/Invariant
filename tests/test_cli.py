@@ -2729,6 +2729,172 @@ class TestDoctorReportsWhatWasLeftParked(ParkedSessionHarness):
         assert "none parked here" in out(capsys)
 
 
+# -- BUG_059: doctor's hook probe is a probe, not a lifecycle event ----
+
+
+def state_snapshot(project):
+    """Every file under the state root with its bytes."""
+    from invariant.core.manifest import Manifest
+
+    root = Manifest.load(project).state_root
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def this_checkout_on_path(tmp_path, monkeypatch):
+    """Make the `invariant` the shims exec THIS checkout's source.
+
+    Otherwise a shim runs whatever build is installed — in this repository an
+    editable install of the main checkout, which is not the code under test.
+    """
+    src = Path(__file__).resolve().parent.parent / "src"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "invariant"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'PYTHONPATH="{src}" exec "{sys.executable}" -m invariant "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    import os
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
+class TestTheHookProbeWritesNothing(EditHookHarness):
+    """`doctor` runs every hook to prove it works, and must change nothing.
+
+    The probe used to be inert by intention: payloads chosen to carry no
+    session id, no file path, no matching command. The hook process inherits
+    `INVARIANT_HOST_SESSION_ID` from whoever runs `doctor`, so the session-end
+    probe ended the caller's real binding anyway (BUG_059). A probe is now
+    inert by construction — the marker swaps the state store for one that
+    writes nothing — so these tests include probes that WOULD write, and the
+    controls show each of them does write without the marker.
+    """
+
+    HOST_ID = "host-probe-0000"
+
+    def bound(self, project, capsys, monkeypatch):
+        """A live session, bound to the caller's host id via the environment."""
+        from invariant.hosts.claude_code import PROBE_KEY
+
+        self.key = PROBE_KEY
+        monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", self.HOST_ID)
+        assert run("init", "--name", "demo") == 0
+        commit_all(project, "invariant")
+        run("session", "start", "probed", "--json")
+        session = payload(capsys)["session"]
+        run("session", "isolate", "--execute", "--id", session["id"])
+        # A pipeline, so a docs read has somewhere to be recorded.
+        assert run("pipeline", "start", "--task", "t") == 0
+        run("session", "list", "--json")
+        (row,) = payload(capsys)["sessions"]
+        worktree = Path(row["worktree"])
+        return session["id"], worktree
+
+    def record(self, project, sid):
+        from invariant.core.manifest import Manifest
+        from invariant.domains.session import SessionDomain
+
+        return SessionDomain(Manifest.load(project)).get(sid)
+
+    def writers(self, worktree):
+        """Probes that reach a write when nothing stops them."""
+        doc = worktree / "docs" / "architecture" / "overview.md"
+        return {
+            "session-end": {"session_id": self.HOST_ID},
+            "post-tool-use": {
+                "session_id": self.HOST_ID,
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": str(worktree / "app.py"),
+                    "old_string": "1",
+                    "new_string": "2",
+                },
+            },
+            "read": {
+                "session_id": self.HOST_ID,
+                "tool_name": "Read",
+                "tool_input": {"file_path": str(doc)},
+            },
+        }
+
+    def test_every_shipped_probe_payload_is_marked(self):
+        from invariant.hosts import claude_code
+
+        for event, body in claude_code._PROBE_PAYLOADS.items():
+            assert body.get(claude_code.PROBE_KEY) is True, event
+
+    def test_every_shipped_probe_returns_a_verdict_and_writes_nothing(
+        self, project, capsys, monkeypatch
+    ):
+        from invariant.hosts import claude_code
+
+        sid, _ = self.bound(project, capsys, monkeypatch)
+        capsys.readouterr()
+        before = state_snapshot(project)
+        for event, body in claude_code._PROBE_PAYLOADS.items():
+            assert self.hook(event, body) == 0
+            response = payload(capsys)
+            assert claude_code.DEGRADED_KEY not in response, (event, response)
+        assert state_snapshot(project) == before
+        assert self.record(project, sid).host_ended is False
+
+    @pytest.mark.parametrize("which", ["session-end", "post-tool-use", "read"])
+    def test_a_probe_that_would_write_still_writes_nothing(
+        self, project, capsys, monkeypatch, which
+    ):
+        _, worktree = self.bound(project, capsys, monkeypatch)
+        body = {**self.writers(worktree)[which], self.key: True}
+        before = state_snapshot(project)
+        assert self.hook("post-tool-use" if which == "read" else which, body) == 0
+        assert state_snapshot(project) == before
+
+    @pytest.mark.parametrize("which", ["session-end", "post-tool-use", "read"])
+    def test_without_the_marker_the_same_payload_does_write(
+        self, project, capsys, monkeypatch, which
+    ):
+        """The control: each payload above reaches a real write, so the test
+        beside it is not passing on a path that never wrote anything."""
+        _, worktree = self.bound(project, capsys, monkeypatch)
+        body = self.writers(worktree)[which]
+        before = state_snapshot(project)
+        self.hook("post-tool-use" if which == "read" else which, body)
+        assert state_snapshot(project) != before
+
+    def test_only_a_literal_true_marks_a_probe(self, project, capsys, monkeypatch):
+        """A truthy look-alike is a real event, not a probe: the marker is an
+        exact value so nothing reaches it by accident."""
+        sid, worktree = self.bound(project, capsys, monkeypatch)
+        body = {**self.writers(worktree)["session-end"], self.key: "yes"}
+        self.hook("session-end", body)
+        assert self.record(project, sid).host_ended is True
+
+    def test_doctor_leaves_the_callers_session_unparked(
+        self, project, capsys, monkeypatch, tmp_path
+    ):
+        """The entry's second claim: `doctor` listed the caller's own live
+        session as parked, because its own probe had just parked it."""
+        this_checkout_on_path(tmp_path, monkeypatch)
+        sid, _ = self.bound(project, capsys, monkeypatch)
+        name = self.record(project, sid).name
+        capsys.readouterr()
+
+        run("doctor")
+        text = out(capsys)
+        parked = next(ln for ln in text.splitlines() if "sessions parked here" in ln)
+        assert "none parked here" in parked
+        assert name not in parked
+        assert "hook shims actually run" in text
+        shims = next(ln for ln in text.splitlines() if "hook shims actually run" in ln)
+        assert "all 6 evaluated" in shims
+
+
 class TestInitScaffoldsTheArchitectureDoc:
     """A fresh project used to fail its own docs-first gate with nothing to read.
 

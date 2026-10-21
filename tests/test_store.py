@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 import pytest
 
 from invariant.core.errors import LockTimeout, StateError
-from invariant.core.store import UNKNOWN_KEYS, JsonStore, PreservesUnknownKeys
+from invariant.core.store import (
+    UNKNOWN_KEYS,
+    InertStore,
+    JsonStore,
+    PreservesUnknownKeys,
+)
 
 
 @pytest.fixture
@@ -161,6 +166,84 @@ def test_ensure_root_reports_a_real_failure(tmp_path):
 def test_json_is_valid_on_disk(store):
     store.write("sessions/a.json", {"k": "v"})
     json.loads((store.root / "sessions" / "a.json").read_text(encoding="utf-8"))
+
+
+# -- the inert store ---------------------------------------------------
+
+
+def snapshot(root):
+    """Every file under ``root`` with its bytes — the whole observable state."""
+    if not root.exists():
+        return None
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+class TestInertStore:
+    """Reads like the real store; writes nothing, wherever the write comes from.
+
+    It exists for `doctor`'s hook probe (BUG_059). The probe runs every hook the
+    host would run, and a hook is a writer — so a probe built on the real store
+    delivered a real lifecycle event and spent the caller's host binding. The
+    guarantee has to hold for every write path at once, including ones nobody
+    has written yet, which is why it lives at the store and not in a list of
+    handlers told to behave.
+    """
+
+    @pytest.fixture
+    def seeded(self, store):
+        store.write("sessions/abc.json", {"host_ended": False})
+        with store.locked("registry.json", default={}) as data:
+            data["abc"] = {"state": "isolated"}
+        return store
+
+    def test_it_reads_what_the_real_store_wrote(self, seeded):
+        inert = InertStore(seeded.root)
+        assert inert.read("sessions/abc.json") == {"host_ended": False}
+        assert inert.exists("sessions/abc.json")
+        assert inert.list_ids("sessions") == ["abc"]
+
+    def test_a_write_lands_nowhere(self, seeded):
+        before = snapshot(seeded.root)
+        InertStore(seeded.root).write("sessions/abc.json", {"host_ended": True})
+        InertStore(seeded.root).write("sessions/new.json", {"x": 1})
+        assert snapshot(seeded.root) == before
+
+    def test_a_delete_removes_nothing(self, seeded):
+        before = snapshot(seeded.root)
+        assert InertStore(seeded.root).delete("sessions/abc.json") is False
+        assert snapshot(seeded.root) == before
+
+    def test_a_locked_mutation_is_seen_and_discarded(self, seeded):
+        """The caller still gets the current document to work on, so the code
+        path it exercises is the real one; only the write-back is gone."""
+        before = snapshot(seeded.root)
+        with InertStore(seeded.root).locked("registry.json", default={}) as data:
+            assert data == {"abc": {"state": "isolated"}}
+            data["abc"]["state"] = "abandoned"
+        assert snapshot(seeded.root) == before
+
+    def test_a_locked_mutation_on_a_missing_document_gets_its_default(self, tmp_path):
+        with InertStore(tmp_path / "state").locked("registry.json", default={"d": 1}) as data:
+            assert data == {"d": 1}
+
+    def test_it_creates_no_state_root_and_no_lock_files(self, tmp_path):
+        """Not even the directories: a probe of an uninitialised project must
+        leave it uninitialised."""
+        inert = InertStore(tmp_path / "state")
+        inert.ensure_root()
+        with inert.locked("registry.json", default={}) as data:
+            data["x"] = 1
+        inert.write("sessions/a.json", {})
+        assert not (tmp_path / "state").exists()
+
+    def test_it_still_refuses_a_path_outside_the_state_root(self, store):
+        """Inert is not unchecked: a bad path is still the caller's bug."""
+        with pytest.raises(StateError, match="escapes"):
+            InertStore(store.root).write("../elsewhere.json", {})
 
 
 # -- the round-trip contract -------------------------------------------

@@ -25,7 +25,7 @@ from ..core.rules import (
     all_rules,
     evaluate,
 )
-from ..core.store import JsonStore
+from ..core.store import InertStore, JsonStore
 from ..domains.pipeline import PipelineDomain, describe_run, summarise
 from ..domains.session import (
     SessionDomain,
@@ -127,6 +127,7 @@ class Context:
         session_id: str | None = None,
         host_session_id: str | None = None,
         manifest_start: Path | None = None,
+        probe: bool = False,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         #: ``manifest_start`` separates "which project governs this call" from
@@ -137,7 +138,10 @@ class Context:
         #: every gate. ``cwd`` stays honest for the rules that ask git about
         #: the directory the call actually runs in.
         self.manifest = Manifest.load(manifest_start or self.cwd, required=required)
-        self.store = JsonStore(self.manifest.state_root)
+        #: A probe reads the real state and writes none of it. Every domain
+        #: this context builds shares this one store, so swapping it here
+        #: covers every write a hook can reach (BUG_059).
+        self.store = (InertStore if probe else JsonStore)(self.manifest.state_root)
         #: An explicit --id, carried rather than exported. Writing it into
         #: os.environ would work and would also outlive the command, silently
         #: re-answering the same question for everything that ran afterwards.
@@ -2425,14 +2429,15 @@ def cmd_state_repair(args) -> int:
 
 
 def cmd_hook(args) -> int:
-    from ..hosts.claude_code import ClaudeCodeHost
+    from ..hosts.claude_code import ClaudeCodeHost, is_probe
 
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
-    host_session_id = None
+    body: object = None
     try:
-        host_session_id = (json.loads(raw) or {}).get("session_id")
-    except (json.JSONDecodeError, AttributeError, TypeError):
+        body = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
         pass
+    host_session_id = body.get("session_id") if isinstance(body, dict) else None
     # The manifest is resolved from the project the HOST is working in, not
     # from wherever this process happens to be standing (AUD-04). The host
     # guarantees CLAUDE_PROJECT_DIR to its hooks; the working directory it
@@ -2448,6 +2453,7 @@ def cmd_hook(args) -> int:
             required=True,
             host_session_id=host_session_id,
             manifest_start=manifest_start,
+            probe=is_probe(body),
         )
     except InvariantError as exc:
         # No manifest found anywhere. A shim only exists where `init` put it,

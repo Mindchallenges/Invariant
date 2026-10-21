@@ -122,6 +122,22 @@ invariant doctor
     host sessions. A `doctor` that goes permanently red on every project which
     adopts a checklist is the gate that gets ignored, and then switched off.
 
+    The "hook shims actually run" row executes every installed shim, so it
+    proves the shim resolves the CLI, the engine imports, the rules evaluate
+    and a parseable verdict comes back without the degraded marker. Running a
+    hook is delivering an event, and every hook is a writer — so each probe
+    payload carries `invariantProbe: true`, and `invariant hook` answers a
+    probe from a state store that reads the real state and discards every
+    write. The payloads used to be harmless by choice instead (no session id,
+    no file path), and the hook found the caller anyway through the
+    `INVARIANT_HOST_SESSION_ID` it inherits: the session-end probe ended the
+    caller's real host binding, and the parked row below then reported the
+    caller's own live session as parked (BUG_059). The guarantee sits at the
+    store because identity has more routes than the environment — cwd and
+    worktree resolve a session too — and a store that writes nothing covers
+    every write path, present and future, at once. A shim that execs an OLDER
+    build of the library does not know the marker and is not covered.
+
     A manifest that will not LOAD is one of those checks and not a reason to
     stop: this is the command someone runs because the manifest is wrong, and
     it used to resolve the manifest before it could report anything, so a
@@ -715,6 +731,11 @@ invariant hook <event>
     not wedge the host — but it carries the degraded marker
     (`invariantDegraded`) and says enforcement is off, instead of an empty
     verdict that read as a pass.
+
+    A payload carrying `invariantProbe: true` is `doctor`'s liveness probe,
+    never something a host sends. It is evaluated in full — same rules, same
+    response — against a state store that discards every write, so a probe
+    binds, records, spends and ends nothing. Only the literal `true` counts.
 
 invariant context
     Print the state projection a host would inject: current state, legal

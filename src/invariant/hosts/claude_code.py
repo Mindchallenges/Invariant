@@ -105,23 +105,47 @@ CHECK_WIRED = "hooks wired in settings"
 #: silence. See ``_hook_degraded``.
 DEGRADED_KEY = "invariantDegraded"
 
-#: Payloads for the liveness check. Each is chosen to exercise the whole path
-#: — shim resolution, interpreter start, module import, rule evaluation, JSON
-#: out — while writing nothing: no file_path so no session is adopted and no
-#: docs read is recorded, no session_id so no host binding is ended, and a
-#: command that matches no rule's trigger.
+#: Marks a hook payload as ``doctor``'s liveness probe. A host never sends it.
+#: ``invariant hook`` honours it before anything else is built: the call runs
+#: the whole path against a state store that discards every write, so a probe
+#: cannot bind, record, spend or end anything (BUG_059). Only the literal
+#: ``True`` counts, so nothing reaches it by accident.
+PROBE_KEY = "invariantProbe"
+
+#: Payloads for the liveness check. Each exercises the whole path — shim
+#: resolution, interpreter start, module import, rule evaluation, JSON out —
+#: and each carries :data:`PROBE_KEY`, which is what makes it write nothing.
+#:
+#: The marker is the guarantee, not the payload. These were once chosen to be
+#: harmless on their own (no file_path, no session_id), and that held only
+#: until the hook found the caller's identity by another route: it falls back
+#: to ``INVARIANT_HOST_SESSION_ID`` from the environment ``doctor`` passes on,
+#: so the session-end probe ended the caller's real host binding. Scrubbing
+#: that variable would close one route and leave the rest — the cwd and the
+#: worktree resolve a session too — so inertness is enforced at the store.
 _PROBE_PAYLOADS = {
-    "session-start": {},
-    "user-prompt-submit": {},
-    "pre-tool-use": {"tool_name": "Bash", "tool_input": {"command": "true"}},
-    "post-tool-use": {"tool_name": "Read", "tool_input": {}},
+    "session-start": {PROBE_KEY: True},
+    "user-prompt-submit": {PROBE_KEY: True},
+    "pre-tool-use": {
+        PROBE_KEY: True,
+        "tool_name": "Bash",
+        "tool_input": {"command": "true"},
+    },
+    "post-tool-use": {PROBE_KEY: True, "tool_name": "Read", "tool_input": {}},
     # `stop_hook_active` is what a real turn sets once the closeout has already
     # been demanded, so the probe exercises the whole path and provably cannot
     # block: a liveness check that could halt the caller's turn would be a
     # worse defect than the outage it looks for.
-    "stop": {"stop_hook_active": True},
-    "session-end": {},
+    "stop": {PROBE_KEY: True, "stop_hook_active": True},
+    "session-end": {PROBE_KEY: True},
 }
+
+
+def is_probe(payload: object) -> bool:
+    """Whether a parsed hook payload is ``doctor``'s probe."""
+    return isinstance(payload, dict) and payload.get(PROBE_KEY) is True
+
+
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
 CHECK_AGENTS_CURRENT = "library agents current"
 

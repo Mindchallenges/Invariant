@@ -26,8 +26,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from invariant.cli.main import main
 from invariant.core.manifest import Manifest
 from invariant.domains.session import SessionDomain
@@ -36,10 +34,6 @@ HOST_ID = "host-bug059-synthetic"
 SRC = Path(__file__).resolve().parent.parent / "src"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_059 is live — delete this marker with the fix",
-)
 def test_BUG_059_doctor_does_not_spend_the_callers_host_binding(
     tmp_path, monkeypatch
 ):
