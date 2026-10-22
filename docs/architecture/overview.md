@@ -31,6 +31,9 @@ graph TD
         OGATES[gates]
         ONOTIFY[notify]
         OLAUNCHD[launchd]
+        ODASH[dashboard]
+        OACT[actions]
+        OTUI["tui (Textual)"]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -106,6 +109,16 @@ graph TD
     OGATES --> GIT
     OSIG -. reads the GateReport shape of .-> OGATES
     CLI --> OLAUNCHD
+    CLI -. imports only inside oracle tui .-> OTUI
+    CLI --> ODASH
+    CLI --> OACT
+    CLI -. injects without_host_markers and the handoff launcher .-> CCLAUNCH
+    OTUI --> ODASH
+    OTUI --> OACT
+    ODASH --> OWATCH
+    ODASH --> OSIG
+    ODASH --> OSCAN
+    OACT --> OSIG
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -260,6 +273,24 @@ nothing else from the oracle. The plist runs `python -m invariant oracle
 watch`, so the daemon is the CLI again rather than a new entry point, and no
 arrow from `OLAUNCHD` to `OWATCH` exists. The CLI reaches it through the
 `_oracle_installer` seam, which the suite replaces (ADR-007 D17).
+
+`OTUI` is the dashboard (increment 7), and the only module in the library
+that needs a dependency beyond PyYAML: Textual, the `invariant[oracle]`
+extra (ADR-007 D19). The arrow into it is dotted because the CLI imports it
+only inside `oracle tui`, so nothing else ever loads it, and a missing extra
+is a usage error. What the dashboard decides lives beside it in two modules
+that import no toolkit: `ODASH` (`OTUI --> ODASH`) chooses the document,
+the watcher's snapshot while `ODASH --> OWATCH`'s `snapshot_status` calls it
+fresh, else an in-process scan, and turns rows into lines, naming them by
+`recommend.row_label` (`ODASH --> OSIG`). `OACT` turns a recommendation into
+the step a confirm modal shows and dispatches it once confirmed. `CLI -->
+ODASH` is also `oracle list`'s status flag, so the two surfaces spell it
+once. The host facts an action needs, which variables are host markers and
+how a terminal is opened, are `claude_code_launch`'s, so the CLI hands them
+to `OACT` (`CLI -. injects without_host_markers and the handoff launcher .->
+CCLAUNCH`), the probe's shape a third time. A terminal step reuses the
+`session handoff` launch, its launcher seam and its successor watch, and no
+`oracle → hosts` arrow appears (ADR-007 D18).
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -608,8 +639,8 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Increments 1 to 6 deliver the modules below; the rest of
-the package is planned in [oracle.md](oracle.md).
+project (IDEA_012). Its seven increments have all shipped; see
+[oracle.md](oracle.md).
 
 | Module | Owns | Never does |
 |---|---|---|
@@ -623,6 +654,9 @@ the package is planned in [oracle.md](oracle.md).
 | `gates` | `GateCache`: what each idle session's pipeline owes, evaluated by the domain over an inert store, off the tick, once per fingerprint, at most two at a time, with a timeout that keeps the last answer; `GateReport`, the data `recommend` reads | Write anything; evaluate while a turn runs; persist an answer; raise an alert |
 | `notify` | The `Notifier` protocol and `Notification`; `OsascriptNotifier`, with the quoting injected; `RecordingNotifier` for tests | Import `hosts/`; decide what deserves a notification |
 | `launchd` | The LaunchAgent: `plist_for` (absolute interpreter, explicit `PATH`, log under the home), `LaunchdInstaller` (install, reinstall, uninstall, status, the interpreter check `doctor` runs), `RecordingLaunchctl` for tests | Run `launchctl` except through its injected runner; import the watcher |
+| `dashboard` | What `oracle tui` shows: the snapshot while it is fresh, else an in-process scan behind a banner; each row as a line with its tone; the `ALERT` / `note` / `ok` flag `oracle list` prints too | Import Textual; run anything |
+| `actions` | A recommendation as a confirmable `Step`, the exact lines the confirm modal shows, the refusals (a waiting row, a non-`invariant` argv, a missing cwd), and the dispatch of a confirmed step to an injected runner or terminal launcher; `run_subprocess`, the real runner | Import `hosts/`; run a step nobody confirmed; answer a prompt |
+| `tui` | The Textual app: the table, its refresh, and the confirm, info and output modals. Imported only by `oracle tui` | Decide what `dashboard` and `actions` decide |
 
 ### `adapters/`
 

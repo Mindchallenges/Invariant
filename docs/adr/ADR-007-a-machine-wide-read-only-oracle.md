@@ -1,12 +1,11 @@
 # ADR-007 — A machine-wide, read-only oracle
 
-- **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012,
-  D5–D10 by increment 2, D11–D12 by increment 3, D13–D15 by increment 4,
-  D16 by increment 5 (its read-only git amended by increment 6), and D17 by
-  increment 6.
-  The later decisions are listed under "Still to decide", and each is
-  recorded here when its increment lands. The status
-  becomes Accepted when the oracle ships.
+- **Status:** Accepted. The oracle shipped with increment 7 of IDEA_012, the
+  last of its v1. D1–D4 are implemented by increment 1, D5–D10 by increment
+  2, D11–D12 by increment 3, D13–D15 by increment 4, D16 by increment 5 (its
+  read-only git amended by increment 6), D17 by increment 6, and D18–D19 by
+  increment 7. Nothing is left to decide for v1; the follow-ons are their own
+  ideas (IDEA_013 to IDEA_018).
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. This record adds the first state this library keeps
   outside any project.
@@ -403,10 +402,74 @@ The alternatives were a cron entry or a login item. Cron restarts nothing that
 exits and runs without the GUI session; a login item is a GUI application
 concern. launchd's `KeepAlive` is the restart policy the watcher wants.
 
-## Still to decide (later increments of IDEA_012)
+### D18 — Every action is confirmed first, and runs as a subprocess or a new host
 
-These are recorded so the record is complete. They are not decided yet.
+The dashboard can act on a row, and the person's hard rule is that nothing it
+does is a surprise. So an action is never one key. The key opens a modal that
+shows the exact `argv`, the `cwd`, and each variable the step adds to the
+environment, with Cancel focused; only `y` or the Run button runs it. A step
+of kind `info` opens the same kind of modal with its text and no action.
 
-- **Actions are confirmed first**, run as subprocesses with the host markers
-  stripped, and never answer a permission prompt.
-- **The first optional dependency** (Textual, as `invariant[oracle]`).
+- **A `run` step is a subprocess of the dashboard, with no shell and no
+  stdin.** Its environment is the dashboard's own, minus Claude Code's host
+  markers and minus `INVARIANT_SESSION_ID`, plus the step's own `env`. The
+  markers go for the reason they go from a handoff's successor (BUG_068,
+  BUG_069): a dashboard started from a host's tool shell must not make a
+  command look like that host's child. The ambient session id goes for the
+  reason `domains/pipeline` strips it from the suite it spawns (BUG_035): a
+  step that needs a session names it in `env`, and an inherited id would
+  point the command at whichever session ran the dashboard. The output is
+  shown when the command ends, and the table refreshes.
+- **A `terminal` step opens a new host session through the handoff's
+  launcher.** Resuming belongs in a host, not in a subprocess, so the step
+  becomes a `session handoff` launch plan: `claude --name <session>
+  --remote-control <session>`, in the step's `cwd`, with a first prompt that
+  asks the new session to run the step's command. It goes through
+  `_handoff_launcher` and counts only once the successor is seen alive, as a
+  handoff does (BUG_075). Unlike a handoff, it records no note and ends no
+  host. The modal shows the exact line the window will run.
+- **The host facts are injected.** The marker list
+  (`without_host_markers`) and the launcher are `hosts/claude_code_launch`'s.
+  The oracle may not import `hosts/`, so `oracle/actions` takes both as
+  arguments and the CLI joins them, D11's shape again.
+- **The oracle never answers a prompt.** A row waiting on a permission prompt
+  or a question recommends nothing to run (increment 3), and `oracle/actions`
+  refuses a runnable step on such a row as a second line of defence. It also
+  refuses an `argv` that is not an `invariant` command and a `cwd` that does
+  not exist. The snapshot is a file anybody with the user's rights can write,
+  and a file is not a reason to run a program.
+- **The suite never runs one.** The runner is reached through
+  `_oracle_runner` and the launcher through `_handoff_launcher`. Both are
+  replaced for every test by recorders, and the `osascript` guard stays the
+  backstop.
+
+The alternatives were to run in a shell, which would turn a recommendation's
+quoting into a second language, and to type a resume into the person's
+current terminal, which the dashboard does not own.
+
+### D19 — The first optional dependency: Textual, as `invariant[oracle]`
+
+The dashboard is a terminal UI, and the standard library has none worth
+building on (`curses` has no widgets, no modal and no test harness). Textual
+does, and its `App.run_test()` drives an app headless with a pilot, which is
+what lets the suite test that cancel runs nothing.
+
+- **An extra, not a dependency.** `[project.optional-dependencies] oracle =
+  ["textual>=8.0"]`. The core install stays PyYAML-only. Every other part of
+  the oracle — the index, the scan, the watcher, the notifier, the
+  LaunchAgent — uses only the standard library, so only the dashboard needs
+  the extra.
+- **Imported only by the command.** `oracle/tui` is imported inside
+  `cmd_oracle_tui` and nowhere else. A missing Textual is a usage error that
+  names the extra, never a traceback. Any other import failure is not
+  disguised as one. What the dashboard decides lives in modules that do not
+  import Textual (`oracle/dashboard`, `oracle/actions`), so the logic is
+  tested without a terminal and `tui.py` is only drawing.
+- **Pinned for the suite.** Textual is also in the `dev` dependency group,
+  so the suite always runs the dashboard's tests instead of skipping them,
+  and `uv.lock` pins the version, for the reason ruff and Sphinx are pinned
+  there: a floating toolkit would move what the tests measure.
+
+The alternative was `rich` alone, with a redraw loop. It has no input
+handling or modal, so the confirm-first rule would have been hand-built on
+raw key reads, and that is the part that must not be wrong.

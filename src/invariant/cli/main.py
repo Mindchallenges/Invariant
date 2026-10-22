@@ -2678,15 +2678,14 @@ def _oracle_gates():
     return GateCache()
 
 
-#: The flag column of ``oracle list``: an alert, a marker only, or nothing.
-_ORACLE_FLAGS = ("ALERT", "note ", "ok   ")
-
-
 def _oracle_row_lines(row: dict) -> list[str]:
+    from ..oracle.dashboard import status_flag
     from ..oracle.recommend import row_label
 
     signals = row["signals"]
-    flag = _ORACLE_FLAGS[0 if any(s["alert"] for s in signals) else 1 if signals else 2]
+    # The flag column: an alert, a marker only, or nothing. One spelling with
+    # the dashboard's status column.
+    flag = status_flag(row).ljust(5)
     said = "; ".join(f"{s['kind']}: {s['detail']}" for s in signals) or "-"
     lines = [f"  {flag}  {row_label(row):<40} {said}"]
     advice = row["recommendation"]
@@ -2728,6 +2727,119 @@ def cmd_oracle_list(args) -> int:
             lines.extend(_oracle_row_lines(row))
     text = "\n".join(lines) or f"  no projects registered in {index.home}"
     return emit(args, document, text)
+
+
+def _oracle_scan_document(index, cache, gates) -> dict:
+    """One in-process read of the machine: the ``oracle list --json`` document.
+
+    The gates are asked without waiting: a dashboard refreshes, so what
+    finishes after this read is the next one's detail.
+    """
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    snapshots = scan_all(index, cache=cache)
+    now = time.time()
+    document = assess(snapshots, now, gates=gates.refresh(snapshots, now, wait=0.0))
+    document["home"] = str(index.home)
+    return document
+
+
+def _real_oracle_runner():
+    from ..oracle.actions import run_subprocess
+
+    return run_subprocess
+
+
+def _oracle_runner():
+    """What a confirmed ``run`` step of the dashboard runs through.
+
+    A seam, like ``_oracle_notifier``: the suite replaces it with a recorder,
+    so no test runs a recommended command.
+    """
+    return _real_oracle_runner()
+
+
+def _oracle_launch_plan(step, stage: bool):
+    """The ``session handoff`` launch plan for a dashboard step that resumes."""
+    from ..hosts import claude_code_launch as launch
+    from ..oracle.actions import terminal_request
+
+    name, note = terminal_request(step)
+    claude = launch.resolve_claude() or launch.CLAUDE_BINARY
+    return launch.plan_launch(claude, name, note, step.cwd, stage=stage)
+
+
+def _oracle_terminal(step) -> str:
+    """Open a new host session for a dashboard ``terminal`` step.
+
+    The same launch as ``session handoff``: a Terminal window through
+    ``_handoff_launcher``, counted only once a successor is seen alive
+    (BUG_075). Unlike a handoff it ends no host and records no note; the
+    first prompt asks the new session to run the step's command.
+    """
+    from ..hosts import claude_code_launch as launch
+
+    if launch.host_platform() != "darwin":
+        raise InvariantError(
+            "opening a Terminal window needs macOS. Run it by hand:\n"
+            f"    {_oracle_launch_plan(step, stage=False).by_hand}"
+        )
+    if launch.resolve_claude() is None:
+        raise InvariantError(f"no claude on PATH to start; {launch.CLAUDE_BINARY} was not found")
+    plan = _oracle_launch_plan(step, stage=True)
+    pid = _launch_successor(launch, plan)
+    return f"opened a Terminal window: claude (pid {pid}) is running {plan.name} in {plan.cwd}"
+
+
+def _oracle_actions():
+    """The dashboard's actions, with the host facts they need injected.
+
+    The oracle names the shapes; the host markers to strip and the terminal
+    launcher are Claude Code's, joined here (ADR-007 D18).
+    """
+    from ..hosts.claude_code_launch import without_host_markers
+    from ..oracle.actions import Actions
+
+    return Actions(
+        runner=_oracle_runner(),
+        environ=lambda: os.environ,
+        strip=without_host_markers,
+        terminal=_oracle_terminal,
+        preview=lambda step: _oracle_launch_plan(step, stage=False).by_hand,
+    )
+
+
+def cmd_oracle_tui(args) -> int:
+    """The live dashboard. Needs the ``invariant[oracle]`` extra (Textual).
+
+    Reads the watcher's snapshot while it is fresh, else scans in-process
+    behind a banner. Every action is confirmed first.
+    """
+    try:
+        from ..oracle import tui
+    except ImportError as exc:
+        # Textual, or the rich it brings with it; any other failure is a bug
+        # and is not disguised as a missing extra.
+        if (exc.name or "").split(".")[0] not in ("textual", "rich"):
+            raise
+        raise UsageError(
+            "the oracle dashboard needs Textual, which ships as the [oracle] extra:\n"
+            "    pip install 'invariant[oracle]'\n"
+            "  Installed as a uv tool, add it to that environment instead:\n"
+            "    uv tool install --with textual <how invariant was installed>"
+        ) from exc
+    from ..oracle.dashboard import load
+
+    index = _project_index()
+    cache = _oracle_cache()
+    gates = _oracle_gates()
+    app = tui.OracleApp(
+        lambda: load(index.home, time.time(), lambda: _oracle_scan_document(index, cache, gates)),
+        _oracle_actions(),
+    )
+    app.run()
+    return EXIT_OK
 
 
 def _real_oracle_notifier():
@@ -3668,6 +3780,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="post nothing; new alerts stay owed to a watcher that does",
     )
     q.set_defaults(func=cmd_oracle_watch)
+    q = oracle.add_parser(
+        "tui", help="the live dashboard; every action is confirmed first (needs invariant[oracle])"
+    )
+    q.set_defaults(func=cmd_oracle_tui)
     q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
     q.set_defaults(func=cmd_oracle_notify_test)
     q = oracle.add_parser(

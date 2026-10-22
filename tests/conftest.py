@@ -190,6 +190,50 @@ def _no_real_launchd(monkeypatch, tmp_path_factory):
     return installer
 
 
+class InertLauncher:
+    """A terminal launcher that opens nothing and records each plan."""
+
+    def __init__(self) -> None:
+        self.plans: list = []
+
+    def launch(self, plan) -> None:
+        self.plans.append(plan)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_terminal_launch(monkeypatch):
+    """No test opens a Terminal window (IDEA_012 increment 7).
+
+    ``session handoff`` and the oracle dashboard's resume action reach
+    Terminal through one seam, ``_handoff_launcher``. ``test_handoff.py``
+    installs its own recorder over this one; everywhere else this inert one
+    stands, and the ``osascript`` guard below is the backstop. A test about
+    what would have launched reads the plans it recorded.
+    """
+    inert = InertLauncher()
+    monkeypatch.setattr(
+        "invariant.cli.main._handoff_launcher", lambda: inert, raising=False
+    )
+    return inert
+
+
+@pytest.fixture(autouse=True)
+def _no_real_oracle_runner(monkeypatch):
+    """No test runs a command the oracle dashboard recommends.
+
+    A confirmed ``run`` step leaves through one seam, ``_oracle_runner``,
+    replaced here suite-wide by a recorder that runs nothing and answers
+    ``(0, "")``. A test about what ran reads the calls it recorded.
+    """
+    from invariant.oracle.actions import RecordingRunner
+
+    recorder = RecordingRunner()
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_runner", lambda: recorder, raising=False
+    )
+    return recorder
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

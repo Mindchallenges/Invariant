@@ -4,10 +4,11 @@ A machine-wide view of every running session in every invariant project. It
 says which one needs you and recommends the exact next command for each one
 (IDEA_012). The decisions behind it are recorded in ADR-007.
 
-The oracle is built in seven increments, and each one lands on its own. This
-page describes what has shipped. Everything marked **planned** is design that
-was approved in the plan but has no code yet. Treat it as intent, not as a
-description of the current behaviour.
+The oracle was built in seven increments, each landing on its own. All seven
+have shipped, so v1 is complete and this page describes the current
+behaviour. The follow-ons (phone push, a status line, web and artifact
+dashboards, more actions, an idle alert) are their own ideas, IDEA_013 to
+IDEA_018.
 
 | # | Increment | Status |
 |---|---|---|
@@ -17,7 +18,7 @@ description of the current behaviour.
 | 4 | Watcher, rising-edge de-dup ledger, notifier, `watch`, `notify-test` | **shipped** |
 | 5 | Gate cache for recommendation detail | **shipped** |
 | 6 | launchd `install` / `uninstall` / `status` | **shipped** |
-| 7 | Textual TUI behind the `invariant[oracle]` extra | planned |
+| 7 | Textual TUI behind the `invariant[oracle]` extra, confirm-first actions | **shipped** |
 
 ## Where it sits
 
@@ -36,7 +37,9 @@ graph TD
         GATES[gates]
         NOTIFY[notify]
         LAUNCHD[launchd]
-        TUI["tui (planned)"]
+        DASH[dashboard]
+        ACTIONS[actions]
+        TUI["tui (Textual, the [oracle] extra)"]
     end
 
     subgraph core["core/"]
@@ -84,7 +87,16 @@ graph TD
     SIGNALS -. reads the GateReport shape of .-> GATES
     CLI --> LAUNCHD
     LAUNCHD -. its plist runs oracle watch .-> WATCH
-    TUI -. planned .-> SCAN
+    CLI -. imports only inside oracle tui .-> TUI
+    CLI --> DASH
+    CLI --> ACTIONS
+    CLI -. injects without_host_markers and the handoff launcher .-> HOST
+    TUI --> DASH
+    TUI --> ACTIONS
+    DASH --> WATCH
+    DASH --> SIGNALS
+    DASH --> SCAN
+    ACTIONS --> SIGNALS
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -564,6 +576,80 @@ command string: `shell=True`, or `sh`/`bash`/`zsh -c`, where each command's
 first word after assignments and `exec`/`env` wrappers is checked, one level
 of nested `sh -c` included.
 
+## Shipped: the dashboard
+
+`invariant oracle tui` is a live terminal dashboard. It is a Textual app, and
+Textual ships as the `invariant[oracle]` extra, so the core install does not
+carry it (ADR-007 D19). The command imports `oracle/tui` inside itself and
+nowhere else; without Textual it is a usage error naming the extra.
+
+Three modules, split so that only the drawing needs Textual:
+
+| Module | Owns | Never does |
+|---|---|---|
+| `dashboard` | `load(home, now, scan)`: the watcher's snapshot while it is fresh, else the `scan` it is handed, behind a banner. `lines(document)`: each row as a table line, each line's tone, the status flag `oracle list` prints too | Import Textual; run anything |
+| `actions` | `Step`, a row's recommendation as the confirm modal shows it; `confirm_lines`; `refusal`; `child_env`; `Actions`, the dispatch on a confirmed step through an injected runner and terminal launcher; `run_subprocess`, the real runner; `RecordingRunner` for tests | Import `hosts/`; run a step nobody confirmed; answer a prompt |
+| `tui` | `OracleApp`, the table and its refresh, and three modals: `ConfirmScreen`, `InfoScreen`, `OutputScreen` | Decide anything the two modules above decide |
+
+**Where the rows come from.** `load` asks `watcher.snapshot_status`, the rule
+`oracle status` reports. A snapshot that exists, is not older than three of
+its own intervals, and parses as the `assess` document is shown as it is. One
+that is missing, stale or unreadable makes the dashboard scan in-process,
+through the same `scan_all` and `assess` path as `oracle list`, and show a
+banner: "watcher not running", why, and that `oracle install` keeps one
+running. The in-process read asks the gate cache without waiting, so gate
+detail appears from the next refresh on. Either way the table refreshes on
+the snapshot's interval (5 s by default), in a worker thread, and keeps the
+cursor on the row it was on.
+
+**The table.** Project by project: each live session, with its hosts nested
+under it (current first, then earlier ones), then the orphan hosts, the
+leaked worktrees and the error rows.
+
+| Column | Shows |
+|---|---|
+| project | the project's name (blank on a nested host line) |
+| session | `row_label`, the name `oracle list` and the notifications use |
+| stage / lane | a session's stage and its pipeline, as `working · tdd:green`; `orphan host`, `leaked worktree`, `unreadable`; a nested host's `current host` or `earlier host` |
+| status | `ALERT`, `note` or `ok`; a nested host's liveness and what it waits on |
+| signals | each signal and its detail: a high alert red, any other alert amber, a marker dim |
+| next | the recommended command, or the step's label when there is nothing to run |
+
+A row with a high alert is drawn red throughout, and a host waiting on a
+permission prompt or a question is a high alert. Measured with the suite's
+three projects and five sessions, from a stale snapshot so it scans
+in-process: the first render took 0.4 s, inside the 5-second acceptance.
+
+### Confirm-first actions
+
+Enter (or `a`) on a line acts on its row; a nested host line acts for its
+session. Nothing runs from the key itself (ADR-007 D18):
+
+| Step | The modal | On `y` or Run |
+|---|---|---|
+| `info` | The label and detail. No Run button | nothing; any key closes it |
+| `run` | `run <argv>`, `in <cwd>`, each variable `env` adds, and a note that host markers and `INVARIANT_SESSION_ID` are removed. Cancel is focused | the runner starts it: no shell, no stdin, a 600 s limit. The output and exit status are shown, and the table refreshes |
+| `terminal` | The same, plus the exact line a new Terminal window will run | a `session handoff` launch: `claude --name <session> --remote-control <session>` in the `cwd`, whose first prompt asks it to run the step's command. It counts once the successor is seen alive. No note is recorded and no host is ended |
+| refused | Why it will not run | nothing |
+
+`refusal` refuses a runnable step on a row whose host is waiting on a prompt:
+the oracle never answers one, and a waiting row recommends nothing to run in
+the first place. It also refuses an `argv` that is not an `invariant`
+command, a `cwd` that does not exist, and a kind it does not know, because
+the snapshot is a file and a file is not a reason to run a program.
+
+**The host facts are injected.** Which variables are host markers
+(`without_host_markers`) and how a terminal is opened (`_handoff_launcher`,
+`plan_launch` and the successor watch) are `hosts/claude_code_launch`'s. The
+CLI's `_oracle_actions` hands them to `Actions`, so the oracle still imports
+nothing from `hosts/`. The runner is reached through `_oracle_runner`. The
+suite replaces both seams for every test with recorders (`RecordingRunner`,
+and an inert launcher), and the `osascript` guard stays the backstop.
+
+**Setting it up.** See the installation guide's "The Session Oracle" section:
+`pip install 'invariant[oracle]'` (or add Textual to a uv tool install), then
+`invariant oracle install` and `invariant oracle tui`.
+
 ## Known gap: a host rooted in another repository (BUG_040)
 
 A host session is attributed to the project its hooks resolve, and its
@@ -573,11 +659,3 @@ record and transcript in the wrong project: it shows up there as an orphan
 `host` row, and the session it serves shows no host. This is documented, not
 fixed; BUG_040 owns it.
 
-## Planned
-
-The plan approved on 2026-10-22 sets out the shape below. Each part is written
-up properly when it ships.
-
-- **TUI** (increment 7). A Textual app behind the `invariant[oracle]` extra.
-  Every action asks for confirmation first, in a modal that shows the exact
-  argv and cwd. It never answers a permission prompt.

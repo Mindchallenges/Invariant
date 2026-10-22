@@ -100,6 +100,34 @@ each other, and sessions in one repository all see the same registry.
 `invariant session list` lists the sessions of the repository you are
 standing in. The one thing shared across repositories is the binary.
 
+## The Session Oracle
+
+The oracle is the exception to "sessions in different repositories do not see
+each other": a machine-wide, read-only view of every session in every
+invariant project, which tells you when one is waiting on you and recommends
+the next command for each. A project joins it by itself on `init` or its first
+session start. `invariant oracle list` works with the plain install. The live
+dashboard needs the `[oracle]` extra, which adds Textual:
+
+```bash
+pip install 'invariant[oracle]'
+# installed as a uv tool: add Textual to that tool's environment
+uv tool install --with textual git+https://github.com/Mindchallenges/invariant
+```
+
+Then, on macOS, start the background watcher, which also posts a notification
+when a session needs you, and open the dashboard:
+
+```bash
+invariant oracle install      # a LaunchAgent that keeps `oracle watch` running
+invariant oracle tui          # the dashboard; every action asks you to confirm it
+invariant oracle status       # is the agent loaded, and is its snapshot fresh
+```
+
+Without the watcher the dashboard still works. It scans in-process and shows
+a "watcher not running" banner. It never answers a permission prompt for
+you. See [the oracle's architecture page](../architecture/oracle.md).
+
 ## Working on invariant itself
 
 ```bash

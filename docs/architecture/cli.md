@@ -854,6 +854,25 @@ invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify
     {"snapshot", "ledger", "rows", "elapsed", "alerts": [{"key", "project",
     "subject", "kind", "severity", "detail", "since", "notified"}]}.
 
+invariant oracle tui
+    The live dashboard (needs the [oracle] extra: pip install
+    'invariant[oracle]'; without Textual it exits 2 naming the extra). One
+    table of every live session with its hosts nested under it, then orphan
+    hosts, leaked worktrees and unreadable projects; columns project,
+    session, stage / lane, status, signals (a high alert red, any other
+    alert amber, markers dim) and the recommended next command. It reads the
+    watcher's snapshot while it is fresh, and otherwise scans in-process, as
+    `list` does, under a "watcher not running" banner. It refreshes on the
+    snapshot's interval; r refreshes now, q quits. Enter or a on a row opens
+    a confirm modal showing the step's exact argv, cwd and added environment;
+    nothing runs without y or the Run button. A run step is started as a
+    subprocess with no shell and no stdin, without Claude Code's host markers
+    or INVARIANT_SESSION_ID, and its output is shown; a terminal step opens a
+    new Terminal window through the `session handoff` launcher; an info step
+    shows its text and has no action. It never answers a prompt: a step on a
+    row waiting on one is refused, and so is any argv that is not an
+    invariant command. Exit 0 when quit.
+
 invariant oracle notify-test [--json]
     Post one notification through the seam the watcher uses, to check that
     notifications reach you. A delivery failure exits 1 with the reason.
@@ -895,11 +914,11 @@ The other two routes into the index are automatic: `init` (above) and the
 first SessionStart in a project, which `invariant hook session-start`
 registers after computing its response — reading first, locking only for a
 missing project, skipped for `doctor`'s probe, and swallowing any failure so
-the hook's output cannot change. The rest of the oracle's surface, `tui`, is
-planned and not yet shipped.
+the hook's output cannot change.
 
 `oracle list` writes nothing anywhere: not to any project's state root, and
-not to the oracle home. `oracle watch` writes only its two derived files and
+not to the oracle home. Neither does `oracle tui` itself; what a confirmed
+action changes is what that command changes. `oracle watch` writes only its two derived files and
 their lock under the oracle home, never under a project's state root; both
 files are safe to delete. `oracle install` and `uninstall` are the only
 commands that write outside a repository and the oracle home: the one plist
