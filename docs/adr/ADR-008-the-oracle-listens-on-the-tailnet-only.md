@@ -138,8 +138,17 @@ The page is one self-contained response: inline HTML, CSS and script, with no
 CDN, font or image. It carries a `Content-Security-Policy` of `default-src
 'none'` that admits only its own nonce-tagged script and style and
 `connect-src 'self'`. Every response is `no-store`, `nosniff` and
-`no-referrer`. The script builds the rows with `textContent` and never
-`innerHTML`, so a session name cannot become markup.
+`Referrer-Policy: same-origin`. The script builds the rows with `textContent`
+and never `innerHTML`, so a session name cannot become markup.
+
+The referrer policy was `no-referrer` at first. Under it a browser sends
+`Origin: null` on the page's own form `POST`, a navigation, so the pairing
+form was refused by the `Origin` check meant for forgeries, and no real
+browser could pair (BUG_079). `same-origin` sends a referrer, and with it a
+`/pair?code=` query, only to this origin and never to another, which was what
+`no-referrer` was there for. A same-origin request then carries the page's
+real `Origin`, and a cross-origin one still carries `null`, which both
+`Origin` checks refuse (D10, D11).
 
 ### D6 — Every dashboard refreshes itself and says how old it is
 

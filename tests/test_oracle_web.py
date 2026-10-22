@@ -614,10 +614,13 @@ class TestPairingOverHttp:
         clock.now += 61
         assert _post(_app(store, clock=clock), "/pair", f"code={pairing.code}".encode()).status == 403
 
-    def test_a_cross_site_post_is_refused(self, store):
+    # "null" is what a browser sends for a cross-site form whose page runs a
+    # strict referrer policy, as this page's own same-origin one does (BUG_079).
+    @pytest.mark.parametrize("origin", ["http://evil.example", "null"])
+    def test_a_cross_site_post_is_refused(self, store, origin):
         pairing = store.issue("phone", ttl=300)
         response = _post(_app(store), "/pair", f"code={pairing.code}".encode(),
-                         headers={"origin": "http://evil.example"})
+                         headers={"origin": origin})
         assert response.status == 403
         assert store.pending() == 1
 
@@ -660,7 +663,7 @@ class TestPaired:
         for response in (_get(_app(store), "/", token=token), _get(_app(store), "/")):
             assert response.header("cache-control") == "no-store"
             assert response.header("x-content-type-options") == "nosniff"
-            assert response.header("referrer-policy") == "no-referrer"
+            assert response.header("referrer-policy") == "same-origin"
 
     def test_the_json_is_the_oracle_list_document_with_the_view(self, store, machine_world):
         token = _paired(store)

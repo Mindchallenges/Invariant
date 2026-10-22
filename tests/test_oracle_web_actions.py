@@ -1075,18 +1075,11 @@ def _shown_text(body: bytes) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", text).split())
 
 
-# Repro for BUG_079 — see the work-item entry.
-# Fails while the defect is live. When the fix lands, delete the strict
-# expected-failure marker on the "pair" case; the assertion must then pass
-# unchanged. The "act" case is not marked: per the Fetch standard a fetch()
-# POST in the default "cors" mode keeps its real Origin under any referrer
-# policy, so it passes today and guards the action route through the fix.
-@pytest.mark.parametrize("surface", [
-    pytest.param("pair", marks=pytest.mark.xfail(
-        strict=True, reason="BUG_079 is live: Referrer-Policy no-referrer makes the "
-                            "pairing form's POST carry Origin: null; delete with the fix")),
-    "act",
-])
+# BUG_079: under Referrer-Policy no-referrer the pairing form's own POST carried
+# Origin: null and was refused. Per the Fetch standard a fetch() POST in the
+# default "cors" mode keeps its real Origin under any referrer policy, so the
+# "act" case guards the action route.
+@pytest.mark.parametrize("surface", ["pair", "act"])
 def test_BUG_079_the_pages_own_post_is_accepted_with_the_origin_a_browser_derives(
         world, store, surface):
     app = _app(world, store)

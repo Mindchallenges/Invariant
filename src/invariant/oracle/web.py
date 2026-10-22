@@ -358,7 +358,10 @@ class Response:
 _BASE_HEADERS = [
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
-    ("Referrer-Policy", "no-referrer"),
+    # Not no-referrer: under it a browser sends Origin: null on the page's own
+    # form POST, which the origin checks refuse (BUG_079). same-origin still
+    # keeps a referrer, and a /pair?code= in it, from ever leaving the origin.
+    ("Referrer-Policy", "same-origin"),
     ("X-Frame-Options", "DENY"),
 ]
 

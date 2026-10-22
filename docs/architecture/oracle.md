@@ -736,8 +736,12 @@ on `127.0.0.1` instead, only when no tailnet address exists. A request whose
 The token is the `invariant_oracle` cookie (`HttpOnly; SameSite=Strict`), or
 an `Authorization: Bearer` header. The token is checked before anything is
 read, so an unpaired request costs no scan. Every response is `no-store`,
-`nosniff` and `no-referrer`. The page's Content-Security-Policy admits only
-its own nonce-tagged script and style, and `connect-src 'self'`.
+`nosniff` and `Referrer-Policy: same-origin`: a referrer, and a `?code=` in
+it, never leaves the origin, while the page's own form `POST` keeps its real
+`Origin`. Under `no-referrer` a browser sent that `POST` with `Origin: null`
+and the pairing form refused itself (BUG_079, ADR-008 D5). The page's
+Content-Security-Policy admits only its own nonce-tagged script and style,
+and `connect-src 'self'`.
 
 ### What the page shows
 
