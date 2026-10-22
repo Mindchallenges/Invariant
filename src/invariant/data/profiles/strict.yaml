@@ -26,6 +26,9 @@ rules:
   # and this profile's own rule is that heuristics advise.
   agents.design_agent_ran: warn
   agents.review_agent_ran: warn
+  # Said before a design or review agent is dispatched with no pipeline to
+  # record it (IDEA_020). Warn everywhere: the dispatch is legitimate.
+  agents.gated_dispatch_has_pipeline: warn
 
   docs.read_architecture: block
   docs.updated: block

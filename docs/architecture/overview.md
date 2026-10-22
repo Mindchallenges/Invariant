@@ -548,6 +548,17 @@ design agent that created a pipeline could never be evidence for it (BUG_028).
 No layering rule could recover that; only a fact the host already knows and
 now hands upward. A host that cannot say who is acting omits the key.
 
+It was widened a second time by two keys (IDEA_020). `tool_input.subagent_type`
+is which agent a dispatch names: `agents.gated_dispatch_has_pipeline` warns at
+PreToolUse before a design or review agent is dispatched with no pipeline
+running. It is a rule so a project can retune it, so it reads the payload
+through the contract. `tool_input.prompt` was already read above `hosts/`
+(`Context.resolution_for_payload` finds the worktree a dispatch's brief names)
+and the list had not said so. The same change moved `AGENT_TOOLS` and the
+`dispatched_agent` reader into `core/rules`, beside `EDIT_TOOLS`, by the rule
+in the previous paragraph: the PostToolUse recording and the PreToolUse
+warning ask one question, so the host imports the rule's answer.
+
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through
 hooks and installed assets, while this one *reads back* what the host already

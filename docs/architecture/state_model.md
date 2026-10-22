@@ -1147,6 +1147,65 @@ Six properties, each deliberate:
 - **A wrong agent does not satisfy a role.** The failure names what did run, so
   "I dispatched the curator" reads as the miss it is rather than as silence.
 
+#### Warned before the dispatch, not only after it
+
+A dispatch made while the session has no pipeline is recorded nowhere, because
+there is no pipeline for it to be evidence in. The PostToolUse notice ("was
+NOT recorded as evidence: session … has no pipeline running") says so, but
+only after the agent has done its work. For a gated role the cost is a full
+re-dispatch: a pipeline started later finds its `agents.*_ran` gate unmet.
+`agents.gated_dispatch_has_pipeline` says it at PreToolUse instead, when
+starting the pipeline first is still cheap (IDEA_020).
+
+```mermaid
+sequenceDiagram
+    participant H as Claude Code
+    participant R as rules
+    participant P as pipeline
+    H->>R: PreToolUse (Agent/Task, subagent_type)
+    R->>R: gated_roles_of(agent) over agents.roles
+    alt gated role, session bound, no pipeline
+        R-->>H: [warn] … will NOT count as evidence — try: pipeline start --methodology <m>
+    else otherwise
+        R-->>H: silent
+    end
+    Note over H: the dispatch runs either way
+    H->>P: PostToolUse: record_agent_run (unchanged)
+```
+
+- **A rule, not a branch in the host.** Bound to `pre-tool-use` at `warn` in
+  every shipped profile, so `_pre_tool_use` delivers it through the same
+  `v.warns` path as any other advisory, and a project can retune it in its
+  manifest. A hard-coded host branch would have been one fewer contract key,
+  but nobody could turn it down, it could not be acknowledged or stood down,
+  and it would sit beside the gates it describes instead of in the same
+  registry. Never blocking is a decision, not a default: the dispatch is
+  legitimate, and the engine cannot tell that the agent will not start the
+  pipeline itself.
+- **One reading of the role mapping.** The rule asks `gated_roles_of`, which
+  reads `agents.roles.<role>` through the helper the two gates read, and
+  `GATED_ROLES` names which role each gate reads. An agent in an ungated role
+  (the backlog curator) gets nothing. A role whose gate is `off` gets nothing
+  either, because that gate asks for no evidence.
+- **One answer to "which agent is this dispatch".** `AGENT_TOOLS` and
+  `dispatched_agent` live in `core/rules`, and the PostToolUse recording uses
+  the same two. Reading `tool_input.subagent_type` from a rule widened the
+  normalised payload contract (see `overview.md`, `hosts/`).
+- **Same conditions as the PostToolUse notice.** No session bound to the call
+  means no warning: nobody is working under the gates. "No pipeline" is what
+  `record_agent_run` calls `NO_PIPELINE`: no current pipeline record. A
+  dispatch whose brief names another live session's worktree is judged
+  against that session, because the rule context resolves through
+  `resolution_for_payload`. A dispatch from a host rooted in another
+  repository resolves no session and so stays silent; BUG_040 is that gap, and
+  its fix will reach this rule through the same resolution with no change here.
+- **Quiet under a stand-down, like any other rule.** The open question was
+  whether an advisory should still speak. It does not. A stand-down that holds
+  now also holds over the pipeline started next, so the gate the warning is
+  about would be stood down too.
+- **Session-recorded runs are not carried over.** Evidence is per-pipeline on
+  purpose. The warning makes the loss visible early; it does not change it.
+
 ## Domain: work item
 
 Two item types with distinct lifecycles.

@@ -92,6 +92,13 @@ only the review-agent check. Both are
 advisory in every shipped profile — set them to `block` once the project has
 decided that coding always goes through the agents.
 
+A dispatch made before any pipeline is running is recorded nowhere, and a
+pipeline started afterwards will not see it. So when you dispatch a design or
+review agent with no pipeline running, `agents.gated_dispatch_has_pipeline`
+warns *before* the agent starts and names the fix
+(`invariant pipeline start --methodology <m>`). The dispatch still goes ahead.
+Other agents, such as the backlog curator, get no warning.
+
 ## Keeping them current, and making them yours
 
 Library agents are **managed** files: the frontmatter carries a digest of

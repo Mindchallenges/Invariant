@@ -35,6 +35,20 @@ from .privacy import EXEMPTION_MARKER, PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
+#: Tools whose invocation means "a subagent ran". The host records one as
+#: pipeline evidence at PostToolUse, and ``agents.gated_dispatch_has_pipeline``
+#: reads one at PreToolUse. Both hooks ask the same question, so it is answered
+#: here, beside ``EDIT_TOOLS``, rather than once in each.
+AGENT_TOOLS = frozenset({"Task", "Agent"})
+
+#: The roles an ``agents.*_ran`` gate reads, and the gate that reads each one.
+#: A role absent from here is ungated: an agent configured for it is evidence
+#: for nothing, so dispatching one without a pipeline loses nothing.
+GATED_ROLES = {
+    "design": "agents.design_agent_ran",
+    "review": "agents.review_agent_ran",
+}
+
 #: The normalised hook-payload keys layers above ``hosts/`` are permitted to
 #: read. This is the whole contract, and it lives here because ``hosts/``
 #: implement the protocols ``core/`` defines.
@@ -70,7 +84,15 @@ NORMALISED_PAYLOAD_KEYS = (
     "tool_input.notebook_path",
     "agent_type",
     "stop_hook_active",
+    "tool_input.subagent_type",
+    "tool_input.prompt",
 )
+#: ``tool_input.subagent_type`` and ``tool_input.prompt`` joined together
+#: (IDEA_020). The first is which agent a dispatch names. The host read it
+#: already, but a warning before a gated dispatch is a rule so a project can
+#: retune it, and a rule reads only this contract. The second was already
+#: read above ``hosts/``: ``Context.resolution_for_payload`` finds the worktree
+#: a dispatch's brief names, and this list did not say so.
 
 #: The terminal state that means "gave up", as opposed to "finished".
 #:
@@ -269,10 +291,31 @@ class RuleContext:
         raw = self.tool_input.get("file_path") or self.tool_input.get("notebook_path")
         return Path(str(raw)) if raw else None
 
+    @property
+    def dispatched_agent(self) -> str | None:
+        return dispatched_agent(self.payload)
+
     def evidence(self, key: str, default: Any = None) -> Any:
         if not self.pipeline:
             return default
         return (self.pipeline.get("evidence") or {}).get(key, default)
+
+
+def dispatched_agent(payload: Mapping[str, Any]) -> str | None:
+    """The agent type a subagent dispatch names, or ``None`` if this is none.
+
+    ``None`` for a call through any tool outside :data:`AGENT_TOOLS`, and for a
+    dispatch that names no agent. Both hooks ask this, so a dispatch the
+    PostToolUse recording would file is the same dispatch the PreToolUse
+    warning screens.
+    """
+    if str(payload.get("tool_name", "")) not in AGENT_TOOLS:
+        return None
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, Mapping):
+        return None
+    agent = tool_input.get("subagent_type")
+    return str(agent) if agent else None
 
 
 # -- registry ----------------------------------------------------------
@@ -1307,9 +1350,29 @@ def _pipeline_complete(ctx: RuleContext) -> Verdict:
 # same spirit as the docs-first gate: what happened, not what was intended.
 
 
+def _role_members(manifest: Manifest, role: str) -> list[str]:
+    """The agents ``agents.roles.<role>`` names. The one reading of the mapping."""
+    return [str(a) for a in (manifest.get(f"agents.roles.{role}") or [])]
+
+
+def gated_roles_of(manifest: Manifest, agent: str) -> list[str]:
+    """The gated roles ``agent`` is configured for, whose gate is not off.
+
+    Read from the same mapping, through the same helper, that the
+    ``agents.*_ran`` gates read, so the warning and the gate cannot disagree
+    about which agents count. A role whose gate is ``off`` asks for no
+    evidence, so it is left out.
+    """
+    return [
+        role
+        for role, gate in GATED_ROLES.items()
+        if manifest.rule_level(gate) is not Level.OFF
+        and agent in _role_members(manifest, role)
+    ]
+
+
 def _agent_role_gate(ctx: RuleContext, role: str, purpose: str) -> Verdict:
-    configured = ctx.manifest.get(f"agents.roles.{role}") or []
-    configured = [str(a) for a in configured]
+    configured = _role_members(ctx.manifest, role)
     if not configured:
         return Verdict.na(f"no agent is configured for the {role!r} role")
 
@@ -1359,6 +1422,58 @@ def _agents_review_ran(ctx: RuleContext) -> Verdict:
         "review",
         "The review agent is what checks the change against the project's "
         "compliance checklist before it is committed.",
+    )
+
+
+@rule(
+    "agents.gated_dispatch_has_pipeline",
+    summary="A design or review agent is dispatched into a running pipeline.",
+    events=("pre-tool-use",),
+)
+def _agents_gated_dispatch_has_pipeline(ctx: RuleContext) -> Verdict:
+    """Say, before the dispatch, that it will not count as evidence (IDEA_020).
+
+    The PostToolUse notice says the same thing after the agent has done its
+    work, when the only remedy left is to start a pipeline and dispatch again.
+    This is the point where starting the pipeline first is still cheap.
+
+    A rule rather than a branch in the host, so a project can retune it like
+    any other advisory. Every shipped profile grades it ``warn``: the dispatch
+    is legitimate and is never refused, and evidence recorded against the
+    session is deliberately NOT carried into a later pipeline.
+
+    Speaks under the same conditions as the PostToolUse notice. No session
+    bound to the call means nobody is working under the gates, so it is silent.
+    "No pipeline" means the same as ``record_agent_run``'s ``NO_PIPELINE``: no
+    current pipeline record at all.
+    """
+    agent = ctx.dispatched_agent
+    if agent is None:
+        return Verdict.na("not screened: this call is not an agent dispatch")
+    roles = gated_roles_of(ctx.manifest, agent)
+    if not roles:
+        return Verdict.na(f"{agent} holds no gated role")
+    if ctx.session is None:
+        return Verdict.na("no session is bound to this dispatch, so no gate waits for it")
+    if ctx.pipeline is not None:
+        return Verdict.clean(f"pipeline is in {ctx.pipeline.get('state')!r}")
+
+    named = " and ".join(roles)
+    methodology = ctx.manifest.get("methodology.pipeline") or "<methodology>"
+    return Verdict.fail(
+        f"{agent} ({named} role) is being dispatched with no pipeline running, "
+        f"so its run will NOT count as evidence for a pipeline started later",
+        detail=f"Session {ctx.session.get('id')} has no pipeline. "
+        f"{', '.join(GATED_ROLES[r] for r in roles)} will not find this dispatch, "
+        "and repeating it is the only way to satisfy them. The dispatch still "
+        "goes ahead. If the agent starts the pipeline itself, its own calls "
+        "after that are recorded and this does not apply.",
+        fixes=(
+            (
+                f"invariant pipeline start --methodology {methodology} "
+                "--task \"<what you are doing>\" first, then dispatch"
+            ),
+        ),
     )
 
 

@@ -1498,6 +1498,81 @@ class TestBUG028TheAgentThatCreatedThePipelineIsInIt:
         ]
 
 
+class TestIDEA020AGatedDispatchIsWarnedBeforeItRuns:
+    """IDEA_020 — the warning arrives at PreToolUse, while it can still help.
+
+    Borrows the BUG_028 world (a governed repo whose design role names
+    `feature-architect`) and its PostToolUse driver rather than inheriting the
+    class, which would re-run every one of its tests here. Asserted through the
+    host's real `_pre_tool_use`, so the rule, its level and the delivery are
+    exercised together.
+    """
+
+    HOST_ID = TestBUG028TheAgentThatCreatedThePipelineIsInIt.HOST_ID
+    world = TestBUG028TheAgentThatCreatedThePipelineIsInIt.world
+    post = TestBUG028TheAgentThatCreatedThePipelineIsInIt.post
+
+    def pre(self, world, payload, host_session_id=None):
+        from invariant.cli.main import Context
+
+        root, _ = world
+        return ClaudeCodeHost(root)._pre_tool_use(
+            payload,
+            Context(
+                cwd=root,
+                host_session_id=(
+                    self.HOST_ID if host_session_id is None else host_session_id
+                ),
+            ),
+        )
+
+    @staticmethod
+    def dispatch(agent):
+        return {"tool_name": "Agent", "tool_input": {"subagent_type": agent, "prompt": "go"}}
+
+    def bound_session(self, ctx):
+        session = ctx.sessions.start("no-pipeline-yet")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        return session
+
+    def test_a_gated_dispatch_with_no_pipeline_is_warned_and_allowed(self, world):
+        _root, ctx = world
+        self.bound_session(ctx)
+
+        response = self.pre(world, self.dispatch("feature-architect"))
+
+        output = response["hookSpecificOutput"]
+        assert "permissionDecision" not in output, "the warning must never block"
+        said = output["additionalContext"]
+        assert "agents.gated_dispatch_has_pipeline" in said
+        assert "feature-architect" in said and "design" in said
+        assert "invariant pipeline start --methodology" in said
+
+    def test_a_non_gated_dispatch_is_silent(self, world):
+        _root, ctx = world
+        self.bound_session(ctx)
+        assert self.pre(world, self.dispatch("backlog-curator")) == {}
+
+    def test_a_running_pipeline_is_silent(self, world):
+        _root, ctx = world
+        session = self.bound_session(ctx)
+        ctx.pipelines.start(session.id, task="t")
+        assert self.pre(world, self.dispatch("feature-architect")) == {}
+
+    def test_no_bound_session_is_silent(self, world):
+        assert self.pre(world, self.dispatch("feature-architect")) == {}
+
+    def test_the_post_tool_use_notice_is_unchanged(self, world):
+        _root, ctx = world
+        self.bound_session(ctx)
+        self.pre(world, self.dispatch("feature-architect"))
+
+        said = self.post(world, self.dispatch("feature-architect"))[
+            "hookSpecificOutput"
+        ]["additionalContext"]
+        assert "NOT recorded as evidence" in said and "no pipeline running" in said
+
+
 class TestAutomaticBinding:
     """`session start` runs through Bash, which carries no hook payload.
 

@@ -38,8 +38,10 @@ from pathlib import Path
 from ..core import plan as plan_reader
 from ..core.errors import InvariantError, UsageError
 from ..core.rules import (
+    AGENT_TOOLS,
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
+    dispatched_agent,
     evaluate_event,
     is_architecture_doc,
     standdown_in_force,
@@ -148,11 +150,6 @@ def is_probe(payload: object) -> bool:
 
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
 CHECK_AGENTS_CURRENT = "library agents current"
-
-#: Tools whose invocation means "a subagent ran". Recorded as pipeline
-#: evidence so the agent-role gates can read a fact instead of a claim.
-AGENT_TOOLS = {"Task", "Agent"}
-
 
 #: How an installed asset differs from what the library ships. These are the
 #: strings `doctor` has always printed; naming them keeps the classifier and
@@ -1243,7 +1240,7 @@ class ClaudeCodeHost:
             return {}
 
         try:
-            agent_type = tool_input.get("subagent_type")
+            agent_type = dispatched_agent(payload)
             if not agent_type:
                 return {}
 

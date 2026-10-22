@@ -1,6 +1,7 @@
 import subprocess
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -2756,6 +2757,158 @@ class TestAgentRoleGates:
         ctx = ctx_factory(pipeline={"evidence": {}})
         verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
         assert any("feature-architect" in fix for fix in verdict.fixes)
+
+
+def dispatch_payload(agent, tool="Agent"):
+    return {"tool_name": tool, "tool_input": {"subagent_type": agent, "prompt": "go"}}
+
+
+class TestGatedDispatchHasPipeline:
+    """IDEA_020 — a gated-role dispatch with no pipeline is said BEFORE it runs.
+
+    The PostToolUse notice says the same thing after the agent has done its
+    work, which is too late to start the pipeline the work needed. This rule
+    fires at pre-tool-use and warns; it never blocks in a shipped profile.
+    """
+
+    RULE = "agents.gated_dispatch_has_pipeline"
+    SESSION: ClassVar[dict] = {"id": "s1", "state": "isolated"}
+
+    def verdict(self, ctx):
+        return only(evaluate([self.RULE], ctx))
+
+    def test_it_is_bound_to_pre_tool_use(self):
+        assert self.RULE in {spec.id for spec in rules_for_event("pre-tool-use")}
+
+    def test_a_design_agent_with_no_pipeline_warns(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("feature-architect"))
+        result = self.verdict(ctx)
+        assert result.warns
+        message = result.verdict.message + result.verdict.detail
+        assert "feature-architect" in message
+        assert "design" in message
+        assert "will not count as evidence" in result.verdict.message.lower()
+        assert any("invariant pipeline start --methodology" in f for f in result.verdict.fixes)
+
+    def test_the_fix_names_the_configured_methodology(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("feature-architect"))
+        fixes = self.verdict(ctx).verdict.fixes
+        assert any("--methodology tdd" in f for f in fixes)
+
+    def test_a_review_agent_dispatched_by_task_warns(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.SESSION, payload=dispatch_payload("compliance-reviewer", tool="Task")
+        )
+        result = self.verdict(ctx)
+        assert result.warns
+        assert "review" in result.verdict.message
+
+    def test_a_non_gated_agent_is_silent(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("backlog-curator"))
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+        assert "backlog-curator" in result.verdict.message
+
+    def test_a_running_pipeline_is_clean(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.SESSION,
+            pipeline={"state": "designing", "evidence": {}},
+            payload=dispatch_payload("feature-architect"),
+        )
+        result = self.verdict(ctx)
+        assert result.verdict.ok and not result.verdict.skipped
+
+    def test_no_bound_session_is_silent(self, ctx_factory):
+        ctx = ctx_factory(session=None, payload=dispatch_payload("feature-architect"))
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+
+    def test_a_call_that_is_not_a_dispatch_is_not_screened(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=bash_payload("ls"))
+        assert self.verdict(ctx).verdict.skipped
+
+    def test_a_dispatch_naming_no_agent_is_not_screened(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.SESSION, payload={"tool_name": "Agent", "tool_input": {}}
+        )
+        assert self.verdict(ctx).verdict.skipped
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"tool_name": "Agent"},
+            {"tool_name": "Agent", "tool_input": None},
+            {"tool_name": "Agent", "tool_input": "junk"},
+            {"tool_name": "Agent", "tool_input": {"subagent_type": 7}},
+            {"tool_name": "Agent", "tool_input": {"subagent_type": ["feature-architect"]}},
+            {"tool_name": "Agent", "tool_input": {"subagent_type": {"a": 1}}},
+            {"tool_input": {"subagent_type": "feature-architect"}},
+        ],
+    )
+    def test_a_malformed_payload_never_crashes_or_warns(self, ctx_factory, payload):
+        ctx = ctx_factory(session=self.SESSION, payload=payload)
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+
+    def test_a_role_whose_gate_is_off_owes_nothing(self, ctx_factory):
+        """The warning is about evidence a gate will ask for. A gate the project
+        switched off asks for none, so there is nothing to warn about."""
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "enforcement": {"rules": {"agents.design_agent_ran": "off"}},
+        })
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("feature-architect"))
+        assert self.verdict(ctx).verdict.skipped
+
+    def test_the_role_mapping_is_the_one_the_gates_read(self, ctx_factory):
+        """A project's own reviewer warns; the library one it replaced does not."""
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"review": ["house-reviewer"]}},
+        })
+        ours = ctx_factory(session=self.SESSION, payload=dispatch_payload("house-reviewer"))
+        assert self.verdict(ours).warns
+        theirs = ctx_factory(
+            session=self.SESSION, payload=dispatch_payload("compliance-reviewer")
+        )
+        assert self.verdict(theirs).verdict.skipped
+
+    def test_an_agent_in_both_roles_names_both(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"design": ["one"], "review": ["one"]}},
+        })
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("one"))
+        message = self.verdict(ctx).verdict.message
+        assert "design" in message and "review" in message
+
+    def test_a_stand_down_quiets_it_like_any_other_rule(self, ctx_factory):
+        session = dict(self.SESSION, standdown={"until": "session", "reason": "drill"})
+        ctx = ctx_factory(session=session, payload=dispatch_payload("feature-architect"))
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+
+    def test_every_shipped_profile_grades_it_warn(self):
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        for profile in (DATA_DIR / "profiles").glob("*.yaml"):
+            rules = yaml.safe_load(profile.read_text(encoding="utf-8"))["rules"]
+            assert rules[self.RULE] == "warn", profile.name
+
+    def test_the_dispatch_reader_is_shared_with_the_host(self):
+        """One answer to "which agent is this call dispatching", for both hooks."""
+        from invariant.core.rules import AGENT_TOOLS, dispatched_agent
+        from invariant.hosts import claude_code
+
+        assert claude_code.AGENT_TOOLS is AGENT_TOOLS
+        assert dispatched_agent(dispatch_payload("x", tool="Task")) == "x"
+        assert dispatched_agent(dispatch_payload("x", tool="Read")) is None
+        assert dispatched_agent({"tool_name": "Agent", "tool_input": "junk"}) is None
 
 
 
@@ -5684,7 +5837,21 @@ class TestTheNormalisedPayloadContract:
             "tool_input.notebook_path",
             "agent_type",
             "stop_hook_active",
+            "tool_input.subagent_type",
+            "tool_input.prompt",
         }
+
+    def test_the_dispatched_agent_is_part_of_the_contract(self):
+        """IDEA_020 widened the seam, and this is the record of that decision.
+
+        `agents.gated_dispatch_has_pipeline` is a rule, so a project can
+        retune it, and a rule reads the payload through this contract. Which
+        agent a dispatch names is what it reads. The brief joined in the same
+        change: `Context.resolution_for_payload` already read it to find the
+        worktree a dispatch names, and the list did not say so.
+        """
+        assert "tool_input.subagent_type" in NORMALISED_PAYLOAD_KEYS
+        assert "tool_input.prompt" in NORMALISED_PAYLOAD_KEYS
 
     def test_the_acting_agent_is_part_of_the_contract(self):
         """BUG_028 widened the seam, and this is the record of that decision.

@@ -29,6 +29,9 @@ rules:
   # engine can prove an agent ran, never that one was needed.
   agents.design_agent_ran: warn
   agents.review_agent_ran: warn
+  # Said before a design or review agent is dispatched with no pipeline to
+  # record it (IDEA_020). Warn everywhere: the dispatch is legitimate.
+  agents.gated_dispatch_has_pipeline: warn
 
   # Docs-first is core policy, not an opt-in (ADR-001 D12).
   docs.read_architecture: block
