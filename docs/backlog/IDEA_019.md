@@ -2,12 +2,16 @@
 id: IDEA_019
 type: idea
 title: A maintainer-ruled closure edge for an already-fixed bug, carrying its provenance
-status: accepted
+status: in_progress
 residue: []
 history:
 - from: proposed
   to: accepted
   reason: null
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: work started in session c12456c7
   forced: false
 priority: high
 effort: M
