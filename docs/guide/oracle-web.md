@@ -92,6 +92,16 @@ To serve the page by hand instead, in a terminal, run `invariant oracle web`.
 It stops with Ctrl-C, and it refuses to start when Tailscale is not up. It
 asks Tailscale for the certificate once when it starts.
 
+A page served by hand is not a test of the agent. `invariant oracle web` run
+in a terminal inherits that terminal's environment: your `PATH`, your
+`INVARIANT_HOME`, and a `TERM`. The agent gets only what its plist sets, and
+launchd sets no `TERM`. The Tailscale app's command-line tool starts its GUI
+instead of answering when `TERM` is missing, so invariant gives every program
+it asks for addresses or a certificate `TERM=dumb` when there is none. When
+the hand-run page works and the agent does not, the difference is in that
+environment: read `invariant oracle status` and the agent's log, not the
+terminal's output.
+
 ## 4. Pair your phone
 
 Every device must be paired once. Nothing else gets past the "not paired"
@@ -107,7 +117,7 @@ It prints a code and the link to open:
 pairing code for phone: ABCDE-FGHJK
   it works once, for 5 minutes
   open on the device, while the page is served ('invariant oracle install --web', or 'invariant oracle web'):
-    https://<mac name>.<tailnet>.ts.net:7341/pair?code=ABCDEFGHJK
+    https://<mac name>.<tailnet>.ts.net:7341/pair?code=ABCDE-FGHJK
 ```
 
 Before the Mac has a certificate, the link is plain HTTP, one per tailnet
@@ -193,6 +203,7 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | `web page  waiting: cannot listen on … port 7341: …` | Another program holds the port, or a hand-run `invariant oracle web` does. Stop it, or reinstall on another port: `invariant oracle install --web --port 7342`. The agent retries every 10 seconds. |
 | `web page  NOT running` | The process that served the page is gone. If `web agent` says `NOT loaded`, run `invariant oracle install --web` again. Otherwise read the log. |
 | `certificate  NONE: serving plain http; … HTTPS Certificates look off …` | HTTPS Certificates are not enabled for your tailnet. Enable them on the DNS page of the Tailscale admin console (step 2). The agent asks again every 10 minutes, so the page moves to https by itself; `invariant oracle install --web` restarts it at once. |
+| `certificate  NONE: … did not print JSON; it said: The Tailscale GUI failed to start …` | Tailscale's command-line tool started its GUI instead of answering, which it does when `TERM` is missing. invariant gives it `TERM=dumb` whenever there is none, so you should not see this. If you do, either the agent is still running an invariant from before that was added (upgrade it, then run `invariant oracle install --web` to restart the agent), or the tool does not accept `TERM=dumb` either: file a bug with the line from `invariant oracle status`. |
 | `certificate  NONE: serving plain http; …` with another reason | Tailscale did not answer, or refused. The reason is Tailscale's own. Check that Tailscale is connected, then wait 10 minutes or reinstall the agent as above. Meanwhile the page works over plain HTTP, with a red warning at its top. |
 | `certificate  … last renewal failed: …` | The certificate is still valid and still served; the agent keeps asking every hour. `doctor` fails once fewer than 14 days remain. Fix what the reason says. |
 | The phone warns that the certificate does not match | You opened the `100.x.y.z` address. Open the `*.ts.net` name instead, or the link `pair` prints. |

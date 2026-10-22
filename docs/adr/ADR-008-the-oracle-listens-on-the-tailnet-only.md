@@ -445,6 +445,22 @@ stdout.
 - **One lookup for the CLI.** `web.tailscale_binaries`, the address
   discovery's own, which tries `tailscale` on `PATH` and then the app bundle's
   absolute path. The LaunchAgent's minimal `PATH` therefore cannot hide it.
+- **`TERM` is set for it (BUG_084).** The app bundle's binary decides from
+  its environment whether it is the CLI or the GUI: with no `TERM` it tries to
+  start the GUI, prints "The Tailscale GUI failed to start", and exits 0.
+  launchd sets no `TERM`, so under the agent every `status --json` and `cert`
+  got that line instead of an answer. `web.run_program`, the one runner both
+  the certificate and the address discovery (`tailscale ip`, then `ifconfig`)
+  go through, gives the program this process's environment with
+  `TERM=dumb` added when `TERM` is missing or empty, and leaves a `TERM` it
+  was given alone. It is set there and not in the web plist's
+  `EnvironmentVariables` because the runner is the one place every call
+  passes: the agent, a foreground `oracle web`, `oracle web pair`'s
+  discovery and the loop's own looks are all covered, and an agent installed
+  before the fix needs no reinstall for it. An answer to `status --json` that
+  is not JSON is reported by its first line ("did not print JSON; it said:
+  …"), not by the parse error, since the CLI's exit status 0 hides the
+  failure until then.
 - **One file, owner-only from creation.** `<oracle home>/web/tls/oracle.pem`
   holds the chain followed by the key, `0600` in `0700` directories, written
   through a temporary file created `0600` and renamed over it
@@ -460,6 +476,12 @@ stdout.
   beside `_oracle_web_addresses` and `_oracle_web_server` (D7). The suite
   replaces it with a recorder that hands back a self-signed fixture or
   refuses, and the program guard still refuses `tailscale`.
+- **The listener takes the certificate by name (BUG_083).** Everything
+  `WebServer` takes after the port, `served` among it, is keyword-only, and
+  the suite's `RecordingWeb` takes the same signature, which a test holds
+  equal. A holder passed fourth and positionally became the listener's
+  `request_timeout`, and every connection raised; the recorder accepted it
+  positionally, so the suite never saw it.
 
 Reading a certificate's name and expiry uses a small DER reader over the
 standard library, so the core install stays PyYAML-only.

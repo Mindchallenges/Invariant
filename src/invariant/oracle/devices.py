@@ -97,6 +97,11 @@ def normalise_code(code: str) -> str:
     return "".join(ch for ch in code.upper() if ch.isalnum())
 
 
+def display_code(code: str) -> str:
+    """The code as it is shown and linked: two groups of five, ``AVR7Y-TBRDE``."""
+    return f"{code[:5]}-{code[5:]}"
+
+
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
 

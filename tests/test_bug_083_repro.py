@@ -29,8 +29,6 @@ import ssl
 from pathlib import Path
 from typing import ClassVar
 
-import pytest
-
 from invariant.cli.main import main
 from invariant.oracle.tls import Issued
 from invariant.oracle.web import LOOPBACK, WebServer
@@ -79,7 +77,6 @@ class _Probe(WebServer):
                            "port": self.port}
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_083 is live — delete this line with the fix")
 def test_BUG_083_a_kept_certificate_serves_https_and_redirects_http(
         capsys, oracle_web, oracle_certificates):
     oracle_certificates.issued = Issued(

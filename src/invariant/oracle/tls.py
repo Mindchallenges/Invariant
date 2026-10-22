@@ -251,7 +251,10 @@ def cert_domain(status_json: str) -> tuple[str | None, bool]:
     try:
         status = json.loads(status_json)
     except ValueError as exc:
-        raise CertError(f"tailscale status --json did not print JSON: {exc}") from exc
+        # The app's CLI without TERM prints its GUI's failure and exits 0
+        # (BUG_084): what it said is the cause, not the parse error.
+        raise CertError("tailscale status --json did not print JSON; it said: "
+                        f"{_first_line(status_json)}") from exc
     if not isinstance(status, dict):
         raise CertError("tailscale status --json did not print an object")
     domains = status.get("CertDomains")

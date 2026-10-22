@@ -88,6 +88,11 @@ TUNNEL_PREFIXES = ("utun", "tailscale")
 #: Seconds a discovery command may take.
 PROGRAM_TIMEOUT = 5
 
+#: The terminal type a program is given when its environment names none. The
+#: Tailscale app's CLI starts its GUI instead of answering when ``TERM`` is
+#: missing, as it is under launchd (BUG_084, ADR-008 D19).
+PROGRAM_TERM = "dumb"
+
 #: The largest request body read: the pairing form and an action are a few bytes.
 MAX_BODY = 4096
 
@@ -178,10 +183,17 @@ def tailscale_binaries(which: Callable[[str], str | None] = shutil.which) -> lis
 
 
 def run_program(argv: list[str], timeout: float = PROGRAM_TIMEOUT) -> tuple[int, str]:
-    """``argv``'s exit status and output; 127 when it cannot be started."""
+    """``argv``'s exit status and output; 127 when it cannot be started.
+
+    The program inherits this process's environment, with ``TERM`` set to
+    ``PROGRAM_TERM`` when it has none, or an empty one.
+    """
+    env = dict(os.environ)
+    if not env.get("TERM"):
+        env["TERM"] = PROGRAM_TERM
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, check=False, timeout=timeout
+            argv, capture_output=True, text=True, check=False, timeout=timeout, env=env
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, str(exc)
@@ -766,6 +778,9 @@ class WebServer:
     """One ``ThreadingHTTPServer`` per bound address, all serving one app.
 
     With ``served``, each speaks TLS with its certificate, read per connection.
+    Everything after the port is keyword-only, and ``RecordingWeb`` takes the
+    same arguments, so a caller cannot hand one option in another's place
+    (BUG_083).
     """
 
     def __init__(
@@ -773,9 +788,10 @@ class WebServer:
         app: WebApp,
         addresses: list[str],
         port: int,
+        *,
+        served: Served | None = None,
         request_timeout: float = REQUEST_TIMEOUT,
         max_connections: int = MAX_CONNECTIONS,
-        served: Served | None = None,
     ) -> None:
         self.app = app
         self.addresses = list(addresses)
@@ -849,6 +865,8 @@ class RecordingServer:
     addresses: list[str]
     port: int
     served: Served | None = None
+    request_timeout: float = REQUEST_TIMEOUT
+    max_connections: int = MAX_CONNECTIONS
     started: bool = False
     foreground: bool = False
     background: bool = False
@@ -890,9 +908,20 @@ class RecordingWeb:
         self.script.pop(0)()
         return False
 
-    def _make(self, app: WebApp, addresses: list[str], port: int,
-              served: Served | None = None) -> RecordingServer:
-        server = RecordingServer(app, list(addresses), port, served)
+    def _make(
+        self,
+        app: WebApp,
+        addresses: list[str],
+        port: int,
+        *,
+        served: Served | None = None,
+        request_timeout: float = REQUEST_TIMEOUT,
+        max_connections: int = MAX_CONNECTIONS,
+    ) -> RecordingServer:
+        """``WebServer``'s own signature, which the suite holds it to."""
+        server = RecordingServer(app, list(addresses), port, served=served,
+                                 request_timeout=request_timeout,
+                                 max_connections=max_connections)
         self.servers.append(server)
         return server
 

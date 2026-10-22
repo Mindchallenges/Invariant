@@ -21,7 +21,9 @@ opens a socket binds loopback on an ephemeral port.
 
 from __future__ import annotations
 
+import inspect
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -42,6 +44,8 @@ from invariant.oracle.devices import (
     MAX_FAILED_REDEEMS,
     DeviceStore,
     PairingError,
+    display_code,
+    normalise_code,
 )
 from invariant.oracle.home import oracle_home
 from invariant.oracle.index import ProjectIndex
@@ -135,6 +139,13 @@ class TestPairing:
         pairing = store.issue("phone", ttl=300)
         spaced = f" {pairing.code[:5].lower()}-{pairing.code[5:]} "
         device, _ = store.redeem(spaced)
+        assert device.name == "phone"
+
+    def test_a_code_is_shown_in_two_groups_that_redeem_as_one(self, store):
+        assert display_code("AVR7YTBRDE") == "AVR7Y-TBRDE"
+        pairing = store.issue("phone", ttl=300)
+        assert normalise_code(display_code(pairing.code)) == pairing.code
+        device, _ = store.redeem(display_code(pairing.code))
         assert device.name == "phone"
 
     def test_too_many_wrong_codes_cancel_every_pending_code(self, store):
@@ -334,6 +345,38 @@ class TestAddresses:
     def test_the_real_runner_runs_a_program(self):
         status, text = web.run_program(["/bin/echo", TS4])
         assert (status, text.strip()) == (0, TS4)
+
+    def test_the_runner_gives_a_program_a_terminal_type_when_it_has_none(self, monkeypatch):
+        # The Tailscale app's CLI starts its GUI when TERM is missing, and
+        # launchd sets none (BUG_084).
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(argv, 0, "out", "")
+
+        monkeypatch.setattr(web.subprocess, "run", fake_run)
+        monkeypatch.delenv("TERM", raising=False)
+        monkeypatch.setenv("INVARIANT_TEST_MARK", "kept")
+        web.run_program(["true"])
+        assert seen["env"]["TERM"] == web.PROGRAM_TERM == "dumb"
+        assert seen["env"]["INVARIANT_TEST_MARK"] == "kept"
+        assert "TERM" not in os.environ
+        monkeypatch.setenv("TERM", "")
+        web.run_program(["true"])
+        assert seen["env"]["TERM"] == "dumb"
+
+    def test_the_runner_keeps_a_terminal_type_it_was_given(self, monkeypatch):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs)
+            return subprocess.CompletedProcess(argv, 0, "out", "")
+
+        monkeypatch.setattr(web.subprocess, "run", fake_run)
+        monkeypatch.setenv("TERM", "xterm-256color")
+        web.run_program(["true"])
+        assert seen["env"]["TERM"] == "xterm-256color"
 
 
 class TestChooseBind:
@@ -894,6 +937,35 @@ def _http(url: str, method: str = "GET", body: bytes | None = None,
         connection.close()
 
 
+class TestTheServerSeam:
+    """The suite's recorder stands where ``WebServer`` does, so they take one signature."""
+
+    def test_the_recorder_takes_the_servers_own_arguments(self):
+        from invariant.oracle.web import RecordingWeb
+
+        real = inspect.signature(WebServer).parameters
+        recorded = inspect.signature(RecordingWeb()._make).parameters
+        assert [(p.name, p.kind, p.default) for p in recorded.values()] == [
+            (p.name, p.kind, p.default) for p in real.values()]
+
+    def test_neither_takes_a_certificate_positionally(self, store):
+        from invariant.oracle.web import RecordingWeb
+
+        app = WebApp(store, lambda: _loaded({"projects": []}), [LOOPBACK])
+        for make in (WebServer, RecordingWeb()._make):
+            with pytest.raises(TypeError):
+                make(app, [LOOPBACK], 0, object())
+
+    def test_the_recorder_keeps_what_it_was_asked_to_serve(self, store):
+        from invariant.oracle.web import RecordingWeb
+
+        app = WebApp(store, lambda: _loaded({"projects": []}), [LOOPBACK])
+        recorder = RecordingWeb()
+        server = recorder.factory(app, [LOOPBACK], 0, request_timeout=3.0, max_connections=2)
+        assert (server.request_timeout, server.max_connections) == (3.0, 2)
+        assert recorder.servers == [server] and server.served is None
+
+
 class TestTheServer:
     def test_it_serves_on_loopback_and_an_unpaired_request_gets_nothing(self, store):
         token = _paired(store)
@@ -1087,8 +1159,16 @@ class TestTheCommands:
         body = json.loads(out)
         assert len(body["code"]) == CODE_LENGTH
         assert body["name"] == "phone"
-        assert body["links"] == [f"http://{TS4}:{web.DEFAULT_PORT}/pair?code={body['code']}"]
+        shown = display_code(body["code"])
+        assert body["links"] == [f"http://{TS4}:{web.DEFAULT_PORT}/pair?code={shown}"]
         assert DeviceStore(oracle_home()).pending() == 1
+
+    def test_pair_shows_the_code_as_its_link_carries_it(self, capsys, oracle_web):
+        oracle_web.addresses = [TS4]
+        code, out = run_cli(capsys, "oracle", "web", "pair")
+        assert code == 0
+        shown = out.split("pairing code for ", 1)[1].split(": ", 1)[1].split()[0]
+        assert "-" in shown and f"/pair?code={shown}" in out
 
     def test_pair_text_says_how_long_it_lasts(self, capsys, oracle_web):
         oracle_web.addresses = [TS4]
@@ -1437,7 +1517,7 @@ class TestTheCommandsOverTls:
         code, out = run_cli(capsys, "oracle", "web", "pair", "--json")
         assert code == 0
         body = json.loads(out)
-        assert body["links"] == [f"https://{TS_NAME}:7341/pair?code={body['code']}"]
+        assert body["links"] == [f"https://{TS_NAME}:7341/pair?code={display_code(body['code'])}"]
 
     def test_pair_ignores_an_expired_certificate(
             self, capsys, oracle_web, oracle_certificates, monkeypatch):
@@ -1450,6 +1530,25 @@ class TestTheCommandsOverTls:
         body = json.loads(run_cli(capsys, "oracle", "web", "pair", "--json")[1])
         assert body["links"][0].startswith(f"http://{TS4}:")
         assert tls.read_certificate(oracle_home()) is not None
+
+    def test_the_command_hands_the_listener_its_certificate_by_keyword(
+            self, capsys, oracle_web, oracle_certificates):
+        # BUG_083: passed fourth and positionally, the holder became
+        # WebServer's request_timeout, and every connection raised.
+        self.issue(oracle_certificates)
+        oracle_web.addresses = [TS4]
+        calls = []
+
+        def factory(*args, **keywords):
+            calls.append((args, keywords))
+            return oracle_web._make(*args, **keywords)
+
+        oracle_web.factory = factory
+        assert run_cli(capsys, "oracle", "web")[0] == 0
+        ((args, keywords),) = calls
+        bound = inspect.signature(WebServer).bind(*args, **keywords)
+        assert len(args) == 3 and bound.arguments["served"] is oracle_web.servers[0].served
+        assert "request_timeout" not in bound.arguments
 
     def test_the_certificate_seam_is_the_recorder_and_the_real_one_asks_tailscale(
             self, oracle_certificates, monkeypatch):

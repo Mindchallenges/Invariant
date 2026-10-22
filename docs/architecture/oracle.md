@@ -722,7 +722,9 @@ ADR-008's. The person-facing setup is the guide's
 <!-- invariant: allow-privacy -->
 Only on the Mac's Tailscale addresses: those in `100.64.0.0/10` or
 `fd7a:115c:a1e0::/48`, as `tailscale ip` reports them, else as `ifconfig`
-lists them on a tunnel interface (`utun*`, `tailscale*`). Never the wildcard.
+lists them on a tunnel interface (`utun*`, `tailscale*`). Both run through
+`web.run_program`, which gives the program `TERM=dumb` when the environment
+has no `TERM` (see "Over HTTPS"). Never the wildcard.
 With none, `oracle web` refuses to start (exit 1). `--allow-loopback` serves
 on `127.0.0.1` instead, only when no tailnet address exists. Over HTTPS, a
 request whose `Host` is not the certificate's name gets a 421 naming the
@@ -814,7 +816,9 @@ once. More are closed unanswered. A malformed `Content-Length` is a 400
 ### Pairing
 
 `oracle web pair` issues a 10-character code that lives 5 minutes
-(`--ttl`) and works once, and prints its link: the https name once a valid
+(`--ttl`) and works once, and prints it as two groups of five,
+`ABCDE-FGHJK` (`devices.display_code`), in the text and in its link
+(`/pair?code=ABCDE-FGHJK`; redeeming drops the dash). It prints the link: the https name once a valid
 certificate is kept, else a plain-HTTP link per tailnet address. Ten wrong
 codes in a row cancel every pending one. The pairing form's `POST` refuses a
 foreign `Origin` and lets a missing one through: the code, not the cookie, is
@@ -828,7 +832,14 @@ The CLI reaches discovery through `_oracle_web_addresses`, the server
 through `_oracle_web_server` and the certificate through
 `_oracle_web_certificates`, and the suite replaces all three for every test
 (`RecordingWeb`, and a `RecordingIssuer` that refuses until a test hands it a
-self-signed fixture from `tests/fixtures/tls`). The one TLS test that opens a
+self-signed fixture from `tests/fixtures/tls`). The server seam is
+`WebServer`'s constructor, `(app, addresses, port, *, served,
+request_timeout, max_connections)`: everything after the port is
+keyword-only, the CLI passes `served=` by name, and `RecordingWeb`'s factory
+takes the same signature, which a test holds equal to the real one. Before
+that, the CLI passed the certificate holder fourth, it landed in
+`request_timeout`, and every HTTPS connection raised while the recorder
+accepted the call (BUG_083). The one TLS test that opens a
 socket serves a fixture on loopback. An action leaves through the TUI's own seams,
 `_oracle_runner` and `_handoff_launcher`, which the suite replaces with
 recorders, so no test runs a command or opens a window. The `conftest.py` program guard refuses `tailscale`. Its
@@ -853,7 +864,7 @@ removes the page alone and `oracle uninstall` removes both (ADR-008 D15).
 | `ProgramArguments` | `[<python>, -m, invariant, oracle, web, --port, N, --wait]` | The watcher's rules for the interpreter. Never `--allow-loopback`. |
 | `RunAtLoad`, `KeepAlive` | `true` | As the watcher's. `--wait` means it never exits for a missing tailnet, so launchd has no crash to restart. |
 | `StandardOutPath`, `StandardErrorPath` | `<oracle home>/oracle/web.log` | The loop's state changes only: waiting, serving, a changed address, a failed bind. Requests are never logged, because a request line can carry a pairing code. |
-| `EnvironmentVariables` | `PATH`, and `INVARIANT_HOME` only if set | `PATH` finds `invariant` (an action runs it), git, osascript and `tailscale`, then the interpreter's own directory, then the system directories. |
+| `EnvironmentVariables` | `PATH`, and `INVARIANT_HOME` only if set | `PATH` finds `invariant` (an action runs it), git, osascript and `tailscale`, then the interpreter's own directory, then the system directories. No `TERM`, which launchd does not set either: `web.run_program` gives Tailscale's CLI one (BUG_084, "Over HTTPS"). |
 
 `LaunchdInstaller` takes the label, so both agents are written, loaded,
 replaced and checked by one code path. The CLI reaches the second through
@@ -922,6 +933,14 @@ The page is served with the Let's Encrypt certificate Tailscale issues for the
 Mac's MagicDNS name, once the person turns on HTTPS Certificates in the
 Tailscale admin console (ADR-008 D19–D24).
 
+Tailscale's CLI is asked through `web.run_program`, the runner address
+discovery uses too. The Mac App Store and standalone apps' binary starts its
+GUI instead of answering when `TERM` is missing, and launchd sets none, so
+the runner adds `TERM=dumb` to the environment it passes on when `TERM` is
+missing or empty, and keeps one it was given. The plist does not carry it:
+the runner is the one place every call passes, the agent's and a foreground
+run's alike (BUG_084, ADR-008 D19).
+
 ```mermaid
 sequenceDiagram
     participant Loop as WebService (oracle web --wait)
@@ -930,6 +949,7 @@ sequenceDiagram
     participant Srv as WebServer listener
     Loop->>Certs: ensure() each look while the tailnet is up
     Certs->>Certs: read web/tls/oracle.pem; due if < 30 days or none
+    Note over Certs,TS: web.run_program, with TERM=dumb when the environment has none
     Certs->>TS: status --json (CertDomains, else Self.DNSName)
     Certs->>TS: cert --cert-file - --key-file - <name>
     TS-->>Certs: chain then key, on stdout
@@ -948,6 +968,7 @@ sequenceDiagram
 | A valid certificate | HTTPS on the port, at the certificate's name only. A plain-HTTP request gets `307` to `https://<name>:<port>/` and nothing else. The cookie is `Secure`; the `Origin` must be `https` |
 | None to be had | Plain HTTP, as before, with a red warning on the page and the pairing form, `PLAIN HTTP` on `oracle web`'s output, `certificate NONE` in `oracle status` and a failing `doctor` row. Asked for again every 10 minutes |
 | A renewal fails | The kept certificate while it is valid, the failure in `status` and the log; `doctor` fails 14 days before expiry |
+| Tailscale answers `status --json` with something that is not JSON | Treated as no certificate; the error quotes the answer's first line (`did not print JSON; it said: …`) |
 | `--allow-loopback` | Plain HTTP on loopback, no warning, nothing asked of Tailscale |
 
 ## Known gap: a host rooted in another repository (BUG_040)

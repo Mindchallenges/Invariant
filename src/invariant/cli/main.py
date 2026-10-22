@@ -3220,9 +3220,11 @@ def _real_oracle_web_server():
 
 
 def _oracle_web_server():
-    """What ``oracle web`` listens through: ``(app, addresses, port)`` to a server.
+    """What ``oracle web`` listens through: ``WebServer``'s constructor.
 
-    A seam: the suite replaces it with a recorder that binds nothing.
+    ``(app, addresses, port, *, served=None)`` to a server. A seam: the suite
+    replaces it with ``RecordingWeb``, which binds nothing and takes the same
+    signature, so a call the real constructor would misread fails there too.
     """
     return _real_oracle_web_server()
 
@@ -3313,7 +3315,7 @@ def cmd_oracle_web(args) -> int:
             insecure = _plain_http_warning(certificates.error)
         app = WebApp(devices, lambda: load(index.home, time.time(), scan), bound,
                      remote=remote, served=served, insecure=insecure)
-        return _oracle_web_server()(app, bound, port, served)
+        return _oracle_web_server()(app, bound, port, served=served)
 
     if args.wait:
         return _serve_always(listener, index.home, port, certificates)
@@ -3386,7 +3388,7 @@ def _minutes(seconds: float) -> str:
 
 def cmd_oracle_web_pair(args) -> int:
     """Issue a one-time pairing code, and the link a phone opens to use it."""
-    from ..oracle.devices import DeviceStore
+    from ..oracle.devices import DeviceStore, display_code
     from ..oracle.home import oracle_home
     from ..oracle.tls import read_certificate
     from ..oracle.web import LOOPBACK, tailnet_addresses, url_for
@@ -3396,7 +3398,8 @@ def cmd_oracle_web_pair(args) -> int:
     if not found and args.allow_loopback:
         found = [LOOPBACK]
     pairing = DeviceStore(oracle_home()).issue(args.name, ttl=args.ttl)
-    path = f"/pair?code={pairing.code}"
+    shown = display_code(pairing.code)
+    path = f"/pair?code={shown}"
     # Once a certificate is kept, the page is served over HTTPS at its name,
     # and nowhere else (ADR-008 D22).
     certificate = read_certificate(oracle_home())
@@ -3406,7 +3409,7 @@ def cmd_oracle_web_pair(args) -> int:
     else:
         links = [url_for(address, port, path) for address in found]
     lines = [
-        f"pairing code for {pairing.name}: {pairing.code[:5]}-{pairing.code[5:]}",
+        f"pairing code for {pairing.name}: {shown}",
         f"  it works once, for {_minutes(args.ttl)}",
     ]
     if links:

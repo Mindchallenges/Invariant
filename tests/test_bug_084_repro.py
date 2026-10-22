@@ -62,7 +62,6 @@ def _app_binary(argv, *, env=None, **_):
     return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_084 is live — delete this line with the fix")
 def test_BUG_084_the_web_agent_fetches_a_certificate_with_no_TERM_from_launchd(
         monkeypatch, tmp_path):
     plist = launchd.web_plist_for("/usr/bin/python3", tmp_path, 7341,
@@ -76,7 +75,6 @@ def test_BUG_084_the_web_agent_fetches_a_certificate_with_no_TERM_from_launchd(
     assert issued.name == NAME
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_084 is live — delete this line with the fix")
 def test_BUG_084_an_answer_that_is_not_json_is_reported_by_its_first_line():
     def run(argv):
         return 0, GUI_FAILURE

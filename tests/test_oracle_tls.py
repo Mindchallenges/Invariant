@@ -213,6 +213,14 @@ class TestCertDomain:
         with pytest.raises(CertError, match="status --json"):
             cert_domain("[1]")
 
+    def test_an_answer_that_is_not_json_is_reported_by_its_first_line(self):
+        with pytest.raises(CertError) as caught:
+            cert_domain("The Tailscale GUI failed to start.\nsecond line\n")
+        assert "said: The Tailscale GUI failed to start." in str(caught.value)
+        assert "second line" not in str(caught.value)
+        with pytest.raises(CertError, match="said: no output"):
+            cert_domain("  ")
+
 
 # -- asking Tailscale -----------------------------------------------------------------
 
