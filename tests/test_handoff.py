@@ -1697,3 +1697,106 @@ class TestDismiss:
         self.recorded(project, capsys)
         assert run("context") == 0
         assert "invariant session handoff --dismiss" in capsys.readouterr().out
+
+
+# -- BUG_075: a long note is cut by the tty, and nothing checks the successor --
+
+
+#: A note well over the line budget, still one a real handoff accepts: one
+#: line, a ``next:`` item, clean, and within ``HANDOFF_NOTE_MAX`` characters.
+#: The middots are two bytes each, so it is over 2000 BYTES while staying under
+#: 2000 characters. Synthetic — names no real item.
+BUG_075_NOTE = (
+    "done: P1.10 · next: P1.11 BUG_EXAMPLE_LONG_NOTE critical -> bugprep · carry: "
+    + "the successor reads this carry line in full · " * 41
+).strip()
+
+#: macOS canonical-input limit (MAX_CANON). ``do script`` TYPES the line into
+#: the new window's tty, and canonical mode holds at most this many bytes of
+#: one line, newline included; the reported tab received exactly this many.
+BUG_075_MAX_CANON = 1024
+
+
+class TestBUG075LongNoteHandoff:
+    """Repro for BUG_075 — see the work-item entry.
+
+    Three assertions, one per mechanism, so a fix can be proven against each:
+    the typed line fits the tty; the bytes a tty delivers still start
+    ``claude``; and a handoff that sees no live successor neither reports
+    success nor ends the launching session.
+
+    Each is a strict xfail: it fails while the defect is live. When the fix
+    lands, delete the xfail markers; the assertions must then pass unchanged.
+    The third needs whatever successor check the fix adds to find NO successor
+    here — the stub launcher starts nothing.
+    """
+
+    SLUG = "p1-11-example-long-note-critical"
+
+    def test_BUG_075_guard_the_note_is_long_and_acceptable(self, project):
+        """Not xfail: pins that the note is a valid handoff note, over 2000 bytes."""
+        assert len(BUG_075_NOTE.encode("utf-8")) > 2000
+        assert len(BUG_075_NOTE) <= HANDOFF_NOTE_MAX
+        assert domain(project).vet_handoff_note(BUG_075_NOTE) == BUG_075_NOTE
+        assert handoff_name(BUG_075_NOTE) == self.SLUG
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_075 is live — delete this line with the fix"
+    )
+    def test_BUG_075_typed_line_fits_the_tty_for_a_2000_byte_note(self):
+        plan = launch.plan_launch(
+            "/opt/homebrew/bin/claude",
+            self.SLUG,
+            BUG_075_NOTE,
+            Path("/work/projects/example-project"),
+            token="5678abcd:2026-10-20",
+        )
+        typed = (plan.shell_line + "\n").encode("utf-8")
+        assert len(typed) <= BUG_075_MAX_CANON, (
+            f"typed line is {len(typed)} bytes; the tty keeps {BUG_075_MAX_CANON}"
+        )
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_075 is live — delete this line with the fix"
+    )
+    def test_BUG_075_the_line_a_tty_delivers_still_starts_claude(self, tmp_path):
+        """The tab's shell gets at most MAX_CANON bytes; claude must still run."""
+        captured = tmp_path / "argv.json"
+        fake = tmp_path / "claude"
+        fake.write_text(
+            f"#!{sys.executable}\nimport json, sys\n"
+            f"json.dump(sys.argv[1:], open({str(captured)!r}, 'w'))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        workdir = tmp_path / "main"
+        workdir.mkdir()
+
+        plan = launch.plan_launch(
+            str(fake), self.SLUG, BUG_075_NOTE, workdir, token="5678abcd:2026-10-20"
+        )
+        delivered = plan.shell_line.encode("utf-8")[:BUG_075_MAX_CANON]
+        subprocess.run(
+            [b"/bin/sh", b"-c", delivered], capture_output=True, check=False
+        )
+
+        assert captured.exists(), "no claude started from the line the tty delivered"
+        argv = json.loads(captured.read_text(encoding="utf-8"))
+        assert argv[:4] == ["--name", self.SLUG, "--remote-control", self.SLUG]
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_075 is live — delete this line with the fix"
+    )
+    def test_BUG_075_no_live_successor_means_no_success_and_no_sigterm(
+        self, project, capsys, launcher, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        code = run("session", "handoff", "--note", BUG_075_NOTE)
+        capsys.readouterr()
+
+        assert len(launcher.plans) == 1, "the handoff never reached the launch"
+        assert closer.closed == [], (
+            f"SIGTERM scheduled for the launching session with no successor: "
+            f"{closer.closed}"
+        )
+        assert code != 0, "handoff reported success with no successor alive"
