@@ -1657,6 +1657,8 @@ $INVARIANT_HOME, else ~/.invariant/
     snapshot.json       the last tick's assessed view of every project
     alerts.json         the rising-edge de-dup ledger
     watcher.log         the launchd agent's stdout and stderr
+    web.json            the web page loop's report: waiting or serving, where
+    web.log             the web page agent's stdout and stderr
   web/                  the web page's records; NOT derived (0700)
     devices.json        token hashes and pending pairing codes (0600)
     actions.log         what the page ran: a start and an end line each (0600)
@@ -1717,6 +1719,28 @@ tick.
 | **The log is output, not state** | `watcher.log` is where launchd sends the agent's two streams (`oracle install`, ADR-007 D17). Nothing reads it back; it holds the ticks with news and the failed ticks the loop survived. It is appended to, not rotated, and safe to delete. The agent's plist lives outside the home, in `~/Library/LaunchAgents`, because launchd reads it there. |
 | **`notified: false` is owed, not spent** | An edge seen with no notifier, or whose delivery failed, is delivered by the next tick that can deliver it. A key that is no longer seen is dropped, so the condition returning is a new edge. A project that could not be read keeps its keys. |
 
+### The web page loop's report
+
+`oracle web --wait`, the mode the web page's LaunchAgent runs (IDEA_023
+increment 3, ADR-008 D16, D17), writes `<oracle home>/oracle/web.json` each
+time its state changes:
+
+```json
+{"version": 1, "pid": 4242, "state": "waiting|serving",
+ "addresses": ["<tailnet address>"], "port": 7341,
+ "urls": ["http://<tailnet address>:7341/"], "since": "<iso>", "error": null}
+```
+
+| Property | Why |
+|---|---|
+| **Derived, safe to delete** | It says what one running process is doing, nothing more, so it sits in `oracle/` beside the snapshot. The loop removes it when it stops; `oracle uninstall` removes it after the `bootout`, because launchd's SIGTERM ends the process first. A report left by a process that died says so: its `pid` is checked alive on every read. |
+| **Written on a change, not on a timer** | `waiting` to `serving`, a new address set, a new bind error. `since` is when the state began, so a steady loop writes nothing. Its pid's liveness, not the file's age, says whether anything is behind it. |
+| **`error` means waiting for a reason** | A bind that failed (a port in use) leaves `state: waiting` with the error. `doctor` fails on it; waiting for Tailscale with no error passes. |
+| **Clock times, machine-local** | `since` is UTC to the second: the D14 exception again, under the home and never committed. |
+
+`web.log` is the agent's output, like `watcher.log`: appended to, never read
+back, safe to delete. It holds the state changes and never a request line.
+
 ### The paired devices
 
 `invariant oracle web` (IDEA_023, ADR-008) answers only a device that holds a
@@ -1758,7 +1782,7 @@ one when it ends:
 
 | Property | Why |
 |---|---|
-| **A record, not derived** | Nothing else can say afterwards what was run from the phone, so the log sits in `web/` beside the paired devices, not in the watcher's `oracle/`. Nothing reads it back. It is appended to and never rewritten, rotated or locked: one process writes it, and each line is a single `O_APPEND` write. |
+| **A record, not derived** | Nothing else can say afterwards what was run from the phone, so the log sits in `web/` beside the paired devices, not in the watcher's `oracle/`. Only `oracle status` and `doctor` read it back, and only its last 8 KiB, for the last action (`AuditLog.last`, ADR-008 D17). It is appended to and never rewritten, rotated or locked: one process writes it, and each line is a single `O_APPEND` write. |
 | **No record, no action** | The start line is written before the action runs. If it cannot be, the action is refused and nothing runs. A server killed mid-run therefore still leaves the start line. An end line that cannot be written is reported on the page's job. |
 | **No secrets** | No token, nonce, environment or output: the device by id and name, the row by its key, and the command by its `argv` and `cwd`. `exit` is `null` for a terminal step, which has no exit status. |
 | **Owner-only from creation** | Opened `O_APPEND \| O_CREAT \| O_NOFOLLOW` with mode `0600` in a `0700` `web/`, so a symbolic link planted in its place is refused rather than followed. |

@@ -31,6 +31,7 @@ no route to one, and ``refusal`` refuses a step on a row that waits on one.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import threading
 import time
@@ -58,6 +59,9 @@ from .scan import row_key
 
 #: The audit log, under the oracle home. A record, not derived state.
 AUDIT_FILE = "web/actions.log"
+
+#: How much of the audit log's end :meth:`AuditLog.last` reads: many lines.
+TAIL_BYTES = 8192
 
 #: Seconds a confirm view's nonce stays good.
 CONFIRM_TTL = 120.0
@@ -177,8 +181,9 @@ class AuditLog:
 
     It records what the page ran, which no other state can tell again, so it
     is a record and lives in ``web/`` beside the paired devices, not in the
-    watcher's derived ``oracle/``. Nothing reads it back. It holds no token,
-    nonce, environment or output.
+    watcher's derived ``oracle/``. Only :meth:`last` reads it back, for
+    ``oracle status`` and ``doctor`` (ADR-008 D17). It holds no token, nonce,
+    environment or output.
     """
 
     def __init__(self, home: Path, clock: Callable[[], float] = time.time) -> None:
@@ -188,6 +193,28 @@ class AuditLog:
     def record(self, entry: dict[str, Any]) -> None:
         line = {"at": _iso(self.clock()), **entry}
         append_private(self.path, json.dumps(line, sort_keys=True) + "\n")
+
+    def last(self) -> dict[str, Any] | None:
+        """The last whole line, or ``None`` when there is none to read.
+
+        Reads only the file's tail, so a long log costs nothing. A line cut
+        short by a killed write is skipped for the one before it.
+        """
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - TAIL_BYTES))
+                tail = handle.read()
+        except OSError:
+            return None
+        for line in reversed(tail.splitlines()):
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                return entry
+        return None
 
 
 # -- the actions ---------------------------------------------------------------

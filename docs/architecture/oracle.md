@@ -8,9 +8,10 @@ The oracle was built in seven increments, each landing on its own. All seven
 have shipped, so v1 is complete and this page describes the current
 behaviour. The follow-ons (phone push, a status line, web and artifact
 dashboards, more actions, an idle alert) are their own ideas, IDEA_013 to
-IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose first two
-increments have shipped: the page, and confirm-first actions from it
-("Shipped: the web page" below, ADR-008).
+IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose three
+increments have shipped: the page, confirm-first actions from it, and the
+page served always by a second LaunchAgent ("Shipped: the web page" below,
+ADR-008).
 
 | # | Increment | Status |
 |---|---|---|
@@ -45,6 +46,7 @@ graph TD
         WEB["web (IDEA_023, ADR-008)"]
         WEBPAGE[webpage]
         WEBACT["webactions (IDEA_023 inc 2)"]
+        WEBSVC["webservice (IDEA_023 inc 3)"]
         DEVICES[devices]
     end
 
@@ -120,6 +122,13 @@ graph TD
     WEBACT --> HOME
     WEBACT --> SIGNALS
     WEB --> SIGNALS
+    CLI --> WEBSVC
+    LAUNCHD -. its second plist runs oracle web --wait .-> WEBSVC
+    WEBSVC --> WEB
+    WEBSVC --> DEVICES
+    WEBSVC --> WEBACT
+    WEBSVC --> SCAN
+    WEBSVC --> INDEX
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -687,8 +696,10 @@ and an inert launcher), and the `osascript` guard stays the backstop.
 
 `invariant oracle web` serves the dashboard to a phone over the person's
 tailnet, with the TUI's confirm-first actions, each confirmed on the page
-(increment 2). Running it under the launchd agent is increment 3. The
-decisions are ADR-008's.
+(increment 2), and `oracle install --web` keeps it served by a second
+LaunchAgent (increment 3, "The page, always on" below). The decisions are
+ADR-008's. The person-facing setup is the guide's
+[The oracle on your phone](../guide/oracle-web.md).
 
 | Module | Owns | Never does |
 |---|---|---|
@@ -696,6 +707,7 @@ decisions are ADR-008's.
 | `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, the action, the job and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
 | `webpage` | The HTML: the self-contained page with its inline style and script, the confirm panel and the action list, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce |
 | `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
+| `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; its report, `oracle/web.json`; `web_status` and its wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
 
 ### Where it listens
 
@@ -809,6 +821,64 @@ skips the standard library's `getfqdn` for the same reason. A real serve on
 the tailnet may need that permission granted to the Python interpreter that
 serves it, in System Settings > Privacy & Security > Local Network (ADR-008
 D7).
+
+### The page, always on (increment 3)
+
+`invariant oracle install --web [--port 7341]` installs a second
+LaunchAgent, `dev.invariant.oracle.web`, whose plist runs `oracle web --port
+N --wait`. The watcher's agent is untouched by it; `oracle uninstall --web`
+removes the page alone and `oracle uninstall` removes both (ADR-008 D15).
+
+| Key | Value | Why |
+|---|---|---|
+| `Label` | `dev.invariant.oracle.web` | Its own agent: a listener that fails takes no notification with it, and the page stays opt-in. |
+| `ProgramArguments` | `[<python>, -m, invariant, oracle, web, --port, N, --wait]` | The watcher's rules for the interpreter. Never `--allow-loopback`. |
+| `RunAtLoad`, `KeepAlive` | `true` | As the watcher's. `--wait` means it never exits for a missing tailnet, so launchd has no crash to restart. |
+| `StandardOutPath`, `StandardErrorPath` | `<oracle home>/oracle/web.log` | The loop's state changes only: waiting, serving, a changed address, a failed bind. Requests are never logged, because a request line can carry a pairing code. |
+| `EnvironmentVariables` | `PATH`, and `INVARIANT_HOME` only if set | `PATH` finds `invariant` (an action runs it), git, osascript and `tailscale`, then the interpreter's own directory, then the system directories. |
+
+`LaunchdInstaller` takes the label, so both agents are written, loaded,
+replaced and checked by one code path. The CLI reaches the second through
+`_oracle_web_installer`, which the suite replaces with a recording installer
+over the watcher's temporary directory and the same recording launchctl.
+
+**The loop** (`oracle/webservice.WebService`, ADR-008 D16):
+
+```mermaid
+stateDiagram-v2
+    [*] --> waiting: no Tailscale address
+    [*] --> serving: addresses found, bound
+    waiting --> waiting: still none, or the bind failed (look again in 10 s)
+    waiting --> serving: addresses found, bound
+    serving --> serving: same addresses (look again in 30 s)
+    serving --> serving: addresses changed: close, bind the new ones
+    serving --> waiting: addresses gone: close
+    serving --> [*]: stopped (report removed)
+    waiting --> [*]: stopped (report removed)
+```
+
+Discovery is the foreground's (`_oracle_web_addresses`), filtered to
+Tailscale's ranges again inside the loop. Each listener gets a fresh `WebApp`
+bound to its addresses, for the `Host` check, and all of them share one
+`RemoteActions`, so jobs survive a rebind. The pause is the
+`_oracle_web_wait` seam, which the suite replaces with a scripted recorder,
+so no test sleeps.
+
+**The report.** On each change of state the loop writes
+`<oracle home>/oracle/web.json` (the format is in
+[state_model.md](state_model.md), "User-level state"). `web_status` reads it,
+checks its pid with `scan.pid_exists`, counts the paired devices and reads the
+audit log's last line (`AuditLog.last`, the last 8 KiB only). `oracle status`
+prints that under the watcher's lines, and `doctor` adds `oracle web
+interpreter` and `oracle web page` when the web plist exists, asking launchd
+nothing (ADR-008 D17).
+
+**The page recovers.** The refresh loop never stops (D6), so a listener or
+agent restart is recovered by itself within the backoff. A look at the page
+(visible again, focus, restored, back online) cuts the backoff short and
+reads at once, with no second read while one is in flight. A job the
+restarted server no longer knows (`/api/job` 404) is reported lost, with a
+pointer to the audit log, instead of being polled forever (D18).
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

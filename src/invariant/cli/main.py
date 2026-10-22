@@ -660,8 +660,31 @@ def cmd_doctor(args) -> int:
     agent = _oracle_installer().interpreter_check()
     if agent is not None:
         checks.append(("oracle agent interpreter", *agent))
+    checks.extend(_oracle_web_checks())
 
     return _report_checks(args, checks)
+
+
+def _oracle_web_checks() -> list[tuple[str, bool, str]]:
+    """``doctor``'s two web rows, when the web page's agent is installed.
+
+    Like the watcher's row, it reads files and asks launchd nothing: the
+    plist, and the report the serving loop keeps, whose pid is checked alive.
+    """
+    from ..oracle.home import oracle_home
+    from ..oracle.webservice import last_action_text, page_ok, page_text, web_status
+
+    interpreter = _oracle_web_installer().interpreter_check()
+    if interpreter is None:
+        return []
+    status = web_status(oracle_home())
+    devices = (
+        _plural(status["devices"], "paired device") if status["devices"] is not None
+        else f"devices unreadable: {status['devices_error']}"
+    )
+    detail = (f"{page_text(status)}; {devices}; "
+              f"last action {last_action_text(status['last_action'])}")
+    return [("oracle web interpreter", *interpreter), ("oracle web page", page_ok(status), detail)]
 
 
 def _report_checks(args, checks: list[tuple[str, bool, str]]) -> int:
@@ -2939,6 +2962,21 @@ def _oracle_installer():
     return _real_oracle_installer()
 
 
+def _real_oracle_web_installer():
+    from ..oracle.launchd import WEB_LABEL, LaunchdInstaller, agents_dir
+
+    return LaunchdInstaller(agents_dir(), os.getuid(), label=WEB_LABEL)
+
+
+def _oracle_web_installer():
+    """The installer for the web page's LaunchAgent, ``dev.invariant.oracle.web``.
+
+    A seam, like ``_oracle_installer``: the suite replaces it with one over
+    the same temporary directory and recording launchctl.
+    """
+    return _real_oracle_web_installer()
+
+
 def _argv_line(argv: list[str]) -> str:
     return " ".join(argv)
 
@@ -2946,17 +2984,23 @@ def _argv_line(argv: list[str]) -> str:
 def cmd_oracle_install(args) -> int:
     """Install the LaunchAgent that keeps ``oracle watch`` running.
 
+    ``--web`` installs the web page's agent instead (ADR-008 D15).
     ``--dry-run`` prints the plist and the launchctl calls and changes nothing.
     """
     from ..oracle.home import HOME_ENV, oracle_home
     from ..oracle.launchd import plist_for, search_path
 
-    if not args.interval > 0:
-        raise UsageError(f"--interval must be positive, not {args.interval:g}")
+    if args.web:
+        return _install_web(args)
+    if args.port is not None:
+        raise UsageError("--port is the web page's; use it with --web")
+    interval = 5.0 if args.interval is None else args.interval
+    if not interval > 0:
+        raise UsageError(f"--interval must be positive, not {interval:g}")
     plist = plist_for(
         os.path.abspath(sys.executable),
         oracle_home(),
-        args.interval,
+        interval,
         path=search_path(),
         pin_home=bool(os.environ.get(HOME_ENV)),
     )
@@ -2976,22 +3020,81 @@ def cmd_oracle_install(args) -> int:
     return emit(args, result.to_dict(), text)
 
 
-def cmd_oracle_uninstall(args) -> int:
-    """Boot the LaunchAgent out and remove its plist."""
-    result = _oracle_installer().uninstall(dry_run=args.dry_run)
+def _install_web(args) -> int:
+    """``oracle install --web``: the agent that keeps ``oracle web --wait`` running."""
+    from ..oracle.home import HOME_ENV, oracle_home
+    from ..oracle.launchd import WEB_PROGRAMS, search_path, web_plist_for
+    from ..oracle.web import DEFAULT_PORT
+
+    if args.interval is not None:
+        raise UsageError("--interval is the watcher's; the web page has none")
+    port = _web_port(DEFAULT_PORT if args.port is None else args.port)
+    python = os.path.abspath(sys.executable)
+    plist = web_plist_for(
+        python,
+        oracle_home(),
+        port,
+        # The interpreter's own directory holds the console script an action runs.
+        path=search_path(programs=WEB_PROGRAMS, extra=(os.path.dirname(python),)),
+        pin_home=bool(os.environ.get(HOME_ENV)),
+    )
+    result = _oracle_web_installer().install(plist, dry_run=args.dry_run)
+    steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    if args.dry_run:
+        return emit(args, result.to_dict(),
+                    f"would write {result.plist_path}:\n{result.xml.decode()}\n"
+                    f"would run:\n{steps}")
+    verb = "replaced" if result.was_loaded else "installed"
+    lines = [
+        f"{verb} the oracle web page agent: {result.plist_path}",
+        steps,
+        (f"  it serves on this Mac's Tailscale address, port {port}, and waits for "
+         f"Tailscale when it is not up"),
+        f"  web log: {plist['StandardOutPath']}",
+        "  pair a device: invariant oracle web pair --name phone",
+    ]
+    if not _oracle_installer().plist_path.exists():
+        lines.append("  note: the watcher agent is not installed, so the page scans on each "
+                     "refresh and nothing notifies; 'invariant oracle install' adds it")
+    return emit(args, result.to_dict(), "\n".join(lines))
+
+
+def _uninstall_text(name: str, result, dry_run: bool) -> str:
     steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
     present = result.plist_path.exists()
     if not result.steps and not present and not result.removed:
-        text = f"the oracle agent is not installed; nothing to do ({result.plist_path})"
-    elif args.dry_run:
-        text = "would run:\n" + (steps or "  nothing (not loaded)") + (
+        return f"the {name} is not installed; nothing to do ({result.plist_path})"
+    if dry_run:
+        return "would run:\n" + (steps or "  nothing (not loaded)") + (
             f"\nwould remove {result.plist_path}" if present else ""
         )
-    else:
-        text = "\n".join(
-            filter(None, [steps, f"  removed {result.plist_path}" if result.removed else ""])
-        )
-    return emit(args, result.to_dict(), text)
+    return "\n".join(
+        filter(None, [steps, f"  removed {result.plist_path}" if result.removed else ""])
+    )
+
+
+def _uninstall_web(dry_run: bool):
+    """Boot the web agent out, remove its plist and the serving loop's report."""
+    from ..oracle.home import oracle_home
+    from ..oracle.index import HomeStore
+    from ..oracle.webservice import WEB_STATE_FILE
+
+    result = _oracle_web_installer().uninstall(dry_run=dry_run)
+    if not dry_run:
+        # launchd's SIGTERM ends the loop before it can take its report down.
+        HomeStore(oracle_home()).delete(WEB_STATE_FILE)
+    return result
+
+
+def cmd_oracle_uninstall(args) -> int:
+    """Boot the LaunchAgents out and remove their plists; ``--web`` the page's only."""
+    web = _uninstall_web(args.dry_run)
+    web_text = _uninstall_text("oracle web page agent", web, args.dry_run)
+    if args.web:
+        return emit(args, web.to_dict(), web_text)
+    result = _oracle_installer().uninstall(dry_run=args.dry_run)
+    text = _uninstall_text("oracle agent", result, args.dry_run)
+    return emit(args, {**result.to_dict(), "web": web.to_dict()}, f"{text}\n{web_text}")
 
 
 def cmd_oracle_status(args) -> int:
@@ -3007,12 +3110,7 @@ def cmd_oracle_status(args) -> int:
         agent_line = (
             f"installed, {'loaded' if agent.loaded else 'NOT loaded'} ({agent.plist_path})"
         )
-    lines = [f"  agent        {agent_line}"]
-    if agent.error:
-        lines.append(f"  interpreter  {agent.error}")
-    elif agent.interpreter is not None:
-        state = "ok" if agent.interpreter_exists else "MISSING"
-        lines.append(f"  interpreter  {state}  {agent.interpreter}")
+    lines = [f"  agent        {agent_line}", *_agent_lines(agent, "interpreter")]
     if not snapshot["exists"]:
         lines.append(f"  snapshot     no snapshot yet ({snapshot['path']})")
     else:
@@ -3023,7 +3121,47 @@ def cmd_oracle_status(args) -> int:
             f"  snapshot     {freshness}; written {snapshot['age']:.0f}s ago, "
             f"interval {snapshot['interval']:g}s ({snapshot['path']})"
         )
-    return emit(args, {"agent": agent.to_dict(), "snapshot": snapshot}, "\n".join(lines))
+    web, web_lines = _oracle_web_status()
+    return emit(args, {"agent": agent.to_dict(), "snapshot": snapshot, "web": web},
+                "\n".join(lines + web_lines))
+
+
+def _agent_lines(agent, label: str) -> list[str]:
+    lines = []
+    if agent.error:
+        lines.append(f"  {label:<12} {agent.error}")
+    elif agent.interpreter is not None:
+        state = "ok" if agent.interpreter_exists else "MISSING"
+        lines.append(f"  {label:<12} {state}  {agent.interpreter}")
+    return lines
+
+
+def _oracle_web_status() -> tuple[dict, list[str]]:
+    """``oracle status``'s web half: the agent, the page, the devices, the last action."""
+    from ..oracle.home import oracle_home
+    from ..oracle.webservice import last_action_text, page_text, web_status
+
+    agent = _oracle_web_installer().status()
+    page = web_status(oracle_home())
+    body = {"agent": agent.to_dict(), "page": page}
+    if not agent.installed and not page["exists"]:
+        return body, [(f"  web agent    not installed ({agent.plist_path}); "
+                       f"'invariant oracle install --web' serves the page on the tailnet")]
+    loaded = "loaded" if agent.loaded else "NOT loaded"
+    state = f"installed, {loaded}" if agent.installed else "not installed"
+    port = f", port {agent.port}" if agent.port is not None else ""
+    lines = [f"  web agent    {state}{port} ({agent.plist_path})"]
+    lines += _agent_lines(agent, "web python")
+    devices = (
+        _plural(page["devices"], "paired device") if page["devices"] is not None
+        else f"cannot read: {page['devices_error']}"
+    )
+    lines += [
+        f"  web page     {page_text(page)}",
+        f"  devices      {devices}",
+        f"  last action  {last_action_text(page['last_action'])}",
+    ]
+    return body, lines
 
 
 def cmd_oracle_notify_test(args) -> int:
@@ -3076,6 +3214,23 @@ def _oracle_web_server():
     return _real_oracle_web_server()
 
 
+def _real_oracle_web_wait():
+    def wait(seconds: float) -> bool:
+        time.sleep(seconds)
+        return False
+
+    return wait
+
+
+def _oracle_web_wait():
+    """How ``oracle web --wait`` pauses between looks at the tailnet.
+
+    ``(seconds) -> stop``. A seam: the suite's recorder runs a test's script
+    and then stops the loop, so no test sleeps.
+    """
+    return _real_oracle_web_wait()
+
+
 def _web_port(port: int) -> int:
     if not 1 <= port <= 65535:
         raise UsageError(f"--port must be between 1 and 65535, not {port}")
@@ -3087,7 +3242,8 @@ def cmd_oracle_web(args) -> int:
 
     The page and its JSON, to paired devices only, and the TUI's confirm-first
     actions, each confirmed on the page and audited. Refuses to start with no
-    Tailscale address unless ``--allow-loopback``.
+    Tailscale address unless ``--allow-loopback``. ``--wait``, the agent's
+    mode, waits for one instead and follows the tailnet (ADR-008 D16).
     """
     import threading
 
@@ -3097,7 +3253,13 @@ def cmd_oracle_web(args) -> int:
     from ..oracle.webactions import AuditLog, RemoteActions
 
     port = _web_port(args.port)
-    addresses = choose_bind(_oracle_web_addresses()(), allow_loopback=args.allow_loopback)
+    if args.wait and args.allow_loopback:
+        raise UsageError("--wait waits for a Tailscale address; --allow-loopback is for a "
+                         "test in the foreground, without it")
+    addresses = (
+        [] if args.wait
+        else choose_bind(_oracle_web_addresses()(), allow_loopback=args.allow_loopback)
+    )
     index = _project_index()
     cache = _oracle_cache()
     gates = _oracle_gates()
@@ -3109,13 +3271,16 @@ def cmd_oracle_web(args) -> int:
         with reading:
             return _oracle_scan_document(index, cache, gates)
 
-    app = WebApp(
-        devices,
-        lambda: load(index.home, time.time(), scan),
-        addresses,
-        remote=RemoteActions(_oracle_actions(), scan, AuditLog(index.home)),
-    )
-    server = _oracle_web_server()(app, addresses, port)
+    remote = RemoteActions(_oracle_actions(), scan, AuditLog(index.home))
+
+    def listener(bound: list[str]):
+        app = WebApp(devices, lambda: load(index.home, time.time(), scan), bound,
+                     remote=remote)
+        return _oracle_web_server()(app, bound, port)
+
+    if args.wait:
+        return _serve_always(listener, index.home, port)
+    server = listener(addresses)
     urls = server.start()
     paired = len(devices.devices())
     lines = [f"serving the oracle on {url}" for url in urls]
@@ -3133,6 +3298,19 @@ def cmd_oracle_web(args) -> int:
     return EXIT_OK
 
 
+def _serve_always(listener, home, port: int) -> int:
+    """``oracle web --wait``: serve whenever there is a tailnet, under the agent."""
+    from ..oracle.webservice import WebService
+
+    service = WebService(_oracle_web_addresses(), listener, home, port=port,
+                         wait=_oracle_web_wait())
+    try:
+        service.run()
+    except KeyboardInterrupt:
+        pass
+    return EXIT_OK
+
+
 def _minutes(seconds: float) -> str:
     if seconds >= 60 and seconds % 60 == 0:
         return _plural(int(seconds // 60), "minute")
@@ -3145,7 +3323,7 @@ def cmd_oracle_web_pair(args) -> int:
     from ..oracle.home import oracle_home
     from ..oracle.web import LOOPBACK, tailnet_addresses, url_for
 
-    port = _web_port(args.port)
+    port = _web_port(args.port if args.port is not None else _serving_port())
     found = tailnet_addresses(_oracle_web_addresses()())
     if not found and args.allow_loopback:
         found = [LOOPBACK]
@@ -3156,7 +3334,8 @@ def cmd_oracle_web_pair(args) -> int:
         f"  it works once, for {_minutes(args.ttl)}",
     ]
     if links:
-        lines.append("  open on the device, while 'invariant oracle web' runs:")
+        lines.append("  open on the device, while the page is served "
+                     "('invariant oracle install --web', or 'invariant oracle web'):")
         lines.extend(f"    {link}" for link in links)
     else:
         lines.append(
@@ -3169,6 +3348,19 @@ def cmd_oracle_web_pair(args) -> int:
          "links": links},
         "\n".join(lines),
     )
+
+
+def _serving_port() -> int:
+    """The port the page serves on: the loop's report, else the agent's, else the default."""
+    from ..oracle.home import oracle_home
+    from ..oracle.web import DEFAULT_PORT
+    from ..oracle.webservice import web_status
+
+    reported = web_status(oracle_home())["port"]
+    if isinstance(reported, int) and not isinstance(reported, bool):
+        return reported
+    installed = _oracle_web_installer().status().port
+    return installed if installed is not None else DEFAULT_PORT
 
 
 def cmd_oracle_web_devices(args) -> int:
@@ -3945,11 +4137,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--dry-run", action="store_true",
                    help="print the plist and the launchctl calls; change nothing")
-    q.add_argument("--interval", type=float, default=5.0, help="seconds between ticks")
+    q.add_argument("--interval", type=float, default=None,
+                   help="seconds between ticks (default 5)")
+    q.add_argument("--web", action="store_true",
+                   help="install the web page's agent instead: `oracle web --wait`, always on")
+    q.add_argument("--port", type=int, default=None,
+                   help="with --web, the port the page serves on (default 7341)")
     q.set_defaults(func=cmd_oracle_install)
-    q = oracle.add_parser("uninstall", help="unload the LaunchAgent and remove its plist")
+    q = oracle.add_parser("uninstall", help="unload the LaunchAgents and remove their plists")
     q.add_argument("--dry-run", action="store_true",
                    help="print the launchctl calls; change nothing")
+    q.add_argument("--web", action="store_true",
+                   help="remove the web page's agent only; the watcher stays")
     q.set_defaults(func=cmd_oracle_uninstall)
     q = oracle.add_parser(
         "status", help="is the agent loaded, and how old is the watcher's snapshot"
@@ -3964,12 +4163,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-loopback", action="store_true",
         help="with no Tailscale address, serve on 127.0.0.1 for a test on this Mac",
     )
+    web.add_argument(
+        "--wait", action="store_true",
+        help="wait for a Tailscale address instead of refusing, and follow it (the agent's mode)",
+    )
     web.set_defaults(func=cmd_oracle_web)
     web_actions = web.add_subparsers(dest="web_action")
     q = web_actions.add_parser("pair", help="a one-time code that pairs one device")
     q.add_argument("--name", default="device", help="what to call the device")
     q.add_argument("--ttl", type=float, default=300.0, help="seconds the code lives")
-    q.add_argument("--port", type=int, default=7341, help="the port the link names")
+    q.add_argument("--port", type=int, default=None,
+                   help="the port the link names (default: the one the page serves on)")
     q.add_argument("--allow-loopback", action="store_true",
                    help="with no Tailscale address, link 127.0.0.1")
     q.set_defaults(func=cmd_oracle_web_pair)

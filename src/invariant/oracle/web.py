@@ -742,6 +742,8 @@ class RecordingServer:
     port: int
     started: bool = False
     served: bool = False
+    background: bool = False
+    closed: bool = False
 
     def start(self) -> list[str]:
         self.started = True
@@ -750,17 +752,34 @@ class RecordingServer:
     def serve(self) -> None:
         self.served = True
 
+    def serve_in_background(self) -> None:
+        self.background = True
+
     def close(self) -> None:
-        return
+        self.closed = True
 
 
 class RecordingWeb:
-    """The CLI's two web seams, inert: no tailnet until a test sets one."""
+    """The CLI's web seams, inert: no tailnet until a test sets one.
+
+    ``wait`` stands in for ``oracle web --wait``'s pause: each call records
+    its seconds and runs the next of ``script``, and once the script is spent
+    it stops the loop rather than sleeping.
+    """
 
     def __init__(self) -> None:
         self.addresses: list[str] = []
         self.servers: list[RecordingServer] = []
         self.factory = self._make
+        self.script: list[Callable[[], None]] = []
+        self.waits: list[float] = []
+
+    def wait(self, seconds: float) -> bool:
+        self.waits.append(seconds)
+        if not self.script:
+            return True
+        self.script.pop(0)()
+        return False
 
     def _make(self, app: WebApp, addresses: list[str], port: int) -> RecordingServer:
         server = RecordingServer(app, list(addresses), port)

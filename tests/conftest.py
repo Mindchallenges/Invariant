@@ -190,6 +190,27 @@ def _no_real_launchd(monkeypatch, tmp_path_factory):
     return installer
 
 
+@pytest.fixture(autouse=True)
+def _no_real_web_launchd(monkeypatch, _no_real_launchd):
+    """No test loads or writes the web page's LaunchAgent (IDEA_023 increment 3).
+
+    ``oracle install --web``, ``uninstall``, ``status``, ``web pair`` and
+    ``doctor`` reach the second agent, ``dev.invariant.oracle.web``, through
+    ``_oracle_web_installer``. It is replaced here by an installer over the
+    same temporary ``LaunchAgents`` directory and the same recording
+    launchctl as the watcher's, so a test sees both agents in one launchd.
+    """
+    from invariant.oracle.launchd import WEB_LABEL, recording_installer
+
+    installer = recording_installer(
+        _no_real_launchd.agents_dir, label=WEB_LABEL, run=_no_real_launchd.run
+    )
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_web_installer", lambda: installer, raising=False
+    )
+    return installer
+
+
 class InertLauncher:
     """A terminal launcher that opens nothing and records each plan."""
 
@@ -242,7 +263,9 @@ def oracle_web(monkeypatch):
     ``_oracle_web_addresses``, and listens through another,
     ``_oracle_web_server``. Both are replaced here suite-wide: discovery finds
     no tailnet until a test sets ``addresses``, and the server binds nothing
-    and records what it was asked to serve. The guard below refuses
+    and records what it was asked to serve, and ``oracle web --wait``'s
+    pauses (``_oracle_web_wait``) run the test's ``script`` and then stop the
+    loop instead of sleeping. The guard below refuses
     ``tailscale`` as the backstop. A test that needs a real socket builds a
     ``WebServer`` on loopback itself.
     """
@@ -256,6 +279,9 @@ def oracle_web(monkeypatch):
     )
     monkeypatch.setattr(
         "invariant.cli.main._oracle_web_server", lambda: recorder.factory, raising=False
+    )
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_web_wait", lambda: recorder.wait, raising=False
     )
     return recorder
 

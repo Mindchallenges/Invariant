@@ -23,6 +23,11 @@ starts, and launchd shapes it in three ways (ADR-007 D17):
 ``launchctl`` is reached only through an injected runner. The CLI passes
 :func:`run_launchctl`; the suite passes a :class:`RecordingLaunchctl`, and a
 guard in ``tests/conftest.py`` refuses the real program by any route.
+
+**A second agent serves the web page.** ``dev.invariant.oracle.web`` runs
+``oracle web --wait``, opt-in through ``oracle install --web`` (ADR-008 D15).
+Both agents go through one :class:`LaunchdInstaller`, keyed by label, so
+they are written, loaded, replaced and checked the same way.
 """
 
 from __future__ import annotations
@@ -40,10 +45,18 @@ from typing import Any
 from ..core.errors import InvariantError
 
 LABEL = "dev.invariant.oracle"
-PLIST_NAME = f"{LABEL}.plist"
+
+#: The second agent: the web page, served always (ADR-008 D15).
+WEB_LABEL = f"{LABEL}.web"
 
 #: Where both of the watcher's output streams go, under the oracle home.
 LOG_FILE = "oracle/watcher.log"
+
+#: Where both of the web page's output streams go.
+WEB_LOG_FILE = "oracle/web.log"
+
+#: What re-points each agent at the interpreter running now.
+REMEDIES = {LABEL: "invariant oracle install", WEB_LABEL: "invariant oracle install --web"}
 
 #: Absolute, because the installing shell's PATH is not what matters.
 LAUNCHCTL = "/bin/launchctl"
@@ -53,6 +66,10 @@ SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
 #: The programs the watcher needs on its PATH.
 NEEDED_PROGRAMS = ("git", "osascript")
+
+#: The programs the web page needs: an action runs ``invariant``, a scan runs
+#: git, a terminal step osascript, and discovery asks ``tailscale``.
+WEB_PROGRAMS = ("invariant", "git", "osascript", "tailscale")
 
 #: How long ``launchctl`` may take to answer one call.
 LAUNCHCTL_TIMEOUT_SECONDS = 30
@@ -77,13 +94,18 @@ def agents_dir() -> Path:
     return Path.home() / "Library" / "LaunchAgents"
 
 
-def search_path(which: Callable[[str], str | None] = shutil.which) -> str:
-    """A ``PATH`` that finds git and osascript, then the system directories."""
+def search_path(
+    which: Callable[[str], str | None] = shutil.which,
+    programs: tuple[str, ...] = NEEDED_PROGRAMS,
+    extra: tuple[str, ...] = (),
+) -> str:
+    """A ``PATH`` that finds ``programs``, then ``extra``, then the system directories."""
     dirs: list[str] = []
-    for program in NEEDED_PROGRAMS:
+    for program in programs:
         found = which(program)
         if found:
             dirs.append(str(Path(found).parent))
+    dirs.extend(extra)
     dirs.extend(SYSTEM_PATH)
     return ":".join(dict.fromkeys(dirs))
 
@@ -116,6 +138,29 @@ def plist_for(
         "StandardErrorPath": log,
         "EnvironmentVariables": environment,
     }
+
+
+def web_plist_for(
+    python: str, home: Path, port: int, *, path: str, pin_home: bool
+) -> dict[str, Any]:
+    """The web agent's property list: ``python -m invariant oracle web --wait``.
+
+    ``--wait`` makes a missing tailnet a wait rather than an exit, so launchd
+    never restarts it in a loop, and the page binds once Tailscale is up. It
+    never carries ``--allow-loopback``.
+    """
+    if not 1 <= port <= 65535:
+        raise LaunchdError(f"the port must be between 1 and 65535, not {port}")
+    plist = plist_for(python, home, 1.0, path=path, pin_home=pin_home)
+    log = str(home / WEB_LOG_FILE)
+    plist.update(
+        Label=WEB_LABEL,
+        ProgramArguments=[python, "-m", "invariant", "oracle", "web",
+                          "--port", str(port), "--wait"],
+        StandardOutPath=log,
+        StandardErrorPath=log,
+    )
+    return plist
 
 
 def plist_bytes(plist: dict[str, Any]) -> bytes:
@@ -171,6 +216,8 @@ class AgentStatus:
     interpreter_exists: bool | None = None
     interval: float | None = None
     error: str | None = None
+    label: str = LABEL
+    port: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         body = asdict(self)
@@ -187,15 +234,18 @@ class LaunchdInstaller:
         uid: int,
         run: Launchctl = run_launchctl,
         sleep: Callable[[float], None] = time.sleep,
+        label: str = LABEL,
     ) -> None:
         self.agents_dir = Path(agents_dir)
         self.uid = uid
         self.run = run
         self.sleep = sleep
+        self.label = label
+        self.remedy = REMEDIES.get(label, REMEDIES[LABEL])
 
     @property
     def plist_path(self) -> Path:
-        return self.agents_dir / PLIST_NAME
+        return self.agents_dir / f"{self.label}.plist"
 
     @property
     def domain(self) -> str:
@@ -203,7 +253,7 @@ class LaunchdInstaller:
 
     @property
     def service(self) -> str:
-        return f"{self.domain}/{LABEL}"
+        return f"{self.domain}/{self.label}"
 
     def _bootout_argv(self) -> list[str]:
         return [LAUNCHCTL, "bootout", self.service]
@@ -238,7 +288,7 @@ class LaunchdInstaller:
             raise LaunchdError(
                 f"launchctl bootstrap refused the agent ({code}): {text or 'no reason given'}\n"
                 f"  The plist is at {self.plist_path}; "
-                f"'invariant oracle uninstall' removes it."
+                f"'{self.remedy.replace('install', 'uninstall', 1)}' removes it."
             )
         return result
 
@@ -258,7 +308,9 @@ class LaunchdInstaller:
         return result
 
     def status(self) -> AgentStatus:
-        status = AgentStatus(self.plist_path, self.plist_path.exists(), self.loaded())
+        status = AgentStatus(
+            self.plist_path, self.plist_path.exists(), self.loaded(), label=self.label
+        )
         if not status.installed:
             return status
         try:
@@ -269,7 +321,8 @@ class LaunchdInstaller:
         if arguments:
             status.interpreter = str(arguments[0])
             status.interpreter_exists = Path(status.interpreter).exists()
-        status.interval = _interval_of(arguments)
+        status.interval = _flag_value(arguments, "--interval", float)
+        status.port = _flag_value(arguments, "--port", int)
         return status
 
     def interpreter_check(self) -> tuple[bool, str] | None:
@@ -284,13 +337,13 @@ class LaunchdInstaller:
         except LaunchdError as exc:
             return False, str(exc)
         if not arguments:
-            return False, f"{self.plist_path} names no interpreter; run 'invariant oracle install'"
+            return False, f"{self.plist_path} names no interpreter; run '{self.remedy}'"
         interpreter = str(arguments[0])
         if Path(interpreter).exists():
             return True, interpreter
         return False, (
             f"{interpreter} is gone (moved or reinstalled); "
-            f"run 'invariant oracle install' to point the agent at this one"
+            f"run '{self.remedy}' to point the agent at this one"
         )
 
     # -- internals ------------------------------------------------------
@@ -305,7 +358,7 @@ class LaunchdInstaller:
 
     def _write(self, plist: dict[str, Any]) -> None:
         self.agents_dir.mkdir(parents=True, exist_ok=True)
-        partial = self.plist_path.with_name(f".{PLIST_NAME}.tmp")
+        partial = self.plist_path.with_name(f".{self.plist_path.name}.tmp")
         partial.write_bytes(plist_bytes(plist))
         os.replace(partial, self.plist_path)
 
@@ -328,9 +381,10 @@ class LaunchdInstaller:
         )
 
 
-def _interval_of(arguments: list[Any]) -> float | None:
+def _flag_value(arguments: list[Any], flag: str, kind: Callable[[Any], Any]) -> Any:
+    """The value after ``flag`` in a plist's arguments, as ``kind``; ``None`` without one."""
     try:
-        return float(arguments[arguments.index("--interval") + 1])
+        return kind(arguments[arguments.index(flag) + 1])
     except (ValueError, IndexError, TypeError):
         return None
 
@@ -362,7 +416,8 @@ class RecordingLaunchctl:
         if verb == "print":
             return self._print(target)
         if verb == "bootstrap":
-            self.loaded.add(f"{argv[2]}/{LABEL}")
+            # The label is the plist's file name, as the installer writes it.
+            self.loaded.add(f"{argv[2]}/{Path(argv[3]).stem}")
             return 0, ""
         if verb == "bootout":
             if target not in self.loaded:
@@ -378,9 +433,20 @@ class RecordingLaunchctl:
             return 0, "state = exiting"
         if target in self.loaded:
             return 0, "state = running"
-        return 113, f'Could not find service "{LABEL}" in domain for user'
+        return 113, f'Could not find service "{target.rsplit("/", 1)[-1]}" in domain for user'
 
 
-def recording_installer(agents_dir: Path, uid: int = 501) -> LaunchdInstaller:
-    """An installer over ``agents_dir`` and a :class:`RecordingLaunchctl`. Never sleeps."""
-    return LaunchdInstaller(agents_dir, uid, run=RecordingLaunchctl(), sleep=lambda _: None)
+def recording_installer(
+    agents_dir: Path,
+    uid: int = 501,
+    label: str = LABEL,
+    run: RecordingLaunchctl | None = None,
+) -> LaunchdInstaller:
+    """An installer over ``agents_dir`` and a :class:`RecordingLaunchctl`. Never sleeps.
+
+    Pass one ``run`` to several installers and they share one fake launchd.
+    """
+    return LaunchdInstaller(
+        agents_dir, uid, run=run if run is not None else RecordingLaunchctl(),
+        sleep=lambda _: None, label=label,
+    )

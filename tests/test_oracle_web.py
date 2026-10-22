@@ -803,6 +803,72 @@ const loop = ORACLE.makeLoop({
         assert result["never"]["stale"] is True
         assert result["cap"] == web.MAX_BACKOFF
 
+    def test_the_page_wakes_the_loop_when_it_is_looked_at_again(self):
+        script = _script()
+        for event in ('"visibilitychange"', '"online"', '"pageshow"', '"focus"'):
+            assert event in script
+        assert "loop.wake()" in script
+
+    @pytest.mark.skipif(ENGINE is None, reason="no JavaScript engine runs here")
+    def test_wake_cuts_a_backoff_short_after_a_server_restart(self):
+        # The server is down for two reads, so the loop backs off; it comes
+        # back, and a wake (the phone looked at the page again) reads at
+        # once instead of sitting out the rest of the backoff.
+        harness = _script() + r"""
+const scheduled = [];
+const cancelled = [];
+let up = false;
+let calls = 0;
+let release = null;
+const loop = ORACLE.makeLoop({
+  interval: 5,
+  now: () => 1000,
+  fetchState: () => {
+    calls += 1;
+    if (calls === 4) return new Promise((resolve) => { release = resolve; });
+    if (!up) return Promise.reject(new Error('connection refused'));
+    return Promise.resolve({freshness: {age: 0, interval: 5, stale_after: 15}});
+  },
+  schedule: (fn, ms) => { scheduled.push(ms); return 'timer' + scheduled.length; },
+  cancel: (handle) => cancelled.push(handle),
+  onData: () => {},
+  onError: () => {},
+});
+(async () => {
+  await loop.tick(); await loop.tick();
+  const backedOff = loop.state.failures;
+  up = true;
+  await loop.wake();
+  const afterWake = {failures: loop.state.failures, data: loop.state.data !== null};
+  const pending = loop.wake();
+  const second = loop.wake();
+  const inFlightCalls = calls;
+  release({freshness: {age: 0, interval: 5, stale_after: 15}});
+  await pending; await second;
+  (typeof print === "function" ? print : console.log)(JSON.stringify({
+    backedOff, afterWake, cancelled, scheduled, inFlightCalls, calls,
+    lost: ORACLE.jobPoll(404), done: ORACLE.jobPoll(200), down: ORACLE.jobPoll(0),
+    other: ORACLE.jobPoll(503),
+  }));
+})();
+"""
+        out = subprocess.run([*ENGINE, harness], capture_output=True, text=True, timeout=30,
+                             check=True)
+        result = json.loads(out.stdout)
+        assert result["backedOff"] == 2
+        assert result["afterWake"] == {"failures": 0, "data": True}
+        assert result["cancelled"][0] == "timer2"
+        assert result["scheduled"] == [10000, 20000, 5000, 5000]
+        assert result["inFlightCalls"] == 4 and result["calls"] == 4
+        assert result["lost"] == "lost"
+        assert result["done"] == "show"
+        assert result["down"] == "retry" and result["other"] == "retry"
+
+    def test_a_job_the_server_forgot_is_said_to_be_lost(self):
+        script = _script()
+        assert "ORACLE.jobPoll(response.status)" in script
+        assert "actions.log" in script
+
 
 # -- a real socket, on loopback only ------------------------------------------------
 

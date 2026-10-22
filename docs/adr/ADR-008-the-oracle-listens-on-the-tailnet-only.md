@@ -2,8 +2,8 @@
 
 - **Status:** Accepted. D1–D7 are implemented by IDEA_023 increment 1 (the
   read-only page). D8, the remote confirm, and D9–D14, its details and the
-  listener's hardening, are implemented by increment 2. Increment 3 runs the
-  server under the launchd agent.
+  listener's hardening, are implemented by increment 2. D15–D18, the page
+  served always by a LaunchAgent, are implemented by increment 3.
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. It amends ADR-007 in two places: the oracle gains a
   network listener, and D18's confirm-first actions will gain a second surface
@@ -311,6 +311,110 @@ It holds no token, nonce, environment or output.
   created with the process default and narrowed by `chmod` after the write,
   which would leave it readable in between.
 
+### D15 — A second LaunchAgent serves the page, and only on request
+
+`invariant oracle install --web [--port 7341]` installs
+`dev.invariant.oracle.web`, beside the watcher's `dev.invariant.oracle`. Its
+plist runs `<python> -m invariant oracle web --port N --wait`, at load and
+kept alive, with both streams in `<oracle home>/oracle/web.log`. Plain
+`oracle install` is unchanged and never touches it; `oracle uninstall --web`
+removes the page alone, and plain `oracle uninstall` removes both.
+
+Both agents go through one `LaunchdInstaller`, keyed by label, so the second
+one is written, loaded, replaced, removed and checked by the code that
+already does it for the first (ADR-007 D17). The plist follows the watcher's
+rules: the absolute interpreter, unresolved; `-m invariant`; an explicit
+`PATH`; `INVARIANT_HOME` only if it was set. Its `PATH` finds more, because
+the page does more: `invariant`, which an action from the page runs, then
+git, osascript and `tailscale`, then the interpreter's own directory, which
+holds the console script of the installation serving the page.
+
+**Why not the watcher's agent.** One process serving both would be one fewer
+plist, but it would couple two things that fail differently. A port in use, a
+bind refused or a wedged listener would then take the notifications down with
+it, and a watcher restarted for its own reasons would drop every phone's
+connection. The page is also opt-in. Most people who want notifications do
+not want a network listener, so making `oracle watch` listen, even behind a
+flag, would make the one agent everybody installs the first network listener
+on their Mac. Two agents keep the listener as separate as the decision to run
+one, with a log and an uninstall of its own. They share the interpreter, so
+macOS's Local Network permission (D7) covers both.
+
+### D16 — Under launchd, no tailnet is a wait, never an exit and never a fallback
+
+A login usually comes before Tailscale is up. A server that refused to start
+(D1) would exit, and launchd would restart it every ten seconds for as long
+as Tailscale stayed down, which is a crash loop with a log line each time.
+`oracle web --wait`, the agent's mode, therefore waits instead
+(`oracle/webservice`):
+
+- **No Tailscale address, no socket.** It asks for the addresses every 10 s,
+  logs once that it is waiting, and binds nothing. The answer is filtered to
+  Tailscale's ranges once more inside the loop, so no discovery result can
+  make it bind another network. `--wait` and `--allow-loopback` together
+  are a usage error, and the plist never carries the second.
+- **It follows the tailnet.** While serving, it asks again every 30 s. When
+  the addresses change, it closes the listener and binds the new ones. When
+  they are gone, it closes and waits. This is D1's cost ("an interface that
+  comes up after the server starts is not served") paid by the agent rather
+  than by the person.
+- **A failed bind waits too.** A port in use is logged once and tried again
+  every 10 s, so nothing here exits for a condition time can mend.
+- **Actions survive a rebind.** One `RemoteActions` serves every listener the
+  process makes, so a running job, its result and the device's recent jobs
+  outlive an address change. Only a process restart forgets them (D10).
+
+In the foreground, without `--wait`, a missing tailnet is still a refusal
+(exit 1), because the person who typed the command is there to read it.
+
+### D17 — The loop reports what it is doing; status and doctor read that report
+
+The loop writes `<oracle home>/oracle/web.json`, `{version, pid, state,
+addresses, port, urls, since, error}`, when its state changes: `waiting`
+(with the bind error, if one is why) or `serving`. It is derived, so it sits
+in the watcher's `oracle/` and is safe to delete. The loop removes it when it
+stops, and `oracle uninstall` removes it after the `bootout`, because
+launchd's SIGTERM ends the process before it can.
+
+`oracle status` reports the web agent's half: whether it is installed and
+loaded, its port, whether its interpreter still exists, the report (where it
+serves, or that it waits, and whether its pid is alive), the paired device
+count, and the audit log's last line. `doctor` adds two rows when the web
+plist exists: `oracle web interpreter`, as the watcher's, and `oracle web
+page`, which passes while the reporting process is alive and no bind error
+stands, and carries the address, the device count and the last action in its
+detail. Waiting for Tailscale passes: the agent is doing what it should, and
+nothing in invariant can fix it. Like the watcher's row, both read files and
+ask launchd nothing.
+
+This amends D13's "nothing reads it back". `AuditLog.last` reads the log's
+last 8 KiB, never the whole file, and skips a line cut short by a killed
+write.
+
+`oracle web pair` names the port the page serves on, taken from the report,
+else from the installed plist, else 7341, so the link matches an agent
+installed with `--port`.
+
+### D18 — The page recovers when the server comes back
+
+D6's loop never stops, so a page left open across a listener restart, an
+agent restart or a reboot recovers by itself, within its backoff (60 s at
+most). Two additions make that prompt and honest:
+
+- **A look cuts the backoff short.** When the page becomes visible again,
+  regains focus, is restored from the back-forward cache, or the browser
+  says the network is back, the pending wait is cancelled and the page
+  reads at once. A read already in flight is not doubled. On a phone, that
+  is the moment anyone is looking.
+- **A forgotten job is said to be lost.** A restarted server knows no job
+  from before it (D10), so `/api/job` answers 404. The panel stops polling
+  and says the result is in the Mac's audit log, rather than showing
+  "running" forever.
+
+The device's cookie survives every restart, because `devices.json` is a
+record (D3). An open confirm's nonce does not, which only means opening the
+confirm again.
+
 ## Alternatives rejected
 
 - **Wildcard plus firewall plus token.** See D1. The token would be the only
@@ -336,5 +440,14 @@ It holds no token, nonce, environment or output.
 - **A synchronous action.** A merge or a test run can take minutes, and the
   phone's request would time out first. The 202-and-poll design (D10) keeps
   every request short.
+- **The watcher's agent also serving the page.** See D15: one process
+  would make a listener failure a notification failure, and the agent
+  everybody installs a network listener.
+- **Exiting when there is no tailnet, and letting launchd restart it.** See
+  D16: a crash loop, throttled to one restart every ten seconds, for as long
+  as Tailscale is down.
+- **Falling back to the wildcard or loopback under the agent.** D1 stands:
+  the network is the first gate, and an unattended process has nobody to
+  notice that it widened.
 - **Long-lived codes or reusable links.** A code copied once into a chat would
   pair any device later. Single use and 5 minutes bound that exposure.

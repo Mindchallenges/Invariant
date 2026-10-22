@@ -130,18 +130,24 @@ you. See [the oracle's architecture page](../architecture/oracle.md).
 
 ### The dashboard on your phone, over Tailscale
 
-`invariant oracle web` serves the dashboard from the Mac, with the same
-confirm-first actions as the TUI.
+The oracle can serve its dashboard from the Mac to your phone, with the same
+confirm-first actions as the TUI. The full setup, from installing Tailscale
+to troubleshooting, is [The oracle on your phone](oracle-web.md). In short:
+
 It listens only on the Mac's Tailscale address, so only devices on your
-tailnet can reach it, and it refuses to start when Tailscale is not up. Each
-device must be paired once:
+tailnet can reach it. Each device must be paired once:
 
 ```bash
-invariant oracle web                  # serve, in the foreground; Ctrl-C stops it
+invariant oracle install --web        # serve it always: a LaunchAgent that waits for Tailscale
+invariant oracle web                  # or serve it by hand; Ctrl-C stops it
 invariant oracle web pair --name phone  # a one-time code and link, valid 5 minutes
 invariant oracle web devices          # the paired devices
 invariant oracle web revoke <id>      # forget one device
+invariant oracle uninstall --web      # stop serving it
 ```
+
+By hand, `oracle web` refuses to start when Tailscale is not up. The agent
+waits for it instead, and binds as soon as Tailscale connects.
 
 Open the link `pair` prints on the phone and press "Pair this device". The
 phone keeps a cookie from then on, and every other device gets only a "not

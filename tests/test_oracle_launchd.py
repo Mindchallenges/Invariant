@@ -471,7 +471,8 @@ class TestUninstallCommand:
         assert main(["oracle", "uninstall", "--dry-run"]) == 0
         out = capsys.readouterr().out
         assert "would" in out and f"{LAUNCHCTL} bootout" in out
-        assert [c[1] for c in _no_real_launchd.run.calls] == ["print"]
+        # Only reads: one print per agent, the watcher's and the web page's.
+        assert [c[1] for c in _no_real_launchd.run.calls] == ["print", "print"]
         assert _no_real_launchd.plist_path.exists() and _no_real_launchd.loaded()
 
 

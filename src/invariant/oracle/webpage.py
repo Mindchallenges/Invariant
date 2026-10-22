@@ -9,7 +9,10 @@ lets run. The script builds every element with ``textContent``, never
 **It always refreshes** (ADR-008 D6). The script fetches ``/api/state`` on a
 timer, not with a meta refresh, so the scroll position and an opened summary
 survive. A failed fetch backs off — the interval doubled per failure, capped
-at :data:`MAX_BACKOFF` — and the loop never stops. A line at the top says
+at :data:`MAX_BACKOFF` — and the loop never stops. When the page is looked
+at again (it becomes visible, regains focus, is restored, or the network
+comes back) a backoff is cut short and it reads at once, so a server that
+restarted is seen as soon as anyone looks. A line at the top says
 ``updated N s ago`` and turns red once the rows are older than three
 intervals, the watcher's own staleness rule, which a stalled refresh reaches
 by itself.
@@ -106,7 +109,9 @@ const ORACLE = (function () {{
   }}
   function makeLoop(opts) {{
     const state = {{failures: 0, data: null, fetchedAt: null}};
-    async function tick() {{
+    let timer = null;
+    let inFlight = null;
+    async function read() {{
       try {{
         const data = await opts.fetchState();
         state.data = data;
@@ -118,10 +123,30 @@ const ORACLE = (function () {{
         opts.onError(err, state.failures);
       }} finally {{
         const interval = state.data ? state.data.freshness.interval : opts.interval;
-        opts.schedule(tick, retryDelay(interval, state.failures) * 1000);
+        timer = opts.schedule(tick, retryDelay(interval, state.failures) * 1000);
       }}
     }}
-    return {{tick: tick, state: state}};
+    function tick() {{
+      if (inFlight) return inFlight;
+      inFlight = read().finally(() => {{ inFlight = null; }});
+      return inFlight;
+    }}
+    // Read now, not at the end of a backoff: the page was looked at again,
+    // or the network came back, and the server may be back with it.
+    function wake() {{
+      if (inFlight) return inFlight;
+      if (timer !== null && opts.cancel) opts.cancel(timer);
+      timer = null;
+      return tick();
+    }}
+    return {{tick: tick, wake: wake, state: state}};
+  }}
+  // A job poll's answer: show it, keep polling, or the server forgot it
+  // (it restarted; the Mac's audit log still has the action).
+  function jobPoll(status) {{
+    if (status === 200) return "show";
+    if (status === 404) return "lost";
+    return "retry";
   }}
   function actionBody(row, nonce) {{
     return JSON.stringify({{row: row, nonce: nonce}});
@@ -139,7 +164,7 @@ const ORACLE = (function () {{
   }}
   return {{retryDelay: retryDelay, ageOf: ageOf, freshnessText: freshnessText,
           makeLoop: makeLoop, actionBody: actionBody, actionLabel: actionLabel,
-          jobText: jobText}};
+          jobText: jobText, jobPoll: jobPoll}};
 }})();
 
 if (typeof document !== "undefined") {{
@@ -289,7 +314,15 @@ if (typeof document !== "undefined") {{
       try {{
         const response = await fetch("/api/job?id=" + encodeURIComponent(id),
                                      {{cache: "no-store", credentials: "same-origin"}});
-        if (response.ok) {{
+        const verdict = ORACLE.jobPoll(response.status);
+        if (verdict === "lost") {{
+          if (panelJob !== id) return;
+          showPanel([el("div", "refused", "The server restarted and no longer knows this "
+                        + "action's result. The Mac's audit log has it: web/actions.log "
+                        + "in the oracle home."), closeButton("close")]);
+          return;
+        }}
+        if (verdict === "show") {{
           const job = await response.json();
           if (panelJob !== id) return;
           showResult({{job: job}});
@@ -365,6 +398,7 @@ if (typeof document !== "undefined") {{
       return response.json();
     }},
     schedule: (fn, ms) => setTimeout(fn, ms),
+    cancel: (handle) => clearTimeout(handle),
     onData: (data) => {{ lastError = ""; render(data); showAge(); }},
     onError: (err, failures) => {{
       lastError = "refresh failed (" + failures + " in a row: " + err.message + "); retrying";
@@ -382,6 +416,12 @@ if (typeof document !== "undefined") {{
   }}
 
   setInterval(showAge, 1000);
+  document.addEventListener("visibilitychange", () => {{
+    if (document.visibilityState === "visible") loop.wake();
+  }});
+  for (const name of ["online", "pageshow", "focus"]) {{
+    window.addEventListener(name, () => loop.wake());
+  }}
   loop.tick();
 }}
 """

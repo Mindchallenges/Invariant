@@ -47,9 +47,10 @@ Nothing reaches the engine another way.
   oracle's user-level directory (`$INVARIANT_HOME`, else `~/.invariant`;
   ADR-007). It holds which projects exist, plus the watcher's derived
   snapshot, alert ledger and log, and nothing of any project's. Only `init`,
-  the SessionStart hook and the `oracle` commands write it. One file lies
+  the SessionStart hook and the `oracle` commands write it. Two files lie
   outside both: `oracle install` writes, and `oracle uninstall` removes, the
-  LaunchAgent plist under `~/Library/LaunchAgents` (ADR-007 D17).
+  LaunchAgent plists under `~/Library/LaunchAgents`, the watcher's and,
+  with `--web`, the web page's (ADR-007 D17, ADR-008 D15).
 
 ## Setup
 
@@ -142,6 +143,15 @@ invariant doctor
     login without a word. The remedy is `invariant oracle install`. The row
     reads the plist only and asks launchd nothing; with no plist there is no
     row.
+
+    When the web page's LaunchAgent is installed, two more: `oracle web
+    interpreter`, the same check on its plist (remedy `invariant oracle
+    install --web`), and `oracle web page`, which passes while the process
+    that last reported in <oracle home>/oracle/web.json is alive and no bind
+    error stands. Its detail is where the page serves (or that it waits for
+    Tailscale, which passes), the paired device count and the last action
+    from the audit log. Both read files and ask launchd nothing (ADR-008
+    D17).
 
     The "hook shims actually run" row executes every installed shim, so it
     proves the shim resolves the CLI, the engine imports, the rules evaluate
@@ -879,6 +889,7 @@ invariant oracle notify-test [--json]
     JSON: {"sent": true}.
 
 invariant oracle install [--interval 5] [--dry-run] [--json]
+invariant oracle install --web [--port 7341] [--dry-run] [--json]
     Install the LaunchAgent that keeps `oracle watch --interval N` running
     (macOS): write ~/Library/LaunchAgents/dev.invariant.oracle.plist, then
     `launchctl bootstrap gui/<uid> <plist>`. The plist runs this
@@ -892,24 +903,43 @@ invariant oracle install [--interval 5] [--dry-run] [--json]
     non-positive --interval exits 2; a launchctl refusal exits 1 and names
     the plist. JSON: {"plist_path", "plist", "steps": [[argv]...],
     "was_loaded", "dry_run", "wrote", "removed"}.
+    --web installs the web page's agent instead, and only it (ADR-008 D15):
+    ~/Library/LaunchAgents/dev.invariant.oracle.web.plist, running `oracle
+    web --port N --wait`, kept alive, logging to <oracle home>/oracle/web.log,
+    with a PATH that also finds invariant (an action runs it), tailscale and
+    the interpreter's own directory. A second --web install replaces it. It
+    says so when the watcher's agent is not installed. --port without --web,
+    --interval with it, and a port outside 1-65535 exit 2. JSON: as above.
 
-invariant oracle uninstall [--dry-run] [--json]
+invariant oracle uninstall [--web] [--dry-run] [--json]
     `launchctl bootout gui/<uid>/dev.invariant.oracle` if it is loaded, then
-    remove the plist. Nothing installed is nothing to do (exit 0). --dry-run
-    prints what it would run and changes nothing. The watcher's files under
-    the oracle home are left; they are derived and safe to delete. JSON: as
-    install.
+    remove the plist; the same for dev.invariant.oracle.web, whose loop's
+    report, <oracle home>/oracle/web.json, is removed too. --web removes the
+    web page's agent only. Nothing installed is nothing to do (exit 0).
+    --dry-run prints what it would run and changes nothing. The logs and the
+    snapshot are left; they are derived and safe to delete. The paired
+    devices and the audit log under web/ are records and are left too.
+    JSON: as install, for the watcher, plus "web": the same for the page;
+    with --web, the page's alone.
 
 invariant oracle status [--json]
     Is the agent installed and loaded, does the interpreter its plist names
     still exist, and how old is the watcher's snapshot. The snapshot is
     STALE when it is older than three of its own intervals, or missing: no
-    watcher is writing it. Exit 0 whatever it finds: it is a query. JSON:
+    watcher is writing it. Then the web page's half: its agent, installed
+    and loaded, its port and interpreter; where the page serves, or that it
+    waits for Tailscale, and whether the process reporting it is alive; the
+    paired device count; and the last action from the audit log. With no
+    web agent and no report, one line says how to install it. Exit 0
+    whatever it finds: it is a query. JSON:
     {"agent": {"plist_path", "installed", "loaded", "interpreter",
-    "interpreter_exists", "interval", "error"}, "snapshot": {"path",
-    "exists", "age", "interval", "stale", "watcher_pid"}}.
+    "interpreter_exists", "interval", "error", "label", "port"}, "snapshot":
+    {"path", "exists", "age", "interval", "stale", "watcher_pid"}, "web":
+    {"agent": <as agent>, "page": {"path", "exists", "state", "pid",
+    "running", "addresses", "port", "urls", "since", "error", "unreadable",
+    "devices", "devices_error", "last_action"}}}.
 
-invariant oracle web [--port 7341] [--allow-loopback]
+invariant oracle web [--port 7341] [--allow-loopback | --wait]
     Serve the dashboard to paired devices, with the TUI's confirm-first
     actions, in the foreground until Ctrl-C (ADR-008). It listens only on
     this Mac's Tailscale addresses, found with `tailscale ip`, else on
@@ -940,10 +970,19 @@ invariant oracle web [--port 7341] [--allow-loopback]
     A --port outside 1-65535 exits 2; an address it cannot bind exits 1.
     macOS may ask once for Local Network permission for the Python that
     serves it.
+    --wait is the mode the web agent runs (ADR-008 D16): with no Tailscale
+    address it waits, looking every 10 s, instead of exiting; it binds when
+    one appears, looks again every 30 s while serving, listens again when
+    the addresses change and closes when they go. A failed bind is retried
+    every 10 s. It never binds anything outside Tailscale's ranges, and
+    --wait with --allow-loopback exits 2. Each change is one line on stdout
+    and in <oracle home>/oracle/web.json, which it removes when it stops.
 
-invariant oracle web pair [--name device] [--ttl 300] [--port 7341] [--allow-loopback] [--json]
+invariant oracle web pair [--name device] [--ttl 300] [--port PORT] [--allow-loopback] [--json]
     Issue a one-time pairing code, valid --ttl seconds, and print it with a
     link per Tailscale address (http://<address>:<port>/pair?code=<code>).
+    The port is --port, else the one the page reports serving on, else the
+    one its agent was installed with, else 7341.
     Opening the link shows a form; its button pairs the device, which keeps
     an HttpOnly, SameSite=Strict cookie. Only the code's hash is stored.
     Without a Tailscale address it still issues the code and says so.
@@ -973,9 +1012,10 @@ but `web/devices.json` under the oracle home, when a device pairs, and
 `web/actions.log`, one line when an action from the page starts and one when
 it ends; what a confirmed action changes is what that command changes.
 `pair` and `revoke` write `web/devices.json` too. Both files are created
-owner-only. `oracle install` and `uninstall` are the only
-commands that write outside a repository and the oracle home: the one plist
-under ~/Library/LaunchAgents. The signal and recommendation tables it prints from
+owner-only. `oracle web --wait` also writes its report, `oracle/web.json`,
+derived and removed when it stops. `oracle install` and `uninstall` are the
+only commands that write outside a repository and the oracle home: the two
+plists under ~/Library/LaunchAgents. The signal and recommendation tables it prints from
 are in [oracle.md](oracle.md).
 
 A gate refusal from `pipeline advance`, `session transition`, `session
