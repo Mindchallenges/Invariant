@@ -1029,3 +1029,98 @@ def test_the_new_module_imports_no_host_and_no_toolkit():
     imports = re.findall(r"^\s*(?:from|import)\s+(\S+)", source, re.MULTILINE)
     assert not [i for i in imports if "hosts" in i or "textual" in i or "tui" in i]
 
+
+
+# -- BUG_079: the Origin a browser derives from the page's own headers -------------------
+
+
+def _browser_origin(referrer_policy: str, mode: str, page_origin: str, target_origin: str) -> str:
+    """The ``Origin`` a browser sends on a non-``GET`` request the page makes.
+
+    The Fetch standard, "append a request `Origin` header", for a request whose
+    response tainting is not "cors" (any same-origin request): if the request's
+    mode is not "cors", the document's referrer policy decides, and
+    ``no-referrer`` serializes the origin as ``null``. A form submission is a
+    navigation (mode "navigate"); ``fetch()`` without a ``mode`` is "cors".
+    """
+    if mode == "cors":
+        return page_origin
+    policy = referrer_policy.split(",")[-1].strip().lower()
+    if policy == "no-referrer":
+        return "null"
+    if policy == "same-origin" and page_origin != target_origin:
+        return "null"
+    if policy in ("no-referrer-when-downgrade", "strict-origin",
+                  "strict-origin-when-cross-origin") and (
+            page_origin.startswith("https:") and not target_origin.startswith("https:")):
+        return "null"
+    return page_origin
+
+
+def _fetch_mode(page_html: str, url: str) -> str:
+    """The ``mode`` the page's script passes to ``fetch(url, ...)``; "cors" without one."""
+    import re
+
+    call = re.search(r'fetch\("' + re.escape(url) + r'",\s*\{(.*?)\}\);', page_html, re.DOTALL)
+    assert call, f"the page no longer fetches {url}"
+    mode = re.search(r'\bmode:\s*"([a-z-]+)"', call.group(1))
+    return mode.group(1) if mode else "cors"
+
+
+def _shown_text(body: bytes) -> str:
+    """What a person reads on an HTML answer: the body, without style, script or tags."""
+    import re
+
+    text = re.sub(r"<(style|script)\b.*?</\1>", " ", body.decode("utf-8", "replace"), flags=re.DOTALL)
+    return " ".join(re.sub(r"<[^>]+>", " ", text).split())
+
+
+# Repro for BUG_079 — see the work-item entry.
+# Fails while the defect is live. When the fix lands, delete the strict
+# expected-failure marker on the "pair" case; the assertion must then pass
+# unchanged. The "act" case is not marked: per the Fetch standard a fetch()
+# POST in the default "cors" mode keeps its real Origin under any referrer
+# policy, so it passes today and guards the action route through the fix.
+@pytest.mark.parametrize("surface", [
+    pytest.param("pair", marks=pytest.mark.xfail(
+        strict=True, reason="BUG_079 is live: Referrer-Policy no-referrer makes the "
+                            "pairing form's POST carry Origin: null; delete with the fix")),
+    "act",
+])
+def test_BUG_079_the_pages_own_post_is_accepted_with_the_origin_a_browser_derives(
+        world, store, surface):
+    app = _app(world, store)
+    if surface == "pair":
+        # The page that holds the form, as the pairing link opens it.
+        page = _get(app, "/pair?code=ignored")
+        assert page.status == 200 and '<form method="post" action="/pair">' in page.body.decode()
+        mode = "navigate"
+    else:
+        _, token = _paired(store)
+        page = _get(app, "/", token)
+        assert page.status == 200
+        mode = _fetch_mode(page.body.decode(), "/api/act")
+    policy = page.header("referrer-policy") or "strict-origin-when-cross-origin"
+    origin = _browser_origin(policy, mode, ORIGIN, ORIGIN)
+    headers = {"host": f"{TS4}:7341", "origin": origin, "sec-fetch-site": "same-origin"}
+
+    if surface == "pair":
+        code = store.issue("phone", ttl=300).code
+        response = app.handle(Request("POST", "/pair", {
+            **headers, "content-type": "application/x-www-form-urlencoded",
+            "sec-fetch-mode": "navigate"}, f"code={code}".encode()))
+        assert response.status == 303, (
+            f"the pairing form posted from its own page, Referrer-Policy {policy!r} -> "
+            f"Origin {origin!r}, was refused: HTTP {response.status} "
+            f"{_shown_text(response.body)!r}")
+        assert store.verify(response.header("set-cookie").split(";")[0].split("=", 1)[1])
+    else:
+        shown = json.loads(_get(app, "/api/confirm?row=K%7Cs1", token).body)
+        response = app.handle(Request("POST", "/api/act", {
+            **headers, "content-type": "application/json", "sec-fetch-mode": mode,
+            "cookie": f"{COOKIE_NAME}={token}"},
+            json.dumps({"row": "K|s1", "nonce": shown["nonce"]}).encode()))
+        assert response.status == 202, (
+            f"the page's own action, Referrer-Policy {policy!r}, fetch mode {mode!r} -> "
+            f"Origin {origin!r}, was refused: HTTP {response.status} {response.body!r}")
+        assert world.runner.calls[0][0] == MERGE
