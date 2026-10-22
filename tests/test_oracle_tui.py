@@ -62,9 +62,12 @@ machine_world = test_oracle_scan.machine_world
 
 
 def _tick(world) -> dict:
-    """One watcher tick over the machine: a fresh snapshot, and its document."""
+    """One watcher tick over the machine at the fixture's own clock: a fresh
+    snapshot, and its document."""
+    now = test_oracle_scan.NOW
     watcher = Watcher(
-        ProjectIndex(oracle_home()), None, cache=ScanCache(probe=world["probe"])
+        ProjectIndex(oracle_home()), None, clock=lambda: now,
+        cache=ScanCache(probe=world["probe"]),
     )
     return watcher.tick().document
 

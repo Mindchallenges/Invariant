@@ -392,8 +392,11 @@ def _loaded(document, source=dashboard.SOURCE_SNAPSHOT, age=2.0, interval=5.0, b
 
 
 def _document(world) -> dict:
-    snapshots = scan_all(ProjectIndex(oracle_home()), cache=ScanCache(probe=world["probe"]))
-    return assess(snapshots, time.time())
+    """The machine assessed at the fixture's own clock, which every age in it is from."""
+    now = test_oracle_scan.NOW
+    snapshots = scan_all(ProjectIndex(oracle_home()), clock=lambda: now,
+                         cache=ScanCache(probe=world["probe"]))
+    return assess(snapshots, now)
 
 
 class TestView:

@@ -23,6 +23,7 @@ from conftest import RefusedProgram
 from test_oracle_scan import (
     THE_HOST_PID,
     FakeProbe,
+    iso,
     make_project,
     put_attention,
     put_pipeline,
@@ -57,7 +58,8 @@ from invariant.oracle.watcher import (
     snapshot_status,
 )
 
-SINCE = "2026-10-22T10:00:00+00:00"
+#: A wait that began ten minutes before the run, on the watcher's default clock.
+SINCE = iso(time.time() - 600)
 
 
 def waiting(kind: str = "permission", since: str = SINCE) -> dict:

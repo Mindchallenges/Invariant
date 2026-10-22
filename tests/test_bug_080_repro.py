@@ -47,7 +47,6 @@ def world_far_in_the_future(monkeypatch, request):
     return request.getfixturevalue("machine_world")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_080 is live — delete this line with the fix")
 def test_BUG_080_a_waiting_session_reads_red_whatever_the_clock_says(world_far_in_the_future):
     world = world_far_in_the_future
     watcher = Watcher(ProjectIndex(oracle_home()), None, clock=lambda: FAR_FUTURE,

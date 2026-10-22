@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,11 @@ NOW = time.time()
 HOUR = 3600.0
 THE_HOST_PID = os.getpid()
 NOT_A_HOST_PID = os.getppid()
+
+
+def iso(epoch: float) -> str:
+    """An attention-record timestamp for ``epoch``, as the hooks write one."""
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
 
 
 def dead_pid() -> int:
@@ -167,7 +173,7 @@ def machine_world(tmp_path):
                 plan=[{"n": 1, "title": "x", "done": False, "done_at": None}])
     put_attention(alpha, "h-live", pid=THE_HOST_PID, turn="running",
                   waiting={"kind": "permission", "message": "Allow Bash?",
-                           "since": "2026-10-22T10:00:00+00:00"})
+                           "since": iso(NOW - 600)})
     put_pipeline(alpha, "a-live", methodology="tdd", state="green", evidence={
         "test_runs": [{"phase": "red", "passed": False, "failed": 1},
                       {"phase": "green", "passed": False, "failed": 2,
