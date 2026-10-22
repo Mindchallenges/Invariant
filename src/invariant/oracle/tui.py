@@ -12,6 +12,13 @@ is red, any other alert amber, markers dim. The table refreshes on the
 snapshot's own interval, in a worker thread, so a slow in-process scan never
 freezes the screen.
 
+**It always refreshes.** The timer starts when the app mounts, before the
+first read, and a read that fails leaves it running, so a broken first load
+is retried on the next tick rather than never. A line under the banner says
+``updated N s ago`` every second and turns red once the rows are older than
+three intervals, :func:`~invariant.oracle.dashboard.freshness`, the rule the
+web page and ``oracle status`` use too.
+
 **Nothing runs without a confirm.** Enter (or ``a``) on a line opens a modal:
 an ``info`` step shows its text and has no action; a ``run`` or ``terminal``
 step shows the exact argv, cwd and environment, focuses Cancel, and runs only
@@ -20,6 +27,7 @@ on ``y`` or the Run button. The output is shown when it finishes.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import ClassVar
 
@@ -33,8 +41,19 @@ from textual.timer import Timer
 from textual.widgets import Button, DataTable, Footer, Header, Static
 
 from .actions import Actions, Outcome, Step, refusal, step_for
-from .dashboard import AMBER, DIM, PLAIN, RED, SOURCE_SNAPSHOT, Line, Loaded, lines
+from .dashboard import (
+    AMBER,
+    DIM,
+    PLAIN,
+    RED,
+    SOURCE_SNAPSHOT,
+    Line,
+    Loaded,
+    freshness,
+    lines,
+)
 from .recommend import INFO
+from .watcher import DEFAULT_INTERVAL
 
 COLUMNS = ("project", "session", "stage / lane", "status", "signals", "next")
 
@@ -147,6 +166,8 @@ class OracleApp(App):
     CSS = """
     #banner { background: $warning 30%; padding: 0 1; }
     #source { color: $text-muted; padding: 0 1; }
+    #fresh { color: $text-muted; padding: 0 1; }
+    #fresh.stale { color: $error; text-style: bold; }
     #rows { height: 1fr; }
     """
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -155,24 +176,40 @@ class OracleApp(App):
         Binding("q", "quit", "quit"),
     ]
 
-    def __init__(self, loader: Callable[[], Loaded], actions: Actions) -> None:
+    def __init__(
+        self,
+        loader: Callable[[], Loaded],
+        actions: Actions,
+        interval: float = DEFAULT_INTERVAL,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         super().__init__()
         self.loader = loader
         self.actions = actions
+        self.clock = clock
         self.lines: dict[str, Line] = {}
-        self.interval: float | None = None
+        #: Seconds between refreshes until a read says otherwise.
+        self.interval = interval
         self.refresh_timer: Timer | None = None
+        #: When the shown rows were read, and how old they were then.
+        self.read_at: float | None = None
+        self.read_age = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(id="banner")
         yield Static(id="source")
+        yield Static(id="fresh")
         yield DataTable(id="rows", cursor_type="row")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#banner").display = False
         self.query_one("#rows", DataTable).add_columns(*COLUMNS)
+        # Armed before the first read, so a read that fails is retried.
+        self.refresh_timer = self.set_interval(self.interval, self.action_reload)
+        self.set_interval(1.0, self.show_freshness)
+        self.show_freshness()
         self.action_reload()
 
     # -- loading -------------------------------------------------------
@@ -193,6 +230,17 @@ class OracleApp(App):
         banner = self.query_one("#banner", Static)
         banner.update(Text(f"could not read the machine: {message}"))
         banner.display = True
+        self.show_freshness()
+
+    def show_freshness(self) -> None:
+        """``updated N s ago``, red once it is stale. Ages through failures."""
+        age = None if self.read_at is None else self.read_age + max(
+            0.0, self.clock() - self.read_at
+        )
+        text, stale = freshness(age, self.interval)
+        fresh = self.query_one("#fresh", Static)
+        fresh.update(Text(text))
+        fresh.set_class(stale, "stale")
 
     def _show(self, loaded: Loaded) -> None:
         banner = self.query_one("#banner", Static)
@@ -214,11 +262,14 @@ class OracleApp(App):
         if keep in self.lines:
             table.move_cursor(row=table.get_row_index(keep))
 
+        self.read_at = self.clock()
+        self.read_age = loaded.age
         if loaded.interval != self.interval:
             if self.refresh_timer is not None:
                 self.refresh_timer.stop()
             self.interval = loaded.interval
             self.refresh_timer = self.set_interval(loaded.interval, self.action_reload)
+        self.show_freshness()
 
     def current_key(self) -> str | None:
         table = self.query_one("#rows", DataTable)

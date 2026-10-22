@@ -128,6 +128,35 @@ Without the watcher the dashboard still works. It scans in-process and shows
 a "watcher not running" banner. It never answers a permission prompt for
 you. See [the oracle's architecture page](../architecture/oracle.md).
 
+### The dashboard on your phone, over Tailscale
+
+`invariant oracle web` serves a read-only copy of the dashboard from the Mac.
+It listens only on the Mac's Tailscale address, so only devices on your
+tailnet can reach it, and it refuses to start when Tailscale is not up. Each
+device must be paired once:
+
+```bash
+invariant oracle web                  # serve, in the foreground; Ctrl-C stops it
+invariant oracle web pair --name phone  # a one-time code and link, valid 5 minutes
+invariant oracle web devices          # the paired devices
+invariant oracle web revoke <id>      # forget one device
+```
+
+Open the link `pair` prints on the phone and press "Pair this device". The
+phone keeps a cookie from then on, and every other device gets only a "not
+paired" page. The page refreshes itself every few seconds and turns its
+"updated N s ago" line red if the rows stop moving.
+
+<!-- invariant: allow-privacy -->
+**macOS may ask for Local Network permission.** The first time the Python that
+runs invariant listens on the tailnet address, macOS may ask whether it may "find
+devices on your local network". Allow it, or the phone cannot connect. You
+can grant or revoke it later in System Settings > Privacy & Security > Local
+Network, under the Python interpreter (or terminal app) that serves the page.
+`--allow-loopback` serves on 127.0.0.1 instead when no Tailscale address is
+found, for a test on the Mac itself; loopback needs no permission. The
+decisions behind the listener and the pairing are in ADR-008.
+
 ## Working on invariant itself
 
 ```bash

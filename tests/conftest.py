@@ -234,6 +234,32 @@ def _no_real_oracle_runner(monkeypatch):
     return recorder
 
 
+@pytest.fixture(autouse=True)
+def oracle_web(monkeypatch):
+    """No test binds a Tailscale address or asks the real ``tailscale`` (IDEA_023).
+
+    ``oracle web`` finds the Mac's Tailscale addresses through one seam,
+    ``_oracle_web_addresses``, and listens through another,
+    ``_oracle_web_server``. Both are replaced here suite-wide: discovery finds
+    no tailnet until a test sets ``addresses``, and the server binds nothing
+    and records what it was asked to serve. The guard below refuses
+    ``tailscale`` as the backstop. A test that needs a real socket builds a
+    ``WebServer`` on loopback itself.
+    """
+    from invariant.oracle.web import RecordingWeb
+
+    recorder = RecordingWeb()
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_web_addresses",
+        lambda: (lambda: list(recorder.addresses)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_web_server", lambda: recorder.factory, raising=False
+    )
+    return recorder
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
@@ -253,7 +279,9 @@ class RefusedProgram(BaseException):
 
 
 #: Never run, by any route. ``osascript`` alone can be admitted, per test.
-_REFUSED = ("osascript", "launchctl")
+#: ``tailscale`` and the macOS app's ``Tailscale`` would report, or change,
+#: the real tailnet.
+_REFUSED = ("osascript", "launchctl", "tailscale", "Tailscale")
 
 #: Programs that run their ``-c`` argument as a command string.
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
@@ -329,7 +357,7 @@ def _programs_of(args, shell: bool = False, executable=None) -> set[str]:
 
 @pytest.fixture(autouse=True)
 def _no_real_osascript(request, monkeypatch):
-    """No test runs ``osascript`` or ``launchctl``, by any route.
+    """No test runs ``osascript``, ``launchctl`` or ``tailscale``, by any route.
 
     ``osascript`` opens Terminal windows (``session handoff``) and posts
     notifications (the oracle); ``launchctl`` loads and unloads the oracle's
@@ -360,6 +388,66 @@ def _no_real_osascript(request, monkeypatch):
         real_init(self, args, *rest, **kwargs)
 
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded)
+
+
+def _loopback(address) -> bool:
+    """Whether a socket address stays on this machine: loopback or a path."""
+    import ipaddress
+
+    if not isinstance(address, tuple):
+        return True  # AF_UNIX: a path, or an abstract name
+    host = address[0]
+    if isinstance(host, bytes):
+        host = host.decode(errors="replace")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(str(host).split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_network_beyond_loopback(monkeypatch):
+    """No test binds, connects, sends or looks a name up beyond loopback (IDEA_023).
+
+    macOS asks the person whether Python may "find devices on your local
+    network" the first time a process reaches past loopback, so a test that
+    did would put a privacy prompt on the screen of whoever runs the suite.
+    ``oracle web``'s address discovery and its server are seams the suite
+    replaces (``oracle_web`` above); this is the backstop. ``bind``,
+    ``connect``, ``connect_ex`` and ``sendto`` refuse any address that is not
+    loopback, the wildcard ``""``, ``0.0.0.0`` and ``::`` included, and a
+    reverse lookup (``gethostbyaddr``, which ``socket.getfqdn`` and the
+    standard library's ``HTTPServer.server_bind`` make) is refused outright.
+    It raises :class:`RefusedProgram`, so a broad ``except`` cannot hide it.
+    """
+    import socket
+
+    def guard(name, real):
+        def guarded(self, address, *rest):
+            target = rest[-1] if name == "sendto" and rest else address
+            if not _loopback(target):
+                raise RefusedProgram(
+                    f"a test called socket.{name}({target!r}): only loopback is "
+                    f"allowed, so the suite never reaches the local network"
+                )
+            if name == "sendto":
+                return real(self, address, *rest)
+            return real(self, address)
+
+        return guarded
+
+    for name in ("bind", "connect", "connect_ex", "sendto"):
+        monkeypatch.setattr(socket.socket, name, guard(name, getattr(socket.socket, name)))
+
+    def no_reverse_lookup(host, *rest):
+        raise RefusedProgram(
+            f"a test asked for the name of {host!r}: a reverse lookup can reach "
+            f"the local network, and the suite never does"
+        )
+
+    monkeypatch.setattr(socket, "gethostbyaddr", no_reverse_lookup)
 
 
 def write_manifest(root: Path, body: dict) -> Path:

@@ -3046,6 +3046,148 @@ def cmd_oracle_notify_test(args) -> int:
     return emit(args, {"sent": True}, "sent one notification")
 
 
+def _real_oracle_web_addresses():
+    from ..oracle import web
+
+    return lambda: web.discover_addresses(web.run_program)
+
+
+def _oracle_web_addresses():
+    """How ``oracle web`` finds this Mac's Tailscale addresses.
+
+    A seam, like ``_oracle_installer``: the suite replaces it with one that
+    finds no tailnet until a test names one, so no test asks the real
+    ``tailscale`` or binds a real tailnet address (ADR-008).
+    """
+    return _real_oracle_web_addresses()
+
+
+def _real_oracle_web_server():
+    from ..oracle.web import WebServer
+
+    return WebServer
+
+
+def _oracle_web_server():
+    """What ``oracle web`` listens through: ``(app, addresses, port)`` to a server.
+
+    A seam: the suite replaces it with a recorder that binds nothing.
+    """
+    return _real_oracle_web_server()
+
+
+def _web_port(port: int) -> int:
+    if not 1 <= port <= 65535:
+        raise UsageError(f"--port must be between 1 and 65535, not {port}")
+    return port
+
+
+def cmd_oracle_web(args) -> int:
+    """Serve the dashboard on this Mac's Tailscale address, in the foreground.
+
+    Read-only: the page and its JSON, to paired devices only. Refuses to start
+    with no Tailscale address unless ``--allow-loopback``.
+    """
+    from ..oracle.dashboard import load
+    from ..oracle.devices import DeviceStore
+    from ..oracle.web import LOOPBACK, WebApp, choose_bind
+
+    port = _web_port(args.port)
+    addresses = choose_bind(_oracle_web_addresses()(), allow_loopback=args.allow_loopback)
+    index = _project_index()
+    cache = _oracle_cache()
+    gates = _oracle_gates()
+    devices = DeviceStore(index.home)
+    app = WebApp(
+        devices,
+        lambda: load(index.home, time.time(), lambda: _oracle_scan_document(index, cache, gates)),
+        addresses,
+    )
+    server = _oracle_web_server()(app, addresses, port)
+    urls = server.start()
+    paired = len(devices.devices())
+    lines = [f"serving the oracle on {url}" for url in urls]
+    if addresses == [LOOPBACK]:
+        lines.append("  loopback only: no Tailscale address was found; this Mac alone can open it")
+    lines.append(
+        f"  {_plural(paired, 'paired device')}; pair one with 'invariant oracle web pair'. "
+        f"Ctrl-C stops it."
+    )
+    print("\n".join(lines), flush=True)
+    try:
+        server.serve()
+    finally:
+        server.close()
+    return EXIT_OK
+
+
+def _minutes(seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        return _plural(int(seconds // 60), "minute")
+    return f"{seconds:g} seconds"
+
+
+def cmd_oracle_web_pair(args) -> int:
+    """Issue a one-time pairing code, and the link a phone opens to use it."""
+    from ..oracle.devices import DeviceStore
+    from ..oracle.home import oracle_home
+    from ..oracle.web import LOOPBACK, tailnet_addresses, url_for
+
+    port = _web_port(args.port)
+    found = tailnet_addresses(_oracle_web_addresses()())
+    if not found and args.allow_loopback:
+        found = [LOOPBACK]
+    pairing = DeviceStore(oracle_home()).issue(args.name, ttl=args.ttl)
+    links = [url_for(address, port, f"/pair?code={pairing.code}") for address in found]
+    lines = [
+        f"pairing code for {pairing.name}: {pairing.code[:5]}-{pairing.code[5:]}",
+        f"  it works once, for {_minutes(args.ttl)}",
+    ]
+    if links:
+        lines.append("  open on the device, while 'invariant oracle web' runs:")
+        lines.extend(f"    {link}" for link in links)
+    else:
+        lines.append(
+            "  no Tailscale address on this Mac yet; start Tailscale, run "
+            "'invariant oracle web', and open its address with /pair on the device"
+        )
+    return emit(
+        args,
+        {"code": pairing.code, "name": pairing.name, "expires": pairing.expires,
+         "links": links},
+        "\n".join(lines),
+    )
+
+
+def cmd_oracle_web_devices(args) -> int:
+    """The paired devices, and how many codes are still pending."""
+    from ..oracle.devices import DeviceStore
+    from ..oracle.home import oracle_home
+
+    store = DeviceStore(oracle_home())
+    devices = store.devices()
+    pending = store.pending()
+    text = "\n".join(f"  {d.id}  {d.name}  paired {d.paired}" for d in devices) or (
+        "  no paired devices"
+    )
+    if pending:
+        text += f"\n  {_plural(pending, 'pairing code')} not yet used"
+    return emit(args, {"devices": [d.to_dict() for d in devices], "pending": pending}, text)
+
+
+def cmd_oracle_web_revoke(args) -> int:
+    """Forget one paired device; the others keep working."""
+    from ..oracle.devices import DeviceStore
+    from ..oracle.home import oracle_home
+
+    device = DeviceStore(oracle_home()).revoke(args.id)
+    return emit(
+        args,
+        {"revoked": device.to_dict()},
+        f"revoked {device.id} ({device.name}); its next request gets nothing",
+    )
+
+
 # -- host bridge -------------------------------------------------------
 
 
@@ -3801,6 +3943,30 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="is the agent loaded, and how old is the watcher's snapshot"
     )
     q.set_defaults(func=cmd_oracle_status)
+    web = oracle.add_parser(
+        "web",
+        help="serve the dashboard to paired devices on this Mac's Tailscale address",
+    )
+    web.add_argument("--port", type=int, default=7341)
+    web.add_argument(
+        "--allow-loopback", action="store_true",
+        help="with no Tailscale address, serve on 127.0.0.1 for a test on this Mac",
+    )
+    web.set_defaults(func=cmd_oracle_web)
+    web_actions = web.add_subparsers(dest="web_action")
+    q = web_actions.add_parser("pair", help="a one-time code that pairs one device")
+    q.add_argument("--name", default="device", help="what to call the device")
+    q.add_argument("--ttl", type=float, default=300.0, help="seconds the code lives")
+    q.add_argument("--port", type=int, default=7341, help="the port the link names")
+    q.add_argument("--allow-loopback", action="store_true",
+                   help="with no Tailscale address, link 127.0.0.1")
+    q.set_defaults(func=cmd_oracle_web_pair)
+    web_actions.add_parser("devices", help="the paired devices").set_defaults(
+        func=cmd_oracle_web_devices
+    )
+    q = web_actions.add_parser("revoke", help="forget one paired device")
+    q.add_argument("id", help="its id, from 'oracle web devices'")
+    q.set_defaults(func=cmd_oracle_web_revoke)
 
     hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
     q = hooks.add_parser("install")

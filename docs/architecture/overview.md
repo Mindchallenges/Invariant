@@ -34,6 +34,9 @@ graph TD
         ODASH[dashboard]
         OACT[actions]
         OTUI["tui (Textual)"]
+        OWEB["web (ADR-008)"]
+        OPAGE[webpage]
+        ODEV[devices]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -119,6 +122,15 @@ graph TD
     ODASH --> OSIG
     ODASH --> OSCAN
     OACT --> OSIG
+    CLI --> OWEB
+    CLI --> ODEV
+    OWEB --> ODASH
+    OWEB --> ODEV
+    OWEB --> OPAGE
+    OWEB --> OSCAN
+    OWEB --> OWATCH
+    OPAGE --> OWATCH
+    ODEV --> OINDEX
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -291,6 +303,20 @@ to `OACT` (`CLI -. injects without_host_markers and the handoff launcher .->
 CCLAUNCH`), the probe's shape a third time. A terminal step reuses the
 `session handoff` launch, its launcher seam and its successor watch, and no
 `oracle → hosts` arrow appears (ADR-007 D18).
+
+`OWEB` is the oracle's web page (IDEA_023, ADR-008), the first network
+listener in the library. `CLI --> OWEB` serves it in the foreground. The
+server binds only the Mac's Tailscale addresses and answers only paired
+devices. `OWEB --> ODASH` reads the document exactly as the TUI does
+(`dashboard.load`) and draws its rows with `dashboard.lines` and its
+`freshness` rule. `OWEB --> OSCAN` is the row kinds it folds into a summary,
+and `OWEB --> OWATCH` and `OPAGE --> OWATCH` are the staleness constants.
+`OPAGE` is the self-contained HTML. `ODEV` is the paired-device store under
+the home: `ODEV --> OINDEX` is `HomeStore`, the home's locked store, again.
+`CLI --> ODEV` is `oracle web pair`, `devices` and `revoke`. Address discovery
+and the server are reached through two CLI seams the suite replaces, and the
+web modules import neither `hosts/` nor Textual. In this increment no arrow
+leads from `OWEB` to `OACT`: the page reads and does not act.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -639,7 +665,8 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Its seven increments have all shipped; see
+project (IDEA_012). Its seven increments have all shipped, and the web page
+over Tailscale (IDEA_023) is shipping in increments; see
 [oracle.md](oracle.md).
 
 | Module | Owns | Never does |
@@ -657,6 +684,9 @@ project (IDEA_012). Its seven increments have all shipped; see
 | `dashboard` | What `oracle tui` shows: the snapshot while it is fresh, else an in-process scan behind a banner; each row as a line with its tone; the `ALERT` / `note` / `ok` flag `oracle list` prints too | Import Textual; run anything |
 | `actions` | A recommendation as a confirmable `Step`, the exact lines the confirm modal shows, the refusals (a waiting row, a non-`invariant` argv, a missing cwd), and the dispatch of a confirmed step to an injected runner or terminal launcher; `run_subprocess`, the real runner | Import `hosts/`; run a step nobody confirmed; answer a prompt |
 | `tui` | The Textual app: the table, its refresh, and the confirm, info and output modals. Imported only by `oracle tui` | Decide what `dashboard` and `actions` decide |
+| `web` | `oracle web`: the Tailscale-only bind and its discovery, the `Host` check, the page's view and freshness, `WebApp` (requests to responses) and `WebServer` (the stdlib server, one per address) | Bind the wildcard; answer an unpaired device with anything but "not paired"; act on a row |
+| `webpage` | The page's HTML, inline CSS and script, with its self-refreshing loop, and the small "not paired" and pairing pages | Load anything from another origin; turn a row's text into markup |
+| `devices` | `web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Store a token or code in the clear; let a device in when the file cannot be read |
 
 ### `adapters/`
 
@@ -974,6 +1004,9 @@ per repository:
   oracle/snapshot.json      the watcher's last tick; derived, safe to delete
   oracle/alerts.json        the rising-edge de-dup ledger; derived, safe to delete
   oracle/watcher.log        the launchd agent's stdout and stderr
+  web/devices.json          paired devices' token hashes and pending pairing
+                            codes for `oracle web`; a source of truth, 0600
+  locks/devices.lock        advisory lock for its read-modify-write
 
 ~/Library/LaunchAgents/dev.invariant.oracle.plist
                             the agent `oracle install` writes; `uninstall` removes it

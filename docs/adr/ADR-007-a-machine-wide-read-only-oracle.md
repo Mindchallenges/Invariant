@@ -5,7 +5,8 @@
   2, D11–D12 by increment 3, D13–D15 by increment 4, D16 by increment 5 (its
   read-only git amended by increment 6), D17 by increment 6, and D18–D19 by
   increment 7. Nothing is left to decide for v1; the follow-ons are their own
-  ideas (IDEA_013 to IDEA_018).
+  ideas (IDEA_013 to IDEA_018, and IDEA_023, the web dashboard over
+  Tailscale, whose listener and pairing ADR-008 records).
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. This record adds the first state this library keeps
   outside any project.

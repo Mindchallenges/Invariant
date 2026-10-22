@@ -908,6 +908,38 @@ invariant oracle status [--json]
     {"agent": {"plist_path", "installed", "loaded", "interpreter",
     "interpreter_exists", "interval", "error"}, "snapshot": {"path",
     "exists", "age", "interval", "stale", "watcher_pid"}}.
+
+invariant oracle web [--port 7341] [--allow-loopback]
+    Serve the dashboard, read-only, to paired devices, in the foreground until
+    Ctrl-C (ADR-008). It listens only on this Mac's Tailscale addresses, found
+    with `tailscale ip`, else on ifconfig's tunnel interfaces, and never on
+    the wildcard. With no Tailscale address it exits 1, unless
+    --allow-loopback, which then serves on loopback alone. GET / is the page;
+    GET /api/state is {"document": <oracle list --json>, "view",
+    "freshness": {"source", "age", "interval", "stale_after", "stale",
+    "text", "served_at", "banner"}}. A request without a paired device's
+    token gets only a "not paired" page (401), and one whose Host is not this
+    server gets 421. The page refreshes itself on the snapshot's interval,
+    backs off after a failed fetch, and flags its rows STALE after three
+    intervals. A --port outside 1-65535 exits 2; an address it cannot bind
+    exits 1. macOS may ask once for Local Network permission for the Python
+    that serves it.
+
+invariant oracle web pair [--name device] [--ttl 300] [--port 7341] [--allow-loopback] [--json]
+    Issue a one-time pairing code, valid --ttl seconds, and print it with a
+    link per Tailscale address (http://<address>:<port>/pair?code=<code>).
+    Opening the link shows a form; its button pairs the device, which keeps
+    an HttpOnly, SameSite=Strict cookie. Only the code's hash is stored.
+    Without a Tailscale address it still issues the code and says so.
+    JSON: {"code", "name", "expires", "links"}.
+
+invariant oracle web devices [--json]
+    The paired devices and the count of unused codes. JSON: {"devices":
+    [{"id", "name", "paired"}], "pending"}.
+
+invariant oracle web revoke ID [--json]
+    Forget one device; its next request gets nothing, and the others are
+    untouched. An unknown ID exits 2. JSON: {"revoked"}.
 ```
 
 The other two routes into the index are automatic: `init` (above) and the
@@ -920,7 +952,9 @@ the hook's output cannot change.
 not to the oracle home. Neither does `oracle tui` itself; what a confirmed
 action changes is what that command changes. `oracle watch` writes only its two derived files and
 their lock under the oracle home, never under a project's state root; both
-files are safe to delete. `oracle install` and `uninstall` are the only
+files are safe to delete. `oracle web` writes nothing
+but `web/devices.json` under the oracle home, when a device pairs; `pair` and
+`revoke` write that file too. `oracle install` and `uninstall` are the only
 commands that write outside a repository and the oracle home: the one plist
 under ~/Library/LaunchAgents. The signal and recommendation tables it prints from
 are in [oracle.md](oracle.md).

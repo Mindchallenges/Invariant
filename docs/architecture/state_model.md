@@ -1657,6 +1657,9 @@ $INVARIANT_HOME, else ~/.invariant/
     snapshot.json       the last tick's assessed view of every project
     alerts.json         the rising-edge de-dup ledger
     watcher.log         the launchd agent's stdout and stderr
+  web/                  the web page's paired devices; NOT derived (0700)
+    devices.json        token hashes and pending pairing codes (0600)
+  locks/devices.lock    advisory lock for its read-modify-write
 ```
 
 ```json
@@ -1712,3 +1715,28 @@ tick.
 | **Clock times, machine-local** | `generated` and `since` are UTC to the second, the attention sidecar's spelling, and `now` is the assessed epoch `oracle list --json` already prints. They are the second exception to "Storing what was measured, not when". They are scoped by where they live: outside every repository, never committed or rendered, and outside what `privacy.clean` screens (ADR-007 D14). |
 | **The log is output, not state** | `watcher.log` is where launchd sends the agent's two streams (`oracle install`, ADR-007 D17). Nothing reads it back; it holds the ticks with news and the failed ticks the loop survived. It is appended to, not rotated, and safe to delete. The agent's plist lives outside the home, in `~/Library/LaunchAgents`, because launchd reads it there. |
 | **`notified: false` is owed, not spent** | An edge seen with no notifier, or whose delivery failed, is delivered by the next tick that can deliver it. A key that is no longer seen is dropped, so the condition returning is a new edge. A project that could not be read keeps its keys. |
+
+### The paired devices
+
+`invariant oracle web` (IDEA_023, ADR-008) answers only a device that holds a
+token, and `<oracle home>/web/devices.json` is where those devices are
+recorded. It lives in `web/` rather than `oracle/` because it is not derived:
+deleting it unpairs every device, and only `oracle web pair` and a phone can
+make it again.
+
+```json
+{"version": 1,
+ "devices":  [{"id": "<8 hex>", "name": "<--name>", "hash": "sha256:<hex>",
+               "paired": "<iso>"}],
+ "pairings": [{"hash": "sha256:<hex>", "name": "<--name>", "expires": 1792640300.0}],
+ "failed": 0}
+```
+
+| Property | Why |
+|---|---|
+| **Hashes only** | A device's token (256 random bits) and a pairing code are stored as their SHA-256, so the file is not a credential. The token is shown to nobody; the code only to the person who ran `pair`. |
+| **Single-use, short-lived codes** | A code is removed by the redeem that spends it, and expired ones are dropped on every write. `failed` counts wrong codes in a row; at ten every pending code is cancelled, and a good redeem resets it. |
+| **Owner-only** | The file is `0600` and `web/` is `0700`, set after every write. |
+| **Locked writes, refused shapes** | `issue`, `redeem` and `revoke` take `locks/devices.lock` through `HomeStore`. Like the index, a newer `version`, a non-object or a malformed list is refused rather than rewritten, and unknown keys survive. |
+| **Fails closed** | `verify`, the one read on every request, answers "nobody" when the file cannot be read, so a broken store locks devices out rather than letting one in. |
+| **Clock times, machine-local** | `paired` (UTC ISO, to the second) and `expires` (epoch seconds) are the D14 exception again: under the home, never committed or rendered. |

@@ -749,6 +749,120 @@ class TestTheApp:
         assert app.return_code in (0, None)
 
 
+class FakeClock:
+    def __init__(self, now: float = 1_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestItAlwaysRefreshes:
+    """Every dashboard refreshes itself, and says how old what it shows is."""
+
+    def test_the_timer_runs_from_mount_even_when_the_first_load_fails(self, tmp_path):
+        calls = []
+
+        def load():
+            calls.append(1)
+            if len(calls) == 1:
+                raise InvariantError("the index is broken")
+            return dashboard.load(tmp_path, time.time(), lambda: {"projects": []})
+
+        app = tui.OracleApp(load, _actions(), interval=0.05)
+
+        async def script(pilot):
+            assert app.refresh_timer is not None
+            for _ in range(40):
+                if len(calls) >= 2 and not app.query_one("#banner").display:
+                    break
+                await pilot.pause(0.05)
+                await app.workers.wait_for_complete()
+            assert len(calls) >= 2
+            assert "updated" in str(app.query_one("#fresh").content)
+
+        drive(app, script)
+
+    def test_a_snapshot_with_another_interval_rearms_the_timer(self, machine_world):
+        _tick(machine_world)
+        app = tui.OracleApp(
+            lambda: dashboard.load(oracle_home(), time.time(), lambda: {"projects": []}),
+            _actions(),
+            interval=1.0,
+        )
+        armed = []
+
+        async def script(pilot):
+            assert app.interval == 5.0
+            first = app.refresh_timer
+            armed.append(first)
+            await pilot.press("r")
+            await settle(app, pilot)
+            assert app.refresh_timer is first
+
+        drive(app, script)
+        assert armed[0] is not None
+
+    def test_the_indicator_ages_and_flags_a_stale_read(self, tmp_path):
+        clock = FakeClock()
+        app = tui.OracleApp(
+            lambda: dashboard.load(tmp_path, time.time(), lambda: {"projects": []}),
+            _actions(),
+            clock=clock,
+        )
+
+        async def script(pilot):
+            fresh = app.query_one("#fresh")
+            app.show_freshness()
+            assert str(fresh.content) == "updated 0s ago"
+            assert not fresh.has_class("stale")
+            clock.now += 7
+            app.show_freshness()
+            assert str(fresh.content) == "updated 7s ago"
+            clock.now += 10
+            app.show_freshness()
+            assert "STALE" in str(fresh.content)
+            assert fresh.has_class("stale")
+
+        drive(app, script)
+
+    def test_a_failed_refresh_keeps_the_last_rows_aging(self, tmp_path):
+        clock = FakeClock()
+        calls = []
+
+        def load():
+            calls.append(1)
+            if len(calls) > 1:
+                raise InvariantError("gone")
+            return dashboard.load(tmp_path, time.time(), lambda: {"projects": []})
+
+        app = tui.OracleApp(load, _actions(), clock=clock)
+
+        async def script(pilot):
+            clock.now += 20
+            await pilot.press("r")
+            await settle(app, pilot)
+            assert app.query_one("#banner").display
+            app.show_freshness()
+            assert "STALE" in str(app.query_one("#fresh").content)
+
+        drive(app, script)
+
+    def test_before_any_read_it_says_so(self):
+        def load():
+            raise InvariantError("broken")
+
+        app = tui.OracleApp(load, _actions())
+
+        async def script(pilot):
+            app.show_freshness()
+            fresh = app.query_one("#fresh")
+            assert "never updated" in str(fresh.content)
+            assert fresh.has_class("stale")
+
+        drive(app, script)
+
+
 # -- the CLI -------------------------------------------------------------------
 
 

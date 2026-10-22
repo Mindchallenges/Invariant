@@ -8,7 +8,8 @@ The oracle was built in seven increments, each landing on its own. All seven
 have shipped, so v1 is complete and this page describes the current
 behaviour. The follow-ons (phone push, a status line, web and artifact
 dashboards, more actions, an idle alert) are their own ideas, IDEA_013 to
-IDEA_018.
+IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose first
+increment has shipped ("Shipped: the web page" below, ADR-008).
 
 | # | Increment | Status |
 |---|---|---|
@@ -40,6 +41,9 @@ graph TD
         DASH[dashboard]
         ACTIONS[actions]
         TUI["tui (Textual, the [oracle] extra)"]
+        WEB["web (IDEA_023, ADR-008)"]
+        WEBPAGE[webpage]
+        DEVICES[devices]
     end
 
     subgraph core["core/"]
@@ -97,6 +101,15 @@ graph TD
     DASH --> SIGNALS
     DASH --> SCAN
     ACTIONS --> SIGNALS
+    CLI --> WEB
+    CLI --> DEVICES
+    WEB --> DASH
+    WEB --> DEVICES
+    WEB --> WEBPAGE
+    WEB --> SCAN
+    WEB --> WATCH
+    WEBPAGE --> WATCH
+    DEVICES --> INDEX
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -602,6 +615,16 @@ detail appears from the next refresh on. Either way the table refreshes on
 the snapshot's interval (5 s by default), in a worker thread, and keeps the
 cursor on the row it was on.
 
+**It always refreshes** (ADR-008 D6). The timer is armed when the app mounts,
+at 5 s, before the first read, and re-armed when a snapshot names another
+interval. A read that fails shows its error in the banner and leaves the
+timer running, so a first read that fails is retried on the next tick. A line
+under the banner says `updated N s ago`, every second: the rows' age when
+read (the snapshot's age, or 0 for an in-process scan) plus the time since.
+It turns red with `STALE` once that is older than three intervals.
+`dashboard.freshness` words it, and the web page and `oracle status` use the
+same rule.
+
 **The table.** Project by project: each live session, with its hosts nested
 under it (current first, then earlier ones), then the orphan hosts, the
 leaked worktrees and the error rows.
@@ -649,6 +672,86 @@ and an inert launcher), and the `osascript` guard stays the backstop.
 **Setting it up.** See the installation guide's "The Session Oracle" section:
 `pip install 'invariant[oracle]'` (or add Textual to a uv tool install), then
 `invariant oracle install` and `invariant oracle tui`.
+
+## Shipped: the web page (IDEA_023 increment 1)
+
+`invariant oracle web` serves the dashboard to a phone over the person's
+tailnet. It is read-only in this increment; confirm-first actions from the
+page are increment 2, and running it under the launchd agent is increment 3.
+The decisions are ADR-008's.
+
+| Module | Owns | Never does |
+|---|---|---|
+| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, with each project's quiet orphan hosts and leaked worktrees folded into one summary) and its freshness fields, `WebApp` (request in, response out, no socket), `WebServer` (one `ThreadingHTTPServer` per address), and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; act on a row; import `hosts/` or Textual |
+| `webpage` | The HTML: the self-contained page with its inline style and script, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup |
+| `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read |
+
+### Where it listens
+
+<!-- invariant: allow-privacy -->
+Only on the Mac's Tailscale addresses: those in `100.64.0.0/10` or
+`fd7a:115c:a1e0::/48`, as `tailscale ip` reports them, else as `ifconfig`
+lists them on a tunnel interface (`utun*`, `tailscale*`). Never the wildcard.
+With none, `oracle web` refuses to start (exit 1). `--allow-loopback` serves
+on `127.0.0.1` instead, only when no tailnet address exists. A request whose
+`Host` is not a bound address, a `*.ts.net` name or, on loopback,
+`localhost`, gets a 421 (ADR-008 D1, D2).
+
+### Who gets an answer
+
+| Request | Unpaired | Paired |
+|---|---|---|
+| `GET /pair?code=…` | the pairing form, code filled in; spends nothing | the same |
+| `POST /pair` (form, same origin) | redeems the code: a 303 to `/` with the cookie, else 403 | the same |
+| `GET /` | 401, a minimal "not paired" page | the page |
+| `GET /api/state` | 401, the same page | `{document, view, freshness}`; a read that raises is a 503 with its error, and the next read runs |
+| anything else | 401 | 404, or 405 for a method that is not `GET` |
+
+The token is the `invariant_oracle` cookie (`HttpOnly; SameSite=Strict`), or
+an `Authorization: Bearer` header. The token is checked before anything is
+read, so an unpaired request costs no scan. Every response is `no-store`,
+`nosniff` and `no-referrer`. The page's Content-Security-Policy admits only
+its own nonce-tagged script and style, and `connect-src 'self'`.
+
+### What the page shows
+
+`document` is `oracle list --json`'s, read through `dashboard.load` (the
+snapshot while fresh, else a scan, behind its banner). One read runs at a
+time. `view` is per project: its lines, from `dashboard.lines`, with the TUI's
+tones. A waiting session is red. The recommendation is shown as text: label,
+command, directory and detail. The quiet orphan hosts and leaked worktrees
+come last, behind one line such as "12 orphan hosts, 1 leaked worktree, no
+alert", which opens on a tap and stays open across refreshes. `freshness` is
+`{source, age, interval, stale_after, stale, text, served_at, banner}`.
+
+The script fetches `/api/state` on a timer at the snapshot's interval, with
+no meta refresh, so the scroll position survives. After a failure it waits
+the interval doubled per failure, up to 60 s, and it never stops. The top
+line says `updated N s ago` and turns red once the rows are older than
+`stale_after`, three intervals. The loop's logic is the `ORACLE` object,
+which touches no page, and the suite drives it under `node`, else macOS's
+`jsc`.
+
+### Pairing
+
+`oracle web pair` issues a 10-character code that lives 5 minutes
+(`--ttl`) and works once, and prints a link per tailnet address. Ten wrong
+codes in a row cancel every pending one. `oracle web devices` lists the
+paired devices and `oracle web revoke <id>` forgets one. The store is
+specified in [state_model.md](state_model.md), "User-level state".
+
+### The seams
+
+The CLI reaches discovery through `_oracle_web_addresses` and the server
+through `_oracle_web_server`, and the suite replaces both for every test
+(`RecordingWeb`). The `conftest.py` program guard refuses `tailscale`. Its
+socket guard refuses any `bind`, `connect`, `connect_ex` or `sendto` past
+loopback, and any reverse lookup, because macOS asks for Local Network
+permission the first time a process reaches past loopback. The server's bind
+skips the standard library's `getfqdn` for the same reason. A real serve on
+the tailnet may need that permission granted to the Python interpreter that
+serves it, in System Settings > Privacy & Security > Local Network (ADR-008
+D7).
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

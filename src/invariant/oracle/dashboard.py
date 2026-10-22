@@ -59,6 +59,9 @@ class Loaded:
     interval: float
     #: Empty while a watcher is behind the snapshot.
     banner: str = ""
+    #: How old the rows were when they were read: the snapshot's age, or 0 for
+    #: a scan run just now. A dashboard adds the time since the read.
+    age: float = 0.0
 
 
 def load(home: Path, now: float, scan: Callable[[], dict[str, Any]]) -> Loaded:
@@ -75,7 +78,7 @@ def load(home: Path, now: float, scan: Callable[[], dict[str, Any]]) -> Loaded:
     else:
         document = _read(Path(status["path"]))
         if document is not None:
-            return Loaded(document, SOURCE_SNAPSHOT, interval)
+            return Loaded(document, SOURCE_SNAPSHOT, interval, age=status["age"])
         reason = "its snapshot cannot be read"
     return Loaded(
         scan(),
@@ -86,6 +89,23 @@ def load(home: Path, now: float, scan: Callable[[], dict[str, Any]]) -> Loaded:
             f"'invariant oracle install' keeps one running."
         ),
     )
+
+
+def freshness(age: float | None, interval: float) -> tuple[str, bool]:
+    """``updated N s ago``, and whether the rows are stale.
+
+    Stale is :func:`~invariant.oracle.watcher.snapshot_status`'s rule: older
+    than :data:`~invariant.oracle.watcher.STALE_INTERVALS` intervals. ``age``
+    ``None`` is a dashboard that has never read the machine, which is stale.
+    Every dashboard, the TUI and the web page, says it this way.
+    """
+    if age is None:
+        return "never updated: no read has succeeded yet", True
+    stale = age > STALE_INTERVALS * interval
+    text = f"updated {age:.0f}s ago"
+    if stale:
+        text += f"; STALE: older than {STALE_INTERVALS} intervals of {interval:g}s"
+    return text, stale
 
 
 def _read(path: Path) -> dict[str, Any] | None:
