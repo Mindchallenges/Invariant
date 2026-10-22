@@ -434,6 +434,64 @@ class TestTheRealEvaluator:
         assert seen == [gate_world["worktree"]]
 
 
+class TestTheEvaluationTakesNoOptionalLock:
+    """The rules' git runs with ``GIT_OPTIONAL_LOCKS=0`` (ADR-007 D16).
+
+    A host is working in the worktree being evaluated, and a plain ``git
+    diff`` there may refresh the index stat cache and take ``index.lock``
+    under it. The oracle must be strictly read-only, so every git subprocess
+    the evaluation starts carries the variable — and the oracle's other git,
+    and the rest of the process, do not.
+    """
+
+    @pytest.fixture
+    def git_envs(self, monkeypatch):
+        from invariant.core import git as git_module
+
+        seen: list = []
+        real = git_module.subprocess.run
+
+        def record(argv, *args, **kwargs):
+            if argv and argv[0] == "git":
+                seen.append(kwargs.get("env"))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(git_module.subprocess, "run", record)
+        return seen
+
+    def row(self, world):
+        # From reviewing, the edge to committed owes docs.updated and the
+        # coverage floor, which ask git what changed: plain `git diff`.
+        put_pipeline(world["alpha"], "a-idle", methodology="tdd", state="reviewing")
+        [snapshot] = scan_all(world["index"], cache=ScanCache(probe=FakeProbe()))
+        [row] = [r for r in snapshot.rows if r.session_id == "a-idle"]
+        return snapshot, row
+
+    def test_every_git_the_evaluation_runs_carries_it(self, gate_world, git_envs):
+        _, row = self.row(gate_world)
+        git_envs.clear()
+        evaluate_row(row)
+        assert git_envs, "the evaluation asked git nothing; the test proves nothing"
+        assert len(git_envs) > 5
+        assert all(env is not None and env["GIT_OPTIONAL_LOCKS"] == "0" for env in git_envs)
+
+    def test_it_reaches_the_worker_thread(self, gate_world, git_envs):
+        snapshot, _ = self.row(gate_world)
+        git_envs.clear()
+        GateCache().refresh([snapshot], time.time(), wait=10)
+        assert git_envs
+        assert all(env is not None and env["GIT_OPTIONAL_LOCKS"] == "0" for env in git_envs)
+
+    def test_the_scan_and_the_process_are_untouched(self, gate_world, git_envs, monkeypatch):
+        import os
+
+        monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
+        _, row = self.row(gate_world)
+        assert git_envs and all(env is None for env in git_envs)
+        evaluate_row(row)
+        assert "GIT_OPTIONAL_LOCKS" not in os.environ
+
+
 # -- the watcher and the CLI ---------------------------------------------------
 
 

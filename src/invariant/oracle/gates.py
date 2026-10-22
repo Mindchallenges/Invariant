@@ -13,7 +13,9 @@ Four rules keep it from costing a project anything:
 * **Never a write.** The domain is built on an
   :class:`~invariant.core.store.InertStore` over the state root, so whatever a
   rule path touches is discarded, and the manifest is the session worktree's
-  own, the one ``pipeline gates`` run there would load.
+  own, the one ``pipeline gates`` run there would load. The rules' git runs
+  with ``GIT_OPTIONAL_LOCKS=0``, so a ``git diff`` cannot refresh the index
+  stat cache and take ``index.lock`` in a worktree a host is working in.
 * **Never while a turn runs.** The rules shell out to git in the session's
   worktree; a host mid-turn is using that worktree, and its own git commands
   must not meet ours. A session is evaluated when its turn has ended, or, with
@@ -41,6 +43,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..core import git
 from ..core.manifest import MANIFEST_RELPATH, Manifest
 from ..core.rules import Evaluated
 from ..core.store import InertStore
@@ -180,7 +183,8 @@ def evaluate_row(row: Row) -> Mapping[str, list[Evaluated]]:
 
     Over an inert store on the project's state root, so nothing is written, and
     with the worktree's own manifest, because the rules resolve the paths they
-    compare against the manifest's root.
+    compare against the manifest's root. Every git call the rules make takes
+    no optional lock (ADR-007 D16).
     """
     workdir = _workdir(row)
     if workdir is None:
@@ -188,12 +192,13 @@ def evaluate_row(row: Row) -> Mapping[str, list[Evaluated]]:
     manifest_root = workdir if (workdir / MANIFEST_RELPATH).is_file() else Path(row.root)
     manifest = Manifest.load(manifest_root)
     store = InertStore(Path(row.project))
-    session = SessionDomain(manifest, store=store).get(row.session_id)
-    return PipelineDomain(manifest, store=store).evaluate_gates_by_destination(
-        row.session_id,
-        session=session.to_dict() if session is not None else None,
-        cwd=workdir,
-    )
+    with git.without_optional_locks():
+        session = SessionDomain(manifest, store=store).get(row.session_id)
+        return PipelineDomain(manifest, store=store).evaluate_gates_by_destination(
+            row.session_id,
+            session=session.to_dict() if session is not None else None,
+            cwd=workdir,
+        )
 
 
 @dataclass

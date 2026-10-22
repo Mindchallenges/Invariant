@@ -6593,3 +6593,86 @@ class TestBaselineEntriesMatchHoweverTheyAreSpelled:
         verdict = self.verdict_for(ctx_factory, f"{legacy} 69.17\n./{legacy} 40\n")
         assert not verdict.ok
         assert "already recorded" in (verdict.detail or "")
+
+
+class TestReadsWithoutOptionalLocks:
+    """``without_optional_locks`` keeps a reader out of another process's index.
+
+    A plain ``git status`` or ``git diff`` may refresh the index's stat cache
+    as a side effect, which takes ``index.lock``. The oracle's gate cache asks
+    git about worktrees a host is working in, so it reads with
+    ``GIT_OPTIONAL_LOCKS=0`` (ADR-007 D16). The scope is a context variable,
+    so it reaches exactly the git calls made inside it, in the thread that
+    entered it, and nothing else in the process.
+    """
+
+    @pytest.fixture
+    def spy(self, monkeypatch):
+        from invariant.core import git
+
+        seen: list = []
+        real = git.subprocess.run
+
+        def record(argv, *args, **kwargs):
+            seen.append(kwargs.get("env"))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(git.subprocess, "run", record)
+        return seen
+
+    def test_outside_the_scope_git_inherits_the_environment(self, spy, tmp_path):
+        from invariant.core import git
+
+        git.is_repo(tmp_path)
+        git.staged_blob(tmp_path, "x")
+        assert spy == [None, None]
+
+    def test_inside_it_both_runners_turn_optional_locks_off(self, spy, tmp_path, monkeypatch):
+        from invariant.core import git
+
+        monkeypatch.setenv("SOME_MARKER", "kept")
+        with git.without_optional_locks():
+            git.is_repo(tmp_path)
+            git.staged_blob(tmp_path, "x")
+        assert len(spy) == 2
+        for env in spy:
+            assert env["GIT_OPTIONAL_LOCKS"] == "0"
+            assert env["SOME_MARKER"] == "kept"
+
+    def test_the_scope_ends_with_the_block_even_on_an_error(self, spy, tmp_path):
+        from invariant.core import git
+
+        with pytest.raises(RuntimeError), git.without_optional_locks():
+            raise RuntimeError("boom")
+        git.is_repo(tmp_path)
+        assert spy == [None]
+
+    def test_it_nests(self, spy, tmp_path):
+        from invariant.core import git
+
+        with git.without_optional_locks():
+            with git.without_optional_locks():
+                pass
+            git.is_repo(tmp_path)
+        assert spy[0]["GIT_OPTIONAL_LOCKS"] == "0"
+
+    def test_another_thread_is_not_in_the_scope(self, spy, tmp_path):
+        import threading
+
+        from invariant.core import git
+
+        with git.without_optional_locks():
+            worker = threading.Thread(target=git.is_repo, args=(tmp_path,))
+            worker.start()
+            worker.join()
+        assert spy == [None]
+
+    def test_the_process_environment_is_never_changed(self, tmp_path, monkeypatch):
+        import os
+
+        from invariant.core import git
+
+        monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
+        with git.without_optional_locks():
+            assert "GIT_OPTIONAL_LOCKS" not in os.environ
+            assert git.is_repo(tmp_path) is False

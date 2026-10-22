@@ -2,7 +2,8 @@
 
 - **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012,
   D5–D10 by increment 2, D11–D12 by increment 3, D13–D15 by increment 4,
-  and D16 by increment 5.
+  D16 by increment 5 (its read-only git amended by increment 6), and D17 by
+  increment 6.
   The later decisions are listed under "Still to decide", and each is
   recorded here when its increment lands. The status
   becomes Accepted when the oracle ships.
@@ -322,6 +323,23 @@ choices shape it.
   turn has ended, or, with no turn known or its host gone, after two quiet
   minutes. The alternative, evaluating every tick, was rejected for the same
   reason and for cost.
+- **Its git takes no optional lock** (added by increment 6). An idle turn is
+  not a promise: the person can type the next prompt while an evaluation
+  runs. A plain `git status` or `git diff` may refresh the index stat cache
+  as a side effect, and that takes `index.lock`, so the host's next `git add`
+  could fail on the oracle's lock. Every git call the evaluation makes
+  therefore runs with `GIT_OPTIONAL_LOCKS=0`, which git defines for exactly
+  this, a background reader. The scope is
+  `core/git.without_optional_locks()`, a context variable `_run` and
+  `_run_bytes` read, entered by `evaluate_row` in the worker thread. Two
+  alternatives were rejected. Setting it in `os.environ` would be
+  process-wide and racy across the worker threads, and would reach the
+  scan's and every other git in the process. Setting it in `core/git._run`
+  for every call would change the engine's own commands, which run in their
+  own turn in their own worktree, where refreshing the stat cache is the
+  ordinary, wanted behaviour and speeds the next `git status`; nothing there
+  was wrong. The scan needs no scope: its only git call is `worktree list`,
+  which takes no optional lock.
 - **Once per fingerprint, off the tick.** The fingerprint is the session's
   state and heartbeat, the pipeline's state and transition count, and the
   pipeline record's write time. Evaluation runs in daemon threads, at most two
@@ -338,11 +356,57 @@ choices shape it.
   is derived and rewritten every tick (D14). Persisting them would make a
   forecast look like a record.
 
+### D17 — The first daemon is a user LaunchAgent that runs the CLI
+
+The watcher is useful only while it runs, so increment 6 makes it the first
+long-lived process this library starts. On macOS that is a LaunchAgent in
+the person's GUI domain, `~/Library/LaunchAgents/dev.invariant.oracle.plist`,
+loaded with `launchctl bootstrap gui/<uid>`. A GUI-domain agent is what can
+post notifications as the logged-in user; a LaunchDaemon cannot.
+
+- **It runs the CLI, not a new entry point.** The plist's program is
+  `<python> -m invariant oracle watch --interval N`, so the daemon is exactly
+  the command a person can run by hand, with the same seams and the same
+  failure handling. `oracle/launchd` imports nothing else from the oracle.
+- **launchd's environment is minimal, so the plist is explicit.** launchd
+  starts an agent with a bare `PATH` and no shell profile. The interpreter is
+  absolute: `sys.executable` as it is, not resolved, because a virtual
+  environment's `python` is a symlink that finds its environment from its own
+  path. `-m invariant` needs no `PATH` at all. `PATH` is set to the
+  directories `git` and `osascript` are found in at install time, then
+  `/usr/bin:/bin:/usr/sbin:/sbin`, because the scan and the gate cache run
+  git and the notifier runs `osascript`. `INVARIANT_HOME` is pinned only when
+  it was set, so an unset one keeps meaning `~/.invariant` rather than
+  freezing a path. Both output streams go to `<oracle home>/oracle/watcher.log`,
+  whose directory `install` creates because launchd does not.
+- **An install can move.** An editable install, or a reinstalled tool, leaves
+  the plist naming an interpreter that is gone, and launchd then fails at every
+  login without a word. `doctor` adds a row when the plist exists, and `oracle
+  status` reports it; both read the plist only. The remedy is to run `install`
+  again, which replaces the agent.
+- **Replacing a loaded agent is bootout, wait, bootstrap.** launchd refuses
+  to bootstrap a label that is still loaded, and `bootout` returns before the
+  old process has gone, so the installer polls `launchctl print` for up to
+  five seconds before it bootstraps. `--dry-run` runs only that `print`, so
+  the calls it shows are exact, and changes nothing.
+- **launchctl is a seam, and the suite refuses the real one.** The installer
+  takes the program as an injected runner; the CLI reaches it through
+  `_oracle_installer`, which the suite replaces with a recording installer for
+  every test. The `conftest.py` guard that refused `osascript` (D13) now
+  refuses `launchctl` too, with no marker that admits it. It raises a
+  `BaseException`, so a broad `except Exception` in the code under test — the
+  watcher's notify path has one on purpose — cannot swallow the refusal; and
+  it reads the program from a bare string or path, an `executable=` override
+  and, best effort, a shell command string, not only an argument list.
+
+The alternatives were a cron entry or a login item. Cron restarts nothing that
+exits and runs without the GUI session; a login item is a GUI application
+concern. launchd's `KeepAlive` is the restart policy the watcher wants.
+
 ## Still to decide (later increments of IDEA_012)
 
 These are recorded so the record is complete. They are not decided yet.
 
 - **Actions are confirmed first**, run as subprocesses with the host markers
   stripped, and never answer a permission prompt.
-- **The first daemon** (launchd) and **the first optional dependency**
-  (Textual, as `invariant[oracle]`).
+- **The first optional dependency** (Textual, as `invariant[oracle]`).

@@ -5,6 +5,8 @@ person's identifier, which is the same rule the library's own privacy gate
 enforces on its consumers.
 """
 
+import os
+import shlex
 from pathlib import Path
 
 import pytest
@@ -169,6 +171,25 @@ def _no_real_notifier(monkeypatch):
     return recorder
 
 
+@pytest.fixture(autouse=True)
+def _no_real_launchd(monkeypatch, tmp_path_factory):
+    """No test loads, unloads or writes a real LaunchAgent (IDEA_012 increment 6).
+
+    ``oracle install``, ``uninstall`` and ``status``, and ``doctor``'s
+    interpreter check, reach launchd through one seam, ``_oracle_installer``.
+    It is replaced here suite-wide by an installer over a temporary
+    ``LaunchAgents`` directory and a recording launchctl, which this fixture
+    returns. The guard below refuses the real program as the backstop.
+    """
+    from invariant.oracle.launchd import recording_installer
+
+    installer = recording_installer(tmp_path_factory.mktemp("launchd") / "LaunchAgents")
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_installer", lambda: installer, raising=False
+    )
+    return installer
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
@@ -177,36 +198,120 @@ def pytest_configure(config):
     )
 
 
-def _program_of(args) -> str:
-    if isinstance(args, (str, bytes)):
-        first = args.split()[0] if args.split() else ""
+class RefusedProgram(BaseException):
+    """A test reached a program the suite never runs for real.
+
+    A ``BaseException`` and not an ``AssertionError``: code under test that
+    catches ``Exception`` broadly — the watcher's notify path does, on
+    purpose — would otherwise swallow the refusal and carry on as if the
+    program had failed normally.
+    """
+
+
+#: Never run, by any route. ``osascript`` alone can be admitted, per test.
+_REFUSED = ("osascript", "launchctl")
+
+#: Programs that run their ``-c`` argument as a command string.
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+#: Words that run the word after them as the program.
+_WRAPPERS = frozenset({"exec", "env", "command", "nohup", "time", "sudo"})
+
+#: Shell operators that start a new command.
+_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")"})
+
+
+def _word(value) -> str:
+    """One argument as text: a str, bytes, or any ``os.PathLike``."""
+    value = os.fspath(value)
+    return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+
+
+def _command_programs(command: str, depth: int) -> set[str]:
+    """Best effort: the program each command in a shell string starts."""
+    # shlex reads a newline as whitespace; to a shell it ends a command.
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        tokens = command.split()
+    programs: set[str] = set()
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token not in _SEPARATORS:
+            segment.append(token)
+            continue
+        words = [w for w in segment if "=" not in w.split("/")[0]]
+        while words and words[0] in _WRAPPERS:
+            words = [w for w in words[1:] if not w.startswith("-")]
+        if words:
+            programs |= _argv_programs(words, depth + 1)
+        segment = []
+    return programs
+
+
+def _argv_programs(argv: list, depth: int = 0) -> set[str]:
+    """The program ``argv`` starts, and what a ``sh -c`` in it would start."""
+    words = [_word(arg) for arg in argv]
+    if not words:
+        return set()
+    program = Path(words[0]).name
+    programs = {program}
+    if program in _SHELLS and depth < 3:
+        for position, word in enumerate(words[1:], start=1):
+            if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+                if position + 1 < len(words):
+                    programs |= _command_programs(words[position + 1], depth)
+                break
+    return programs
+
+
+def _programs_of(args, shell: bool = False, executable=None) -> set[str]:
+    """Every program a ``Popen(args, shell=…, executable=…)`` would start."""
+    if isinstance(args, (str, bytes, os.PathLike)):
+        args = [args]
     else:
-        first = next(iter(args), "")
-    first = first.decode() if isinstance(first, bytes) else str(first)
-    return Path(first).name
+        args = list(args)
+    if shell:
+        command = " ".join(_word(arg) for arg in args[:1])
+        programs = _command_programs(command, 0)
+    else:
+        programs = _argv_programs(args)
+    if executable is not None:
+        programs.add(Path(_word(executable)).name)
+    return programs
 
 
 @pytest.fixture(autouse=True)
 def _no_real_osascript(request, monkeypatch):
-    """No test runs ``osascript``, by any route, unless it says it means to.
+    """No test runs ``osascript`` or ``launchctl``, by any route.
 
     ``osascript`` opens Terminal windows (``session handoff``) and posts
-    notifications (the oracle). Every route to it is a seam the suite replaces,
-    and this is the backstop: ``subprocess.Popen`` — which ``run`` and every
-    other helper start through — refuses the program. A test that evaluates a
-    pure AppleScript expression on purpose carries ``real_osascript``.
+    notifications (the oracle); ``launchctl`` loads and unloads the oracle's
+    LaunchAgent. Every route to either is a seam the suite replaces, and this
+    is the backstop: ``subprocess.Popen`` — which ``run`` and every other
+    helper start through — refuses them, whether named in an argument list,
+    as a bare string or path, through ``executable=``, or inside a shell
+    command string (``shell=True``, ``sh -c``; best effort). A test that
+    evaluates a pure AppleScript expression on purpose carries
+    ``real_osascript``. Nothing admits ``launchctl``.
     """
-    if request.node.get_closest_marker("real_osascript"):
-        return
+    admitted = {"osascript"} if request.node.get_closest_marker("real_osascript") else set()
+    refused = set(_REFUSED) - admitted
     import subprocess
 
     real_init = subprocess.Popen.__init__
 
     def guarded(self, args, *rest, **kwargs):
-        if _program_of(args) == "osascript":
-            raise AssertionError(
-                f"a test ran osascript: {args!r}; replace the seam, or mark the "
-                f"test real_osascript if it evaluates a script with no effect"
+        hit = refused & _programs_of(
+            args, shell=bool(kwargs.get("shell")), executable=kwargs.get("executable")
+        )
+        if hit:
+            raise RefusedProgram(
+                f"a test ran {', '.join(sorted(hit))}: {args!r}; replace the seam"
+                + (", or mark the test real_osascript if it evaluates a script "
+                   "with no effect" if "osascript" in hit else "")
             )
         real_init(self, args, *rest, **kwargs)
 

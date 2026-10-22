@@ -16,7 +16,7 @@ description of the current behaviour.
 | 3 | Read-only scan, `classify`, `recommend`, `oracle list` | **shipped** |
 | 4 | Watcher, rising-edge de-dup ledger, notifier, `watch`, `notify-test` | **shipped** |
 | 5 | Gate cache for recommendation detail | **shipped** |
-| 6 | launchd `install` / `uninstall` | planned |
+| 6 | launchd `install` / `uninstall` / `status` | **shipped** |
 | 7 | Textual TUI behind the `invariant[oracle]` extra | planned |
 
 ## Where it sits
@@ -35,7 +35,7 @@ graph TD
         WATCH[watcher]
         GATES[gates]
         NOTIFY[notify]
-        LAUNCHD["launchd (planned)"]
+        LAUNCHD[launchd]
         TUI["tui (planned)"]
     end
 
@@ -80,8 +80,10 @@ graph TD
     GATES --> STORE
     GATES --> MANIFEST
     GATES --> RULES
+    GATES --> GIT
     SIGNALS -. reads the GateReport shape of .-> GATES
-    LAUNCHD -. planned .-> WATCH
+    CLI --> LAUNCHD
+    LAUNCHD -. its plist runs oracle watch .-> WATCH
     TUI -. planned .-> SCAN
 ```
 
@@ -456,7 +458,7 @@ prints, and keeps the answer in memory.
 
 | Rule | How |
 |---|---|
-| **Never a write** | The domains are built on an `InertStore` over the row's state root. The manifest is the session worktree's own (the main checkout's if the worktree has none), because the rules resolve the paths they compare against the manifest's root. The rules run with `cwd` set to the worktree, so their git questions are asked there. |
+| **Never a write** | The domains are built on an `InertStore` over the row's state root. The manifest is the session worktree's own (the main checkout's if the worktree has none), because the rules resolve the paths they compare against the manifest's root. The rules run with `cwd` set to the worktree, so their git questions are asked there, and inside `core/git.without_optional_locks()`, so every one runs with `GIT_OPTIONAL_LOCKS=0`: a plain `git diff` cannot refresh the index stat cache and take `index.lock` under the host working there (ADR-007 D16). |
 | **Never while a turn runs** | A host mid-turn is using that worktree, and its own git commands must not meet ours. A session is evaluated when its current host's `turn` is `ended`. With no turn known, or a running turn whose host is known to be gone, it is evaluated after 2 minutes without activity. A running turn on a live host, or one whose liveness is unknown, is never evaluated. |
 | **Only when something moved** | The fingerprint is the session's `state` and `heartbeat`, the pipeline's `state` and transition count, and the pipeline record's `st_mtime_ns`. Evidence is recorded without a transition, so the write time is what moves for a new test run or a doc read. The scan supplies all five (`PipelineView.transitions`, `written_ns`), so fingerprinting costs no extra read. |
 | **Skipped when there is nothing to ask** | A row that is not a session, has no pipeline or a terminal one, is stranded, or whose worktree (else root) is not a directory. |
@@ -500,6 +502,68 @@ warm, the same as without it, and a `watch --once` that waited for the gates
 took 0.12 s. The suite stalls an evaluation and checks that the tick still
 returns in under 2 s.
 
+## Shipped: the launchd agent
+
+### `oracle/launchd`
+
+The watcher is useful only while it runs, so on macOS it is a user
+LaunchAgent: `~/Library/LaunchAgents/dev.invariant.oracle.plist`, loaded into
+the person's GUI domain, `gui/<uid>`. It is the first long-lived process this
+library starts (ADR-007 D17).
+
+`plist_for(python, home, interval, path, pin_home)` builds the property list,
+and `plist_bytes` writes it with `plistlib`:
+
+| Key | Value | Why |
+|---|---|---|
+| `Label` | `dev.invariant.oracle` | One agent per user. |
+| `ProgramArguments` | `[<python>, -m, invariant, oracle, watch, --interval, N]` | The absolute interpreter that ran `install`, unresolved. A virtual environment's `python` is a symlink and finds its environment from its own path, so resolving it would lose the environment. `-m invariant`, not the console script, so nothing depends on `PATH`. |
+| `RunAtLoad`, `KeepAlive` | `true` | Starts at login and is restarted if it exits. |
+| `StandardOutPath`, `StandardErrorPath` | `<oracle home>/oracle/watcher.log` | Both streams. The watcher prints only ticks with news and failed ticks, so the log grows slowly. `install` creates the directory, because launchd does not. |
+| `EnvironmentVariables` | `PATH`, and `INVARIANT_HOME` only if it was set | launchd's `PATH` is minimal. This one is the directories `git` and `osascript` are found in now, then `/usr/bin:/bin:/usr/sbin:/sbin`. An unset `INVARIANT_HOME` stays unset, so it keeps meaning `~/.invariant`. |
+
+`LaunchdInstaller(agents_dir, uid, run, sleep)` owns the plist file and the
+`launchctl` calls. `launchctl` is reached only through `run`, an injected
+`(argv) -> (status, text)`; the CLI passes `run_launchctl`, which runs
+`/bin/launchctl`.
+
+| Operation | Calls |
+|---|---|
+| `install(plist)` | `print gui/<uid>/dev.invariant.oracle` to see whether it is loaded. If it is: `bootout` that service, then `print` until it is gone (up to 5 s), because `bootout` returns before the process has left and launchd refuses to bootstrap a label still loaded. Then the plist is written atomically and `bootstrap gui/<uid> <plist>` loads it. A refusal is a `LaunchdError` (exit 1) that names the plist. |
+| `uninstall()` | `print`; `bootout` and wait, if loaded; remove the plist, if present. Nothing installed is nothing to do. A `bootout` that fails because the agent already left is not an error. |
+| `--dry-run` of either | Only the `print`, so the steps reported are the ones a real run would make. No file is written, no directory created, nothing loaded or unloaded. |
+| `status()` | Whether the plist exists, whether `print` finds the agent, the interpreter it names and whether that still exists, and its interval. |
+| `interpreter_check()` | `doctor`'s row. Reads the plist only, asks launchd nothing. `None` with no plist. |
+
+`RecordingLaunchctl` is a fake launchd for tests: it records every call,
+keeps a loaded set, can refuse a verb, and can keep an agent "exiting" for a
+number of `print` calls after its `bootout`. `recording_installer(dir)` pairs
+it with a temporary directory and a sleep that does not sleep.
+
+### `invariant oracle install`, `uninstall` and `status`
+
+`install [--interval 5] [--dry-run]` writes and loads the agent; a second
+`install` replaces it cleanly. `uninstall [--dry-run]` unloads it and removes
+the plist. `status` reports the agent and the snapshot: the snapshot's age is
+its modification time (`watcher.snapshot_status`), and it is **stale** when it
+is older than three of its own intervals, or missing. `doctor` adds one row
+when the plist exists: `oracle agent interpreter`, failing when the
+interpreter has moved. See [cli.md](cli.md), "Oracle".
+
+The CLI reaches the installer through the `_oracle_installer` seam. The suite
+replaces it for every test with a recording installer over a temporary
+`LaunchAgents` directory, and the `conftest.py` guard makes `subprocess.Popen`
+refuse `launchctl` outright, with no marker that admits it. Real `launchctl`
+never runs in the suite.
+
+**The guard** raises `RefusedProgram`, a `BaseException`, so code under test
+that catches `Exception` (the watcher's notify path does, on purpose) cannot
+swallow it. It reads the program from an argument list, a bare string, bytes
+or a path (`os.fspath`), an `executable=` override, and, best effort, a shell
+command string: `shell=True`, or `sh`/`bash`/`zsh -c`, where each command's
+first word after assignments and `exec`/`env` wrappers is checked, one level
+of nested `sh -c` included.
+
 ## Known gap: a host rooted in another repository (BUG_040)
 
 A host session is attributed to the project its hooks resolve, and its
@@ -514,8 +578,6 @@ fixed; BUG_040 owns it.
 The plan approved on 2026-10-22 sets out the shape below. Each part is written
 up properly when it ships.
 
-- **launchd** (increment 6). A plist with an absolute interpreter and an
-  explicit PATH, installed through a seam. `doctor` checks the interpreter.
 - **TUI** (increment 7). A Textual app behind the `invariant[oracle]` extra.
   Every action asks for confirmation first, in a modal that shows the exact
   argv and cwd. It never answers a permission prompt.

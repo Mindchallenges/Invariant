@@ -46,8 +46,10 @@ Nothing reaches the engine another way.
   One store sits outside every repository and so outside this rule: the
   oracle's user-level directory (`$INVARIANT_HOME`, else `~/.invariant`;
   ADR-007). It holds which projects exist, plus the watcher's derived
-  snapshot and alert ledger, and nothing of any project's. Only `init`, the
-  SessionStart hook and the `oracle` commands write it.
+  snapshot, alert ledger and log, and nothing of any project's. Only `init`,
+  the SessionStart hook and the `oracle` commands write it. One file lies
+  outside both: `oracle install` writes, and `oracle uninstall` removes, the
+  LaunchAgent plist under `~/Library/LaunchAgents` (ADR-007 D17).
 
 ## Setup
 
@@ -133,6 +135,13 @@ invariant doctor
     a parked session is the designed resting state of a plan that spans several
     host sessions. A `doctor` that goes permanently red on every project which
     adopts a checklist is the gate that gets ignored, and then switched off.
+
+    When the oracle's LaunchAgent is installed, one more row, `oracle agent
+    interpreter`, fails if the interpreter its plist names no longer exists:
+    an editable install can move, and the agent would then fail at every
+    login without a word. The remedy is `invariant oracle install`. The row
+    reads the plist only and asks launchd nothing; with no plist there is no
+    row.
 
     The "hook shims actually run" row executes every installed shim, so it
     proves the shim resolves the CLI, the engine imports, the rules evaluate
@@ -849,19 +858,52 @@ invariant oracle notify-test [--json]
     Post one notification through the seam the watcher uses, to check that
     notifications reach you. A delivery failure exits 1 with the reason.
     JSON: {"sent": true}.
+
+invariant oracle install [--interval 5] [--dry-run] [--json]
+    Install the LaunchAgent that keeps `oracle watch --interval N` running
+    (macOS): write ~/Library/LaunchAgents/dev.invariant.oracle.plist, then
+    `launchctl bootstrap gui/<uid> <plist>`. The plist runs this
+    interpreter (absolute) with `-m invariant`, at load and kept alive, logs
+    both streams to <oracle home>/oracle/watcher.log, and carries an explicit
+    PATH that finds git and osascript, plus INVARIANT_HOME only if it is set.
+    An agent already loaded is booted out first, and install waits for it to
+    go, so a second install replaces the first cleanly. --dry-run prints the
+    plist and the launchctl calls it would make, and changes nothing; it asks
+    `launchctl print` whether the agent is loaded so the calls are exact. A
+    non-positive --interval exits 2; a launchctl refusal exits 1 and names
+    the plist. JSON: {"plist_path", "plist", "steps": [[argv]...],
+    "was_loaded", "dry_run", "wrote", "removed"}.
+
+invariant oracle uninstall [--dry-run] [--json]
+    `launchctl bootout gui/<uid>/dev.invariant.oracle` if it is loaded, then
+    remove the plist. Nothing installed is nothing to do (exit 0). --dry-run
+    prints what it would run and changes nothing. The watcher's files under
+    the oracle home are left; they are derived and safe to delete. JSON: as
+    install.
+
+invariant oracle status [--json]
+    Is the agent installed and loaded, does the interpreter its plist names
+    still exist, and how old is the watcher's snapshot. The snapshot is
+    STALE when it is older than three of its own intervals, or missing: no
+    watcher is writing it. Exit 0 whatever it finds: it is a query. JSON:
+    {"agent": {"plist_path", "installed", "loaded", "interpreter",
+    "interpreter_exists", "interval", "error"}, "snapshot": {"path",
+    "exists", "age", "interval", "stale", "watcher_pid"}}.
 ```
 
 The other two routes into the index are automatic: `init` (above) and the
 first SessionStart in a project, which `invariant hook session-start`
 registers after computing its response — reading first, locking only for a
 missing project, skipped for `doctor`'s probe, and swallowing any failure so
-the hook's output cannot change. The rest of the oracle's surface — `tui`,
-`install`, `uninstall` — is planned and not yet shipped.
+the hook's output cannot change. The rest of the oracle's surface, `tui`, is
+planned and not yet shipped.
 
 `oracle list` writes nothing anywhere: not to any project's state root, and
 not to the oracle home. `oracle watch` writes only its two derived files and
 their lock under the oracle home, never under a project's state root; both
-files are safe to delete. The signal and recommendation tables it prints from
+files are safe to delete. `oracle install` and `uninstall` are the only
+commands that write outside a repository and the oracle home: the one plist
+under ~/Library/LaunchAgents. The signal and recommendation tables it prints from
 are in [oracle.md](oracle.md).
 
 A gate refusal from `pipeline advance`, `session transition`, `session

@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import RefusedProgram
 from test_oracle_scan import (
     THE_HOST_PID,
     FakeProbe,
@@ -47,10 +48,13 @@ from invariant.oracle.recommend import row_label
 from invariant.oracle.scan import ScanCache
 from invariant.oracle.signals import Thresholds
 from invariant.oracle.watcher import (
+    DEFAULT_INTERVAL,
     LEDGER_FILE,
     SNAPSHOT_FILE,
     SNAPSHOT_VERSION,
+    STALE_INTERVALS,
     Watcher,
+    snapshot_status,
 )
 
 SINCE = "2026-10-22T10:00:00+00:00"
@@ -169,10 +173,18 @@ class TestNoTestReachesARealOsascript:
         assert isinstance(_no_real_notifier, RecordingNotifier)
 
     def test_running_osascript_is_refused(self):
-        with pytest.raises(AssertionError, match="osascript"):
+        with pytest.raises(RefusedProgram, match="osascript"):
             subprocess.run(["osascript", "-e", 'return "x"'], check=False)
-        with pytest.raises(AssertionError, match="osascript"):
+        with pytest.raises(RefusedProgram, match="osascript"):
             subprocess.run("/usr/bin/osascript -e 1", shell=True, check=False)
+
+    def test_the_watchers_broad_handler_cannot_swallow_the_refusal(self, one_project):
+        """The notify path catches ``Exception``; the refusal is not one."""
+        put_attention(one_project, "h-1", pid=THE_HOST_PID, turn="running",
+                      waiting=waiting())
+        real = OsascriptNotifier(quote=applescript_string)
+        with pytest.raises(RefusedProgram):
+            make_watcher(notifier=real).tick()
 
     def test_other_programs_still_run(self):
         assert subprocess.run(["true"], check=False).returncode == 0
@@ -481,6 +493,50 @@ class TestTheBudget:
         assert cold.elapsed < 2.0, cold.elapsed
         assert warm.elapsed < 2.0, warm.elapsed
         print(f"tick: cold {cold.elapsed:.3f}s warm {warm.elapsed:.3f}s")
+
+
+class TestSnapshotStatus:
+    """How old the last tick is, for ``oracle status`` (increment 6)."""
+
+    def write(self, body, age: float) -> Path:
+        path = oracle_home() / SNAPSHOT_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body if isinstance(body, str) else json.dumps(body), "utf-8")
+        then = time.time() - age
+        os.utime(path, (then, then))
+        return path
+
+    def test_no_snapshot_is_stale_with_no_age(self):
+        status = snapshot_status(oracle_home(), time.time())
+        assert status == {
+            "path": str(oracle_home() / SNAPSHOT_FILE), "exists": False, "age": None,
+            "interval": None, "stale": True, "watcher_pid": None,
+        }
+
+    def test_a_snapshot_within_three_intervals_is_fresh(self):
+        self.write({"interval": 5.0, "watcher_pid": 77}, age=14)
+        status = snapshot_status(oracle_home(), time.time())
+        assert status["exists"] and not status["stale"]
+        assert status["interval"] == 5.0 and status["watcher_pid"] == 77
+        assert 13 <= status["age"] <= 16
+
+    def test_beyond_three_intervals_it_is_stale(self):
+        assert STALE_INTERVALS == 3
+        self.write({"interval": 2.0}, age=7)
+        assert snapshot_status(oracle_home(), time.time())["stale"] is True
+
+    def test_the_real_tick_writes_a_fresh_one(self, one_project):
+        make_watcher().tick()
+        status = snapshot_status(oracle_home(), time.time())
+        assert status["stale"] is False
+        assert status["watcher_pid"] == os.getpid()
+
+    @pytest.mark.parametrize("body", ["not json", {"interval": "x"}, {"interval": -1}, []])
+    def test_an_unreadable_interval_falls_back_to_the_default(self, body):
+        self.write(body, age=12)
+        status = snapshot_status(oracle_home(), time.time())
+        assert status["interval"] == DEFAULT_INTERVAL
+        assert status["stale"] is False
 
 
 # -- the CLI -----------------------------------------------------------------

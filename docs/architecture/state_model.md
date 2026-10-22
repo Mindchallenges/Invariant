@@ -1656,6 +1656,7 @@ $INVARIANT_HOME, else ~/.invariant/
   oracle/               the watcher's derived state; safe to delete
     snapshot.json       the last tick's assessed view of every project
     alerts.json         the rising-edge de-dup ledger
+    watcher.log         the launchd agent's stdout and stderr
 ```
 
 ```json
@@ -1709,4 +1710,5 @@ tick.
 | **Atomic replace** | A reader, such as the planned TUI, never sees half a snapshot. |
 | **The ledger is locked** | The daemon and a `watch --once` run at the same time must not both announce one edge, so the read-modify-write takes `locks/alerts.lock`. The snapshot is not locked: the last writer wins, and either one is a whole tick. |
 | **Clock times, machine-local** | `generated` and `since` are UTC to the second, the attention sidecar's spelling, and `now` is the assessed epoch `oracle list --json` already prints. They are the second exception to "Storing what was measured, not when". They are scoped by where they live: outside every repository, never committed or rendered, and outside what `privacy.clean` screens (ADR-007 D14). |
+| **The log is output, not state** | `watcher.log` is where launchd sends the agent's two streams (`oracle install`, ADR-007 D17). Nothing reads it back; it holds the ticks with news and the failed ticks the loop survived. It is appended to, not rotated, and safe to delete. The agent's plist lives outside the home, in `~/Library/LaunchAgents`, because launchd reads it there. |
 | **`notified: false` is owed, not spent** | An edge seen with no notifier, or whose delivery failed, is delivered by the next tick that can deliver it. A key that is no longer seen is dropped, so the condition returning is a new edge. A project that could not be read keeps its keys. |

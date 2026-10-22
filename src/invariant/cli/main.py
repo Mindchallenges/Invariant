@@ -654,6 +654,13 @@ def cmd_doctor(args) -> int:
                 )
             )
 
+    # Machine-wide, so outside the manifest block: an installed oracle agent
+    # names an absolute interpreter, and an editable install can move. Reads
+    # the plist only; launchd is not asked.
+    agent = _oracle_installer().interpreter_check()
+    if agent is not None:
+        checks.append(("oracle agent interpreter", *agent))
+
     return _report_checks(args, checks)
 
 
@@ -2803,6 +2810,110 @@ def cmd_oracle_watch(args) -> int:
     return EXIT_OK
 
 
+def _real_oracle_installer():
+    from ..oracle.launchd import LaunchdInstaller, agents_dir
+
+    return LaunchdInstaller(agents_dir(), os.getuid())
+
+
+def _oracle_installer():
+    """The LaunchAgent installer ``oracle install``, ``uninstall``, ``status`` and
+    ``doctor`` reach launchd through.
+
+    A seam, like ``_oracle_notifier``: the suite replaces it with an installer
+    over a temporary directory and a recording launchctl, so no test loads or
+    writes a real agent.
+    """
+    return _real_oracle_installer()
+
+
+def _argv_line(argv: list[str]) -> str:
+    return " ".join(argv)
+
+
+def cmd_oracle_install(args) -> int:
+    """Install the LaunchAgent that keeps ``oracle watch`` running.
+
+    ``--dry-run`` prints the plist and the launchctl calls and changes nothing.
+    """
+    from ..oracle.home import HOME_ENV, oracle_home
+    from ..oracle.launchd import plist_for, search_path
+
+    if not args.interval > 0:
+        raise UsageError(f"--interval must be positive, not {args.interval:g}")
+    plist = plist_for(
+        os.path.abspath(sys.executable),
+        oracle_home(),
+        args.interval,
+        path=search_path(),
+        pin_home=bool(os.environ.get(HOME_ENV)),
+    )
+    result = _oracle_installer().install(plist, dry_run=args.dry_run)
+    steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    if args.dry_run:
+        text = (
+            f"would write {result.plist_path}:\n{result.xml.decode()}\n"
+            f"would run:\n{steps}"
+        )
+    else:
+        verb = "replaced" if result.was_loaded else "installed"
+        text = (
+            f"{verb} the oracle agent: {result.plist_path}\n{steps}\n"
+            f"  watcher log: {plist['StandardOutPath']}"
+        )
+    return emit(args, result.to_dict(), text)
+
+
+def cmd_oracle_uninstall(args) -> int:
+    """Boot the LaunchAgent out and remove its plist."""
+    result = _oracle_installer().uninstall(dry_run=args.dry_run)
+    steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    present = result.plist_path.exists()
+    if not result.steps and not present and not result.removed:
+        text = f"the oracle agent is not installed; nothing to do ({result.plist_path})"
+    elif args.dry_run:
+        text = "would run:\n" + (steps or "  nothing (not loaded)") + (
+            f"\nwould remove {result.plist_path}" if present else ""
+        )
+    else:
+        text = "\n".join(
+            filter(None, [steps, f"  removed {result.plist_path}" if result.removed else ""])
+        )
+    return emit(args, result.to_dict(), text)
+
+
+def cmd_oracle_status(args) -> int:
+    """Whether the agent is installed and loaded, and how old the snapshot is."""
+    from ..oracle.home import oracle_home
+    from ..oracle.watcher import STALE_INTERVALS, snapshot_status
+
+    agent = _oracle_installer().status()
+    snapshot = snapshot_status(oracle_home(), time.time())
+    if not agent.installed:
+        agent_line = f"not installed ({agent.plist_path})"
+    else:
+        agent_line = (
+            f"installed, {'loaded' if agent.loaded else 'NOT loaded'} ({agent.plist_path})"
+        )
+    lines = [f"  agent        {agent_line}"]
+    if agent.error:
+        lines.append(f"  interpreter  {agent.error}")
+    elif agent.interpreter is not None:
+        state = "ok" if agent.interpreter_exists else "MISSING"
+        lines.append(f"  interpreter  {state}  {agent.interpreter}")
+    if not snapshot["exists"]:
+        lines.append(f"  snapshot     no snapshot yet ({snapshot['path']})")
+    else:
+        freshness = (
+            f"STALE: older than {STALE_INTERVALS} intervals" if snapshot["stale"] else "fresh"
+        )
+        lines.append(
+            f"  snapshot     {freshness}; written {snapshot['age']:.0f}s ago, "
+            f"interval {snapshot['interval']:g}s ({snapshot['path']})"
+        )
+    return emit(args, {"agent": agent.to_dict(), "snapshot": snapshot}, "\n".join(lines))
+
+
 def cmd_oracle_notify_test(args) -> int:
     """Post one notification through the same seam the watcher uses."""
     from ..oracle.notify import Notification, NotifyError
@@ -3559,6 +3670,21 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_oracle_watch)
     q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
     q.set_defaults(func=cmd_oracle_notify_test)
+    q = oracle.add_parser(
+        "install", help="install the LaunchAgent that keeps `oracle watch` running"
+    )
+    q.add_argument("--dry-run", action="store_true",
+                   help="print the plist and the launchctl calls; change nothing")
+    q.add_argument("--interval", type=float, default=5.0, help="seconds between ticks")
+    q.set_defaults(func=cmd_oracle_install)
+    q = oracle.add_parser("uninstall", help="unload the LaunchAgent and remove its plist")
+    q.add_argument("--dry-run", action="store_true",
+                   help="print the launchctl calls; change nothing")
+    q.set_defaults(func=cmd_oracle_uninstall)
+    q = oracle.add_parser(
+        "status", help="is the agent loaded, and how old is the watcher's snapshot"
+    )
+    q.set_defaults(func=cmd_oracle_status)
 
     hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
     q = hooks.add_parser("install")

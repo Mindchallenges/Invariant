@@ -33,6 +33,7 @@ repeat of each live alert, and an unreadable ledger is replaced.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -58,9 +59,42 @@ LEDGER_VERSION = 1
 #: Seconds between ticks. A prompt is seen within one interval plus one tick.
 DEFAULT_INTERVAL = 5.0
 
+#: A snapshot older than this many intervals has no watcher behind it.
+STALE_INTERVALS = 3
+
 #: The sound a high or medium alert plays. A low one is a silent banner.
 ALERT_SOUND = "Glass"
 _AUDIBLE = (HIGH, MEDIUM)
+
+
+def snapshot_status(home: Path, now: float) -> dict[str, Any]:
+    """How old the last tick's snapshot is, and whether a watcher is behind it.
+
+    The age is the file's modification time, which the atomic replace sets on
+    every tick. A snapshot older than :data:`STALE_INTERVALS` of its own
+    ``interval`` is stale: the watcher that wrote it has stopped, or is stuck.
+    No snapshot at all is stale too. A body that cannot be read still has an
+    age; its interval falls back to :data:`DEFAULT_INTERVAL`.
+    """
+    path = home / SNAPSHOT_FILE
+    try:
+        written = path.stat().st_mtime
+    except OSError:
+        return {"path": str(path), "exists": False, "age": None, "interval": None,
+                "stale": True, "watcher_pid": None}
+    interval, pid = DEFAULT_INTERVAL, None
+    try:
+        document = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        document = None
+    if isinstance(document, dict):
+        recorded = document.get("interval")
+        if isinstance(recorded, (int, float)) and not isinstance(recorded, bool) and recorded > 0:
+            interval = float(recorded)
+        pid = document.get("watcher_pid")
+    age = max(0.0, now - written)
+    return {"path": str(path), "exists": True, "age": age, "interval": interval,
+            "stale": age > STALE_INTERVALS * interval, "watcher_pid": pid}
 
 
 def _stderr(message: str) -> None:

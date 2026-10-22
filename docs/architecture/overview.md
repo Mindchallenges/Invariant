@@ -30,6 +30,7 @@ graph TD
         OWATCH[watcher]
         OGATES[gates]
         ONOTIFY[notify]
+        OLAUNCHD[launchd]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -102,7 +103,9 @@ graph TD
     OGATES --> STORE
     OGATES --> MANIFEST
     OGATES --> RULES
+    OGATES --> GIT
     OSIG -. reads the GateReport shape of .-> OGATES
+    CLI --> OLAUNCHD
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -241,9 +244,22 @@ OGATES` and `OWATCH --> OGATES` are its two callers, through the CLI's
 `_oracle_gates` seam. The dotted `OSIG -. reads the GateReport shape of .->
 OGATES` is a type only: `recommend` takes the report as data and stays pure,
 and nothing the cache answers reaches `classify`, so it can never raise an
-alert (ADR-007 D8, D16). `PipelineDomain.relpath` is public for this reader:
+alert (ADR-007 D8, D16). `OGATES --> GIT` is one call,
+`git.without_optional_locks()`, around the evaluation: every git read the
+rules make in a worktree a host is working in runs with
+`GIT_OPTIONAL_LOCKS=0`, so it cannot take `index.lock` there. The scope is a
+context variable inside `core/git`, so the engine's own commands, which run
+in their own turn and worktree, are unchanged. `PipelineDomain.relpath` is public for this reader:
 the fingerprint watches the pipeline record's write time, and must name the
 file the domain writes rather than a second spelling of it.
+
+`OLAUNCHD` is the LaunchAgent that keeps `oracle watch` running (increment
+6). `CLI --> OLAUNCHD` is its only arrow: the module builds the plist with
+`plistlib` and runs `launchctl` through an injected runner, and imports
+nothing else from the oracle. The plist runs `python -m invariant oracle
+watch`, so the daemon is the CLI again rather than a new entry point, and no
+arrow from `OLAUNCHD` to `OWATCH` exists. The CLI reaches it through the
+`_oracle_installer` seam, which the suite replaces (ADR-007 D17).
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -592,7 +608,7 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Increments 1 to 5 deliver the modules below; the rest of
+project (IDEA_012). Increments 1 to 6 deliver the modules below; the rest of
 the package is planned in [oracle.md](oracle.md).
 
 | Module | Owns | Never does |
@@ -606,6 +622,7 @@ the package is planned in [oracle.md](oracle.md).
 | `watcher` | The tick: scan, assess, the atomic `oracle/snapshot.json`, and the rising-edge de-dup ledger `oracle/alerts.json` that decides what notifies; the loop that survives a failed tick | Decide what a signal means (`signals` does); know how a notification is delivered; write under a project's state root |
 | `gates` | `GateCache`: what each idle session's pipeline owes, evaluated by the domain over an inert store, off the tick, once per fingerprint, at most two at a time, with a timeout that keeps the last answer; `GateReport`, the data `recommend` reads | Write anything; evaluate while a turn runs; persist an answer; raise an alert |
 | `notify` | The `Notifier` protocol and `Notification`; `OsascriptNotifier`, with the quoting injected; `RecordingNotifier` for tests | Import `hosts/`; decide what deserves a notification |
+| `launchd` | The LaunchAgent: `plist_for` (absolute interpreter, explicit `PATH`, log under the home), `LaunchdInstaller` (install, reinstall, uninstall, status, the interpreter check `doctor` runs), `RecordingLaunchctl` for tests | Run `launchctl` except through its injected runner; import the watcher |
 
 ### `adapters/`
 
@@ -922,6 +939,10 @@ per repository:
   locks/alerts.lock         advisory lock for the alert ledger
   oracle/snapshot.json      the watcher's last tick; derived, safe to delete
   oracle/alerts.json        the rising-edge de-dup ledger; derived, safe to delete
+  oracle/watcher.log        the launchd agent's stdout and stderr
+
+~/Library/LaunchAgents/dev.invariant.oracle.plist
+                            the agent `oracle install` writes; `uninstall` removes it
 ```
 
 It holds no project's runtime state — only which projects exist, and what the

@@ -7,9 +7,44 @@ repository — a rule that crashes is worse than a rule that abstains.
 
 from __future__ import annotations
 
+import os
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+
+#: Whether the git calls made in this context must take no optional lock.
+_NO_OPTIONAL_LOCKS: ContextVar[bool] = ContextVar("git_no_optional_locks", default=False)
+
+
+@contextmanager
+def without_optional_locks() -> Iterator[None]:
+    """Run the git reads inside the block with ``GIT_OPTIONAL_LOCKS=0``.
+
+    A plain ``git status`` or ``git diff`` may refresh the index's stat cache
+    as a side effect, and that takes ``index.lock``. For a command run in its
+    own turn, in its own worktree, that is the wanted, ordinary behaviour. A
+    reader asking about a worktree somebody else is working in (the oracle's
+    gate cache, ADR-007 D16) must not take that lock under them.
+
+    The scope is a context variable rather than ``os.environ``: it reaches
+    exactly the git calls made inside the block, in the thread that entered
+    it, and changes nothing else in the process.
+    """
+    token = _NO_OPTIONAL_LOCKS.set(True)
+    try:
+        yield
+    finally:
+        _NO_OPTIONAL_LOCKS.reset(token)
+
+
+def _env() -> dict[str, str] | None:
+    """The environment for a git call: inherited, unless optional locks are off."""
+    if not _NO_OPTIONAL_LOCKS.get():
+        return None
+    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 
 
 def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
@@ -27,6 +62,7 @@ def _run(args: list[str], cwd: Path) -> tuple[int, str, str]:
             text=True,
             timeout=30,
             check=False,
+            env=_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return 1, "", "git unavailable"
@@ -49,6 +85,7 @@ def _run_bytes(args: list[str], cwd: Path) -> tuple[int, bytes]:
             capture_output=True,
             timeout=30,
             check=False,
+            env=_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return 1, b""
