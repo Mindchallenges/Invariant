@@ -102,6 +102,18 @@ def step_for(row: dict[str, Any]) -> Step | None:
     )
 
 
+def command_of(step: Step) -> tuple[Any, ...]:
+    """What confirming ``step`` agrees to run, and nothing it only says.
+
+    The kind, the ``argv``, the ``cwd``, the added environment, and for a
+    ``terminal`` step the session name the new host is launched under. The
+    label and the detail are left out: they describe the step, and the gate
+    detail in them moves while the command stays the same.
+    """
+    name = step.session_name if step.kind == TERMINAL else None
+    return (step.kind, step.argv, step.cwd, tuple(sorted(step.env.items())), name)
+
+
 def refusal(step: Step, row: dict[str, Any]) -> str | None:
     """Why ``step`` may not run from the dashboard, or ``None``."""
     if step.kind not in KINDS:

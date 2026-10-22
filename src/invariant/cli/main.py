@@ -3085,12 +3085,16 @@ def _web_port(port: int) -> int:
 def cmd_oracle_web(args) -> int:
     """Serve the dashboard on this Mac's Tailscale address, in the foreground.
 
-    Read-only: the page and its JSON, to paired devices only. Refuses to start
-    with no Tailscale address unless ``--allow-loopback``.
+    The page and its JSON, to paired devices only, and the TUI's confirm-first
+    actions, each confirmed on the page and audited. Refuses to start with no
+    Tailscale address unless ``--allow-loopback``.
     """
+    import threading
+
     from ..oracle.dashboard import load
     from ..oracle.devices import DeviceStore
     from ..oracle.web import LOOPBACK, WebApp, choose_bind
+    from ..oracle.webactions import AuditLog, RemoteActions
 
     port = _web_port(args.port)
     addresses = choose_bind(_oracle_web_addresses()(), allow_loopback=args.allow_loopback)
@@ -3098,10 +3102,18 @@ def cmd_oracle_web(args) -> int:
     cache = _oracle_cache()
     gates = _oracle_gates()
     devices = DeviceStore(index.home)
+    # The page's reads and an action's fresh read share one scan cache.
+    reading = threading.Lock()
+
+    def scan() -> dict:
+        with reading:
+            return _oracle_scan_document(index, cache, gates)
+
     app = WebApp(
         devices,
-        lambda: load(index.home, time.time(), lambda: _oracle_scan_document(index, cache, gates)),
+        lambda: load(index.home, time.time(), scan),
         addresses,
+        remote=RemoteActions(_oracle_actions(), scan, AuditLog(index.home)),
     )
     server = _oracle_web_server()(app, addresses, port)
     urls = server.start()

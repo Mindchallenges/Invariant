@@ -18,14 +18,15 @@ The store is ``<oracle home>/web/devices.json``. It is a source of truth, not
 derived state, so it lives outside the watcher's ``oracle/`` directory, which
 is safe to delete. Like the project index it refuses a newer version and a
 malformed shape instead of rewriting them, keeps keys it does not know, and
-is written under the home's lock. It is readable by its owner only.
+is written under the home's lock. It is readable by its owner only, from
+the moment it is created: ``web/`` is made ``0700`` and each write's temporary
+file ``0600`` before a byte goes into it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 import time
 from collections.abc import Callable
@@ -35,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import InvariantError, StateError, UsageError
+from .home import PRIVATE_FILE_MODE, private_dir
 from .index import HomeStore
 
 DEVICES_FILE = "web/devices.json"
@@ -109,7 +111,7 @@ class DeviceStore:
         token: Callable[[int], str] = secrets.token_urlsafe,
     ) -> None:
         self.home = Path(home)
-        self.store = HomeStore(self.home)
+        self.store = HomeStore(self.home, mode=PRIVATE_FILE_MODE)
         self.clock = clock
         self.token = token
 
@@ -148,14 +150,8 @@ class DeviceStore:
     # -- writes ----------------------------------------------------------
 
     def _locked(self):
+        private_dir((self.home / DEVICES_FILE).parent)
         return self.store.locked(DEVICES_FILE, {"version": VERSION})
-
-    def _close(self) -> None:
-        try:
-            os.chmod(self.home / "web", 0o700)
-            os.chmod(self.home / DEVICES_FILE, 0o600)
-        except OSError as exc:
-            raise StateError(f"cannot restrict {DEVICES_FILE} to its owner: {exc}") from exc
 
     def issue(self, name: str, ttl: float = PAIRING_TTL) -> Pairing:
         """A new one-time code for a device to be called ``name``."""
@@ -170,7 +166,6 @@ class DeviceStore:
             _checked(document)
             pairings = _live(document, now)
             pairings.append({"hash": _hash(code), "name": name, "expires": now + ttl})
-        self._close()
         return Pairing(code=code, name=name, expires=now + ttl)
 
     def redeem(self, code: str) -> tuple[Device, str]:
@@ -208,7 +203,6 @@ class DeviceStore:
                        "hash": _hash(token), "paired": _iso(now)}
                 devices.append(row)
                 outcome["device"], outcome["token"] = _device(row), token
-        self._close()
         if "error" in outcome:
             raise PairingError(outcome["error"])
         return outcome["device"], outcome["token"]
@@ -223,7 +217,6 @@ class DeviceStore:
             removed = [row for row in devices if row.get("id") == device_id]
             for row in removed:
                 devices.remove(row)
-        self._close()
         if not removed:
             raise UsageError(
                 f"no paired device has the id {device_id!r}; "

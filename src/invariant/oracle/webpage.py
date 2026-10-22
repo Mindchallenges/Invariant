@@ -14,8 +14,16 @@ at :data:`MAX_BACKOFF` — and the loop never stops. A line at the top says
 intervals, the watcher's own staleness rule, which a stalled refresh reaches
 by itself.
 
-The loop's logic is the ``ORACLE`` object, which touches no page, so the
-suite drives it under ``node``.
+**It acts only on a second, explicit confirm** (ADR-008 D8–D12). A row whose
+step is ``run`` or ``terminal`` has a button. It fetches ``/api/confirm`` and
+shows what the server says would run, word for word as the TUI's confirm, with
+Cancel focused; only the second button posts ``/api/act``, and that carries
+the row key and the confirm's nonce and nothing else. The result is polled
+from ``/api/job`` while the refresh loop goes on, and the device's recent
+actions come back with every refresh.
+
+The loop's logic and the small action helpers are the ``ORACLE`` object, which
+touches no page, so the suite drives it under ``node``.
 """
 
 from __future__ import annotations
@@ -61,6 +69,17 @@ details.noise summary { color: var(--dim); font-size: 13px; padding: 4px 0; curs
 form { display: grid; gap: 12px; max-width: 360px; margin-top: 16px; }
 input, button { font: inherit; padding: 10px; }
 input { text-transform: uppercase; letter-spacing: .1em; }
+button.act { margin-top: 6px; font-size: 13px; padding: 6px 10px; }
+#panel { position: fixed; left: 8px; right: 8px; bottom: 8px; max-height: 80vh; overflow: auto;
+         background: Canvas; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+         box-shadow: 0 4px 24px rgba(0,0,0,.3); }
+#panel h3 { margin: 0 0 8px; font-size: 15px; }
+pre.lines, pre.output { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px;
+                        background: rgba(127,127,127,.1); padding: 8px; border-radius: 4px; }
+pre.output { max-height: 40vh; overflow: auto; }
+.buttons { display: flex; gap: 12px; margin: 8px 0; }
+.refused, .failed, .failed summary { color: var(--red); }
+details.job summary { font-size: 13px; padding: 4px 0; cursor: pointer; }
 """
 
 _SCRIPT = """
@@ -104,14 +123,31 @@ const ORACLE = (function () {{
     }}
     return {{tick: tick, state: state}};
   }}
+  function actionBody(row, nonce) {{
+    return JSON.stringify({{row: row, nonce: nonce}});
+  }}
+  function actionLabel(kind) {{
+    return kind === "terminal" ? "open a session\u2026" : "run\u2026";
+  }}
+  function jobText(job) {{
+    if (job.state !== "done") return "running";
+    const took = " in " + Number(job.elapsed || 0).toFixed(1) + "s";
+    if (job.status === null || job.status === undefined) {{
+      return (job.ok ? "launched" : "FAILED") + took;
+    }}
+    return (job.ok ? "" : "FAILED: ") + "exit " + job.status + took;
+  }}
   return {{retryDelay: retryDelay, ageOf: ageOf, freshnessText: freshnessText,
-          makeLoop: makeLoop}};
+          makeLoop: makeLoop, actionBody: actionBody, actionLabel: actionLabel,
+          jobText: jobText}};
 }})();
 
 if (typeof document !== "undefined") {{
   const byId = (id) => document.getElementById(id);
   const openNoise = new Set();
+  const openJobs = new Set();
   let lastError = "";
+  let panelJob = null;
 
   function el(tag, cls, text) {{
     const node = document.createElement(tag);
@@ -138,7 +174,149 @@ if (typeof document !== "undefined") {{
       if (line.detail) next.appendChild(el("div", "detail", line.detail));
       card.appendChild(next);
     }}
+    if (line.action) {{
+      const button = el("button", "act", ORACLE.actionLabel(line.action));
+      button.addEventListener("click", () => openConfirm(line.row));
+      card.appendChild(button);
+    }}
     return card;
+  }}
+
+  function showPanel(children) {{
+    const panel = byId("panel");
+    panel.replaceChildren(...children);
+    panel.hidden = false;
+  }}
+
+  function closePanel() {{
+    panelJob = null;
+    const panel = byId("panel");
+    panel.hidden = true;
+    panel.replaceChildren();
+  }}
+
+  function closeButton(text) {{
+    const button = el("button", "cancel", text);
+    button.addEventListener("click", closePanel);
+    return button;
+  }}
+
+  async function openConfirm(row) {{
+    panelJob = null;
+    showPanel([el("div", "quiet", "asking the Mac what would run\u2026")]);
+    let data;
+    try {{
+      const response = await fetch("/api/confirm?row=" + encodeURIComponent(row),
+                                   {{cache: "no-store", credentials: "same-origin"}});
+      data = await response.json();
+    }} catch (err) {{
+      showPanel([el("p", "refused", "could not load the confirm: " + err.message),
+                 closeButton("close")]);
+      return;
+    }}
+    const parts = [el("h3", null, data.subject || row)];
+    if (data.refused) {{
+      parts.push(el("p", "refused", "Not run: " + data.refused), closeButton("close"));
+      showPanel(parts);
+      return;
+    }}
+    parts.push(el("pre", "lines", data.lines.join("\\n")));
+    if (!data.nonce) {{
+      parts.push(closeButton("close"));
+      showPanel(parts);
+      return;
+    }}
+    const buttons = el("div", "buttons");
+    const cancel = closeButton("Cancel");
+    const go = el("button", "go", data.kind === "terminal" ? "Open it" : "Run it");
+    go.addEventListener("click", () => {{
+      go.disabled = true;
+      cancel.disabled = true;
+      confirmAct(row, data.nonce);
+    }});
+    buttons.appendChild(cancel);
+    buttons.appendChild(go);
+    parts.push(buttons, el("div", "quiet", "Nothing runs until you press " + go.textContent +
+                              ". This confirm lasts " + Math.round(data.expires_in) + "s."));
+    showPanel(parts);
+    cancel.focus();
+  }}
+
+  async function confirmAct(row, nonce) {{
+    let response, data;
+    try {{
+      response = await fetch("/api/act", {{
+        method: "POST", cache: "no-store", credentials: "same-origin",
+        headers: {{"Content-Type": "application/json"}}, body: ORACLE.actionBody(row, nonce),
+      }});
+      data = await response.json();
+    }} catch (err) {{
+      showResult({{error: "the action may not have reached the Mac: " + err.message}});
+      return;
+    }}
+    if (response.status !== 202) {{
+      showResult({{error: data.error || "HTTP " + response.status}});
+      return;
+    }}
+    showResult({{job: data.job}});
+    if (data.job.state !== "done") pollJob(data.job.id);
+  }}
+
+  function showResult(result) {{
+    if (result.error) {{
+      showPanel([el("p", "refused", result.error), closeButton("close")]);
+      return;
+    }}
+    const job = result.job;
+    const failed = job.state === "done" && !job.ok;
+    const parts = [el("h3", null, job.subject),
+                   el("pre", "lines", job.argv.join(" ") + "\\nin " + job.cwd),
+                   el("div", failed ? "failed" : "", ORACLE.jobText(job))];
+    if (job.remote_control && job.state === "done" && job.ok) {{
+      parts.push(el("div", "quiet",
+                    "pick it up from Claude Code's Remote Control as " + job.remote_control));
+    }}
+    if (job.output) parts.push(el("pre", "output", job.output));
+    if (job.audit_error) parts.push(el("div", "refused", job.audit_error));
+    parts.push(closeButton("close"));
+    showPanel(parts);
+  }}
+
+  function pollJob(id) {{
+    panelJob = id;
+    const poll = async () => {{
+      if (panelJob !== id) return;
+      try {{
+        const response = await fetch("/api/job?id=" + encodeURIComponent(id),
+                                     {{cache: "no-store", credentials: "same-origin"}});
+        if (response.ok) {{
+          const job = await response.json();
+          if (panelJob !== id) return;
+          showResult({{job: job}});
+          if (job.state === "done") return;
+        }}
+      }} catch (err) {{}}
+      setTimeout(poll, 1000);
+    }};
+    setTimeout(poll, 1000);
+  }}
+
+  function renderJobs(jobs) {{
+    const fragment = document.createDocumentFragment();
+    if (jobs.length) fragment.appendChild(el("h2", null, "your actions"));
+    for (const job of jobs) {{
+      const failed = job.state === "done" && !job.ok;
+      const details = el("details", "job" + (failed ? " failed" : ""));
+      details.open = openJobs.has(job.id);
+      details.addEventListener("toggle", () => {{
+        if (details.open) openJobs.add(job.id); else openJobs.delete(job.id);
+      }});
+      details.appendChild(el("summary", null, job.subject + ": " + ORACLE.jobText(job)));
+      details.appendChild(el("pre", "lines", job.argv.join(" ") + "\\nin " + job.cwd));
+      if (job.output) details.appendChild(el("pre", "output", job.output));
+      fragment.appendChild(details);
+    }}
+    byId("jobs").replaceChildren(fragment);
   }}
 
   function render(data) {{
@@ -165,6 +343,7 @@ if (typeof document !== "undefined") {{
     }}
     if (!view.projects.length) fragment.appendChild(el("div", "quiet", "no projects registered"));
     byId("projects").replaceChildren(fragment);
+    renderJobs(data.jobs || []);
     byId("count").textContent = view.alerts ? view.alerts + " need you" : "nothing needs you";
     const banner = byId("banner");
     banner.textContent = data.freshness.banner || "";
@@ -225,7 +404,9 @@ def page(nonce: str, interval: float = DEFAULT_INTERVAL) -> str:
         "<header><h1>invariant oracle · <span id=\"count\">loading</span></h1>"
         "<div id=\"fresh\">never updated: no read has succeeded yet</div>"
         "<div id=\"banner\" hidden></div></header>"
+        "<section id=\"jobs\"></section>"
         "<main id=\"projects\"></main>"
+        "<div id=\"panel\" role=\"dialog\" hidden></div>"
     )
     script = _SCRIPT.format(
         max_backoff=f"{MAX_BACKOFF:g}",

@@ -910,20 +910,36 @@ invariant oracle status [--json]
     "exists", "age", "interval", "stale", "watcher_pid"}}.
 
 invariant oracle web [--port 7341] [--allow-loopback]
-    Serve the dashboard, read-only, to paired devices, in the foreground until
-    Ctrl-C (ADR-008). It listens only on this Mac's Tailscale addresses, found
-    with `tailscale ip`, else on ifconfig's tunnel interfaces, and never on
-    the wildcard. With no Tailscale address it exits 1, unless
-    --allow-loopback, which then serves on loopback alone. GET / is the page;
-    GET /api/state is {"document": <oracle list --json>, "view",
-    "freshness": {"source", "age", "interval", "stale_after", "stale",
-    "text", "served_at", "banner"}}. A request without a paired device's
-    token gets only a "not paired" page (401), and one whose Host is not this
-    server gets 421. The page refreshes itself on the snapshot's interval,
-    backs off after a failed fetch, and flags its rows STALE after three
-    intervals. A --port outside 1-65535 exits 2; an address it cannot bind
-    exits 1. macOS may ask once for Local Network permission for the Python
-    that serves it.
+    Serve the dashboard to paired devices, with the TUI's confirm-first
+    actions, in the foreground until Ctrl-C (ADR-008). It listens only on
+    this Mac's Tailscale addresses, found with `tailscale ip`, else on
+    ifconfig's tunnel interfaces, and never on the wildcard. With no
+    Tailscale address it exits 1, unless --allow-loopback, which then serves
+    on loopback alone. GET / is the page; GET /api/state is {"document":
+    <oracle list --json>, "view", "freshness": {"source", "age", "interval",
+    "stale_after", "stale", "text", "served_at", "banner"}, "jobs"}. A
+    request without a paired device's token gets only a "not paired" page
+    (401), and one whose Host is not this server gets 421. The page
+    refreshes itself on the snapshot's interval, backs off after a failed
+    fetch, and flags its rows STALE after three intervals.
+    A row whose step is run or terminal has a button. GET
+    /api/confirm?row=<key> shows exactly what the TUI's confirm shows (argv,
+    cwd, added environment; for a terminal the launch line and the Remote
+    Control name) and a nonce: single use, 120 s, bound to this device and
+    this row. POST /api/act {"row", "nonce"} (JSON or a form, at most 4096
+    bytes) runs it only with a same-origin Origin header, which is required
+    here: 202 with a job, polled at GET /api/job?id=<id> for its exit
+    status, output and elapsed time. The server scans afresh and derives the
+    step itself; nothing the client sends but the row key and the nonce is
+    read. It refuses what the TUI refuses (a row waiting on a prompt, an
+    argv that is not invariant, a missing cwd, an unknown kind) and a step
+    that changed since the confirm (409). It runs one action at a time per
+    row, four at most, and audits each in <oracle home>/web/actions.log. It
+    never answers a permission prompt. Each connection reads with a 10 s
+    timeout and at most 40 headers (431), and at most 32 are served at once.
+    A --port outside 1-65535 exits 2; an address it cannot bind exits 1.
+    macOS may ask once for Local Network permission for the Python that
+    serves it.
 
 invariant oracle web pair [--name device] [--ttl 300] [--port 7341] [--allow-loopback] [--json]
     Issue a one-time pairing code, valid --ttl seconds, and print it with a
@@ -953,8 +969,11 @@ not to the oracle home. Neither does `oracle tui` itself; what a confirmed
 action changes is what that command changes. `oracle watch` writes only its two derived files and
 their lock under the oracle home, never under a project's state root; both
 files are safe to delete. `oracle web` writes nothing
-but `web/devices.json` under the oracle home, when a device pairs; `pair` and
-`revoke` write that file too. `oracle install` and `uninstall` are the only
+but `web/devices.json` under the oracle home, when a device pairs, and
+`web/actions.log`, one line when an action from the page starts and one when
+it ends; what a confirmed action changes is what that command changes.
+`pair` and `revoke` write `web/devices.json` too. Both files are created
+owner-only. `oracle install` and `uninstall` are the only
 commands that write outside a repository and the oracle home: the one plist
 under ~/Library/LaunchAgents. The signal and recommendation tables it prints from
 are in [oracle.md](oracle.md).

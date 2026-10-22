@@ -35,6 +35,7 @@ adr/ADR-004-a-session-is-a-deliverable-set
 adr/ADR-005-session-handoff-launches-a-host
 adr/ADR-006-proved-not-fixed-is-a-pipeline-outcome
 adr/ADR-007-a-machine-wide-read-only-oracle
+adr/ADR-008-the-oracle-listens-on-the-tailnet-only
 ```
 
 ```{toctree}

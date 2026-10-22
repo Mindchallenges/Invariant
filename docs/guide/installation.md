@@ -130,7 +130,8 @@ you. See [the oracle's architecture page](../architecture/oracle.md).
 
 ### The dashboard on your phone, over Tailscale
 
-`invariant oracle web` serves a read-only copy of the dashboard from the Mac.
+`invariant oracle web` serves the dashboard from the Mac, with the same
+confirm-first actions as the TUI.
 It listens only on the Mac's Tailscale address, so only devices on your
 tailnet can reach it, and it refuses to start when Tailscale is not up. Each
 device must be paired once:
@@ -146,6 +147,16 @@ Open the link `pair` prints on the phone and press "Pair this device". The
 phone keeps a cookie from then on, and every other device gets only a "not
 paired" page. The page refreshes itself every few seconds and turns its
 "updated N s ago" line red if the rows stop moving.
+
+A row with something to run has a button. Pressing it shows exactly what
+would run, where, and with which variables, and nothing runs until you press
+Run it. The result (output, exit status, how long it took) appears on the
+page when the command ends, and your recent actions stay listed under the
+header. A step that resumes a session opens a Terminal window on the Mac,
+whether or not anyone is at it, running `claude --remote-control <name>`;
+pick that session up from Claude Code's Remote Control on the phone. The page
+refuses what the TUI refuses, and it never answers a permission prompt.
+Every action is logged to `~/.invariant/web/actions.log`.
 
 <!-- invariant: allow-privacy -->
 **macOS may ask for Local Network permission.** The first time the Python that

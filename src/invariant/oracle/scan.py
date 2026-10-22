@@ -259,16 +259,35 @@ class Row:
     @property
     def subject(self) -> str:
         """What a signal's key names: a session, a host, a worktree, a project."""
-        if self.session_id:
-            return self.session_id
-        if self.kind == ROW_HOST and self.hosts:
-            return f"host:{self.hosts[0].host_session_id}"
-        if self.kind == ROW_WORKTREE:
-            return f"worktree:{self.path}"
-        return "project"
+        host = self.hosts[0].host_session_id if self.hosts else None
+        return subject_of(self.kind, self.session_id, host, self.path)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def subject_of(kind: str, session_id: str | None, host: str | None, path: str | None) -> str:
+    """A row's subject: its session, else its first host, worktree or project."""
+    if session_id:
+        return session_id
+    if kind == ROW_HOST and host:
+        return f"host:{host}"
+    if kind == ROW_WORKTREE:
+        return f"worktree:{path}"
+    return "project"
+
+
+def row_key(row: dict[str, Any]) -> str:
+    """A row of the assessed document, named stably: ``project|subject``.
+
+    A row's position moves from one scan to the next; its project and subject
+    do not. This is what the web page's actions name a row by, so the server
+    finds the same row again in its own fresh read.
+    """
+    hosts = row.get("hosts") or []
+    host = hosts[0].get("host_session_id") if hosts else None
+    subject = subject_of(row.get("kind", ""), row.get("session_id"), host, row.get("path"))
+    return f"{row.get('project', '')}|{subject}"
 
 
 @dataclass

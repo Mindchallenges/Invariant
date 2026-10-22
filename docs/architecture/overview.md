@@ -36,6 +36,7 @@ graph TD
         OTUI["tui (Textual)"]
         OWEB["web (ADR-008)"]
         OPAGE[webpage]
+        OWACT[webactions]
         ODEV[devices]
     end
 
@@ -131,6 +132,14 @@ graph TD
     OWEB --> OWATCH
     OPAGE --> OWATCH
     ODEV --> OINDEX
+    ODEV --> OHOME
+    OWEB --> OWACT
+    OWEB --> OSIG
+    OWACT --> OACT
+    OWACT --> ODEV
+    OWACT --> OSCAN
+    OWACT --> OSIG
+    OWACT --> OHOME
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -315,8 +324,14 @@ and `OWEB --> OWATCH` and `OPAGE --> OWATCH` are the staleness constants.
 the home: `ODEV --> OINDEX` is `HomeStore`, the home's locked store, again.
 `CLI --> ODEV` is `oracle web pair`, `devices` and `revoke`. Address discovery
 and the server are reached through two CLI seams the suite replaces, and the
-web modules import neither `hosts/` nor Textual. In this increment no arrow
-leads from `OWEB` to `OACT`: the page reads and does not act.
+web modules import neither `hosts/` nor Textual. `OWEB --> OWACT` is the
+page's confirm-first actions (increment 2). `OWACT --> OACT` is the TUI's own
+`step_for`, `refusal`, `describe` and `perform`, so the page adds a transport
+and no rule. `OWACT --> OSCAN` is the stable row key the page names a row by.
+`OWACT --> OHOME` and `ODEV --> OHOME` are the owner-only files under the home:
+the audit log and the paired devices, created private (ADR-008 D9–D14). The
+action reaches the runner and the terminal launcher through the `Actions` the
+CLI builds, so still no `oracle → hosts` arrow appears.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -671,7 +686,7 @@ over Tailscale (IDEA_023) is shipping in increments; see
 
 | Module | Owns | Never does |
 |---|---|---|
-| `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant` | Create it; read anything in it |
+| `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant`; `private_dir` and `append_private`, which create a directory or file owner-only from the start | Create the home itself; read anything in it |
 | `index` | `projects.json` — every registered project once, keyed by its state root; register, remove, prune | Read or write anything under a project's state root; store a clock time |
 | `attention` | `<state_root>/attention/<host-id>.json` — what one host session is waiting on, how its turn ended, its pid; the write and clear rules per event | Decide what a hook event means (the host adapter does); lock; raise into a hook (the CLI guards every call) |
 | `scan` | One read-only snapshot per registered project: live sessions with their hosts nested, orphan hosts, leaked worktrees, and one error row per project or record that cannot be read; host liveness (pid exists, and is still the host); the cache that keeps a repeat scan cheap | Write anything; name a state; import `hosts/` (host facts arrive through the injected `HostProbe`) |
@@ -684,7 +699,8 @@ over Tailscale (IDEA_023) is shipping in increments; see
 | `dashboard` | What `oracle tui` shows: the snapshot while it is fresh, else an in-process scan behind a banner; each row as a line with its tone; the `ALERT` / `note` / `ok` flag `oracle list` prints too | Import Textual; run anything |
 | `actions` | A recommendation as a confirmable `Step`, the exact lines the confirm modal shows, the refusals (a waiting row, a non-`invariant` argv, a missing cwd), and the dispatch of a confirmed step to an injected runner or terminal launcher; `run_subprocess`, the real runner | Import `hosts/`; run a step nobody confirmed; answer a prompt |
 | `tui` | The Textual app: the table, its refresh, and the confirm, info and output modals. Imported only by `oracle tui` | Decide what `dashboard` and `actions` decide |
-| `web` | `oracle web`: the Tailscale-only bind and its discovery, the `Host` check, the page's view and freshness, `WebApp` (requests to responses) and `WebServer` (the stdlib server, one per address) | Bind the wildcard; answer an unpaired device with anything but "not paired"; act on a row |
+| `web` | `oracle web`: the Tailscale-only bind and its discovery, the `Host` check, the page's view and freshness, `WebApp` (requests to responses, the `Origin` rules) and `WebServer` (the stdlib server, one per address, with a socket timeout and caps on headers and connections) | Bind the wildcard; answer an unpaired device with anything but "not paired"; decide what may run |
+| `webactions` | The page's confirm-first actions over `actions`: the confirm view, the single-use nonce bound to device and row, the action re-derived from a fresh scan, one at a time per row, its polled result, and the audit log `web/actions.log` | Run an `argv`, `cwd` or environment a client sent; add a refusal of its own; answer a prompt |
 | `webpage` | The page's HTML, inline CSS and script, with its self-refreshing loop, and the small "not paired" and pairing pages | Load anything from another origin; turn a row's text into markup |
 | `devices` | `web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Store a token or code in the clear; let a device in when the file cannot be read |
 
@@ -1006,6 +1022,8 @@ per repository:
   oracle/watcher.log        the launchd agent's stdout and stderr
   web/devices.json          paired devices' token hashes and pending pairing
                             codes for `oracle web`; a source of truth, 0600
+  web/actions.log           one line per start and end of an action from the
+                            page; a record, never rewritten, 0600
   locks/devices.lock        advisory lock for its read-modify-write
 
 ~/Library/LaunchAgents/dev.invariant.oracle.plist

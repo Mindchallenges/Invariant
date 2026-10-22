@@ -8,8 +8,9 @@ The oracle was built in seven increments, each landing on its own. All seven
 have shipped, so v1 is complete and this page describes the current
 behaviour. The follow-ons (phone push, a status line, web and artifact
 dashboards, more actions, an idle alert) are their own ideas, IDEA_013 to
-IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose first
-increment has shipped ("Shipped: the web page" below, ADR-008).
+IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose first two
+increments have shipped: the page, and confirm-first actions from it
+("Shipped: the web page" below, ADR-008).
 
 | # | Increment | Status |
 |---|---|---|
@@ -43,6 +44,7 @@ graph TD
         TUI["tui (Textual, the [oracle] extra)"]
         WEB["web (IDEA_023, ADR-008)"]
         WEBPAGE[webpage]
+        WEBACT["webactions (IDEA_023 inc 2)"]
         DEVICES[devices]
     end
 
@@ -110,6 +112,14 @@ graph TD
     WEB --> WATCH
     WEBPAGE --> WATCH
     DEVICES --> INDEX
+    DEVICES --> HOME
+    WEB --> WEBACT
+    WEBACT --> ACTIONS
+    WEBACT --> DEVICES
+    WEBACT --> SCAN
+    WEBACT --> HOME
+    WEBACT --> SIGNALS
+    WEB --> SIGNALS
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -676,15 +686,16 @@ and an inert launcher), and the `osascript` guard stays the backstop.
 ## Shipped: the web page (IDEA_023 increment 1)
 
 `invariant oracle web` serves the dashboard to a phone over the person's
-tailnet. It is read-only in this increment; confirm-first actions from the
-page are increment 2, and running it under the launchd agent is increment 3.
-The decisions are ADR-008's.
+tailnet, with the TUI's confirm-first actions, each confirmed on the page
+(increment 2). Running it under the launchd agent is increment 3. The
+decisions are ADR-008's.
 
 | Module | Owns | Never does |
 |---|---|---|
-| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, with each project's quiet orphan hosts and leaked worktrees folded into one summary) and its freshness fields, `WebApp` (request in, response out, no socket), `WebServer` (one `ThreadingHTTPServer` per address), and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; act on a row; import `hosts/` or Textual |
-| `webpage` | The HTML: the self-contained page with its inline style and script, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup |
-| `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read |
+| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, each line naming its row by `row_key` and, when the app acts, its action; each project's quiet orphan hosts and leaked worktrees folded into one summary) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps), and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
+| `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, the action, the job and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
+| `webpage` | The HTML: the self-contained page with its inline style and script, the confirm panel and the action list, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce |
+| `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
 
 ### Where it listens
 
@@ -704,7 +715,10 @@ on `127.0.0.1` instead, only when no tailnet address exists. A request whose
 | `GET /pair?code=…` | the pairing form, code filled in; spends nothing | the same |
 | `POST /pair` (form, same origin) | redeems the code: a 303 to `/` with the cookie, else 403 | the same |
 | `GET /` | 401, a minimal "not paired" page | the page |
-| `GET /api/state` | 401, the same page | `{document, view, freshness}`; a read that raises is a 503 with its error, and the next read runs |
+| `GET /api/state` | 401, the same page | `{document, view, freshness, jobs}`; a read that raises is a 503 with its error, and the next read runs |
+| `GET /api/confirm?row=<key>` | 401 | what the confirm shows: `{row, subject, kind, lines, refused, nonce, expires_in}`; no `row` is a 400, a row not there a 404 |
+| `POST /api/act` (JSON or form: `row`, `nonce`) | 401 | needs a same-origin `Origin`: 202 with the job, else 403 (origin, nonce), 409 (refused, changed, busy), 503 (no read, no audit) |
+| `GET /api/job?id=<id>` | 401 | the job, to the device that started it; else 404 |
 | anything else | 401 | 404, or 405 for a method that is not `GET` |
 
 The token is the `invariant_oracle` cookie (`HttpOnly; SameSite=Strict`), or
@@ -732,11 +746,52 @@ line says `updated N s ago` and turns red once the rows are older than
 which touches no page, and the suite drives it under `node`, else macOS's
 `jsc`.
 
+### Actions from the page
+
+A row whose step is `run` or `terminal` has a button (`run…`, `open a
+session…`); an `info` step, a nested host line and a row with no step have
+none. The actions are the TUI's, under the TUI's rules (ADR-007 D18,
+ADR-008 D8–D13):
+
+| Step | What happens |
+|---|---|
+| press the button | `GET /api/confirm`: the server scans afresh, finds the row by its key, derives the step and answers `refusal`'s reason, or the `info` text, or `Actions.describe`'s lines (the exact `argv`, `cwd`, each added variable and the note that host markers and `INVARIANT_SESSION_ID` are removed) and a nonce. A terminal step adds the launch line and the Remote Control name. Cancel is focused; nothing has run |
+| press Run it (Open it) | `POST /api/act` with `{row, nonce}` and nothing else. The nonce is spent; the server scans again, checks every refusal again and that the step is the one confirmed (`command_of`), reserves the row, writes the audit start line, and answers 202 with a job. A thread runs `Actions.perform` |
+| afterwards | the panel polls `/api/job` every second until the job is done: `exit N in T s` and the output's last 64 KiB, or `launched` with the successor watch's verdict for a terminal. The state loop keeps refreshing throughout, and `/api/state` carries the device's last 20 jobs, so a reload still shows the result |
+
+| Refused when | Answer |
+|---|---|
+| the row waits on a prompt, the argv is not `invariant`, the cwd does not exist, the kind is unknown | the confirm shows the reason and offers no Run; an action is a 409 with it |
+| the nonce is unknown, spent, expired, another device's or another row's | 403; it is spent either way |
+| the step changed since the confirm, the row is gone, the row's last action still runs, four already run | 409 |
+| no `Origin`, a foreign one, or `Sec-Fetch-Site` other than `same-origin` | 403, before the body is read |
+| the audit start line cannot be written | 503; nothing ran |
+
+**The audit log.** `<oracle home>/web/actions.log`, owner-only from
+creation. It gets a JSON line when an action starts and one when it ends:
+when, which device, which row, the kind, the `argv` and `cwd`, and at the end
+the exit status, whether it succeeded and how long it took. It holds no
+token, nonce, environment or output. It is a record, not derived state, so
+it lives in `web/`. The format is in [state_model.md](state_model.md),
+"User-level state".
+
+**What the server never does.** It does not run an `argv`, `cwd` or
+environment a client sent, and it does not trust the snapshot for an action.
+It does not answer a permission prompt, and it does not run a step on a row
+that waits on one.
+
+**The listener.** Each connection reads with a 10-second socket timeout,
+carries at most 40 headers (431 past that), and at most 32 are served at
+once. More are closed unanswered. A malformed `Content-Length` is a 400
+(ADR-008 D14).
+
 ### Pairing
 
 `oracle web pair` issues a 10-character code that lives 5 minutes
 (`--ttl`) and works once, and prints a link per tailnet address. Ten wrong
-codes in a row cancel every pending one. `oracle web devices` lists the
+codes in a row cancel every pending one. The pairing form's `POST` refuses a
+foreign `Origin` and lets a missing one through: the code, not the cookie, is
+its credential (ADR-008 D11). `oracle web devices` lists the
 paired devices and `oracle web revoke <id>` forgets one. The store is
 specified in [state_model.md](state_model.md), "User-level state".
 
@@ -744,7 +799,9 @@ specified in [state_model.md](state_model.md), "User-level state".
 
 The CLI reaches discovery through `_oracle_web_addresses` and the server
 through `_oracle_web_server`, and the suite replaces both for every test
-(`RecordingWeb`). The `conftest.py` program guard refuses `tailscale`. Its
+(`RecordingWeb`). An action leaves through the TUI's own seams,
+`_oracle_runner` and `_handoff_launcher`, which the suite replaces with
+recorders, so no test runs a command or opens a window. The `conftest.py` program guard refuses `tailscale`. Its
 socket guard refuses any `bind`, `connect`, `connect_ex` or `sendto` past
 loopback, and any reverse lookup, because macOS asks for Local Network
 permission the first time a process reaches past loopback. The server's bind

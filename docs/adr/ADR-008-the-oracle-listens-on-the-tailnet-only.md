@@ -1,9 +1,9 @@
 # ADR-008 — The oracle listens on the tailnet only, to paired devices
 
 - **Status:** Accepted. D1–D7 are implemented by IDEA_023 increment 1 (the
-  read-only page). D8, the remote confirm, is decided in principle here and
-  implemented by increment 2; increment 3 runs the server under the launchd
-  agent.
+  read-only page). D8, the remote confirm, and D9–D14, its details and the
+  listener's hardening, are implemented by increment 2. Increment 3 runs the
+  server under the launchd agent.
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. It amends ADR-007 in two places: the oracle gains a
   network listener, and D18's confirm-first actions will gain a second surface
@@ -182,17 +182,134 @@ first serve. It must be allowed, or the phone cannot connect. It is granted
 or revoked in System Settings > Privacy & Security > Local Network. Loopback
 needs no permission. The setup guide says so.
 
-### D8 — The remote confirm (increment 2, decided in principle)
+### D8 — The remote confirm adds a transport, not a rule
 
-The page will act through `oracle/actions`, the TUI's own `refusal` and
-`Actions.perform`, and add a transport and no new rules. A `GET` that shows
-the confirm returns the exact `argv`, `cwd` and added environment, as the TUI
-modal does, plus a nonce bound to that step and that device. It is single
-use, short-lived and kept in the server's memory. The confirm is a `POST`
-carrying it, same-origin, with the `SameSite=Strict` cookie. A replayed or
-forged confirm finds no nonce and runs nothing, and a confirm sent twice runs
-once. Nothing on the page can answer a permission prompt. Increment 2 records
-the details.
+The page acts through `oracle/actions`: the TUI's own `step_for`, `refusal`,
+`Actions.describe` and `Actions.perform`. A `GET` that shows the confirm
+returns the exact `argv`, `cwd` and added environment, the lines the TUI modal
+prints, plus a nonce bound to that step and that device. It is single use,
+short-lived and kept in the server's memory. The confirm is a `POST` carrying
+it, same-origin, with the `SameSite=Strict` cookie. A replayed or forged
+confirm finds no nonce and runs nothing, and a confirm sent twice runs once.
+Nothing on the page can answer a permission prompt: there is no route to one,
+and `refusal` refuses any runnable step on a row that waits on one. The
+transport is `oracle/webactions`. D9–D14 are its details.
+
+### D9 — The server derives the step; the client names only a row
+
+An action names its row by a key that survives a rescan, `project|subject`
+(`scan.row_key`, the subject a signal's key already uses), not by its position
+on the page. The server reads the machine afresh, an in-process scan through
+the same path as `oracle list` and not the snapshot, which can be 15 seconds
+old. It finds the one row with that key and derives the step from it, for the
+confirm and again for the action. Two rows with one key, or none, is "not
+there". The action's body is `{row, nonce}`. Any `argv`, `cwd`, `env` or
+`kind` a client adds is never read.
+
+The confirm remembers what it agreed to run: the kind, `argv`, `cwd`, added
+environment and, for a terminal, the session name (`actions.command_of`). When
+the fresh step at action time differs, nothing runs and the page is told to
+look again. The label and the gate detail are left out of that comparison,
+because they describe the step and move while the command stays the same.
+Every refusal is checked again at action time too. A row that started
+waiting on a prompt between the confirm and the press is refused then.
+
+### D10 — The nonce, the origin and one action at a time
+
+- **Nonce.** 24 random bytes, issued only with a confirm that may run (never
+  for an `info` step or a refused one), bound to the device's id and the row
+  key, good for 120 seconds, and kept in memory (at most 64; the oldest is
+  dropped first). The first action that presents it spends it, whatever
+  happens next. A nonce shown by the wrong device is spent by that attempt
+  too, so a leaked one is spent when somebody tries it, not kept for later. A server
+  restart forgets every nonce, which only means opening the confirm again.
+- **Origin is required.** An action `POST` must carry an `Origin` naming
+  this server, scheme `http`, host and port exactly. A missing `Origin` is
+  refused here, unlike on `/pair` (D11). A browser sends `Origin` with every
+  `POST` a page makes, its own origin's included, so a request without one
+  did not come from the page. Where a browser sends `Sec-Fetch-Site`,
+  anything but `same-origin` is refused too. The paired token is checked
+  before all of this, so an unpaired request still learns nothing.
+- **The body** is JSON or a form, at most 4096 bytes, with string `row` and
+  `nonce`. Anything else is a 400, 413 or 415, and nothing runs.
+- **One at a time per row.** An action on a row whose last action is still
+  running is refused, and at most four run at once across rows. That holds
+  across devices too. A double tap therefore runs once: the second press
+  finds its nonce spent, or the row busy.
+- **Results are polled.** The action answers 202 at once with a job. The
+  command runs in its own thread, so a long run blocks no request, and `GET
+  /api/job?id=…` returns its state, exit status, output (its last 64 KiB) and
+  elapsed time, to the device that started it and no other. The device's
+  last 20 actions come back with every `/api/state`, so the page keeps
+  refreshing while an action runs or after it has finished, and a reload
+  still shows the result.
+
+### D11 — `/pair` keeps its no-`Origin` allowance; an action does not
+
+`POST /pair` refuses a foreign `Origin` but lets a missing one through. A
+cross-site forgery of the pairing form could at most make the victim's
+browser redeem a code, and only the Mac's `oracle web pair` issues codes. An
+attacker who does not have a live code can do nothing with the form. One who
+does could pair their own device directly, so a forged form gains them
+nothing. The code is the credential, and it is single-use and expires. Older
+browsers, `curl` and some privacy modes send no `Origin` on a form `POST`, and
+pairing should not fail for them. An action is different: its credential
+is the ambient cookie, which a forged request would carry. So there the
+missing `Origin` is refused (D10), together with the nonce, which is the real
+proof that the request came from the confirm.
+
+### D12 — A terminal step is offered from the page
+
+The Mac may have nobody at it, and a `terminal` step opens a window there. It
+is offered anyway, under the same confirm, because that is its value from a
+phone. The window runs `claude --name <session> --remote-control <session>`,
+and the session it starts can be picked up from the phone through Claude
+Code's Remote Control. The confirm says so: the exact launch line, that the
+window opens on the Mac whether or not anyone is at it, and the name to look
+for in Remote Control. The launch goes through `_handoff_launcher` and counts
+only once the successor watch sees the new `claude` alive (BUG_075). The
+watch's verdict is the job's result on the page: "claude (pid N) is running
+<name>", or the failure with the line to run by hand. Not offering it would
+leave a parked session unrecoverable from the phone, which is the case
+IDEA_023 exists for.
+
+### D13 — An audit line per action, as a record
+
+Each action from the page appends two JSON lines to `<oracle home>/web/actions.log`,
+one at its start and one at its end. Each line holds `at` (UTC, to the
+second), `event`, `job`, `device` and `device_name`, `row`, `kind`, `argv` and
+`cwd`, and the end adds `exit` (`null` for a terminal), `ok` and `elapsed`.
+It holds no token, nonce, environment or output.
+
+- **A record, not derived state.** Nothing else can say later what was run from
+  the phone, so the log lives in `web/`, beside the paired devices, and not
+  in the watcher's `oracle/`, which is safe to delete. Nothing reads it back,
+  and it is appended to and never rewritten or rotated. A line is about 300
+  bytes.
+- **No record, no action.** If the start line cannot be written, the action
+  is refused before it runs (503). An end line that cannot be written is
+  reported on the job instead.
+- **Two lines rather than one.** A server killed mid-run still leaves the
+  start line.
+- **Clock times, machine-local.** This is ADR-007's D14 exception again: the log lives under the home and is never committed.
+
+### D14 — The listener resists slow and greedy clients; private files are born private
+
+- **A socket timeout per request**, 10 seconds between reads, so a client
+  that sends a request a byte at a time ties up a thread for no longer than
+  that.
+- **At most 40 headers.** The standard library's cap is 100. A browser sends
+  about a dozen, so more is a 431.
+- **At most 32 connections at once.** One more is closed without an answer,
+  so many slow clients cannot pile up threads.
+- **A malformed `Content-Length`** is a 400 rather than an exception.
+- **Owner-only from creation.** `web/` is made `0700` with `mkdir`'s mode,
+  and narrowed first if an older build made it wider. Each `devices.json`
+  write creates its temporary file `0600` (`JsonStore(mode=…)`, with
+  `O_EXCL`, after removing a stale one) before a byte goes in. The audit log
+  is opened `O_APPEND | O_CREAT | O_NOFOLLOW` with mode `0600`. Nothing is
+  created with the process default and narrowed by `chmod` after the write,
+  which would leave it readable in between.
 
 ## Alternatives rejected
 
@@ -210,5 +327,14 @@ the details.
 - **A token in the URL.** It would end up in history, in screenshots and in
   any `Referer`. A cookie the script cannot read (`HttpOnly`) is the smaller
   exposure.
+- **Trusting the snapshot for an action.** It is a file anybody with the
+  user's rights can write, and it can be 15 seconds old. The confirm and the
+  action read the machine afresh (D9).
+- **Running the argv the page sent.** It would make the page's script, and
+  anything that can forge a request, the authority on what runs. The page
+  names a row, and the server decides (D9).
+- **A synchronous action.** A merge or a test run can take minutes, and the
+  phone's request would time out first. The 202-and-poll design (D10) keeps
+  every request short.
 - **Long-lived codes or reusable links.** A code copied once into a chat would
   pair any device later. Single use and 5 minutes bound that exposure.

@@ -1657,8 +1657,9 @@ $INVARIANT_HOME, else ~/.invariant/
     snapshot.json       the last tick's assessed view of every project
     alerts.json         the rising-edge de-dup ledger
     watcher.log         the launchd agent's stdout and stderr
-  web/                  the web page's paired devices; NOT derived (0700)
+  web/                  the web page's records; NOT derived (0700)
     devices.json        token hashes and pending pairing codes (0600)
+    actions.log         what the page ran: a start and an end line each (0600)
   locks/devices.lock    advisory lock for its read-modify-write
 ```
 
@@ -1736,7 +1737,29 @@ make it again.
 |---|---|
 | **Hashes only** | A device's token (256 random bits) and a pairing code are stored as their SHA-256, so the file is not a credential. The token is shown to nobody; the code only to the person who ran `pair`. |
 | **Single-use, short-lived codes** | A code is removed by the redeem that spends it, and expired ones are dropped on every write. `failed` counts wrong codes in a row; at ten every pending code is cancelled, and a good redeem resets it. |
-| **Owner-only** | The file is `0600` and `web/` is `0700`, set after every write. |
+| **Owner-only from creation** | `web/` is created `0700` (and narrowed first if an older build made it wider), and each write's temporary file is created `0600`, exclusively, before it is renamed over the file. Nothing is created with the process default and narrowed afterwards, so the file is never readable by anyone else, not even briefly (ADR-008 D14). |
 | **Locked writes, refused shapes** | `issue`, `redeem` and `revoke` take `locks/devices.lock` through `HomeStore`. Like the index, a newer `version`, a non-object or a malformed list is refused rather than rewritten, and unknown keys survive. |
 | **Fails closed** | `verify`, the one read on every request, answers "nobody" when the file cannot be read, so a broken store locks devices out rather than letting one in. |
 | **Clock times, machine-local** | `paired` (UTC ISO, to the second) and `expires` (epoch seconds) are the D14 exception again: under the home, never committed or rendered. |
+
+### The web actions' audit log
+
+Each action confirmed on the web page (IDEA_023 increment 2, ADR-008 D13)
+appends two lines to `<oracle home>/web/actions.log`, one when it starts and
+one when it ends:
+
+```json
+{"at": "<iso>", "event": "start", "job": "<id>", "device": "<8 hex>",
+ "device_name": "<--name>", "row": "<project key>|<subject>", "kind": "run",
+ "argv": ["invariant", "session", "merge", "--id", "<session>"], "cwd": "<dir>"}
+{"at": "<iso>", "event": "done", "job": "<id>", "device": "<8 hex>", "...": "as above",
+ "exit": 0, "ok": true, "elapsed": 1.234}
+```
+
+| Property | Why |
+|---|---|
+| **A record, not derived** | Nothing else can say afterwards what was run from the phone, so the log sits in `web/` beside the paired devices, not in the watcher's `oracle/`. Nothing reads it back. It is appended to and never rewritten, rotated or locked: one process writes it, and each line is a single `O_APPEND` write. |
+| **No record, no action** | The start line is written before the action runs. If it cannot be, the action is refused and nothing runs. A server killed mid-run therefore still leaves the start line. An end line that cannot be written is reported on the page's job. |
+| **No secrets** | No token, nonce, environment or output: the device by id and name, the row by its key, and the command by its `argv` and `cwd`. `exit` is `null` for a terminal step, which has no exit status. |
+| **Owner-only from creation** | Opened `O_APPEND \| O_CREAT \| O_NOFOLLOW` with mode `0600` in a `0700` `web/`, so a symbolic link planted in its place is refused rather than followed. |
+| **Clock times, machine-local** | `at` is UTC to the second: ADR-007's D14 exception again, under the home and never committed. |

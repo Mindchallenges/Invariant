@@ -134,8 +134,12 @@ class PreservesUnknownKeys:
 class JsonStore:
     """A directory of JSON documents addressed by relative path."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, mode: int | None = None) -> None:
         self.root = Path(root)
+        #: The permission bits a written file is CREATED with, or ``None`` for
+        #: the process default. A private document is never readable by
+        #: anyone else, not even between its creation and a later ``chmod``.
+        self.mode = mode
 
     # -- paths ---------------------------------------------------------
 
@@ -195,7 +199,7 @@ class JsonStore:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            with tmp.open("w", encoding="utf-8") as handle:
+            with self._create(tmp) as handle:
                 json.dump(data, handle, indent=2, sort_keys=True)
                 handle.write("\n")
                 handle.flush()
@@ -203,6 +207,15 @@ class JsonStore:
             os.replace(tmp, path)
         except OSError as exc:
             raise StateError(f"cannot write {rel}: {exc}") from exc
+
+    def _create(self, tmp: Path):
+        if self.mode is None:
+            return tmp.open("w", encoding="utf-8")
+        # A temporary file left by a crashed write keeps its own mode through
+        # a truncating open, so it is removed and the new one made exclusively.
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, self.mode)
+        return os.fdopen(fd, "w", encoding="utf-8")
 
     def delete(self, rel: str) -> bool:
         path = self._path(rel)
