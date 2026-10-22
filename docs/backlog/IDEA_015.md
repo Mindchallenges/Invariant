@@ -29,6 +29,12 @@ renders the same rows, states and recommended commands.
 * Publishing is off by default. Turning it off stops all outbound traffic.
 * The web page is read-only in this idea. Acting from the web is out of scope.
 
+**Route chosen for now (2026-10-22):** for remote access the user chose the
+local plus Tailscale route, IDEA_023: a page served from the Mac over the
+private tailnet, so session data never leaves their devices, with the TUI's
+confirm-first actions. This idea is not dropped. It stays open as the
+hosted alternative.
+
 **Risks / open questions:**
 
 * This is the first time invariant sends state off the machine. It needs its
