@@ -3,9 +3,17 @@ id: IDEA_020
 type: idea
 title: Warn before a gated-role agent is dispatched in a session with no pipeline
   running
-status: proposed
+status: in_progress
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: user approved the ordered fix queue (BUG_075, IDEA_019, BUG_074, IDEA_020)
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: work started in session 7be8db18
+  forced: false
 priority: medium
 effort: S
 tier: '5'
