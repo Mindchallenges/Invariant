@@ -594,6 +594,14 @@ than dropped, behind `invariant session list`. Nothing on that path writes —
 to, because a hook that wrote on every `SessionStart` would stamp heartbeats
 and race every other host against one registry in order to say hello.
 
+One write sits beside that path and does not contradict it, because it touches
+neither this project's registry nor any session. The `hook` command registers
+the project in the oracle's USER-level index ("User-level state" below) after
+the greeting is computed: it reads first and takes that index's lock only for a
+project the index has never seen, so it writes once per project, ever, and not
+once per start. It is skipped for `doctor`'s probe, and a failure there is
+swallowed whole — it can never change the greeting or mark the hook degraded.
+
 **The turn projection reports the plan, not the checklist.** A session that
 outlived a host says so once, with the count; then at most two lines from
 `core.plan.summary_lines` — the next deliverable and the one after it — and
@@ -1580,3 +1588,42 @@ which is what a stale registry entry from a crashed session needs.
 registry records a heartbeat updated on each transition; `repair` treats an
 entry with no live worktree as abandoned rather than deleting it outright, so
 that evidence of what happened survives the cleanup.
+
+## User-level state
+
+Everything above is per repository. The Session Oracle (IDEA_012, ADR-007)
+needs one thing no repository can hold — the list of every invariant project on
+the machine — so it keeps a directory per USER:
+
+```
+$INVARIANT_HOME, else ~/.invariant/
+  projects.json         the project index
+  locks/projects.lock   advisory lock for its read-modify-write
+```
+
+```json
+{"version": 1,
+ "projects": [{"key": "<state root>", "root": "<main checkout>",
+               "name": "<project.name>", "via": "init|session-start|manual"}]}
+```
+
+| Property | Why |
+|---|---|
+| **Keyed by `Manifest.state_root`** | A project is the place its sessions are recorded. Every linked worktree resolves the same git common directory, so keying by it collapses a repository's worktrees — and several manifests sharing one repository — to one entry. Keyed by root, each would list the same sessions again. A project that sets a relative `paths.state` has a state root per checkout and is, honestly, one entry per checkout. |
+| **`root` is the main checkout's spelling** | A worktree is torn down; the main checkout is where a person would `cd`. A registration made from inside a worktree records the same relative position in the main checkout when a manifest is there, else the root as found. |
+| **No clock times** | An entry says what a project is and how it arrived, never when — the same rule as "Storing what was measured, not when". |
+| **Locked writes, read-first registration** | Several hosts can start in several projects at once, so a write is a read-modify-write under `JsonStore.locked`. The automatic route reads first and locks only when the project is missing; a race lost inside the lock keeps the first registration. |
+| **Unknown keys survive** | Entries and the document are mutated in place, never rebuilt, so a field a later build adds is written back by this one (the BUG_061 lesson, applied to a store that is not per-session). |
+| **A newer `version` is refused, not rewritten** | Rewriting would drop whatever the new version means, in the one file every project's registration goes through. |
+
+Three routes add an entry: `init` (`via: init`), the first `SessionStart` in a
+project (`via: session-start`), and `invariant oracle projects add`
+(`via: manual`). An existing entry is never rewritten by a later route, so
+`via` records how the project first arrived. `remove` and `prune` change only
+this index — nothing under any project is touched — and `prune` drops an entry
+only when its `root` no longer carries a manifest.
+
+`doctor`'s probe writes nothing here either: the registration is skipped
+wherever the hook's store is the inert one (BUG_059). The test suite points
+`INVARIANT_HOME` at a temporary directory for every test, so no test can add to
+the index on the machine running it.

@@ -46,6 +46,23 @@ def _no_ambient_session_id(monkeypatch):
     monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_oracle_home(monkeypatch, tmp_path_factory):
+    """No test may write the developer's real ``~/.invariant``.
+
+    ``init`` and the SessionStart hook register the project in the oracle's
+    user-level index, so without this every test that initialises a project
+    would add a temporary directory to the index on the machine running the
+    suite. The variable is set, not deleted, because the fallback is the real
+    home; it is exported, so a hook shim a test runs as a subprocess inherits
+    it too. The directory itself is not created: a test that asserts nothing
+    was written can check that it does not exist.
+    """
+    home = tmp_path_factory.mktemp("oracle") / "home"
+    monkeypatch.setenv("INVARIANT_HOME", str(home))
+    return home
+
+
 class InertCloser:
     """A host closer that signals nothing and records what it was asked."""
 

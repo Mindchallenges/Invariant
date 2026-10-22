@@ -21,6 +21,11 @@ graph TD
         CLI[invariant CLI]
     end
 
+    subgraph oracle["oracle/ — machine-wide view (ADR-007)"]
+        OHOME[home]
+        OINDEX[index]
+    end
+
     subgraph core["core/ — host-agnostic engine"]
         FSM[fsm]
         STORE[store]
@@ -70,6 +75,11 @@ graph TD
     CLI --> PLAN
     CLI -. injects .-> CCTEL
     CLI -. launches and watches the successor through .-> CCLAUNCH
+    CLI --> OINDEX
+    CLI --> OHOME
+    OINDEX --> STORE
+    OINDEX --> MANIFEST
+    OINDEX --> GIT
 
     SESSION --> FSM
     PIPELINE --> FSM
@@ -121,6 +131,20 @@ purpose — `render_lines` answers a question somebody asked and lists every
 entry, `summary_lines` is injected into every turn and is capped at two lines —
 but they count from the same `progress()`, which is what makes them unable to
 disagree.
+
+`oracle/` is the newest layer and the only one whose state is not a
+project's. It sits below the CLI and beside `domains/`, and the arrows into it
+come from the CLI alone: **nothing in `core/`, `domains/` or `adapters/` imports
+it**, which `tests/test_oracle_index.py` enforces with an import scan. The
+engine therefore works identically whether or not the oracle is ever used, and
+the oracle can read every project without any project knowing it exists.
+`OINDEX --> STORE` reuses `JsonStore`'s atomic write and advisory lock for the
+user-level index, `OINDEX --> MANIFEST` is how a project's key is found — its
+`state_root` — and `OINDEX --> GIT` resolves a worktree's root to the main
+checkout's spelling. The registration on SessionStart is wired in the CLI's
+`hook` command rather than in `hosts/claude_code`, so the host adapter gains
+no import and the "hosts reach the engine only through the CLI" rule is
+untouched. See [oracle.md](oracle.md) and ADR-007.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -466,6 +490,17 @@ advance it. They are the only place where "what a session is" is encoded.
   Owns the join from a host session to an invariant session, the rebuildable
   raw store, and the rendered report. See ADR-002.
 
+### `oracle/`
+
+The Session Oracle: a machine-wide view of every session in every invariant
+project (IDEA_012). Increment 1 delivers the two modules below; the rest of the
+package is planned in [oracle.md](oracle.md).
+
+| Module | Owns | Never does |
+|---|---|---|
+| `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant` | Create it; read anything in it |
+| `index` | `projects.json` — every registered project once, keyed by its state root; register, remove, prune | Read or write anything under a project's state root; store a clock time |
+
 ### `adapters/`
 
 An adapter supplies ecosystem knowledge the manifest should not have to spell
@@ -770,6 +805,18 @@ actually happened.
                             report. Scrubbed: session names and bare dates,
                             never a host identifier (ADR-002 D7)
 ```
+
+One directory lives outside every project, and it is per USER rather than
+per repository:
+
+```
+~/.invariant/               $INVARIANT_HOME overrides it (ADR-007)
+  projects.json             the oracle's project index; one entry per state root
+  locks/projects.lock       advisory lock for the index's read-modify-write
+```
+
+It holds no project's runtime state — only which projects exist — and no
+project's state root holds anything of the oracle's in this increment.
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between

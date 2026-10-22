@@ -413,6 +413,7 @@ def cmd_init(args) -> int:
     host = ClaudeCodeHost(root)
     actions.extend(host.plan_install())
     actions.append("add the state root to .gitignore")
+    actions.append("register this project in the oracle index")
     # A starter architecture doc, ONLY where the docs directory is absent. A
     # fresh project otherwise starts out failing its own docs-first gate with
     # nothing to read: `doctor` reports the directory missing and the first
@@ -457,15 +458,42 @@ def cmd_init(args) -> int:
         )
 
     JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
+    registration = _register_after_init(root)
+    note = (
+        f"\n\nNot registered in the oracle index: {registration['error']}\n"
+        f"  The project is initialised; 'invariant oracle projects add' retries."
+        if "error" in registration
+        else ""
+    )
     return emit(
         args,
-        {"actions": actions, "ecosystems": ecosystems},
+        {"actions": actions, "ecosystems": ecosystems, "oracle": registration},
         "initialised:\n"
         + "\n".join(f"  - {a}" for a in actions)
         + "\n\nCommit these before starting a session. A session works in a "
         "linked\nworktree, and a worktree checks out a commit — an uncommitted "
-        "manifest\nis invisible from inside one.",
+        "manifest\nis invisible from inside one."
+        + note,
     )
+
+
+def _register_after_init(root: Path) -> dict:
+    """Record a freshly initialised project in the oracle's index.
+
+    Reported, never raised: by the time this runs the project IS initialised,
+    and failing the command over a user-level index would tell the operator
+    the opposite. The note names the command that retries it.
+    """
+    from ..oracle.home import oracle_home
+    from ..oracle.index import ProjectIndex
+
+    try:
+        entry, added = ProjectIndex(oracle_home()).register(
+            Manifest.load(root), via="init"
+        )
+    except InvariantError as exc:
+        return {"error": str(exc)}
+    return {"added": added, "key": entry.key}
 
 
 def cmd_doctor(args) -> int:
@@ -2543,6 +2571,72 @@ def cmd_state_repair(args) -> int:
     return emit(args, {"actions": actions, "dry_run": args.dry_run}, prefix + text)
 
 
+# -- oracle ------------------------------------------------------------
+#
+# The oracle's commands read and write the user-level index, not a project's
+# state, so none of them builds a Context: they work from any directory,
+# including one no manifest governs.
+
+
+def _project_index():
+    from ..oracle.home import oracle_home
+    from ..oracle.index import ProjectIndex
+
+    return ProjectIndex(oracle_home())
+
+
+def _project_line(entry) -> str:
+    return f"  {entry.name}  {entry.root}  (via {entry.via})\n      state root {entry.key}"
+
+
+def cmd_oracle_projects_list(args) -> int:
+    index = _project_index()
+    entries = index.list()
+    text = "\n".join(_project_line(e) for e in entries) or (
+        f"  no projects registered in {index.home}"
+    )
+    return emit(
+        args,
+        {"home": str(index.home), "projects": [e.to_dict() for e in entries]},
+        text,
+    )
+
+
+def cmd_oracle_projects_add(args) -> int:
+    manifest = Manifest.load(Path(args.path) if args.path else Path.cwd())
+    entry, added = _project_index().register(manifest, via="manual")
+    verb = "registered" if added else "already registered:"
+    return emit(
+        args,
+        {"added": added, "project": entry.to_dict()},
+        f"{verb} {entry.name}\n{_project_line(entry)}",
+    )
+
+
+def cmd_oracle_projects_remove(args) -> int:
+    entry = _project_index().remove(args.key)
+    return emit(
+        args,
+        {"removed": entry.to_dict()},
+        f"removed {entry.name} from the oracle index; nothing in the project "
+        f"was touched\n{_project_line(entry)}",
+    )
+
+
+def cmd_oracle_projects_prune(args) -> int:
+    pruned = _project_index().prune(dry_run=args.dry_run)
+    verb = "would prune" if args.dry_run else "pruned"
+    text = "\n".join(
+        f"  {verb} {e.name} — no manifest at {e.root or '(no root recorded)'}"
+        for e in pruned
+    ) or "  nothing to prune"
+    return emit(
+        args,
+        {"pruned": [e.to_dict() for e in pruned], "dry_run": args.dry_run},
+        text,
+    )
+
+
 # -- host bridge -------------------------------------------------------
 
 
@@ -2598,8 +2692,29 @@ def cmd_hook(args) -> int:
         # never be spelled "the agent may not act".
         print(json.dumps(_hook_degraded(args.event, exc)))
         return EXIT_OK
+    if args.event == "session-start" and not isinstance(ctx.store, InertStore):
+        _register_on_session_start(ctx)
     print(json.dumps(response))
     return EXIT_OK
+
+
+def _register_on_session_start(ctx: Context) -> None:
+    """Record the project in the oracle's index the first time a host starts here.
+
+    Read first: a known project is answered by one small read and takes no
+    lock, so the common case writes nothing. Never raised and never reported:
+    the response is already computed, and this is bookkeeping for a different
+    program — a user-level index that cannot be read or written must not turn
+    a session start into a degraded one. Skipped for ``doctor``'s probe, which
+    writes nothing anywhere (BUG_059); the caller checks the inert store.
+    """
+    from ..oracle.home import oracle_home
+    from ..oracle.index import ProjectIndex
+
+    try:
+        ProjectIndex(oracle_home()).register(ctx.manifest, via="session-start")
+    except Exception:  # noqa: BLE001, S110 - see the docstring
+        pass
 
 
 def _hook_degraded(event: str, exc: Exception) -> dict:
@@ -3083,6 +3198,33 @@ def build_parser() -> argparse.ArgumentParser:
     q = state.add_parser("repair")
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_state_repair)
+
+    # oracle
+    oracle = sub.add_parser(
+        "oracle", help="the machine-wide view of every invariant project"
+    ).add_subparsers(dest="sub", required=True)
+    projects = oracle.add_parser(
+        "projects", help="the user-level index of registered projects"
+    ).add_subparsers(dest="action", required=True)
+    projects.add_parser("list", help="every registered project").set_defaults(
+        func=cmd_oracle_projects_list
+    )
+    q = projects.add_parser(
+        "add", help="register a project by hand (init and session start do it too)"
+    )
+    q.add_argument("path", nargs="?", help="a directory inside the project (default: here)")
+    q.set_defaults(func=cmd_oracle_projects_add)
+    q = projects.add_parser(
+        "remove",
+        help="drop a project from the index; refused when nothing matches",
+    )
+    q.add_argument("key", help="its state-root key, its root, or its name")
+    q.set_defaults(func=cmd_oracle_projects_remove)
+    q = projects.add_parser(
+        "prune", help="drop every project whose root no longer has a manifest"
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_oracle_projects_prune)
 
     hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
     q = hooks.add_parser("install")

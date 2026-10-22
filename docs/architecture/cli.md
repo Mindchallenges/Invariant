@@ -43,6 +43,11 @@ Nothing reaches the engine another way.
   manifest diff, and exempt from session isolation by the same mechanism that
   already exempts the backlog — instead of quietly widening a guarantee.
 
+  One store sits outside every repository and so outside this rule: the
+  oracle's user-level directory (`$INVARIANT_HOME`, else `~/.invariant`;
+  ADR-007). It holds which projects exist and nothing of any project's, and
+  only `init`, the SessionStart hook and the `oracle` commands write it.
+
 ## Setup
 
 ```
@@ -64,6 +69,12 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     — even empty — is the project's and is left alone, `--force` included:
     that flag rewrites the manifest, not the docs. `--dry-run` lists the write
     when it would happen. Written once; no command rewrites it afterwards.
+
+    A successful, non-dry-run `init` also registers the project in the
+    oracle's index (`via: init`; see "Oracle" below). A failure to register is
+    REPORTED and never fails the command — the project is initialised by then
+    — and the note names `invariant oracle projects add` as the retry. The
+    JSON result carries `oracle`: `{"added", "key"}`, or `{"error"}`.
 
 invariant uninstall [--remove-assets] [--remove-manifest] [--dry-run]
     Remove the hook shims, unwire the entries this library added to the host
@@ -761,6 +772,47 @@ invariant state repair [--dry-run]
 invariant state gc [--older-than <days>]
 ```
 
+## Oracle
+
+The machine-wide view of every invariant project (IDEA_012; see
+[oracle.md](oracle.md) and ADR-007). These commands read and write the
+user-level index, not a project's state, so none of them needs a manifest:
+they run from any directory.
+
+```
+invariant oracle projects list [--json]
+    Every registered project: name, root, how it arrived, and its state-root
+    key. The JSON result is {"home", "projects": [{"key", "root", "name",
+    "via"}]}.
+
+invariant oracle projects add [PATH] [--json]
+    Register the project governing PATH (default: here) by hand, `via:
+    manual`. Idempotent: a project already registered — from any of its
+    worktrees, or through another manifest in the same repository, since the
+    key is the state root — is reported and left as it was. No manifest at or
+    above PATH is a usage error (exit 2). JSON: {"added", "project"}.
+
+invariant oracle projects remove KEY [--json]
+    Drop one entry from the index. KEY is tried as the state-root key, then
+    as a root (relative to here, or absolute), then as a project name; the
+    first rung with a hit wins. A name shared by several entries is refused
+    with every candidate's key, and a KEY matching nothing is refused (exit
+    2) — a typo should not read as a removal. Nothing in the project is
+    touched. JSON: {"removed"}.
+
+invariant oracle projects prune [--dry-run] [--json]
+    Drop every entry whose root no longer carries a manifest. --dry-run names
+    them and writes nothing. JSON: {"pruned": [...], "dry_run"}.
+```
+
+The other two routes into the index are automatic: `init` (above) and the
+first SessionStart in a project, which `invariant hook session-start`
+registers after computing its response — reading first, locking only for a
+missing project, skipped for `doctor`'s probe, and swallowing any failure so
+the hook's output cannot change. The rest of the oracle's surface — `oracle
+list`, `watch`, `tui`, `install`, `uninstall`, `notify-test` — is planned and
+not yet shipped.
+
 ## Host bridge
 
 ```
@@ -784,6 +836,12 @@ invariant hook <event>
     never something a host sends. It is evaluated in full — same rules, same
     response — against a state store that discards every write, so a probe
     binds, records, spends and ends nothing. Only the literal `true` counts.
+    It registers nothing in the oracle's index either.
+
+    `session-start` additionally registers the project in the oracle's index
+    the first time a host starts there (`via: session-start`). It never
+    changes the response: a known project costs one read, and a failure is
+    swallowed.
 
 invariant context
     Print the state projection a host would inject: current state, legal
