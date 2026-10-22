@@ -435,7 +435,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through | Read state; run commands |
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level | Decide policy — levels come from the manifest |
-| `items` | The work-item model and the pluggable store backends that read and write it | Know an item's lifecycle — that is `domains/workitem` |
+| `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
 | `git` | Read-only queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, and the commit a revision names | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing |
@@ -455,8 +455,9 @@ advance it. They are the only place where "what a session is" is encoded.
   Scoped to a session; a session runs pipelines in sequence.
 - **`workitem`** — ideas and bugs, their statuses, and the transitions between
   them, including a ruled transition whose rows record who ruled and on which
-  commit. Persisted through `core/items` into whichever backend the project
-  uses.
+  commit; and what `item new` may set — an explicit id it checks is unspent,
+  and the item's own keys it refuses (BUG_074). Persisted through
+  `core/items` into whichever backend the project uses.
 - **`memorystore`** — validation, dedup, and index regeneration over the
   memory directory. Not an FSM; a set of invariants plus repair operations.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for

@@ -1241,12 +1241,18 @@ history (BUG_073), so there the status is right and the provenance survives
 only in version control until that lands.
 
 **Retirement is deferred.** Moving a closed entry into a backend-declared
-closed store in the same transition is the other half of IDEA_019, and it
-shares its manifest key with BUG_074 (c), whose id scan must read the same
-store. The proposed key is `items.closed_path` — unset by default, so the
-markdown backend grows no archive — and it lands with BUG_074 rather than
-here: the only backend that wants a closed store today is the one that cannot
-yet keep the ruling.
+closed store in the same transition is the other half of IDEA_019. Its
+manifest key now exists: `items.closed_path`, unset by default so the markdown
+backend grows no archive, landed with BUG_074 (c), and today it is READ — id
+minting and `item new`'s explicit-id check both count the ids retired there
+(manifest.md, "The ids a store has spent, and the closed store"). Nothing
+writes it. Retiring on close stays deferred because none of what would make it
+safe exists yet: a move touches two files, so it is not one atomic outcome
+without a recovery story for a write that lands in one and not the other; the
+closed file has its own layout, and placing an entry there is the placement
+question BUG_074 (b) answered for the open store only; and the only backend
+that wants a closed store today is the one that cannot yet keep the ruling
+(BUG_073).
 
 A separate field records *residue* — what remains owed after the status says
 done, such as a device soak that has not been run. Status and residue are

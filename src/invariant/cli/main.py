@@ -2271,10 +2271,36 @@ def cmd_pipeline_test(args) -> int:
 # -- items -------------------------------------------------------------
 
 
+def _item_fields(pairs: list[str]) -> dict[str, str]:
+    """``--field k=v`` pairs, each one honoured or refused — never dropped.
+
+    A pair without ``=`` and a key given twice used to vanish (the first) or
+    lose to its last spelling (the second) with the command exiting 0, which
+    is the silent drop BUG_074 (a) is about one layer down.
+    """
+    fields: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise UsageError(f"--field {pair!r} is not key=value; nothing was filed")
+        if key in fields:
+            raise UsageError(f"--field {key} is given twice; nothing was filed")
+        fields[key] = value
+    return fields
+
+
 def cmd_item_new(args) -> int:
     ctx = Context()
-    fields = dict(f.split("=", 1) for f in (args.field or []) if "=" in f)
-    item = ctx.items.new(args.type, args.title, fields=fields, body=args.body or "")
+    fields = _item_fields(args.field or [])
+    item = ctx.items.new(
+        args.type,
+        args.title,
+        fields=fields,
+        body=args.body or "",
+        section=args.section,
+        after=args.after,
+    )
     return emit(args, item.to_dict(), f"{item.id}  {item.status}  {item.title}")
 
 
@@ -2952,6 +2978,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--title", required=True, dest="title")
     q.add_argument("--field", action="append")
     q.add_argument("--body")
+    q.add_argument("--section", help="file at the end of the section with this title")
+    q.add_argument("--after", metavar="ID", help="file directly after this entry")
     q.set_defaults(func=cmd_item_new)
 
     q = item.add_parser("list")

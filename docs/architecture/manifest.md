@@ -105,6 +105,11 @@ items:
   path: docs/backlog.md
   id_prefix: ""                # an ADDITIONAL prefix; the type supplies its own
   id_strategy: numeric         # numeric -> BUG_001 | slug -> BUG_DRAIN_STALLS
+  closed_path: null            # where retired entries live, in the backend's own
+                               # format (a file; a directory for markdown). Set,
+                               # minting and an explicit id's uniqueness check
+                               # read it too; declared but absent is an error.
+                               # Read-only today — see "Backends for work items"
   exempt: true                 # work items are data; exempt from isolation
 
 memory:
@@ -899,9 +904,12 @@ format it already uses.
 | `json` | One JSON document | For machine consumption |
 | `none` | Nothing | Work-item domain disabled |
 
-A backend implements read, write, list, and transition-persist. The lifecycle
-FSM and the id scheme live above it in `domains/workitem`, so switching
-backends does not change item semantics.
+A backend implements read, write, list, transition-persist, `add` (a new item,
+with an optional placement it honours or refuses) and `taken_ids` (every id it
+has spent, closed store included). The lifecycle FSM, and the rules for what
+`item new` may set, live above it in `domains/workitem`, so switching backends
+does not change item semantics. The id scheme (`items.id_strategy`) is shared
+by every backend in `core/items`, and reads `taken_ids`.
 
 **A transition never drops or rewrites body text**, on any backend: it writes
 the status and the history rows and nothing else the item holds. Each backend
@@ -912,9 +920,64 @@ ruling's `ruling` and `evidence` keys travel in the history rows, so they are
 kept wherever history is: in the markdown frontmatter and the JSON document,
 and not yet on `sphinx_needs` (below).
 
-No backend declares a closed store yet. The key proposed for one,
-`items.closed_path`, is to be agreed with BUG_074 (c) and is unset by default;
-see the state model, "An already-fixed bug closes through a ruling".
+### The ids a store has spent, and the closed store
+
+`items.closed_path` declares a **closed store**: where a project keeps the
+entries it has retired out of the open backlog, in the backend's own format —
+a reStructuredText file for `sphinx_needs`, a JSON document for `json`, a
+directory of item files for `markdown` — read by the same backend class. It is
+unset by default, so a project that keeps one store grows no archive. Agreed
+once for both of its readers, BUG_074 (c) and IDEA_019's retirement.
+
+Set, the backend's `taken_ids()` is the union of the ids in both stores, and
+both questions that need "has this id been spent" ask it: numeric and slug
+minting (`next_id`), and the uniqueness check on an explicit id given to `item
+new` (below). A retired id is therefore never minted again and never accepted
+again. A declared closed store that does not exist is an **error**, not an
+empty store: read as empty, a mistyped path would let minting hand out a retired
+id with nothing to say the scan saw nothing.
+
+Nothing writes the closed store yet. Reading it is the whole of what the key
+does today; `item list`, `show` and `transition` still read the open store
+alone, and the store is not one of the declared writable stores above.
+Retiring an entry into it on a closing transition is still deferred — see the
+state model, "Retirement is deferred" — and when it lands the key joins
+`items.path` as a declared store.
+
+### What `item new` writes
+
+`item new` files an item in its machine's initial state, and every `--field`
+it is given is either honoured or refused — never dropped, never written twice
+(BUG_074 (a)):
+
+```mermaid
+graph TD
+    F["item new --field k=v ..."] --> P{"each pair key=value,<br/>no key given twice?"}
+    P -- no --> R1["refused, nothing filed"]
+    P -- yes --> K{"key is status / type /<br/>title / residue / history?"}
+    K -- yes --> R2["refused, naming the surface that sets it<br/>(status: item transition)"]
+    K -- no --> I{"key is id?"}
+    I -- no --> M["minted id from taken_ids()<br/>(open + closed store)"]
+    I -- yes --> U{"well-formed, and unspent in<br/>taken_ids(), case-insensitively?"}
+    U -- no --> R3["refused, naming the clash<br/>and the store holding it"]
+    U -- yes --> X["explicit id replaces the minted one"]
+    M --> A["backend.add(item, section, after)"]
+    X --> A
+    A --> S{"placement named?"}
+    S -- "no" --> D["sphinx_needs: after the last entry of its type (BUG_006);<br/>markdown, json: saved as before"]
+    S -- "yes, sphinx_needs" --> N{"names exactly one<br/>section / entry?"}
+    N -- yes --> W["written at the end of that section's own content,<br/>or directly after that entry"]
+    N -- no --> R4["refused, nothing filed"]
+    S -- "yes, markdown / json" --> R5["refused: no sections to place in"]
+```
+
+`status` is refused rather than honoured because a status is reached through a
+transition and its gates — `filed → reproduced` needs evidence a new item does
+not carry — and `item new` choosing one would be a route around them. The
+others name keys the item model already has its own surface for. The explicit
+id's case-insensitive comparison is for the markdown backend, which names a
+file after the id: on a case-insensitive filesystem `bug_001` and `BUG_001` are
+one file, and the second save would overwrite the first.
 
 ### The `sphinx_needs` round trip
 
@@ -965,7 +1028,24 @@ them and write it back joined by a newline that was never in the file.
 
 A new entry lands after the last entry of its own type, separated from what
 precedes and follows it by a blank line (BUG_006); with no entry of that type
-it is appended to the end.
+it is appended to the end. That is the rule when the caller names no
+placement, and it does not parse the document's structure.
+
+A caller can name one (BUG_074 (b)): `--section "<title>"` puts the entry at
+the end of the section with that title, of any level, and `--after <id>`
+directly after that entry. A **title** is a line at column 0 underlined — and
+optionally overlined with the same line — by one punctuation character repeated
+at least as long as the title, docutils' own condition for a title it accepts
+without complaint; an indented line never is, which keeps directive bodies out.
+"The end of the section" is the end of its **own** content — after its last
+non-blank line, before the next title of any level — because in
+reStructuredText everything after a subsection's title belongs to that
+subsection, and the wider reading would file the entry under whichever
+subsection came last. A title or id that names nothing, a title two sections
+share, and both options at once are refused with the file unchanged; none of
+them falls back to the default, because an entry filed in the wrong section is
+the commit-shaped repair job the option exists to remove. The markdown and
+json backends have no sections and refuse either option.
 
 **`history` is not persisted by this backend.** The directive has no
 representation for a transition log yet, so `item.history_matches_status`

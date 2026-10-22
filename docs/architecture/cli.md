@@ -563,7 +563,20 @@ here" must not have the side effect of moving.
 ## Work items
 
 ```
-invariant item new <type> [--title <t>] [--field k=v]...
+invariant item new <type> --title <t> [--field k=v]... [--body <text>]
+                   [--section "<title>" | --after <id>]
+    Files the item in its machine's initial state. Every --field is honoured
+    or refused, never dropped: `id=X` replaces the minted id, and is refused
+    if X is malformed or already spent in any store the backend reads
+    (items.closed_path included), naming the clash; `status`, `type`,
+    `title`, `residue` and `history` are refused, each naming the surface
+    that sets it (a status is reached with `item transition`). A pair
+    without `=` and a key given twice are refused. --section files at the
+    end of the named section's own content and --after directly after the
+    named entry; either naming nothing is an error, never a fallback, and
+    the markdown and json backends refuse both. With neither, a
+    sphinx_needs entry lands after the last entry of its type (BUG_006).
+    manifest.md, "What item new writes".
 invariant item list [--type <t>] [--status <s>] [--open]
 invariant item show <id>
 invariant item transition <id> <status> [--reason <text>] [--force]

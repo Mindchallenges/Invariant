@@ -7,6 +7,7 @@ what a status means.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ..core.errors import GateFailure, TransitionError, UsageError
@@ -16,6 +17,30 @@ from ..core.machines import load_item_machine
 from ..core.rules import Evaluated, RuleContext, evaluate
 
 ITEM_TYPES = ("idea", "bug")
+
+#: The item's own keys that ``item new --field`` must not set, and where each
+#: one is set instead. ``id`` is absent: an explicit id is honoured.
+_SET_ELSEWHERE = {
+    "status": (
+        "a new item starts in its initial state ({initial}), and every later "
+        "state is reached with `invariant item transition`, through the gates "
+        "that state carries (filed -> reproduced needs its evidence)"
+    ),
+    "type": "the type is the positional argument",
+    "title": "the title is --title",
+    "residue": "residue is recorded with `invariant item residue <id> --add`",
+    "history": "history is written by `invariant item transition`, never by hand",
+}
+
+#: An explicit id: one token a file name and a :need: target can both carry.
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _shown(store: Path, root: Path) -> str:
+    try:
+        return str(store.relative_to(Path(root).resolve()))
+    except ValueError:
+        return str(store)
 
 
 def _one_step_between(machine, source: str, target: str) -> str | None:
@@ -88,20 +113,66 @@ class WorkItemDomain:
         title: str,
         fields: dict | None = None,
         body: str = "",
+        section: str | None = None,
+        after: str | None = None,
     ) -> Item:
+        """File a new item in its machine's initial state.
+
+        A field naming one of the item's own keys is honoured or refused,
+        never dropped: ``id`` replaces the minted id once it is shown to be
+        unspent in every store the backend reads, and the rest are refused,
+        each pointing at the surface that does set it (BUG_074 (a)).
+        ``section`` and ``after`` are placements; the backend honours or
+        refuses them (BUG_074 (b)).
+        """
         machine = self.machine(item_type)
+        fields = dict(fields or {})
+        for key in fields:
+            if key in _SET_ELSEWHERE:
+                raise UsageError(
+                    f"--field {key}=... cannot be set by item new: "
+                    + _SET_ELSEWHERE[key].format(initial=machine.initial)
+                    + ". Nothing was filed."
+                )
+        if not title.strip():
+            raise UsageError("an item needs a title")
+        explicit = fields.pop("id", None)
         item = Item(
-            id=self.backend.next_id(item_type, title),
+            id=(
+                self._unspent(str(explicit))
+                if explicit is not None
+                else self.backend.next_id(item_type, title)
+            ),
             type=item_type,
             title=title.strip(),
             status=machine.initial,
-            fields=dict(fields or {}),
+            fields=fields,
             body=body,
         )
-        if not item.title:
-            raise UsageError("an item needs a title")
-        self.backend.save(item)
+        self.backend.add(item, section=section, after=after)
         return item
+
+    def _unspent(self, item_id: str) -> str:
+        """An explicit id, refused if malformed or already spent anywhere.
+
+        Compared without regard to case: the markdown backend names a file
+        after the id, and on a case-insensitive filesystem two ids differing
+        only in case are one file — the second save would overwrite the first.
+        """
+        item_id = item_id.strip()
+        if not _ID_RE.match(item_id):
+            raise UsageError(
+                f"--field id={item_id!r} is not an id: use letters, digits, '_', "
+                "'-' and '.', starting with a letter or digit. Nothing was filed."
+            )
+        for spent, store in self.backend.taken_ids().items():
+            if spent.casefold() == item_id.casefold():
+                raise UsageError(
+                    f"--field id={item_id} clashes with {spent}, already in "
+                    f"{_shown(store, self.manifest.root)}; choose another id or "
+                    "omit it to have one minted. Nothing was filed."
+                )
+        return item_id
 
     def transition(
         self,

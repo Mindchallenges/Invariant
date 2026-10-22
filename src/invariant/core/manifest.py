@@ -257,6 +257,12 @@ DEFAULTS: dict[str, Any] = {
         # backlog whose entries are referenced by name, where a number is both
         # inconsistent with its neighbours and unlinkable.
         "id_strategy": "numeric",
+        # Where retired entries live, in the backend's own format: a file for
+        # json and sphinx_needs, a directory for markdown. Unset, there is no
+        # closed store. Set, id minting and an explicit id's uniqueness check
+        # read it too, so a retired id is never spent twice (BUG_074 (c)).
+        # Nothing writes it yet: retirement on close is deferred (IDEA_019).
+        "closed_path": None,
         # Work items are data every session touches, like configuration and
         # memory, so the store is exempt from worktree isolation by default.
         # Set false where backlog edits should be reviewed with the code.

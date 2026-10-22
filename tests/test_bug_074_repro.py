@@ -27,9 +27,9 @@ rather than a regression. Manifest.md ("The sphinx_needs round trip") still
 documents the after-the-last-entry rule as the fallback with no placement
 given.
 
-Mechanism (c), the closed-store id scan, has no test: the engine declares no
-closed store (``items.closed_path`` is a proposal, IDEA_019), so there is no
-second store for the scan to miss. It needs design, not reproduction.
+Mechanism (c), the closed-store id scan, is implemented: ``items.closed_path``
+is a manifest key, and id minting and the explicit-id check read it. Its tests
+live in tests/test_bug_074_item_new.py, not here.
 """
 
 import subprocess
@@ -104,7 +104,6 @@ def directive(text: str, title: str) -> list[str]:
 
 
 class TestBUG_074_a_FieldNamingAWrittenKey:
-    @pytest.mark.xfail(strict=True, reason="BUG_074 (a) is live — delete this line with the fix")
     def test_BUG_074_a_explicit_id_becomes_the_entry_id(self, backlog):
         rc = item_new("bug", "--title", "Probe one", "--field", "id=BUG_EXPLICIT",
                       "--body", "Probe body.")
@@ -112,13 +111,11 @@ class TestBUG_074_a_FieldNamingAWrittenKey:
                if o.startswith(":id:")]
         assert (rc, ids) == (0, [":id: BUG_EXPLICIT"])
 
-    @pytest.mark.xfail(strict=True, reason="BUG_074 (a) is live — delete this line with the fix")
     def test_BUG_074_a_explicit_id_colliding_with_an_open_id_is_refused(self, backlog):
         rc = item_new("bug", "--title", "Probe two", "--field", "id=BUG_FIRST")
         assert rc != 0, "an explicit id equal to an open id was accepted"
         assert backlog.read_text(encoding="utf-8") == BACKLOG
 
-    @pytest.mark.xfail(strict=True, reason="BUG_074 (a) is live — delete this line with the fix")
     def test_BUG_074_a_explicit_status_is_not_silently_dropped(self, backlog):
         """Whether ``item new`` may set a non-initial status at all is the
         fixer's call (the bug machine's ``filed -> reproduced`` edge argues
@@ -136,7 +133,6 @@ class TestBUG_074_a_FieldNamingAWrittenKey:
 
 
 class TestBUG_074_b_SectionPlacement:
-    @pytest.mark.xfail(strict=True, reason="BUG_074 (b) is live — delete this line with the fix")
     def test_BUG_074_b_new_bug_lands_in_the_named_section(self, backlog):
         rc = item_new("bug", "--title", "Probe four", "--section", "Batch one")
         lines = backlog.read_text(encoding="utf-8").splitlines()

@@ -47,21 +47,109 @@ class Backend(Protocol):
     def load_all(self) -> list[Item]: ...
     def get(self, item_id: str) -> Item | None: ...
     def save(self, item: Item) -> None: ...
+    def add(
+        self, item: Item, section: str | None = None, after: str | None = None
+    ) -> None: ...
+    def taken_ids(self) -> dict[str, Path]: ...
     def next_id(self, item_type: str, title: str = "") -> str: ...
+
+
+class _Store:
+    """What every file-backed store shares: the id scan and adding a new item.
+
+    The ids a store has spent are the ones in its open file and, when the
+    manifest declares one, in its closed store (``items.closed_path``) — a
+    file or directory of the same format, read by the same backend, holding
+    entries retired out of the open one. Minting reads both, so a retired id
+    is never handed out again (BUG_074 (c)).
+    """
+
+    #: The placement option a caller named, if this format has none to offer.
+    _no_placement = ""
+
+    def __init__(
+        self,
+        path: Path,
+        id_prefix: str = "",
+        id_strategy: str = "numeric",
+        closed_path: Path | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.id_prefix = id_prefix
+        self.id_strategy = id_strategy
+        self.closed_path = Path(closed_path) if closed_path is not None else None
+
+    def load_all(self) -> list[Item]:  # pragma: no cover - every store overrides
+        raise NotImplementedError
+
+    def get(self, item_id: str) -> Item | None:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def save(self, item: Item) -> None:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def taken_ids(self) -> dict[str, Path]:
+        """Every id already spent, and the store that holds it.
+
+        A declared closed store that does not exist is an error rather than an
+        empty store: read as empty, a mistyped path would let minting hand out
+        a retired id with nothing anywhere saying the scan saw nothing.
+        """
+        taken: dict[str, Path] = {}
+        if self.closed_path is not None:
+            if not self.closed_path.exists():
+                raise UsageError(
+                    f"items.closed_path names {self.closed_path}, which does not "
+                    "exist; the ids retired there cannot be read, so none is "
+                    "minted. Create it or unset the key."
+                )
+            closed = type(self)(self.closed_path, self.id_prefix, self.id_strategy)
+            taken.update({i.id: self.closed_path for i in closed.load_all()})
+        taken.update({i.id: self.path for i in self.load_all()})
+        return taken
+
+    def next_id(self, item_type: str, title: str = "") -> str:
+        return _next_id(
+            set(self.taken_ids()), item_type, self.id_prefix, self.id_strategy, title
+        )
+
+    def add(
+        self, item: Item, section: str | None = None, after: str | None = None
+    ) -> None:
+        """Save a NEW item; refuse a placement this format cannot express."""
+        _refuse_placement(self._no_placement, section, after)
+        if self.get(item.id) is not None:
+            raise UsageError(f"{item.id} already exists in {self.path.name}; nothing was filed")
+        self.save(item)
+
+
+def _refuse_placement(why: str, section: str | None, after: str | None) -> None:
+    """A placement a store has no structure for is refused, never ignored."""
+    named = "--section" if section is not None else "--after" if after is not None else None
+    if named:
+        raise UsageError(
+            f"{named} places an entry inside a document's sections; {why}, so "
+            "there is nowhere to place it. Nothing was filed."
+        )
 
 
 # -- markdown ----------------------------------------------------------
 
 
-class MarkdownBackend:
+class MarkdownBackend(_Store):
     """One file per item, frontmatter for fields. Git-native, no tooling."""
 
+    _no_placement = "the markdown backend stores one file per item"
+
     def __init__(
-        self, path: Path, id_prefix: str = "", id_strategy: str = "numeric"
+        self,
+        path: Path,
+        id_prefix: str = "",
+        id_strategy: str = "numeric",
+        closed_path: Path | None = None,
     ) -> None:
-        self.id_strategy = id_strategy
-        self.root = Path(path)
-        self.id_prefix = id_prefix
+        super().__init__(path, id_prefix, id_strategy, closed_path)
+        self.root = self.path
 
     def _path(self, item_id: str) -> Path:
         return self.root / f"{item_id}.md"
@@ -97,11 +185,6 @@ class MarkdownBackend:
             f"---\n{front}\n---\n\n{item.body.strip()}\n", encoding="utf-8"
         )
 
-    def next_id(self, item_type: str, title: str = "") -> str:
-        return _next_id(
-            self.load_all(), item_type, self.id_prefix, self.id_strategy, title
-        )
-
     def _parse(self, path: Path) -> Item:
         text = path.read_text(encoding="utf-8")
         match = re.match(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", text, re.DOTALL)
@@ -124,15 +207,10 @@ class MarkdownBackend:
 # -- json --------------------------------------------------------------
 
 
-class JsonBackend:
+class JsonBackend(_Store):
     """One document. For machine consumption rather than human editing."""
 
-    def __init__(
-        self, path: Path, id_prefix: str = "", id_strategy: str = "numeric"
-    ) -> None:
-        self.id_strategy = id_strategy
-        self.path = Path(path)
-        self.id_prefix = id_prefix
+    _no_placement = "a JSON document has no sections"
 
     def load_all(self) -> list[Item]:
         if not self.path.is_file():
@@ -156,11 +234,6 @@ class JsonBackend:
             )
             + "\n",
             encoding="utf-8",
-        )
-
-    def next_id(self, item_type: str, title: str = "") -> str:
-        return _next_id(
-            self.load_all(), item_type, self.id_prefix, self.id_strategy, title
         )
 
 
@@ -367,6 +440,100 @@ def _read_entry(lines: list[str], start: int, match: re.Match) -> _Entry:
     )
 
 
+#: A section adornment: one punctuation character repeated, nothing else.
+ADORNMENT_RE = re.compile(r"^([!-/:-@\[-`{-~])\1*$")
+
+
+@dataclass
+class _Heading:
+    title: str
+    start: int  # the overline, or the title line when there is none
+    end: int  # one past the underline
+
+
+def _headings(lines: list[str]) -> list[_Heading]:
+    """The section titles in the file, of every level, in order.
+
+    A title is a line of text standing at column 0, underlined — and
+    optionally overlined with the same line — by one punctuation character
+    repeated at least as long as the title. That is docutils' own condition
+    for a title it accepts without complaint; a shorter underline is not read
+    as a heading here, so a caller naming it is refused rather than guessed
+    at. An indented line is never a title, which keeps every directive body
+    out of the scan.
+    """
+    found: list[_Heading] = []
+    index = 0
+    while index < len(lines):
+        text = _content(lines[index]).rstrip()
+        if ADORNMENT_RE.match(text) and index + 2 < len(lines):
+            title = _content(lines[index + 1]).strip()
+            under = _content(lines[index + 2]).rstrip()
+            if (
+                title
+                and not ADORNMENT_RE.match(title)
+                and under == text
+                and len(text) >= len(title)
+            ):
+                found.append(_Heading(title, index, index + 3))
+                index += 3
+                continue
+        if (
+            text
+            and index + 1 < len(lines)
+            and not text[0].isspace()
+            and not text.startswith("..")
+            and not ADORNMENT_RE.match(text)
+        ):
+            under = _content(lines[index + 1]).rstrip()
+            if ADORNMENT_RE.match(under) and len(under) >= len(text):
+                found.append(_Heading(text, index, index + 2))
+                index += 2
+                continue
+        index += 1
+    return found
+
+
+def _section_end(lines: list[str], section: str, name: str) -> int:
+    """Where an entry placed at the end of ``section`` goes.
+
+    The end of the section's OWN content: after its last non-blank line and
+    before the next title of any level. In reStructuredText everything after a
+    subsection's title belongs to that subsection, so "the end of the section"
+    in the wider sense would file the entry under whichever subsection came
+    last — the misplacement this option exists to prevent.
+    """
+    headings = _headings(lines)
+    wanted = _one_line(section)
+    at = [n for n, h in enumerate(headings) if h.title == wanted]
+    if not at:
+        titles = ", ".join(repr(h.title) for h in headings) or "none"
+        raise UsageError(
+            f"{name}: no section titled {wanted!r} (sections here: {titles}); "
+            "nothing was filed"
+        )
+    if len(at) > 1:
+        rows = ", ".join(str(headings[n].start + 1) for n in at)
+        raise UsageError(
+            f"{name}: {len(at)} sections are titled {wanted!r} (lines {rows}); "
+            "name an entry to follow with --after instead. Nothing was filed."
+        )
+    heading = headings[at[0]]
+    stop = headings[at[0] + 1].start if at[0] + 1 < len(headings) else len(lines)
+    position = heading.end
+    for index in range(heading.end, stop):
+        if _content(lines[index]).strip():
+            position = index + 1
+    return position
+
+
+def _insert_at(lines: list[str], position: int, rendered: list[str], eol: str) -> str:
+    """Insert an entry after a non-blank line, one blank line either side."""
+    follows = position < len(lines) and bool(_content(lines[position]).strip())
+    insert = [eol] + rendered + ([eol] if follows else [])
+    return _apply(lines, [(position, position, insert)], eol)
+
+
 def _option_line(indent: str, name: str, value: str, ending: str) -> str:
     return f"{indent}:{name}:" + (f" {value}" if value else "") + ending
 
@@ -407,7 +574,7 @@ def _apply(lines: list[str], edits: list[tuple[int, int, list[str]]], eol: str) 
     return text
 
 
-class SphinxNeedsBackend:
+class SphinxNeedsBackend(_Store):
     """Directives inside a reStructuredText page.
 
     For projects already rendering a needs graph. The parser is deliberately
@@ -426,13 +593,6 @@ class SphinxNeedsBackend:
     representation for it yet.
     """
 
-    def __init__(
-        self, path: Path, id_prefix: str = "", id_strategy: str = "numeric"
-    ) -> None:
-        self.id_strategy = id_strategy
-        self.path = Path(path)
-        self.id_prefix = id_prefix
-
     def _read(self) -> str:
         if not self.path.is_file():
             return ""
@@ -447,6 +607,32 @@ class SphinxNeedsBackend:
         return next((i for i in self.load_all() if i.id == item_id), None)
 
     def save(self, item: Item) -> None:
+        self._store(item)
+
+    def add(
+        self, item: Item, section: str | None = None, after: str | None = None
+    ) -> None:
+        """Save a NEW entry, at the end of ``section`` or after entry ``after``.
+
+        With neither, the entry goes where :meth:`save` puts one (BUG_006).
+        A placement that names nothing in the file is an error, never a fall
+        back to that default: an entry filed in the wrong section is the
+        commit-shaped repair job the option exists to remove (BUG_074).
+        """
+        if section is not None and after is not None:
+            raise UsageError(
+                "--section and --after are two placements for one entry; give "
+                "one. Nothing was filed."
+            )
+        self._store(item, new=True, section=section, after=after)
+
+    def _store(
+        self,
+        item: Item,
+        new: bool = False,
+        section: str | None = None,
+        after: str | None = None,
+    ) -> None:
         if not _one_line(item.id):
             raise UsageError(
                 f"{self.path.name}: an item needs an id to be saved; nothing written"
@@ -455,19 +641,18 @@ class SphinxNeedsBackend:
         eol = next((_ending(line) for line in lines if _ending(line)), "\n")
         entries = _scan(lines)
         entry = next((e for e in entries if e.id == item.id), None)
+        if entry is not None and new:
+            raise UsageError(
+                f"{item.id} already exists in {self.path.name}; nothing was filed"
+            )
         if entry is None:
-            text = self._insert_new(lines, entries, item, eol)
+            text = self._insert_new(lines, entries, item, eol, section, after)
         else:
             text = _apply(lines, self._patch(lines, entry, item, eol), eol)
         self._check(text, item, len(entries) + (entry is None))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-
-    def next_id(self, item_type: str, title: str = "") -> str:
-        return _next_id(
-            self.load_all(), item_type, self.id_prefix, self.id_strategy, title
-        )
 
     def _check(self, text: str, item: Item, count: int) -> None:
         """Refuse a save whose result would not read back as the item saved.
@@ -504,9 +689,20 @@ class SphinxNeedsBackend:
             )
 
     def _insert_new(
-        self, lines: list[str], entries: list[_Entry], item: Item, eol: str
+        self,
+        lines: list[str],
+        entries: list[_Entry],
+        item: Item,
+        eol: str,
+        section: str | None = None,
+        after: str | None = None,
     ) -> str:
-        """Place a new entry beside its own kind, not at the end of the file.
+        """Place a new entry where the caller named, or beside its own kind.
+
+        A named placement — the end of a section, or right after a named entry
+        — is honoured or refused. What follows is the rule with none named.
+
+        Place a new entry beside its own kind, not at the end of the file.
 
         Appending to the end put an entry outside whatever section it belonged
         to — after the closing prose, past any summary table — so a human then
@@ -523,6 +719,17 @@ class SphinxNeedsBackend:
         is rewritten.
         """
         rendered = self._render(item, eol)
+        if section is not None:
+            position = _section_end(lines, section, self.path.name)
+            return _insert_at(lines, position, rendered, eol)
+        if after is not None:
+            anchor = next((e for e in entries if e.id == after), None)
+            if anchor is None:
+                raise UsageError(
+                    f"{self.path.name}: --after {after!r} names no entry in this "
+                    "file; nothing was filed"
+                )
+            return _insert_at(lines, anchor.content_end, rendered, eol)
         if not "".join(lines).strip():
             return "".join(rendered)
         anchors = [e for e in entries if e.type == item.type]
@@ -530,10 +737,7 @@ class SphinxNeedsBackend:
             last_blank = not _content(lines[-1]).strip()
             lead = [] if last_blank else [eol]
             return _apply(lines, [(len(lines), len(lines), lead + rendered)], eol)
-        position = anchors[-1].content_end
-        follows = position < len(lines) and bool(_content(lines[position]).strip())
-        insert = [eol] + rendered + ([eol] if follows else [])
-        return _apply(lines, [(position, position, insert)], eol)
+        return _insert_at(lines, anchors[-1].content_end, rendered, eol)
 
     def _patch(
         self, lines: list[str], entry: _Entry, item: Item, eol: str
@@ -619,6 +823,14 @@ class NullBackend:
             "backend in the manifest to file items"
         )
 
+    def add(
+        self, item: Item, section: str | None = None, after: str | None = None
+    ) -> None:
+        self.save(item)
+
+    def taken_ids(self) -> dict[str, Path]:
+        return {}
+
     def next_id(self, item_type: str, title: str = "") -> str:
         raise UsageError("the work-item domain is disabled")
 
@@ -633,12 +845,11 @@ def backend_for(manifest) -> Backend:
     if name == "none":
         return NullBackend()
     path = (manifest.root / (manifest.get("items.path") or "docs/backlog")).resolve()
-    if name == "markdown":
-        return MarkdownBackend(path, prefix, strategy)
-    if name == "json":
-        return JsonBackend(path, prefix, strategy)
-    if name == "sphinx_needs":
-        return SphinxNeedsBackend(path, prefix, strategy)
+    closed = manifest.get("items.closed_path")
+    closed_path = (manifest.root / closed).resolve() if closed else None
+    stores = {"markdown": MarkdownBackend, "json": JsonBackend, "sphinx_needs": SphinxNeedsBackend}
+    if name in stores:
+        return stores[name](path, prefix, strategy, closed_path)
     raise UsageError(f"unknown work-item backend {name!r}")
 
 
@@ -659,22 +870,23 @@ def _slug_id(stem: str, title: str, taken: set[str]) -> str:
 
 
 def _next_id(
-    items: list[Item],
+    taken: set[str],
     item_type: str,
     prefix: str,
     strategy: str = "numeric",
     title: str = "",
 ) -> str:
+    """The next id for ``item_type``, given every id already spent."""
     stem = f"{prefix}{item_type.upper()}_"
     if strategy == "slug":
-        return _slug_id(stem, title, {i.id for i in items})
+        return _slug_id(stem, title, taken)
     if strategy != "numeric":
         raise UsageError(
             f"unknown items.id_strategy {strategy!r}; expected 'numeric' or 'slug'"
         )
     highest = 0
-    for item in items:
-        match = re.match(rf"^{re.escape(stem)}(\d+)$", item.id)
+    for spent in taken:
+        match = re.match(rf"^{re.escape(stem)}(\d+)$", spent)
         if match:
             highest = max(highest, int(match.group(1)))
     return f"{stem}{highest + 1:03d}"
