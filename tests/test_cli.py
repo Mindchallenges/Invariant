@@ -2892,7 +2892,7 @@ class TestTheHookProbeWritesNothing(EditHookHarness):
         assert name not in parked
         assert "hook shims actually run" in text
         shims = next(ln for ln in text.splitlines() if "hook shims actually run" in ln)
-        assert "all 6 evaluated" in shims
+        assert "all 7 evaluated" in shims
 
 
 class TestInitScaffoldsTheArchitectureDoc:

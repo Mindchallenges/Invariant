@@ -59,6 +59,7 @@ EVENTS = {
     "post-tool-use": "PostToolUse",
     "stop": "Stop",
     "session-end": "SessionEnd",
+    "notification": "Notification",
 }
 
 SHIM_TEMPLATE = """#!/usr/bin/env bash
@@ -140,12 +141,89 @@ _PROBE_PAYLOADS = {
     # worse defect than the outage it looks for.
     "stop": {PROBE_KEY: True, "stop_hook_active": True},
     "session-end": {PROBE_KEY: True},
+    "notification": {
+        PROBE_KEY: True,
+        "notification_type": "idle_prompt",
+        "message": "invariant doctor probe",
+    },
 }
 
 
 def is_probe(payload: object) -> bool:
     """Whether a parsed hook payload is ``doctor``'s probe."""
     return isinstance(payload, dict) and payload.get(PROBE_KEY) is True
+
+
+# -- attention -----------------------------------------------------------
+#
+# What a hook event says about whether the host is waiting on its person.
+# This module translates the hook PROTOCOL into that fact — which notification
+# type means a permission prompt, which tool is a question — and stops there:
+# the CLI writes it into the oracle's sidecar, so this module imports nothing
+# of the oracle's and the host adapter stays a layer below it (ADR-007 D6).
+
+ATTENTION_WAITING = "waiting"
+ATTENTION_ANSWERED = "answered"
+ATTENTION_PROMPT = "prompt"
+ATTENTION_TURN_ENDED = "turn-ended"
+ATTENTION_HOST_ENDED = "host-ended"
+
+
+@dataclass(frozen=True)
+class AttentionSignal:
+    """One hook event's news about the host's attention, host-agnostic.
+
+    ``kind`` and ``message`` accompany ``waiting``; ``rules`` accompanies
+    ``turn-ended`` and names the closeout rules that refused the turn, if any.
+    """
+
+    op: str
+    kind: str | None = None
+    message: str | None = None
+    rules: tuple[str, ...] = ()
+
+
+#: ``notification_type`` values as Claude Code sends them.
+_NOTIFICATION_TYPES = {
+    "permission_prompt": "permission",
+    "elicitation_dialog": "question",
+    "idle_prompt": "idle",
+}
+
+#: The fallback when the type is missing or renamed: the field is newer than
+#: the event, and a version that spells it differently must still turn a
+#: permission prompt into a waiting host. Asked in order; first match wins.
+_NOTIFICATION_PATTERNS = (
+    (re.compile(r"permission", re.IGNORECASE), "permission"),
+    (re.compile(r"waiting for your input|\bidle\b", re.IGNORECASE), "idle"),
+    (re.compile(r"question|needs your (?:input|answer|response)", re.IGNORECASE), "question"),
+)
+
+#: The tool whose call puts a question to the person.
+_QUESTION_TOOL = "AskUserQuestion"
+
+
+def notification_kind(payload: dict) -> str | None:
+    """What a ``Notification`` payload says the host is waiting on, if anything."""
+    kind = _NOTIFICATION_TYPES.get(str(payload.get("notification_type") or ""))
+    if kind:
+        return kind
+    message = payload.get("message")
+    if not isinstance(message, str):
+        return None
+    for pattern, named in _NOTIFICATION_PATTERNS:
+        if pattern.search(message):
+            return named
+    return None
+
+
+def _question_text(tool_input: object) -> str | None:
+    """The first question an ``AskUserQuestion`` call asks, when readable."""
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    if isinstance(questions, list) and questions and isinstance(questions[0], dict):
+        text = questions[0].get("question")
+        return text if isinstance(text, str) else None
+    return None
 
 
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
@@ -344,6 +422,9 @@ class ClaudeCodeHost:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.claude_dir = self.root / ".claude"
+        #: What the last :meth:`handle` call signalled about the host's
+        #: attention; see there.
+        self.attention: AttentionSignal | None = None
 
     # -- installation --------------------------------------------------
 
@@ -656,6 +737,7 @@ class ClaudeCodeHost:
                     text=True,
                     timeout=30,
                     env={**os.environ, "CLAUDE_PROJECT_DIR": str(self.root)},
+                    check=False,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 broken.append(f"{event} ({type(exc).__name__})")
@@ -934,23 +1016,59 @@ class ClaudeCodeHost:
     # -- request handling ----------------------------------------------
 
     def handle(self, event: str, raw: str, ctx) -> dict:
+        """The host's response to ``event``; :attr:`attention` is left set too.
+
+        ``attention`` is what the event says about whether the host is waiting
+        on its person — an :class:`AttentionSignal`, or ``None`` when it says
+        nothing. It is a by-product the caller may record, never an input to
+        the response, which is computed first and does not read it.
+        """
+        self.attention = None
         try:
             payload = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError:
             payload = {}
 
         if event == "pre-tool-use":
-            return self._pre_tool_use(payload, ctx)
+            response = self._pre_tool_use(payload, ctx)
+            self.attention = _signal_or_none(lambda: _question_signal(payload, response))
+            return response
         if event == "post-tool-use":
-            return self._post_tool_use(payload, ctx)
+            response = self._post_tool_use(payload, ctx)
+            self.attention = AttentionSignal(ATTENTION_ANSWERED)
+            return response
         if event == "user-prompt-submit":
-            return _context_response("UserPromptSubmit", build_context(ctx))
+            response = _context_response("UserPromptSubmit", build_context(ctx))
+            self.attention = AttentionSignal(ATTENTION_PROMPT)
+            return response
         if event == "session-start":
             return _context_response("SessionStart", build_context(ctx, greeting=True))
         if event == "stop":
             return self._stop(payload, ctx)
         if event == "session-end":
-            return self._session_end(ctx)
+            response = self._session_end(ctx)
+            self.attention = AttentionSignal(ATTENTION_HOST_ENDED)
+            return response
+        if event == "notification":
+            return self._notification(payload)
+        return {}
+
+    def _notification(self, payload: dict) -> dict:
+        """The host is telling its person something; nothing here can answer.
+
+        The only event that sees a permission prompt. It carries no decision —
+        the host discards anything a Notification hook returns but its exit
+        status — so the response is always empty and the event's whole value
+        is the attention it signals.
+        """
+        kind = notification_kind(payload)
+        if kind is not None:
+            message = payload.get("message")
+            self.attention = AttentionSignal(
+                ATTENTION_WAITING,
+                kind=kind,
+                message=message if isinstance(message, str) else None,
+            )
         return {}
 
     def _stop(self, payload: dict, ctx) -> dict:
@@ -979,6 +1097,11 @@ class ClaudeCodeHost:
             [v for v in verdicts if v.blocks], rule_ctx, ctx, surface="stop"
         )
         notices = [_override_notice(v, record) for v, record in spent]
+        self.attention = _signal_or_none(
+            lambda: AttentionSignal(
+                ATTENTION_TURN_ENDED, rules=tuple(str(v.rule_id) for v in blocking)
+            )
+        )
 
         if blocking:
             return {
@@ -1481,6 +1604,34 @@ _SESSION_CLAIM = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+(start|resume)\b"
 #: The identifier a claiming command prints. Parsed rather than guessed, so
 #: the binding names the session that command actually created or picked up.
 _STARTED_ID = re.compile(r"session\s+([0-9a-z]+)\s+\(")
+
+
+def _signal_or_none(build) -> AttentionSignal | None:
+    """``build()``, or ``None`` if it raises.
+
+    The signal is a by-product of the response, and reading it must not be a
+    way for the response to be lost: a hook that raised here would answer
+    degraded instead of with the verdict it had already reached (ADR-007 D10).
+    """
+    try:
+        return build()
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
+
+
+def _question_signal(payload: dict, response: dict) -> AttentionSignal | None:
+    """``waiting: question`` for an ``AskUserQuestion`` call the hook let through.
+
+    A denied call never reaches the person, so it asks them nothing.
+    """
+    if payload.get("tool_name") != _QUESTION_TOOL:
+        return None
+    decision = response.get("hookSpecificOutput", {}).get("permissionDecision")
+    if decision == "deny":
+        return None
+    return AttentionSignal(
+        ATTENTION_WAITING, kind="question", message=_question_text(payload.get("tool_input"))
+    )
 
 
 def _edit_target(payload: dict) -> Path | None:

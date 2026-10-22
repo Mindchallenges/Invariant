@@ -12,7 +12,7 @@ description of the current behaviour.
 | # | Increment | Status |
 |---|---|---|
 | 1 | Home, project index, `oracle projects` commands, auto-registration | **shipped** |
-| 2 | Attention sidecar and the `Notification` hook | planned |
+| 2 | Attention sidecar and the `Notification` hook | **shipped** |
 | 3 | Read-only scan, `classify`, `recommend`, `oracle list` | planned |
 | 4 | Watcher, rising-edge de-dup ledger, notifier, `watch --once`, `notify-test` | planned |
 | 5 | Gate cache for recommendation detail | planned |
@@ -23,11 +23,13 @@ description of the current behaviour.
 
 ```mermaid
 graph TD
-    CLI[cli — invariant oracle …, init, hook session-start]
+    CLI[cli — invariant oracle …, init, hook, gated commands]
+    HOST["hosts/claude_code"]
 
     subgraph oracle["oracle/"]
         HOME[home]
         INDEX[index]
+        ATTN[attention]
         SCAN["scan (planned)"]
         SIGNALS["signals / recommend (planned)"]
         WATCH["watcher / notify / launchd (planned)"]
@@ -44,6 +46,9 @@ graph TD
 
     CLI --> HOME
     CLI --> INDEX
+    CLI --> ATTN
+    CLI -- reads the AttentionSignal left by --> HOST
+    ATTN --> STORE
     INDEX --> STORE
     INDEX --> MANIFEST
     INDEX --> GIT
@@ -59,10 +64,11 @@ CLI. Nothing in `core/`, `domains/` or `adapters/` imports it, and a test scans
 those packages to enforce this. The engine therefore behaves identically
 whether the oracle is used or not.
 
-The SessionStart registration is wired in the CLI's `hook` command and not in
-`hosts/claude_code`. That keeps the host adapter free of the new layer.
-Increment 2 will decide whether the hook's attention writes need a
-`hosts → oracle` arrow. That decision is recorded in ADR-007 when it is taken.
+The SessionStart registration and the attention writes are both wired in the
+CLI's `hook` command and not in `hosts/claude_code`. That keeps the host
+adapter free of the new layer: the host says what an event means, and the CLI
+writes it (ADR-007 D6). A test scans `hosts/` for oracle imports, beside the
+one that scans `core/`, `domains/` and `adapters/`.
 
 ## Shipped: home and project index
 
@@ -112,18 +118,69 @@ summary:
 
 The CLI surface is in [cli.md](cli.md), "Oracle".
 
+## Shipped: the attention sidecar
+
+### `oracle/attention`
+
+`AttentionStore(store)` reads and writes
+`<state_root>/attention/<host-id>.json`, one record per host session. The
+format is specified in [state_model.md](state_model.md), "Attention and host
+liveness". In summary:
+
+- `waiting` is `{kind, message, since}`, where `kind` is `permission`,
+  `question` or `idle`, and `message` is the host's raw text. `blocked` is
+  `{rules, surface, since}`, where `surface` is `stop` or `cli`. Then `turn`
+  (`running` or `ended`) and `turn_since`, `ended`, `pid`, and `degraded`
+  (`{event, error, since}`).
+- The store is built on the caller's `JsonStore`, so the probe's inert store
+  discards these writes along with every other.
+- One writer per file, atomic replace, no lock. Unknown keys are kept. A
+  record that cannot be read is replaced by the next write.
+- A host id must be a plain name before it becomes a file name.
+
+### What writes it
+
+The host adapter turns each hook event into an `AttentionSignal`. The CLI
+applies the signal through one guarded helper, `_record_attention`.
+
+| Event | Signal | Effect on the record |
+|---|---|---|
+| `Notification` (new, the 7th hook) | `waiting` | `waiting` set. `notification_type` `permission_prompt` → `permission`, `elicitation_dialog` → `question`, `idle_prompt` → `idle`. When the type is missing or unknown, the message is matched instead. A notification that matches nothing writes nothing. |
+| `PreToolUse`, `AskUserQuestion` | `waiting` | `waiting: question`, with the first question's text. Not when the hook denies the call. |
+| `PostToolUse` | `answered` | `waiting` cleared. Reads first, and writes only if something was waiting. |
+| `UserPromptSubmit` | `prompt` | `turn: running`. `waiting`, `blocked` and `degraded` cleared, `ended: false`. |
+| `Stop` | `turn-ended` | `turn: ended`, `waiting` cleared. `blocked` set to the closeout's blocking rule ids, or, on a clean stop, cleared if the Stop had set it. A CLI block is kept. |
+| `SessionEnd` | `host-ended` | `ended: true`. Everything else cleared, including `pid`. |
+| `invariant hook` handler raised | — | `degraded` set, with the event and the error. |
+| `pipeline advance`, `session transition` / `review` / `merge` refused | — | `blocked: {surface: cli}` on the bound host's record, if the session has a live host. Cleared when one of those commands later succeeds. |
+
+`SessionStart` writes nothing. The rule that a hook must not write on every
+start still holds.
+
+### The two guarantees
+
+**A failed write never changes a verdict.** The helper runs after the response
+is computed and before it is printed. It neither reads nor returns the
+response, and it swallows every failure. The suite checks this by breaking the
+store and comparing the output byte for byte (ADR-007 D10).
+
+**The probe writes nothing.** `doctor`'s probe payloads, including the new
+`Notification` one, skip the helper outright. They are run against the inert
+store anyway.
+
+### The host pid
+
+The hook records `CLAUDE_PID` whenever the environment carries it. Without it,
+a pid already recorded stands, and a host with no pid yet walks the parent
+chain with `ps` to the first process named `claude`
+(`claude_code_launch.find_host_pid`). Both paths exist because both were seen
+on this machine (ADR-007 D7). The CLI refusal path records no pid.
+
 ## Planned
 
 The plan approved on 2026-10-22 sets out the shape below. Each part is written
 up properly when it ships.
 
-- **Attention sidecar** (increment 2). A per-project
-  `<state_root>/attention/<host-id>.json` holding `waiting`, `blocked`,
-  `turn`, `ended`, `pid` and `degraded`. It has a single writer and is replaced
-  atomically. It is written from a new `Notification` hook and from
-  PreToolUse(AskUserQuestion), PostToolUse, UserPromptSubmit, Stop and
-  SessionEnd. Every write is guarded and can never change a hook verdict. The
-  probe stays inert.
 - **Scan, signals, recommend** (increment 3). A read-only snapshot over
   `InertStore` for every registered project. A broken project becomes an error
   row and never hides the others. `classify` and `recommend` are pure

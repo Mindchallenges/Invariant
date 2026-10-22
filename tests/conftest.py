@@ -98,6 +98,24 @@ def _no_real_host_close(monkeypatch):
     return inert
 
 
+@pytest.fixture(autouse=True)
+def _no_real_process_walk(monkeypatch):
+    """No hook in the suite reads the real process table for its host pid.
+
+    A hook records its host's pid in the attention sidecar, from ``CLAUDE_PID``
+    or, without it, by walking the parent chain with ``ps``. The closer fixture
+    above removes ``CLAUDE_PID``, so every hook a test runs would otherwise
+    walk — slower, and answering with whatever ``claude`` happens to be running
+    the suite. The walk finds nothing here; a test about the walk supplies a
+    chain of its own.
+    """
+    monkeypatch.setattr(
+        "invariant.cli.main._attention_process_lookup",
+        lambda: (lambda pid: None),
+        raising=False,
+    )
+
+
 class InertWatch:
     """A successor watch that reads no process table.
 

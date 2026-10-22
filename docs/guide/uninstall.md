@@ -20,7 +20,7 @@ invariant uninstall --dry-run
 invariant uninstall
 ```
 
-The inverse of `init`. It removes the six shims and unwires exactly the
+The inverse of `init`. It removes the seven shims and unwires exactly the
 settings entries the library added — it recognises them by the shim path,
 the same test `init` uses to avoid wiring twice — and leaves everything else
 in `.claude/settings.json` as it found it. Malformed JSON is refused rather

@@ -1189,7 +1189,9 @@ def cmd_session_transition(args) -> int:
         report_verdicts(exc.verdicts, args)
         if getattr(args, "json", False):
             print(json.dumps({"advanced": False, "gates": verdicts_payload(exc.verdicts)}, indent=2))
+        _record_cli_refusal(ctx, session, exc.verdicts)
         raise
+    _lift_cli_refusal(ctx, session)
     return emit(args, updated.to_dict(), f"session {updated.id} -> {updated.state}")
 
 
@@ -1978,9 +1980,11 @@ def cmd_session_review(args) -> int:
         )
     except GateFailure as exc:
         report_verdicts(exc.verdicts, args)
+        _record_cli_refusal(ctx, session, exc.verdicts)
         raise GateFailure(
             "the review gates refused this session", verdicts=exc.verdicts
         ) from None
+    _lift_cli_refusal(ctx, session)
     return emit(
         args,
         {"session": session.id},
@@ -2033,6 +2037,7 @@ def cmd_session_merge(args) -> int:
     blocking = [v for v in verdicts if v.blocks]
     if blocking and not args.force:
         report_verdicts(verdicts, args)
+        _record_cli_refusal(ctx, session, verdicts)
         raise GateFailure(
             "the merge gates refused this session — nothing has been merged",
             verdicts=verdicts,
@@ -2070,6 +2075,7 @@ def cmd_session_merge(args) -> int:
         session.id, "merged", reason="ff-merge verified", force=args.force,
         cwd=ctx.cwd,
     )
+    _lift_cli_refusal(ctx, session)
     return emit(
         args,
         {"steps": performed, "verified": True},
@@ -2269,7 +2275,9 @@ def cmd_pipeline_advance(args) -> int:
         report_verdicts(exc.verdicts, args)
         if getattr(args, "json", False):
             print(json.dumps({"advanced": False, "gates": verdicts_payload(exc.verdicts)}, indent=2))
+        _record_cli_refusal(ctx, session, exc.verdicts)
         raise
+    _lift_cli_refusal(ctx, session)
     report_verdicts(verdicts, args)
     return emit(
         args,
@@ -2641,7 +2649,7 @@ def cmd_oracle_projects_prune(args) -> int:
 
 
 def cmd_hook(args) -> int:
-    from ..hosts.claude_code import ClaudeCodeHost, is_probe
+    from ..hosts.claude_code import DEGRADED_KEY, ClaudeCodeHost, is_probe
 
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     body: object = None
@@ -2677,6 +2685,9 @@ def cmd_hook(args) -> int:
         print(json.dumps(_hook_degraded(args.event, exc)))
         return EXIT_OK
     host = ClaudeCodeHost(ctx.manifest.root)
+    # The probe writes nothing anywhere (BUG_059): not the index, and not the
+    # attention sidecar, whose pid fallback would also read the process table.
+    probe = isinstance(ctx.store, InertStore)
     try:
         response = host.handle(args.event, raw, ctx)
     except Exception as exc:  # noqa: BLE001 - see below
@@ -2690,12 +2701,135 @@ def cmd_hook(args) -> int:
         # A block is a verdict, and verdicts come back as a return value. An
         # exception is this library breaking, and this library breaking must
         # never be spelled "the agent may not act".
-        print(json.dumps(_hook_degraded(args.event, exc)))
+        degraded = _hook_degraded(args.event, exc)
+        if not probe:
+            error = degraded[DEGRADED_KEY]
+            _record_attention(
+                ctx,
+                host_session_id,
+                lambda store, hid, pid: store.degraded(
+                    hid, args.event, error, pid_source=pid
+                ),
+            )
+        print(json.dumps(degraded))
         return EXIT_OK
-    if args.event == "session-start" and not isinstance(ctx.store, InertStore):
-        _register_on_session_start(ctx)
+    if not probe:
+        if args.event == "session-start":
+            _register_on_session_start(ctx)
+        signal = host.attention
+        if signal is not None:
+            _record_attention(
+                ctx,
+                host_session_id,
+                lambda store, hid, pid: _apply_signal(store, hid, pid, signal),
+            )
     print(json.dumps(response))
     return EXIT_OK
+
+
+# -- the attention sidecar ---------------------------------------------
+#
+# The host says what an event means for its person's attention; the oracle
+# owns the record; this is where the two meet, so the host adapter never
+# imports the oracle (ADR-007 D6). Every write goes through
+# `_record_attention`, and nothing it does can change a response.
+
+
+def _attention_process_lookup():
+    """The ``(ppid, comm)`` reader the pid fallback walks with.
+
+    A seam, like ``_handoff_closer``: the suite replaces it everywhere, so no
+    hook a test runs reads the real process table.
+    """
+    from ..hosts.claude_code_launch import parent_process
+
+    return parent_process
+
+
+def _attention_pid_source():
+    """The host pid to record, given the one already recorded (ADR-007 D7).
+
+    ``CLAUDE_PID`` when the hook inherited it — it costs nothing and is right
+    even when a resumed host kept its session id under a new process. Without
+    it, a pid already recorded stands, and only a host with none is found by
+    walking the parent chain to a ``claude`` process: one ``ps`` per hop, once
+    per host.
+    """
+    from ..hosts.claude_code_launch import find_host_pid, host_pid
+
+    def source(current: int | None) -> int | None:
+        return (
+            host_pid(os.environ)
+            or current
+            or find_host_pid(os.getppid(), _attention_process_lookup())
+        )
+
+    return source
+
+
+def _apply_signal(store, host_id: str, pid_source, signal) -> None:
+    """Apply the sidecar write an :class:`AttentionSignal` calls for."""
+    from ..hosts import claude_code as host
+
+    if signal.op == host.ATTENTION_WAITING:
+        store.wait(host_id, signal.kind, signal.message, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_ANSWERED:
+        store.answered(host_id, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_PROMPT:
+        store.prompt(host_id, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_TURN_ENDED:
+        store.turn_ended(host_id, signal.rules, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_HOST_ENDED:
+        store.host_ended(host_id)
+
+
+def _record_attention(ctx: Context, host_session_id, write) -> None:
+    """Apply one sidecar write for ``host_session_id``, swallowing any failure.
+
+    The one guarded path every attention write takes (ADR-007 D10). The hook's
+    response is computed before this runs and printed after it, and nothing
+    here reads or returns it — so a sidecar that cannot be written costs the
+    oracle one event and never costs the host a verdict, an exit status or a
+    degraded marker. A payload with no host id has no record to write.
+    """
+    if not host_session_id:
+        return
+    try:
+        from ..oracle.attention import AttentionStore
+
+        write(AttentionStore(ctx.store), host_session_id, _attention_pid_source())
+    except Exception:  # noqa: BLE001, S110 - see the docstring
+        pass
+
+
+def _bound_host(session) -> str | None:
+    """The live host session bound to ``session``, if it has one."""
+    if session is None or getattr(session, "host_ended", False):
+        return None
+    return getattr(session, "host_session_id", None) or None
+
+
+def _record_cli_refusal(ctx: Context, session, verdicts) -> None:
+    """Record a gate refusal on the sidecar of the host the session is bound to.
+
+    "Gate blocked" in the oracle means a refusal somebody actually met, never
+    a fresh evaluation by the watcher (ADR-007 D8). No pid is recorded: the
+    command may have been run by somebody other than the bound host.
+    """
+    _record_attention(
+        ctx,
+        _bound_host(session),
+        lambda store, hid, pid: store.refused(
+            hid, [v.rule_id for v in verdicts if v.blocks]
+        ),
+    )
+
+
+def _lift_cli_refusal(ctx: Context, session) -> None:
+    """A gated CLI transition went through, so its earlier refusal no longer stands."""
+    _record_attention(
+        ctx, _bound_host(session), lambda store, hid, pid: store.refusal_lifted(hid)
+    )
 
 
 def _register_on_session_start(ctx: Context) -> None:

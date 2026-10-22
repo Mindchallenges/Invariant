@@ -1501,6 +1501,9 @@ cache asks whether the source changed, not when.
   stats/<host-id>.json    one telemetry record per host session; derived and
                           rebuildable, except where `stats archive` has
                           promoted it to permanent
+  attention/<host-id>.json  one per host session: what it is waiting on, its
+                          pid, and how its last turn ended. Written by that
+                          host's hooks; read by the oracle (ADR-007 D5)
   locks/registry.lock     advisory lock file
 ```
 
@@ -1588,6 +1591,52 @@ which is what a stale registry entry from a crashed session needs.
 registry records a heartbeat updated on each transition; `repair` treats an
 entry with no live worktree as abandoned rather than deleting it outright, so
 that evidence of what happened survives the cleanup.
+
+## Attention and host liveness
+
+The session record says where a session is in its lifecycle. It cannot say
+whether its host is sitting on a permission prompt right now, whether the last
+turn ended on a refusal, or whether the host is still alive. Those facts belong
+to a HOST session, which may have no invariant session at all. They change on
+every turn. The oracle reads them from a sidecar per host (IDEA_012, ADR-007
+D5):
+
+```json
+{"host_session_id": "<id>", "pid": 4242,
+ "waiting": {"kind": "permission|question|idle", "message": "<raw>", "since": "<iso>"},
+ "blocked": {"rules": ["<rule id>"], "surface": "stop|cli", "since": "<iso>"},
+ "turn": "running|ended", "turn_since": "<iso>",
+ "ended": false,
+ "degraded": {"event": "<hook>", "error": "<type: message>", "since": "<iso>"}}
+```
+
+Every field may be `null` or absent. A record nobody has written means nothing
+is known about that host.
+
+| Property | Why |
+|---|---|
+| **One writer, atomic replace, no lock** | A file is written by its own host's hooks, which run one at a time, so this is the per-session-file argument above. The other writer is a refused CLI command, which writes the record of the host bound to the refused session, and that host is the caller. |
+| **Read-first where it fires constantly** | `PostToolUse` runs after every tool call. It reads, and writes only when something was waiting. `SessionStart` writes nothing, so the rule that a hook must not write on every start still holds. |
+| **Clock times, machine-local** | `since` and `turn_since` are UTC wall-clock times, to the second. They are the exception to "Storing what was measured, not when", and they are scoped by where they live: under the state root, which is never committed or rendered (ADR-007 D9). |
+| **Unknown keys survive; an unreadable record is replaced** | The BUG_061 contract, as for the session records. The difference is that this record is derived from events, so a corrupt one is overwritten by the next event instead of wedging every hook. |
+| **A write never changes a verdict** | One guarded helper in the CLI applies every write after the response is computed and swallows any failure. `doctor`'s probe writes nothing (ADR-007 D10). |
+
+**Host liveness.** `pid` is the first process id this library stores, and a
+pid is a claim that can go stale. The hook records `CLAUDE_PID` when Claude
+Code exports it to its hooks. Without it, a pid already on the record stands,
+and a host with none walks the parent chain to the first process named
+`claude`. `SessionEnd` clears the pid. The reader, which is the oracle's scan
+(increment 3), treats a host as alive only if the pid exists and `ps` still
+names it `claude`. That check runs at read time, because the pid can be reused
+after the host exits. A host that crashed without `SessionEnd` therefore stops
+reading as "waiting" once its process is gone.
+
+**Two surfaces of "blocked".** The Stop hook records the closeout's blocking
+rule ids, and a gated CLI command (`pipeline advance`, `session transition`,
+`review`, `merge`) records the rules that refused it. A clean Stop clears only
+a Stop block. The oracle reports a block once the turn has ended, so a CLI
+refusal must outlive the Stop of the turn it happened in. The next prompt clears
+both, and a CLI transition that succeeds clears a CLI block (ADR-007 D8).
 
 ## User-level state
 

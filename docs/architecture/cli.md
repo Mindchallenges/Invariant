@@ -813,6 +813,13 @@ the hook's output cannot change. The rest of the oracle's surface — `oracle
 list`, `watch`, `tui`, `install`, `uninstall`, `notify-test` — is planned and
 not yet shipped.
 
+A gate refusal from `pipeline advance`, `session transition`, `session
+review` or `session merge` is also recorded for the oracle. The refused
+rule ids go into the attention sidecar of the host bound to the session
+(`blocked`, `surface: cli`), when it has a live one. A later success from
+one of those commands clears it. The command's output and exit status are
+unchanged, and a failure to record is swallowed.
+
 ## Host bridge
 
 ```
@@ -820,7 +827,7 @@ invariant hook <event>
     Read the host's payload on stdin, evaluate the rules bound to <event>, and
     write the host's expected response on stdout. Events for Claude Code:
     session-start, user-prompt-submit, pre-tool-use, post-tool-use, stop,
-    session-end.
+    session-end, notification. `hooks install` wires all seven.
 
     The governing manifest is resolved from CLAUDE_PROJECT_DIR when the host
     supplies it, falling back to the working directory. The host guarantees
@@ -842,6 +849,14 @@ invariant hook <event>
     the first time a host starts there (`via: session-start`). It never
     changes the response: a known project costs one read, and a failure is
     swallowed.
+
+    Every event except session-start also updates the host's attention
+    sidecar, <state root>/attention/<host-id>.json (see oracle.md for the
+    per-event table). `notification` exists for that alone: its response is
+    always empty, and it marks the host as waiting on a permission prompt,
+    a question, or idle. A handler that raises records `degraded` there.
+    These writes happen after the response is computed. They never change
+    it, a failure is swallowed, and the probe writes none.
 
 invariant context
     Print the state projection a host would inject: current state, legal

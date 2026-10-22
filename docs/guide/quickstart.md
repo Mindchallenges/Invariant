@@ -19,7 +19,7 @@ anything else → `generic`) and writes:
 | Path | What it is |
 |---|---|
 | `.claude/invariant.yaml` | the manifest — three lines, everything else defaulted |
-| `.claude/hooks/invariant-*.sh` | six shims, one per Claude Code hook event, each a few lines that `exec invariant hook <event>` |
+| `.claude/hooks/invariant-*.sh` | seven shims, one per Claude Code hook event, each a few lines that `exec invariant hook <event>` |
 | `.claude/settings.json` | hook wiring, merged into whatever is already there |
 | `.claude/agents/*.md` | four library agents (design, review, backlog, bug repro) |
 | `docs/architecture/overview.md` | a starter architecture doc — only when that directory does not already exist |

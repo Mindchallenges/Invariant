@@ -1,9 +1,9 @@
 # ADR-007 — A machine-wide, read-only oracle
 
-- **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012. The
-  later decisions are listed under "Still to decide", and each is recorded
-  here when its increment lands. The status becomes Accepted when the oracle
-  ships.
+- **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012, and
+  D5–D10 by increment 2. The later decisions are listed under "Still to
+  decide", and each is recorded here when its increment lands. The status
+  becomes Accepted when the oracle ships.
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. This record adds the first state this library keeps
   outside any project.
@@ -91,20 +91,117 @@ commands' "never deletes the operator's data" and "teardown must not acquire
 new ways to refuse" postures would each have to absorb a new failure mode for
 bookkeeping that `prune` already handles.
 
+### D5 — Each host session keeps an attention sidecar in its project's state root
+
+`<state_root>/attention/<host-id>.json` records what one host session is
+waiting on: `waiting` (a permission prompt, a question, or idle), `blocked` (the
+rule ids of a refusal and where it happened), `turn` and `turn_since`, `ended`,
+`pid` and `degraded`. It lives in the project's state root and not in the
+oracle home, because it is a fact about one project's host and the hook that
+writes it already holds that project's store. It does not live on the session
+record either. A host can exist with no invariant session at all, and the
+session record is written under the registry's discipline by the domain that
+owns it. A file written on every turn has no business there.
+
+It is the first per-host file in a state root that more than one hook event
+writes. It still has a single writer: its own host, whose hooks run one at a
+time. So it is replaced atomically and takes no lock, which is the argument
+state_model.md already makes for `sessions/<sid>.json`. The one other writer
+is a CLI gate refusal, and that writes the record of the host bound to the
+refused session, which is the process tree that ran the command. Unknown keys
+are kept (BUG_061). A record that cannot be read is replaced by the next write
+instead of wedging the host, because it is derived from events and the next
+event derives it again.
+
+### D6 — The host translates; the CLI writes. No `hosts → oracle` arrow
+
+`hosts/claude_code` decides what an event means for the person's attention.
+That is protocol knowledge: which `notification_type` is a permission prompt,
+which tool asks a question, which closeout rules refused the turn. The host
+leaves the answer on `ClaudeCodeHost.attention` as a host-agnostic
+`AttentionSignal`, and `invariant hook` in the CLI applies it to
+`oracle/attention`. This is the D1 shape again, and the overview's
+`NORMALISED_PAYLOAD_KEYS` shape: the host hands a normalised fact upward, and
+the layer above decides what to do with it. A second host adapter would emit
+the same signals and inherit the sidecar unchanged.
+
+The alternative was for the host adapter to import the oracle and write the
+sidecar itself. It was rejected because it puts the oracle's record format into
+the one module a second host would have to copy, and because it would add an
+arrow the overview says hosts do not draw. A test scans `hosts/` for oracle
+imports.
+
+### D7 — The first stored pid: `CLAUDE_PID`, else a walk up the parent chain
+
+The sidecar stores the host's pid so that the oracle can tell a waiting host
+from a crashed one. It is the first process id this library persists. Before
+choosing, we checked a real hook environment on 2026-10-22 by capturing the
+environment of `invariant hook` processes while Claude Code 2.1.291 ran them.
+The hooks of a terminal-launched host carried `CLAUDE_PID`, and their parent
+was the `claude` process itself. The tool shells of another host on the same
+machine, an IDE-attached one, did not export it. So the variable is used when
+present, and the fallback is not hypothetical.
+
+`CLAUDE_PID` wins whenever it is present, because it costs nothing, and it is
+right even when a resumed host kept its session id under a new process.
+Without it, a pid already recorded stands. Only a host with no recorded pid
+walks the parent chain with `ps`, from the hook's parent up to the first
+process whose name is `claude` (`is_claude_process_name`). The walk is bounded
+to eight hops and runs once per host. `SessionEnd` clears the pid. A pid is a
+claim that can go stale, so the reader must check it, and increment 3 does:
+the pid must be alive and still named `claude`. The CLI refusal path records
+no pid, because the command may have been run by somebody other than the
+bound host.
+
+### D8 — "Gate blocked" is a recorded refusal, from one of two surfaces
+
+`blocked` is written only where a refusal was actually met: the Stop hook's
+closeout (`surface: stop`) and a gated CLI command (`pipeline advance`,
+`session transition`, `review`, `merge`; `surface: cli`). The watcher will
+never evaluate gates to find out. Evaluating is the gate cache's job, and it
+only adds detail to a recommendation (increment 5).
+
+The two surfaces are cleared differently, and on purpose. A refusal at the CLI
+happens in the middle of a turn, and the oracle reports a block once the turn
+has ended. If a clean Stop cleared every block, the Stop that ends the turn
+would erase the refusal it was meant to reveal. So a clean Stop clears only a
+Stop block. The next `UserPromptSubmit` clears both, because the person has
+spoken. A gated CLI transition that then succeeds clears a CLI block.
+
+### D9 — Clock times in the sidecar are machine-local and never committed
+
+`since` and `turn_since` are UTC wall-clock times, to the second. They are the
+first timestamps this library stores outside the stats records' bare dates,
+which store none on principle ("Storing what was measured, not when"). They
+are allowed here because of where they live and what they are for. They live
+under the state root, which is never committed, rendered or published, so they
+are outside what `privacy.clean` screens. And "how long has this host been
+waiting" is the oracle's whole question, so a duration alone cannot answer it.
+The watcher's snapshot and its de-dup ledger are user-level and get their own
+ruling when increment 4 lands.
+
+### D10 — A sidecar write can never change a verdict, and the probe writes none
+
+Every attention write goes through one guarded helper in the CLI. It runs
+after the hook's response is computed and before it is printed, it neither
+reads nor returns that response, and it swallows any failure. A sidecar that
+cannot be written costs the oracle one event. It never costs the host a
+verdict, an exit status or a degraded marker. The same helper records
+`degraded` when the hook's own handler raises.
+
+`doctor`'s probe writes nothing. The attention store is built on the hook's
+own `JsonStore`, which is the inert store for a probe, and the CLI also skips
+the write explicitly, so a probe does not walk the process table either
+(BUG_059).
+
 ## Still to decide (later increments of IDEA_012)
 
 These are recorded so the record is complete. They are not decided yet.
 
-- The per-project **attention sidecar** under `<state_root>/attention/`. It
-  would be the first per-host file in a state root written by more than one
-  hook event, and it would store the first **pid**.
-- **"Gate blocked" means a recorded refusal**, never a fresh evaluation by the
-  watcher.
 - **Actions are confirmed first**, run as subprocesses with the host markers
   stripped, and never answer a permission prompt.
 - **The first daemon** (launchd) and **the first optional dependency**
   (Textual, as `invariant[oracle]`).
 - **How clock times are scoped** in the watcher's snapshot and de-dup ledger.
-  Both are user-level, not committed, and outside the privacy scope.
-- Whether the hook's attention writes need a `hosts → oracle` arrow, or go
-  through the CLI as the registration in D1 does.
+  Both are user-level, not committed, and outside the privacy scope. D9
+  settles this for the attention sidecar only.

@@ -24,6 +24,7 @@ graph TD
     subgraph oracle["oracle/ — machine-wide view (ADR-007)"]
         OHOME[home]
         OINDEX[index]
+        OATTN[attention]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -77,6 +78,8 @@ graph TD
     CLI -. launches and watches the successor through .-> CCLAUNCH
     CLI --> OINDEX
     CLI --> OHOME
+    CLI --> OATTN
+    OATTN --> STORE
     OINDEX --> STORE
     OINDEX --> MANIFEST
     OINDEX --> GIT
@@ -145,6 +148,18 @@ checkout's spelling. The registration on SessionStart is wired in the CLI's
 `hook` command rather than in `hosts/claude_code`, so the host adapter gains
 no import and the "hosts reach the engine only through the CLI" rule is
 untouched. See [oracle.md](oracle.md) and ADR-007.
+
+`CLI --> OATTN` and `OATTN --> STORE` are the attention sidecar (ADR-007 D5,
+D6). The writes run in the same `hook` command, for the same reason. The host
+adapter turns each event into an `AttentionSignal` (a normalised fact, the
+`NORMALISED_PAYLOAD_KEYS` shape) and leaves it on `ClaudeCodeHost.attention`.
+The CLI applies it through `oracle/attention` to the hook's own `JsonStore`.
+That store is why the file lands in the project's state root, and why the
+probe's inert store discards it. The gated CLI commands write a refusal the
+same way. The host pid the record carries comes from `claude_code_launch`
+(`host_pid`, else `find_host_pid`), which is the existing dotted
+`CLI → CCLAUNCH` arrow carrying two more names. A test scans `hosts/` for
+oracle imports, so no `hosts → oracle` arrow can appear unnoticed.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -493,13 +508,14 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Increment 1 delivers the two modules below; the rest of the
-package is planned in [oracle.md](oracle.md).
+project (IDEA_012). Increments 1 and 2 deliver the three modules below; the
+rest of the package is planned in [oracle.md](oracle.md).
 
 | Module | Owns | Never does |
 |---|---|---|
 | `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant` | Create it; read anything in it |
 | `index` | `projects.json` — every registered project once, keyed by its state root; register, remove, prune | Read or write anything under a project's state root; store a clock time |
+| `attention` | `<state_root>/attention/<host-id>.json` — what one host session is waiting on, how its turn ended, its pid; the write and clear rules per event | Decide what a hook event means (the host adapter does); lock; raise into a hook (the CLI guards every call) |
 
 ### `adapters/`
 
@@ -815,8 +831,9 @@ per repository:
   locks/projects.lock       advisory lock for the index's read-modify-write
 ```
 
-It holds no project's runtime state — only which projects exist — and no
-project's state root holds anything of the oracle's in this increment.
+It holds no project's runtime state — only which projects exist. The one
+thing of the oracle's inside a project is the attention sidecar,
+`<state root>/attention/`, which that project's own hooks write.
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between

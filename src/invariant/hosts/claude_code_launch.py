@@ -501,6 +501,56 @@ def is_claude_process_name(name: str | None) -> bool:
     return name.strip().rsplit("/", 1)[-1] == CLAUDE_BINARY
 
 
+#: How far up the parent chain :func:`find_host_pid` looks. A hook is the
+#: host's child, or its grandchild through a shell; the bound only keeps a
+#: chain with no ``claude`` in it from costing more than a handful of ``ps``.
+HOST_PID_MAX_HOPS = 8
+
+
+def parent_process(pid: int) -> tuple[int, str] | None:
+    """``(ppid, comm)`` for ``pid`` from ``ps``, or ``None`` if it cannot say."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "ppid=,comm=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    ppid, _, name = (proc.stdout or "").strip().partition(" ")
+    if not ppid.isdigit():
+        return None
+    return int(ppid), name.strip()
+
+
+def find_host_pid(start: int, lookup, max_hops: int = HOST_PID_MAX_HOPS) -> int | None:
+    """The nearest ``claude`` process at or above ``start``, by the parent chain.
+
+    The fallback for a hook whose environment carries no ``HOST_PID_ENV``:
+    Claude Code exports it to its hooks and tool shells, but not every build
+    does (ADR-007 D7). ``lookup`` answers ``(ppid, comm)`` for a pid, or
+    ``None`` — :func:`parent_process` in production, a table in the suite.
+    """
+    pid = start
+    for _ in range(max_hops):
+        if pid <= 0:
+            return None
+        row = lookup(pid)
+        if row is None:
+            return None
+        ppid, name = row
+        if is_claude_process_name(name):
+            return pid
+        if ppid == pid:
+            return None
+        pid = ppid
+    return None
+
+
 def close_script(pid: int, delay: int) -> str:
     """The detached shell line that ends the launching host: sleep, check, TERM.
 
