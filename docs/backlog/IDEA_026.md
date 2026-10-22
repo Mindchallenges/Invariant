@@ -2,9 +2,21 @@
 id: IDEA_026
 type: idea
 title: Session Oracle web page over HTTPS with a Let's Encrypt certificate from Tailscale
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: Designed in ADR-008 D19-D24
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: Shipped in the IDEA_026 commit
+  forced: false
 priority: high
 effort: M
 tier: '2'
