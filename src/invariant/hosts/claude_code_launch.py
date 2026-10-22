@@ -52,6 +52,31 @@ closing a window, so it works in any terminal and over Remote Control, and the
 window stays at a shell prompt. The CLI reaches the closer through one
 replaceable function, the way it reaches the launcher, and the suite replaces
 it everywhere: no test signals a process.
+
+**The note never rides the typed line (BUG_075).** ``do script`` TYPES the
+line into the new window's tty before its shell has started line editing, and
+a tty in canonical mode holds at most ``MAX_CANON`` bytes of one line — 1024
+on macOS — so a long note was cut mid-quote and no ``claude`` ever ran. The
+plan writes a *launch file* instead: a three-line ``/bin/sh`` script holding
+the whole ``claude`` command, in a private directory outside the project
+(``launch_dir``, mode 0700, the file 0600). The typed line only names it —
+``cd <main> && env -u … INVARIANT_HANDOFF=<token> /bin/sh <launch file>`` — so
+its length no longer depends on the note, and ``plan_launch`` refuses a line
+that would still not fit rather than let the tty cut it. The script removes
+itself first and then ``exec``-s ``claude``, so the note is gone from disk the
+moment the successor holds it, the note stays ONE positional argument quoted
+by ``shlex`` exactly as before, and the successor keeps the script's pid. It
+is a file ``/bin/sh`` reads, not syntax the window's shell parses, so the line
+means the same in zsh, bash or fish. A file nobody ran — a launch that failed
+— is removed by the CLI, and any older than ``LAUNCH_FILE_TTL_SECONDS`` is
+swept on the next staging.
+
+**A launch counts only once a successor is seen alive.** Terminal accepting
+the script proves nothing about what the window then runs, so the CLI asks a
+``SuccessorWatch`` — a third seam, beside the launcher and the closer — for a
+NEW process whose argv carries ``--name <slug>`` and ``--remote-control
+<slug>``, still alive ``SUCCESSOR_GRACE_SECONDS`` after it was first seen.
+Without one the handoff fails, and the launching host is never signalled.
 """
 
 from __future__ import annotations
@@ -59,9 +84,13 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Protocol
 
@@ -133,6 +162,37 @@ HOST_PID_ENV = "CLAUDE_PID"
 #: reading the installed timeout back.
 CLOSE_DELAY_SECONDS = 20
 
+#: The longest line the new window's tty accepts in canonical mode, newline
+#: included: macOS ``MAX_CANON``. ``do script`` types the line before the
+#: window's shell has switched its tty to line editing, so a longer one is cut
+#: and the cut line runs nothing (BUG_075). ``plan_launch`` refuses to build a
+#: plan whose typed line would not fit.
+MAX_CANON = 1024
+
+#: The program that runs the launch file. Named in full, and a program rather
+#: than the window's own shell, so the typed line means the same whatever
+#: shell the window opens.
+LAUNCH_SHELL = "/bin/sh"
+
+#: How long a launch file nobody ran may stay on disk. One the successor ran
+#: has already removed itself, and one whose launch failed the CLI removes; this
+#: bounds what a crash between the two leaves behind. An hour is far longer
+#: than any window takes to open, and far shorter than a note stays useful.
+LAUNCH_FILE_TTL_SECONDS = 3600
+
+#: Seconds to wait for the successor ``claude`` to appear after the launch: a
+#: Terminal window opening and its login shell starting, which can be slow
+#: under a heavy shell profile.
+SUCCESSOR_TIMEOUT_SECONDS = 15
+
+#: Seconds a successor must stay alive after it is first seen. A ``claude``
+#: that refuses its arguments or its login exits within this, and a handoff to
+#: it is a handoff to nothing.
+SUCCESSOR_GRACE_SECONDS = 3
+
+#: Seconds between two reads of the process table while waiting.
+SUCCESSOR_POLL_SECONDS = 0.5
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -140,20 +200,64 @@ class LaunchPlan:
 
     ``--dry-run`` prints exactly this, so what is shown and what would run are
     one value rather than two renderings that could disagree.
+
+    A plan cannot be built without Remote Control: ``argv`` must carry
+    ``--remote-control <name>``, the way a successor is reached from the phone
+    the handoff was usually started from. Construction refuses one that does
+    not, so no later edit to ``plan_launch`` can drop it silently.
     """
 
     #: What ``claude`` receives: the binary, the documented flags, the note.
     argv: tuple[str, ...]
     #: The directory the new session starts in — the main checkout.
     cwd: str
-    #: ``cd <cwd> && env -u <marker> ... [NAME=value ...] <argv>``, quoted for
-    #: a POSIX shell.
+    #: The line typed into the new window: ``cd <cwd> && env -u <marker> ...
+    #: [NAME=value ...] /bin/sh <launch_file>``, quoted for a POSIX shell. It
+    #: carries no note, so its length does not grow with one.
     shell_line: str
     #: The script ``osascript`` runs to type ``shell_line`` into a new window.
     applescript: str
     #: Variables set for ``claude`` alone, as ``(name, value)`` pairs. Empty
     #: where nothing has been recorded for the new session to claim.
     env: tuple[tuple[str, str], ...] = ()
+    #: The session name, given to ``--name`` and ``--remote-control`` alike.
+    name: str = ""
+    #: The launch file ``shell_line`` runs: the whole ``claude`` command.
+    launch_file: str = ""
+    #: What the launch file holds. Written to ``launch_file`` only when the
+    #: plan was staged.
+    script: str = ""
+    #: Whether ``launch_file`` was written. A preview — a dry run, a refusal —
+    #: writes nothing, and names the file a real run would write.
+    staged: bool = False
+    #: The same command as one self-contained line, the note inline, to run by
+    #: hand in a shell that is already up — where line editing, not the tty,
+    #: reads the input, so its length does not matter.
+    by_hand: str = ""
+
+    def __post_init__(self) -> None:
+        require_remote_control(self.argv, self.name)
+
+    def discard(self) -> None:
+        """Remove the launch file, if this plan wrote one and it is still there."""
+        if self.staged and self.launch_file:
+            Path(self.launch_file).unlink(missing_ok=True)
+
+
+def require_remote_control(argv, name: str) -> None:
+    """Refuse an argv that does not enable Remote Control under ``name``.
+
+    The pair must be adjacent and the name non-empty: ``--remote-control``
+    takes an OPTIONAL value, so a bare flag followed by anything else would
+    name the session after whatever came next.
+    """
+    argv = tuple(argv)
+    pairs = set(pairwise(argv))
+    if not name or ("--remote-control", name) not in pairs:
+        raise InvariantError(
+            f"a handoff launch must enable Remote Control: the command carries "
+            f"no '--remote-control {name or '<name>'}'"
+        )
 
 
 class Launcher(Protocol):
@@ -188,37 +292,140 @@ def without_host_markers(environ: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in environ.items() if key not in HOST_MARKERS}
 
 
+def launch_dir() -> Path:
+    """Where launch files are written: private to this user, outside any tree.
+
+    Under the system temporary directory — per user on macOS — and never under
+    the project, so a launch file, which holds the note, cannot be committed.
+    A function, so a test can point it somewhere of its own.
+    """
+    return Path(tempfile.gettempdir()) / f"invariant-handoff-{os.getuid()}"
+
+
+def _private_launch_dir() -> Path:
+    """``launch_dir()``, created mode 0700 and proved to be this user's own.
+
+    A directory under a shared temporary root could have been made by someone
+    else, or be a link to somewhere else; a note is not written into either.
+    Stale launch files are swept on the way.
+    """
+    path = launch_dir()
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise InvariantError(
+            f"refusing to write the handoff note under {path}: it is not a "
+            f"directory this user owns"
+        )
+    os.chmod(path, 0o700)
+    sweep_launch_files(path)
+    return path
+
+
+def sweep_launch_files(path: Path, now: float | None = None) -> list[Path]:
+    """Remove launch files in ``path`` older than ``LAUNCH_FILE_TTL_SECONDS``.
+
+    Returns what was removed. Only this module's own files — ``handoff-*.sh``
+    — are touched, and a file that vanishes mid-sweep is not an error.
+    """
+    cutoff = (time.time() if now is None else now) - LAUNCH_FILE_TTL_SECONDS
+    removed = []
+    for item in path.glob("handoff-*.sh"):
+        try:
+            if item.stat().st_mtime < cutoff:
+                item.unlink()
+                removed.append(item)
+        except FileNotFoundError:
+            continue
+    return removed
+
+
+def launch_script(launch_file: str, argv: tuple[str, ...]) -> str:
+    """The launch file: remove itself, then become ``claude``.
+
+    ``rm`` comes first, so the note leaves the disk before ``claude`` starts;
+    ``/bin/sh`` already holds the file open and reads the rest from that open
+    file. ``exec`` keeps the pid, so the process the successor watch finds is
+    the one ``/bin/sh`` became. The note is one ``shlex``-quoted positional
+    argument, exactly as on the typed line before BUG_075.
+    """
+    return "\n".join(
+        [
+            "#!/bin/sh",
+            f"rm -f -- {shlex.quote(launch_file)}",
+            f"exec {shlex.join(argv)}",
+            "",
+        ]
+    )
+
+
 def plan_launch(
     claude: str,
     name: str,
     note: str,
     cwd: Path | str,
     token: str | None = None,
+    *,
+    stage: bool = True,
 ) -> LaunchPlan:
-    """The command, the shell line and the script, for one handoff.
+    """The command, the launch file, the typed line and the script, for one handoff.
 
     ``--name`` and ``--remote-control`` both carry the name, so the session is
     the same thing in the terminal title, the session picker and the Remote
     Control list. The note is the LAST argument and is positional: that is the
     initial prompt. ``--remote-control`` takes an optional value, so the name
     is given to it explicitly rather than left for the note to be read as.
+    ``LaunchPlan`` refuses an argv without that pair.
 
     ``token`` names the recorded note, and is set as ``HANDOFF_ENV`` in front
-    of ``claude`` — a prefix assignment, so it reaches that one process and the
-    hooks it spawns, and not the window's shell. ``None`` sets nothing: a plan
-    built before the note is recorded has no note to name.
+    of the launch shell — a prefix assignment through ``env``, so it reaches
+    that process, the ``claude`` it becomes and the hooks that spawns, and not
+    the window's shell. ``None`` sets nothing: a plan built before the note is
+    recorded has no note to name.
 
-    ``claude`` is run through ``env``, which first unsets ``HOST_MARKERS``. It
-    is a program rather than shell syntax, so the line means the same in
-    whichever shell the window opens, and an unset name is not an error.
+    The launch shell is run through ``env``, which first unsets
+    ``HOST_MARKERS``. It is a program rather than shell syntax, so the line
+    means the same in whichever shell the window opens, and an unset name is
+    not an error.
+
+    ``stage`` writes the launch file. ``False`` builds a preview that writes
+    nothing and names a file a real run would create. A typed line over
+    ``MAX_CANON`` — only a very long main-checkout path can make one now — is
+    refused before anything is written.
     """
     argv = (claude, "--name", name, "--remote-control", name, note)
+    require_remote_control(argv, name)
     env = ((HANDOFF_ENV, token),) if token else ()
-    unset = "".join(f"-u {name} " for name in HOST_MARKERS)
+    unset = "".join(f"-u {marker} " for marker in HOST_MARKERS)
     assign = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
-    shell_line = (
-        f"cd {shlex.quote(str(cwd))} && env {unset}{assign}{shlex.join(argv)}"
-    )
+    prefix = f"cd {shlex.quote(str(cwd))} && env {unset}{assign}"
+    by_hand = prefix + shlex.join(argv)
+
+    # The preview path is exactly as long as the one ``mkstemp`` returns (its
+    # random part is eight characters), so the length check below runs before
+    # anything is written and holds for the staged line too.
+    launch_file = launch_dir() / "handoff-XXXXXXXX.sh"
+    typed = len((prefix + shlex.join((LAUNCH_SHELL, str(launch_file))) + "\n").encode())
+    if typed > MAX_CANON:
+        raise InvariantError(
+            f"the line typed into the new window would be {typed} bytes, and a "
+            f"terminal accepts {MAX_CANON}; the main checkout path is too long "
+            f"to launch from. Run it by hand:\n    {by_hand}"
+        )
+    if stage:
+        # mkstemp creates the file 0600 and exclusively: nobody else can have
+        # it open, or have put a link where it lands.
+        fd, raw = tempfile.mkstemp(
+            prefix="handoff-", suffix=".sh", dir=_private_launch_dir()
+        )
+        launch_file = Path(raw)
+        script = launch_script(raw, argv)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(script)
+    else:
+        script = launch_script(str(launch_file), argv)
+    shell_line = prefix + shlex.join((LAUNCH_SHELL, str(launch_file)))
+
     applescript = "\n".join(
         [
             'tell application "Terminal"',
@@ -233,6 +440,11 @@ def plan_launch(
         shell_line=shell_line,
         applescript=applescript,
         env=env,
+        name=name,
+        launch_file=str(launch_file),
+        script=script,
+        staged=stage,
+        by_hand=by_hand,
     )
 
 
@@ -259,9 +471,8 @@ class TerminalLauncher:
                 f"osascript could not open a Terminal window: "
                 f"{(proc.stderr or proc.stdout).strip() or 'no reason given'}\n"
                 f"  The note is recorded. Run it by hand:\n"
-                f"    {plan.shell_line}"
+                f"    {plan.by_hand}"
             )
-
 
 
 def host_pid(environ) -> int | None:
@@ -344,3 +555,91 @@ class DetachedCloser:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+
+def carries_successor_flags(command: str, name: str) -> bool:
+    """Whether a ``ps -o command=`` line is a ``claude`` named ``name`` with Remote Control.
+
+    The line is argv joined by spaces, which a slug — no spaces by
+    construction — survives. A word naming ``claude`` must come before the
+    flags, so the shell that runs the launch file, a ``grep`` for the slug and
+    a note that merely mentions the flags are not taken for the successor; a
+    ``claude`` run by an interpreter (``node …/claude --name …``) still is.
+    """
+    words = command.split()
+    for start, word in enumerate(words):
+        if is_claude_process_name(word):
+            rest = words[start + 1 :]
+            pairs = set(pairwise(rest))
+            return ("--name", name) in pairs and ("--remote-control", name) in pairs
+    return False
+
+
+def successor_pids(table: str, name: str) -> set[int]:
+    """The pids in a ``ps -axo pid=,command=`` listing that carry ``name``'s flags."""
+    found = set()
+    for line in table.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and carries_successor_flags(command, name):
+            found.add(int(pid))
+    return found
+
+
+class SuccessorWatch(Protocol):
+    """The seam that proves a successor started. A test passes a stub."""
+
+    def running(self, name: str) -> set[int]: ...
+
+    def wait_for(self, name: str, exclude: set[int]) -> int | None: ...
+
+
+class ProcessTableWatch:
+    """Finds the successor in the process table, by the flags it was given.
+
+    ``running`` is read BEFORE the launch, so a session of the same name that
+    was already up is never mistaken for the one just launched. ``wait_for``
+    polls for a new one until ``timeout``, then waits ``grace`` and reads
+    again: only a process seen both times is a live successor.
+    """
+
+    def __init__(
+        self,
+        timeout: float = SUCCESSOR_TIMEOUT_SECONDS,
+        grace: float = SUCCESSOR_GRACE_SECONDS,
+        poll: float = SUCCESSOR_POLL_SECONDS,
+        clock=time.monotonic,
+        sleep=time.sleep,
+    ) -> None:
+        self.timeout = timeout
+        self.grace = grace
+        self.poll = poll
+        self.clock = clock
+        self.sleep = sleep
+
+    def table(self) -> str:
+        try:
+            proc = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return ""
+        return proc.stdout if proc.returncode == 0 else ""
+
+    def running(self, name: str) -> set[int]:
+        return successor_pids(self.table(), name)
+
+    def wait_for(self, name: str, exclude: set[int]) -> int | None:
+        deadline = self.clock() + self.timeout
+        while True:
+            seen = self.running(name) - set(exclude)
+            if seen:
+                break
+            if self.clock() >= deadline:
+                return None
+            self.sleep(self.poll)
+        self.sleep(self.grace)
+        alive = seen & self.running(name)
+        return min(alive) if alive else None

@@ -1354,6 +1354,51 @@ def _handoff_closer():
     return _real_handoff_closer()
 
 
+def _real_handoff_watch():
+    from ..hosts.claude_code_launch import ProcessTableWatch
+
+    return ProcessTableWatch()
+
+
+def _handoff_successor():
+    """The watch that proves a handoff started a live successor (BUG_075). A
+    seam, like `_handoff_launcher`: the suite replaces it everywhere, so no
+    test waits on the process table, and a test that wants a launch to count
+    says so."""
+    return _real_handoff_watch()
+
+
+def _launch_successor(launch, plan) -> int:
+    """Launch ``plan`` and return the pid of the live successor it started.
+
+    Terminal accepting the script is not a launch: the window's shell can
+    still run nothing, as a tty-cut line did (BUG_075). Sessions of the same
+    name already running are read first and never counted. On any failure the
+    launch file is removed, so a window that opens late runs nothing rather
+    than contradicting the failure just reported, and the error carries the
+    command to run by hand. The caller signals nothing either way.
+    """
+    watch = _handoff_successor()
+    before = watch.running(plan.name)
+    try:
+        _handoff_launcher().launch(plan)
+        pid = watch.wait_for(plan.name, exclude=before)
+    except BaseException:
+        plan.discard()
+        raise
+    if pid is None:
+        plan.discard()
+        raise InvariantError(
+            f"the handoff did not start a successor: no claude with "
+            f"--name {plan.name} --remote-control {plan.name} is running "
+            f"{launch.SUCCESSOR_GRACE_SECONDS}s after it appeared, or it never "
+            f"appeared within {launch.SUCCESSOR_TIMEOUT_SECONDS}s. This session "
+            f"stays open, and the note is recorded. Run it by hand:\n"
+            f"    {plan.by_hand}"
+        )
+    return pid
+
+
 def _close_launching_host(launch, keep_open: bool) -> tuple[dict, str]:
     """After a successful launch, schedule the end of the host that ran it.
 
@@ -1464,7 +1509,11 @@ def cmd_session_handoff(args) -> int:
     3. **Record, then launch.** If the launch fails the note is already on
        the record, and the greeting of whatever session starts next shows it —
        which is the fallback for a lost prompt argument, too.
-    4. **End the old host, last, and only after a launch that succeeded**
+    4. **A launch succeeds only once a successor is seen alive** (BUG_075):
+       a new process whose argv carries ``--name <slug> --remote-control
+       <slug>``, still running after a grace period. Without one the launch
+       failed, whatever Terminal answered: exit non-zero, nothing signalled.
+    5. **End the old host, last, and only after a launch that succeeded**
        (IDEA_009). The output is printed first; the launching `claude`
        (`CLAUDE_PID`) is sent SIGTERM `CLOSE_DELAY_SECONDS` later, by a
        detached sleeper that checks the pid still names `claude` before it
@@ -1524,7 +1573,9 @@ def cmd_session_handoff(args) -> int:
 
     main_checkout = git.main_checkout(ctx.manifest.root) or ctx.manifest.root
     claude = launch.resolve_claude()
-    plan = launch.plan_launch(claude or launch.CLAUDE_BINARY, name, note, main_checkout)
+    plan = launch.plan_launch(
+        claude or launch.CLAUDE_BINARY, name, note, main_checkout, stage=False
+    )
     result = {
         "session": session.id,
         "session_name": session.name,
@@ -1533,9 +1584,12 @@ def cmd_session_handoff(args) -> int:
         "argv": list(plan.argv),
         "cwd": plan.cwd,
         "shell_line": plan.shell_line,
+        "by_hand": plan.by_hand,
+        "launch_file": None,
         "applescript": plan.applescript,
         "token": None,
         "dry_run": bool(args.dry_run),
+        "successor": None,
         "close": {"scheduled": False, "pid": None, "delay": None},
     }
 
@@ -1545,7 +1599,13 @@ def cmd_session_handoff(args) -> int:
                 f"handoff {name} from {session.name} [{session.state}] — dry run, "
                 "nothing recorded or launched"
             ),
-            f"  command:     {plan.shell_line}",
+            f"  command:     {plan.by_hand}",
+            f"  typed:       {plan.shell_line}",
+            (
+                f"  a real run writes the command to a private launch file "
+                f"(mode 0600, under {launch.launch_dir()}), which removes "
+                f"itself as claude starts"
+            ),
             "  applescript:",
             *[f"    {line}" for line in plan.applescript.splitlines()],
             (
@@ -1585,7 +1645,7 @@ def cmd_session_handoff(args) -> int:
         raise UsageError(
             "session handoff opens a new window through macOS Terminal, and "
             "this is not macOS; nothing was recorded. Run it by hand:\n"
-            f"  {plan.shell_line}"
+            f"  {plan.by_hand}"
         )
 
     updated = ctx.sessions.record_handoff(session.id, note, name)
@@ -1595,10 +1655,13 @@ def cmd_session_handoff(args) -> int:
         {
             "token": token,
             "shell_line": plan.shell_line,
+            "by_hand": plan.by_hand,
+            "launch_file": plan.launch_file,
             "applescript": plan.applescript,
         }
     )
-    _handoff_launcher().launch(plan)
+    successor = _launch_successor(launch, plan)
+    result["successor"] = {"pid": successor}
     close, close_line = _close_launching_host(launch, args.keep_open)
     result["close"] = close
     return emit(
@@ -1610,6 +1673,7 @@ def cmd_session_handoff(args) -> int:
                 f"  recorded on {updated.name} [{updated.state}]",
                 f"  opened a new Terminal window in {plan.cwd}:",
                 f"    {plan.shell_line}",
+                f"  successor claude is running as {name} (pid {successor})",
                 close_line,
             ]
         ),

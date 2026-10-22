@@ -81,6 +81,42 @@ def _no_real_host_close(monkeypatch):
     return inert
 
 
+class InertWatch:
+    """A successor watch that reads no process table.
+
+    It answers what a stub launcher makes true: nothing was started, so there
+    is no successor, and a handoff that reaches it fails as a real one with no
+    successor would. A test whose subject is the launch that worked sets
+    ``pid`` to the successor it pretends was found.
+    """
+
+    def __init__(self, pid: int | None = None) -> None:
+        self.pid = pid
+        self.watched: list[tuple[str, set[int]]] = []
+
+    def running(self, name: str) -> set[int]:
+        return set()
+
+    def wait_for(self, name: str, exclude: set[int]) -> int | None:
+        self.watched.append((name, set(exclude)))
+        return self.pid
+
+
+@pytest.fixture(autouse=True)
+def _no_real_successor_watch(monkeypatch):
+    """No test waits on the real process table for a successor (BUG_075).
+
+    The real watch polls ``ps`` for up to ``SUCCESSOR_TIMEOUT_SECONDS``, and no
+    test starts a successor, so it would only ever time out. Replaced
+    suite-wide beside the closer.
+    """
+    inert = InertWatch()
+    monkeypatch.setattr(
+        "invariant.cli.main._handoff_successor", lambda: inert, raising=False
+    )
+    return inert
+
+
 def write_manifest(root: Path, body: dict) -> Path:
     path = root / MANIFEST_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)

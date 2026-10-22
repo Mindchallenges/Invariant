@@ -69,7 +69,7 @@ graph TD
     CLI --> MANIFEST
     CLI --> PLAN
     CLI -. injects .-> CCTEL
-    CLI -. launches through .-> CCLAUNCH
+    CLI -. launches and watches the successor through .-> CCLAUNCH
 
     SESSION --> FSM
     PIPELINE --> FSM
@@ -387,10 +387,11 @@ directly, the arrow would have run `domains → hosts` and the binding would hav
 stopped being replaceable. The precedent is `core/items`, which already defines
 a model with pluggable backends.
 
-`CLI -. launches through .-> CCLAUNCH` is the same shape as the telemetry
-injection and the newest dotted arrow: `session handoff` is the one command
-that STARTS a host process, and the CLI is where the host-specific launcher is
-chosen and handed the plan. The domain never sees it — `domains/session` vets
+`CLI -. launches and watches the successor through .-> CCLAUNCH` is the same
+shape as the telemetry injection and the newest dotted arrow: `session handoff`
+is the one command that STARTS a host process, and the CLI is where the
+host-specific launcher — and the watch that proves the launch started
+something (BUG_075) — is chosen and handed the plan. The domain never sees it — `domains/session` vets
 the note, derives the next session's name and records the handoff, and the
 launch is a value the CLI builds from those answers and passes down (ADR-005
 D3). `SESSION --> PRIVACY` is drawn for that vetting: the note is scanned with
@@ -546,13 +547,67 @@ touching the other.
 relationship: `claude_code` drives a running host, the telemetry reader reads
 back what one wrote, and this one STARTS one. It turns a handoff into a
 `LaunchPlan` — the `claude --name <slug> --remote-control <slug> "<note>"`
-argv, the `cd <main checkout> && env -u <marker> … INVARIANT_HANDOFF=<token> …`
+argv, a *launch file* holding that whole command, the
+`cd <main checkout> && env -u <marker> … INVARIANT_HANDOFF=<token> /bin/sh <launch file>`
 line quoted with `shlex` (the token is set only once the note is recorded), and
 the AppleScript that types that line into a new macOS Terminal window — and
 `TerminalLauncher` runs `osascript` on it. Claude Code has no flag for a
 working directory or a window, so those two are this module's. The CLI reaches
 it through one replaceable function, which is how the suite keeps every test
 from opening a window (ADR-005).
+
+**The note never rides the typed line (BUG_075).** `do script` TYPES the line
+into the new window's tty before its shell has started line editing, and a tty
+in canonical mode keeps at most `MAX_CANON` bytes of a line — 1024 on macOS.
+A note over about 540 bytes was cut mid-quote and no `claude` ran. The note now
+goes into the launch file: a three-line `/bin/sh` script, written by
+`plan_launch` with `mkstemp` (mode 0600) into `launch_dir()` — a directory
+under the user's temporary directory, mode 0700 and proved to be the user's
+own, never under the project, so the file cannot be committed. The script
+removes itself and then `exec`s `claude`, so the note leaves the disk the
+moment the successor holds it, it stays ONE positional argument — the initial
+prompt — quoted by `shlex` as before, and the successor keeps the script's
+pid. A program reads the file, not the window's shell, so the line means the
+same in zsh, bash or fish. The typed line no longer grows with the note, and
+`plan_launch` refuses one that would still exceed `MAX_CANON` (only a very
+long checkout path can) rather than let the tty cut it. A launch file nobody
+ran is removed by the CLI when the launch fails, and any older than
+`LAUNCH_FILE_TTL_SECONDS` is swept the next time one is staged. A preview plan
+(`stage=False`, for `--dry-run` and refusals) writes nothing, and `by_hand`
+carries the self-contained line, note inline, for a person to paste into a
+shell that is already up. `LaunchPlan` itself refuses an argv without
+`--remote-control <name>`: Remote Control is not optional.
+
+**A launch counts only once a successor is seen alive.** Terminal accepting
+the script proves nothing about what the window then runs. `SuccessorWatch` is
+a third seam, reached through `_handoff_successor`, and the real
+`ProcessTableWatch` reads `ps -axo pid=,command=`: before the launch, for the
+sessions of that name already running, which are never counted; after it, for
+a NEW process whose argv runs `claude` with both `--name <slug>` and
+`--remote-control <slug>`, within `SUCCESSOR_TIMEOUT_SECONDS`, and still there
+`SUCCESSOR_GRACE_SECONDS` later. Without one the handoff exits non-zero, the
+launch file is removed, and the closer is never reached. The suite replaces
+the watch everywhere with one that finds nothing, matching a stub launcher
+that starts nothing; a test about the launch that worked says so.
+
+```mermaid
+sequenceDiagram
+    participant CLI as cli (session handoff)
+    participant L as claude_code_launch
+    participant T as Terminal window
+    participant C as successor claude
+    CLI->>L: plan_launch(stage) writes the 0600 launch file
+    CLI->>L: watch.running(slug) before the launch
+    CLI->>L: launcher.launch(plan)
+    L->>T: osascript do script "cd … && env -u … /bin/sh <file>"
+    T->>C: /bin/sh <file>: rm the file, exec claude --name --remote-control "<note>"
+    CLI->>L: watch.wait_for(slug) — new pid, alive after the grace
+    alt successor alive
+        CLI->>L: closer.close(CLAUDE_PID) unless --keep-open
+    else none
+        CLI->>L: plan.discard(), exit 1, nothing signalled
+    end
+```
 
 The module also owns `HOST_MARKERS`: the variables a running Claude Code
 session sets for its children — `CLAUDECODE`, the `CLAUDE_CODE_*` session
@@ -570,8 +625,8 @@ afterwards. The list is named rather than matched by prefix because
 `CLAUDE_CODE_` also prefixes the user's own configuration, which the new
 window's login shell re-exports before the typed line runs.
 
-It also ends the host that ran the handoff, once the launch has succeeded
-(IDEA_009). `HostCloser` is a second seam beside `Launcher`, reached through
+It also ends the host that ran the handoff, once the launch has succeeded —
+that is, once the watch has seen the successor alive (IDEA_009, BUG_075). `HostCloser` is a second seam beside `Launcher`, reached through
 `_handoff_closer` the way the launcher is through `_handoff_launcher`, and the
 suite replaces it everywhere, so no test signals a process. The real
 `DetachedCloser` starts `close_script` in a session of its own, holding none

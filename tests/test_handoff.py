@@ -75,6 +75,21 @@ def launcher(monkeypatch):
     return recorder
 
 
+@pytest.fixture(autouse=True)
+def _launch_files_here(monkeypatch, tmp_path):
+    """Launch files land under this test's tmp_path, never the real temp dir."""
+    directory = tmp_path / "launch"
+    monkeypatch.setattr(launch, "launch_dir", lambda: directory)
+    return directory
+
+
+@pytest.fixture
+def successor(_no_real_successor_watch):
+    """The launch worked: the watch reports a live successor, pid 31337."""
+    _no_real_successor_watch.pid = 31337
+    return _no_real_successor_watch
+
+
 @pytest.fixture
 def macos_with_claude(monkeypatch, tmp_path):
     """A host that can launch: macOS, and a `claude` on PATH."""
@@ -409,7 +424,21 @@ class TestTheLaunchPlan:
         unset = [arg for name in launch.HOST_MARKERS for arg in ("-u", name)]
         assert tokens[:4] == ["cd", "/work/a dir/it's here", "&&", "env"]
         assert tokens[4 : 4 + len(unset)] == unset
-        assert tuple(tokens[4 + len(unset) :]) == plan.argv
+        assert tokens[4 + len(unset) :] == [launch.LAUNCH_SHELL, plan.launch_file]
+
+    def test_the_launch_file_round_trips_the_command_through_shlex(self):
+        plan = self.plan()
+        lines = Path(plan.launch_file).read_text(encoding="utf-8").splitlines()
+        assert lines[0] == "#!/bin/sh"
+        assert shlex.split(lines[1]) == ["rm", "-f", "--", plan.launch_file]
+        assert tuple(shlex.split(lines[2])) == ("exec", *plan.argv)
+        assert plan.script == "\n".join(lines) + "\n"
+
+    def test_the_by_hand_line_carries_the_note_inline(self):
+        plan = self.plan()
+        tokens = shlex.split(plan.by_hand)
+        assert tuple(tokens[-len(plan.argv) :]) == plan.argv
+        assert plan.shell_line.split(" env ", 1)[0] == plan.by_hand.split(" env ", 1)[0]
 
     def test_the_applescript_string_round_trips(self):
         plan = self.plan()
@@ -515,7 +544,7 @@ class TestTheTerminalLauncher:
         with pytest.raises(InvariantError) as caught:
             launch.TerminalLauncher().launch(plan)
         assert "not allowed" in str(caught.value)
-        assert plan.shell_line in str(caught.value)
+        assert plan.by_hand in str(caught.value)
 
     def test_osascript_runs_without_the_host_markers(self, monkeypatch):
         """A Terminal.app the call starts keeps this environment for good."""
@@ -723,7 +752,7 @@ class TestTheCommand:
         assert "not on PATH" in text
 
     def test_a_launch_records_then_opens_the_window(
-        self, project, capsys, launcher, macos_with_claude
+        self, successor, project, capsys, launcher, macos_with_claude
     ):
         session = started(project, capsys)
         assert run("session", "handoff", "--note", NASTY) == 0
@@ -738,7 +767,7 @@ class TestTheCommand:
         assert session["name"] in text
 
     def test_the_launch_cds_into_the_main_checkout_not_the_worktree(
-        self, project, capsys, launcher, macos_with_claude, monkeypatch
+        self, successor, project, capsys, launcher, macos_with_claude, monkeypatch
     ):
         session = started(project, capsys)
         run("session", "isolate", "--execute", "--id", session["id"])
@@ -750,7 +779,7 @@ class TestTheCommand:
         assert Path(plan.cwd).resolve() == project.resolve()
 
     def test_name_overrides_the_derived_one(
-        self, project, capsys, launcher, macos_with_claude
+        self, successor, project, capsys, launcher, macos_with_claude
     ):
         started(project, capsys)
         assert run(
@@ -802,7 +831,7 @@ class TestTheCommand:
         assert domain(project).get(session["id"]).handoffs == []
 
     def test_a_torn_down_session_hands_off_by_explicit_id(
-        self, project, capsys, launcher, macos_with_claude, monkeypatch
+        self, successor, project, capsys, launcher, macos_with_claude, monkeypatch
     ):
         session = started(project, capsys)
         domain(project).transition(session["id"], "abandoned", reason="fixture")
@@ -881,7 +910,7 @@ def closer(_no_real_host_close, monkeypatch):
 
 class TestTheOldSessionEnds:
     def test_a_launch_schedules_sigterm_to_the_launching_claude(
-        self, project, capsys, launcher, closer, macos_with_claude
+        self, successor, project, capsys, launcher, closer, macos_with_claude
     ):
         started(project, capsys)
         assert run("session", "handoff", "--note", "next: ship it") == 0
@@ -893,7 +922,7 @@ class TestTheOldSessionEnds:
         assert "4242" in text and "--keep-open" in text
 
     def test_the_output_is_printed_before_anything_is_closed(
-        self, project, capsys, launcher, closer, macos_with_claude
+        self, successor, project, capsys, launcher, closer, macos_with_claude
     ):
         started(project, capsys)
         assert run("session", "handoff", "--note", "next: ship it") == 0
@@ -901,7 +930,7 @@ class TestTheOldSessionEnds:
         assert text.index("handed off as ship-it") < text.index("4242")
 
     def test_the_delay_outlasts_the_hook_that_records_the_handoff(
-        self, project, capsys, closer, macos_with_claude, tmp_path
+        self, successor, project, capsys, closer, macos_with_claude, tmp_path
     ):
         from invariant.hosts.claude_code import ClaudeCodeHost
 
@@ -920,7 +949,7 @@ class TestTheOldSessionEnds:
         assert hook_budget < delay <= 30
 
     def test_keep_open_launches_and_closes_nothing(
-        self, project, capsys, launcher, closer, macos_with_claude
+        self, successor, project, capsys, launcher, closer, macos_with_claude
     ):
         started(project, capsys)
         assert run("session", "handoff", "--note", "next: ship it", "--keep-open") == 0
@@ -961,7 +990,7 @@ class TestTheOldSessionEnds:
         assert closer.closed == []
 
     def test_no_claude_pid_leaves_the_session_open_and_says_why(
-        self, project, capsys, launcher, closer, macos_with_claude, monkeypatch
+        self, successor, project, capsys, launcher, closer, macos_with_claude, monkeypatch
     ):
         monkeypatch.delenv("CLAUDE_PID")
         started(project, capsys)
@@ -973,7 +1002,7 @@ class TestTheOldSessionEnds:
 
     @pytest.mark.parametrize("value", ["abc", "0", "-7", ""])
     def test_an_unusable_claude_pid_leaves_it_open(
-        self, project, capsys, closer, macos_with_claude, monkeypatch, value
+        self, successor, project, capsys, closer, macos_with_claude, monkeypatch, value
     ):
         monkeypatch.setenv("CLAUDE_PID", value)
         started(project, capsys)
@@ -986,7 +1015,7 @@ class TestTheOldSessionEnds:
         ("name", "said"), [("python3", "python3"), (None, "no running process")]
     )
     def test_a_pid_that_is_not_claude_leaves_it_open(
-        self, project, capsys, closer, macos_with_claude, name, said
+        self, successor, project, capsys, closer, macos_with_claude, name, said
     ):
         closer.name = name
         started(project, capsys)
@@ -996,7 +1025,7 @@ class TestTheOldSessionEnds:
         assert said in text and "leaving this session open" in text
 
     def test_json_says_what_was_scheduled(
-        self, project, capsys, closer, macos_with_claude
+        self, successor, project, capsys, closer, macos_with_claude
     ):
         started(project, capsys)
         run("session", "handoff", "--note", "next: ship it", "--json")
@@ -1006,7 +1035,7 @@ class TestTheOldSessionEnds:
         assert close["delay"] == closer.closed[0][1]
 
     def test_json_on_keep_open_and_dry_run_schedules_nothing(
-        self, project, capsys, closer, macos_with_claude
+        self, successor, project, capsys, closer, macos_with_claude
     ):
         started(project, capsys)
         run("session", "handoff", "--note", "next: ship it", "--keep-open", "--json")
@@ -1290,7 +1319,7 @@ class TestAConsumedHandoffIsNotOffered:
 
 class TestTheLaunchCarriesTheClaimToken:
     def test_the_typed_line_names_the_recorded_note(
-        self, project, capsys, launcher, macos_with_claude
+        self, successor, project, capsys, launcher, macos_with_claude
     ):
         session = started(project, capsys)
         assert run("session", "handoff", "--note", "next: ship it") == 0
@@ -1302,7 +1331,7 @@ class TestTheLaunchCarriesTheClaimToken:
         assert plan.argv[-1] == "next: ship it"
 
     def test_a_real_shell_hands_claude_the_token(
-        self, project, capsys, launcher, monkeypatch, tmp_path
+        self, successor, project, capsys, launcher, monkeypatch, tmp_path
     ):
         captured = tmp_path / "env.json"
         fake = tmp_path / "fakebin" / "claude"
@@ -1740,9 +1769,6 @@ class TestBUG075LongNoteHandoff:
         assert domain(project).vet_handoff_note(BUG_075_NOTE) == BUG_075_NOTE
         assert handoff_name(BUG_075_NOTE) == self.SLUG
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_075 is live — delete this line with the fix"
-    )
     def test_BUG_075_typed_line_fits_the_tty_for_a_2000_byte_note(self):
         plan = launch.plan_launch(
             "/opt/homebrew/bin/claude",
@@ -1756,9 +1782,6 @@ class TestBUG075LongNoteHandoff:
             f"typed line is {len(typed)} bytes; the tty keeps {BUG_075_MAX_CANON}"
         )
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_075 is live — delete this line with the fix"
-    )
     def test_BUG_075_the_line_a_tty_delivers_still_starts_claude(self, tmp_path):
         """The tab's shell gets at most MAX_CANON bytes; claude must still run."""
         captured = tmp_path / "argv.json"
@@ -1784,9 +1807,6 @@ class TestBUG075LongNoteHandoff:
         argv = json.loads(captured.read_text(encoding="utf-8"))
         assert argv[:4] == ["--name", self.SLUG, "--remote-control", self.SLUG]
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_075 is live — delete this line with the fix"
-    )
     def test_BUG_075_no_live_successor_means_no_success_and_no_sigterm(
         self, project, capsys, launcher, closer, macos_with_claude
     ):
@@ -1800,3 +1820,358 @@ class TestBUG075LongNoteHandoff:
             f"{closer.closed}"
         )
         assert code != 0, "handoff reported success with no successor alive"
+
+
+# -- BUG_075 fix: the launch file, Remote Control, and the successor watch --
+
+
+#: The module's own ``launch_dir``, captured before the autouse fixture above
+#: points it at each test's tmp_path.
+_REAL_LAUNCH_DIR = launch.launch_dir
+
+
+class TestRemoteControlIsMandatory:
+    def test_plan_launch_refuses_a_plan_without_a_name_to_give_it(self):
+        with pytest.raises(InvariantError, match="--remote-control"):
+            launch.plan_launch("/opt/bin/claude", "", "next: x", Path("/w"))
+
+    def test_a_plan_cannot_be_built_without_the_pair(self):
+        with pytest.raises(InvariantError, match="Remote Control"):
+            launch.LaunchPlan(
+                argv=("/opt/bin/claude", "--name", "x", "next: x"),
+                cwd="/w",
+                shell_line="",
+                applescript="",
+                name="x",
+            )
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("claude", "--remote-control", "other", "x"),
+            ("claude", "--remote-control", "--name", "x"),
+            ("claude", "x", "--remote-control"),
+        ],
+    )
+    def test_the_flag_must_carry_the_name_itself(self, argv):
+        with pytest.raises(InvariantError):
+            launch.require_remote_control(argv, "x")
+
+    def test_every_plan_carries_it(self):
+        plan = launch.plan_launch("/opt/bin/claude", "x", "next: x", Path("/w"))
+        launch.require_remote_control(plan.argv, plan.name)
+        assert ("--remote-control", "x") in set(zip(plan.argv, plan.argv[1:]))
+
+
+class TestTheLaunchFile:
+    def plan(self, **kwargs):
+        return launch.plan_launch(
+            "/opt/bin/claude", "p1-11-x", BUG_075_NOTE, Path("/w"), **kwargs
+        )
+
+    def test_it_is_private_and_outside_the_project(self, _launch_files_here):
+        plan = self.plan()
+        path = Path(plan.launch_file)
+        assert path.parent == _launch_files_here
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert _launch_files_here.stat().st_mode & 0o777 == 0o700
+        assert plan.staged is True
+
+    def test_the_default_place_is_the_users_temp_dir_not_the_tree(self):
+        import tempfile
+
+        where = _REAL_LAUNCH_DIR()
+        assert where.parent == Path(tempfile.gettempdir())
+        assert str(os.getuid()) in where.name
+        assert not where.resolve().is_relative_to(Path.cwd().resolve())
+
+    def test_the_note_is_in_the_file_not_on_the_typed_line(self):
+        plan = self.plan()
+        assert BUG_075_NOTE not in plan.shell_line
+        assert shlex.quote(BUG_075_NOTE) in Path(plan.launch_file).read_text(
+            encoding="utf-8"
+        )
+
+    def test_it_removes_itself_when_run(self, tmp_path):
+        fake = tmp_path / "claude"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        plan = launch.plan_launch(str(fake), "x", BUG_075_NOTE, tmp_path)
+        subprocess.run(["/bin/sh", "-c", plan.shell_line], check=True)
+        assert not Path(plan.launch_file).exists()
+
+    def test_a_preview_writes_nothing(self, _launch_files_here):
+        plan = self.plan(stage=False)
+        assert plan.staged is False
+        assert not Path(plan.launch_file).exists()
+        assert not _launch_files_here.exists()
+        plan.discard()
+
+    def test_the_preview_line_is_as_long_as_the_staged_one(self):
+        assert len(self.plan(stage=False).shell_line) == len(self.plan().shell_line)
+
+    def test_discard_removes_a_staged_file(self):
+        plan = self.plan()
+        plan.discard()
+        assert not Path(plan.launch_file).exists()
+        plan.discard()
+
+    def test_a_typed_line_too_long_for_the_tty_is_refused_writing_nothing(
+        self, _launch_files_here
+    ):
+        deep = Path("/w") / ("d" * 600)
+        with pytest.raises(InvariantError, match="1024") as caught:
+            launch.plan_launch("/opt/bin/claude", "x", "next: x", deep)
+        assert "Run it by hand" in str(caught.value)
+        assert not _launch_files_here.exists()
+
+    def test_a_directory_that_is_not_ours_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        real = tmp_path / "elsewhere"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        monkeypatch.setattr(launch, "launch_dir", lambda: link)
+        with pytest.raises(InvariantError, match="not a directory this user owns"):
+            self.plan()
+        assert list(real.iterdir()) == []
+
+    def test_old_launch_files_are_swept_and_young_ones_kept(
+        self, _launch_files_here
+    ):
+        _launch_files_here.mkdir()
+        old = _launch_files_here / "handoff-old.sh"
+        young = _launch_files_here / "handoff-young.sh"
+        other = _launch_files_here / "keep.txt"
+        for path in (old, young, other):
+            path.write_text("x", encoding="utf-8")
+        stale = time.time() - launch.LAUNCH_FILE_TTL_SECONDS - 60
+        os.utime(old, (stale, stale))
+        os.utime(other, (stale, stale))
+
+        plan = self.plan()
+        assert not old.exists()
+        assert young.exists() and other.exists()
+        assert Path(plan.launch_file).exists()
+
+    def test_a_file_that_vanishes_mid_sweep_is_not_an_error(
+        self, tmp_path, monkeypatch
+    ):
+        ghost = tmp_path / "handoff-ghost.sh"
+        ghost.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(Path, "glob", lambda self, pattern: iter([ghost]))
+        ghost.unlink()
+        assert launch.sweep_launch_files(tmp_path) == []
+
+
+class TestTheSuccessorFlags:
+    @pytest.mark.parametrize(
+        ("command", "verdict"),
+        [
+            ("/opt/homebrew/bin/claude --name s --remote-control s next: x", True),
+            ("node /usr/lib/claude --remote-control s --name s", True),
+            ("claude --name s --remote-control other", False),
+            ("claude --name s", False),
+            ("/bin/sh /tmp/handoff-1.sh", False),
+            ("grep -- --name s --remote-control s", False),
+            ("claude-helper --name s --remote-control s", False),
+            ("", False),
+        ],
+    )
+    def test_only_a_claude_with_both_pairs_is_a_successor(self, command, verdict):
+        assert launch.carries_successor_flags(command, "s") is verdict
+
+    def test_pids_are_read_from_a_ps_listing(self):
+        table = (
+            "  101 /opt/bin/claude --name s --remote-control s hi\n"
+            "  102 /opt/bin/claude --name t --remote-control t hi\n"
+            "junk line\n"
+            "\n"
+            "  103 claude --name s --remote-control s\n"
+        )
+        assert launch.successor_pids(table, "s") == {101, 103}
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class _ScriptedWatch(launch.ProcessTableWatch):
+    """The real watch, with the process table read from a script of listings."""
+
+    def __init__(self, tables, **kwargs) -> None:
+        clock = _Clock()
+        super().__init__(clock=clock, sleep=clock.sleep, **kwargs)
+        self.clock_obj = clock
+        self.tables = list(tables)
+
+    def table(self) -> str:
+        return self.tables.pop(0) if len(self.tables) > 1 else self.tables[0]
+
+
+LIVE = "  500 /opt/bin/claude --name s --remote-control s next: x"
+OLD = "  400 /opt/bin/claude --name s --remote-control s next: y"
+
+
+class TestTheSuccessorWatch:
+    def test_a_new_successor_alive_after_the_grace_is_found(self):
+        watch = _ScriptedWatch(["", "", LIVE, LIVE], timeout=10, grace=3, poll=1)
+        assert watch.wait_for("s", exclude=set()) == 500
+        assert watch.clock_obj.slept == [1, 1, 3]
+
+    def test_one_that_dies_within_the_grace_is_not(self):
+        watch = _ScriptedWatch([LIVE, ""], timeout=10, grace=3, poll=1)
+        assert watch.wait_for("s", exclude=set()) is None
+
+    def test_none_appearing_times_out(self):
+        watch = _ScriptedWatch([""], timeout=2, grace=3, poll=1)
+        assert watch.wait_for("s", exclude=set()) is None
+        assert watch.clock_obj.now == 2
+
+    def test_a_session_of_that_name_already_running_is_not_the_successor(self):
+        watch = _ScriptedWatch([OLD], timeout=2, grace=3, poll=1)
+        before = watch.running("s")
+        assert before == {400}
+        assert watch.wait_for("s", exclude=before) is None
+        both = _ScriptedWatch([OLD + "\n" + LIVE], timeout=2, grace=0, poll=1)
+        assert both.wait_for("s", exclude={400}) == 500
+
+    def test_the_table_is_ps_over_every_process(self, monkeypatch):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, LIVE + "\n", "")
+
+        monkeypatch.setattr(launch.subprocess, "run", fake_run)
+        assert launch.ProcessTableWatch().running("s") == {500}
+        assert calls == [["ps", "-axo", "pid=,command="]]
+
+    def test_a_failing_or_missing_ps_reads_as_no_processes(self, monkeypatch):
+        monkeypatch.setattr(
+            launch.subprocess,
+            "run",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 1, LIVE, ""),
+        )
+        assert launch.ProcessTableWatch().table() == ""
+
+        def missing(argv, **kw):
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr(launch.subprocess, "run", missing)
+        assert launch.ProcessTableWatch().table() == ""
+
+    def test_the_real_ps_finds_a_running_claude_by_its_flags(self, tmp_path):
+        fake = tmp_path / "claude"
+        fake.write_text(
+            f"#!{sys.executable}\nimport time\ntime.sleep(30)\n", encoding="utf-8"
+        )
+        fake.chmod(0o755)
+        name = f"bug075-probe-{os.getpid()}"
+        watch = launch.ProcessTableWatch(timeout=10, grace=0.3, poll=0.1)
+        before = watch.running(name)
+        proc = subprocess.Popen(
+            [str(fake), "--name", name, "--remote-control", name, "next: x"]
+        )
+        try:
+            assert watch.wait_for(name, exclude=before) == proc.pid
+        finally:
+            proc.kill()
+            proc.wait()
+
+
+class TestTheHandoffNeedsALiveSuccessor:
+    def test_no_successor_fails_says_why_and_removes_the_launch_file(
+        self, project, capsys, launcher, closer, macos_with_claude
+    ):
+        session = started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 1
+        err = capsys.readouterr().err
+        assert "did not start a successor" in err
+        assert "--remote-control ship-it" in err
+        assert "stays open" in err
+        (plan,) = launcher.plans
+        assert not Path(plan.launch_file).exists()
+        assert closer.closed == []
+        assert domain(project).get(session["id"]).handoffs[-1]["name"] == "ship-it"
+
+    def test_keep_open_does_not_excuse_a_missing_successor(
+        self, project, capsys, closer, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: x", "--keep-open") == 1
+
+    def test_the_watch_is_asked_for_this_name_past_what_ran_before(
+        self, project, capsys, successor, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        assert successor.watched == [("ship-it", set())]
+
+    def test_a_live_successor_is_reported(
+        self, project, capsys, launcher, successor, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it", "--json") == 0
+        doc = last_json(capsys)
+        (plan,) = launcher.plans
+        assert doc["successor"] == {"pid": 31337}
+        assert doc["launch_file"] == plan.launch_file
+        assert doc["by_hand"] == plan.by_hand
+        assert Path(plan.launch_file).exists()
+
+    def test_the_text_names_the_successor(
+        self, project, capsys, successor, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        assert "successor claude is running as ship-it (pid 31337)" in (
+            capsys.readouterr().out
+        )
+
+    def test_a_launcher_that_raises_leaves_no_launch_file(
+        self, project, capsys, macos_with_claude, monkeypatch
+    ):
+        seen = []
+
+        class Broken:
+            def launch(self, plan):
+                seen.append(plan)
+                raise InvariantError("osascript refused")
+
+        monkeypatch.setattr("invariant.cli.main._handoff_launcher", lambda: Broken())
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 1
+        (plan,) = seen
+        assert not Path(plan.launch_file).exists()
+
+    def test_a_dry_run_shows_the_typed_line_and_writes_no_launch_file(
+        self, project, capsys, macos_with_claude, _launch_files_here
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", BUG_075_NOTE, "--dry-run") == 0
+        text = capsys.readouterr().out
+        assert "typed:" in text and "launch file" in text
+        assert not _launch_files_here.exists()
+
+    def test_the_real_watch_reads_the_process_table(self):
+        from invariant.cli import main as cli
+
+        assert isinstance(cli._real_handoff_watch(), launch.ProcessTableWatch)
+
+
+def test_no_test_here_waits_on_the_real_process_table():
+    """A guard on the guard: conftest's inert watch keeps the suite fast."""
+    from invariant.cli import main as cli
+
+    assert not isinstance(cli._handoff_successor(), launch.ProcessTableWatch)

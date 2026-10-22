@@ -392,8 +392,8 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     Every refusal comes before anything is written: a bad note, no name,
     another `host.kind`, no `claude` on PATH, or a host that is not macOS —
     that last one printing the command to run by hand. `--dry-run` prints the
-    exact command and AppleScript, records and launches nothing, and needs
-    neither macOS nor `claude`. The note is recorded BEFORE the launch, so a
+    exact command, the line a real run types and the AppleScript, records,
+    writes and launches nothing, and needs neither macOS nor `claude`. The note is recorded BEFORE the launch, so a
     failed launch keeps it, and the next unbound greeting shows it.
 
     Which session hands off: `--id` / `INVARIANT_SESSION_ID`, else a session
@@ -401,11 +401,23 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     output names the one it recorded on. It never prints `session <id> (`,
     the binding sequence `start` and `resume` own: a handoff claims nothing.
 
-    The line actually typed carries the claim token in front of `claude`:
+    The note never rides the typed line (BUG_075). Terminal TYPES the line into
+    the new window's tty, which keeps at most 1024 bytes of it (`MAX_CANON`),
+    so a long note was cut and nothing ran. The whole `claude` command goes
+    into a launch file instead — mode 0600, in a private 0700 directory under
+    the user's temporary directory, never in the project — and the line
+    actually typed only runs it, carrying the claim token:
 
-        cd <main> && env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> claude --name …
+        cd <main> && env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>
 
-    naming the note just recorded, so the launched host's first `session
+    The launch file removes itself and then `exec`s `claude --name <slug>
+    --remote-control <slug> "<note>"`, the note still the one positional
+    argument and so the first prompt, whatever its length. A launch file left
+    by a failed launch is removed; any older than an hour is swept on the next
+    handoff. The JSON result carries `launch_file` and `by_hand`, the same
+    command as one line with the note inline, to paste into a running shell.
+
+    The token names the note just recorded, so the launched host's first `session
     start` or `session resume` marks THAT note consumed and the greeting stops
     offering it (state_model.md, "A note leaves the offer three ways"). A
     `--dry-run` and the by-hand line printed on another platform carry no
@@ -418,6 +430,16 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     for its own tool shells: the first would pin the successor's effort level,
     and `GIT_EDITOR=true` makes git skip the editor, so git falls back to the
     user's configured one instead (BUG_069).
+
+    A launch has succeeded only when a successor is seen alive (BUG_075): a new
+    process — not one of that name already running — whose argv runs `claude`
+    with `--name <slug>` and `--remote-control <slug>`, found within 15
+    seconds (`SUCCESSOR_TIMEOUT_SECONDS`) and still running 3 seconds later
+    (`SUCCESSOR_GRACE_SECONDS`). Without one the handoff exits 1, says no
+    successor started and prints the command to run by hand, removes the
+    launch file, and leaves this session running whatever `--keep-open`
+    says. The note stays recorded. The JSON result carries `successor`:
+    `{"pid": <pid>}`.
 
     Once the launch has succeeded, the old session ends itself (IDEA_009).
     The output is printed in full; then, 20 seconds later
