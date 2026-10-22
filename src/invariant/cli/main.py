@@ -2664,21 +2664,13 @@ def _oracle_cache():
 _ORACLE_FLAGS = ("ALERT", "note ", "ok   ")
 
 
-def _oracle_row_label(row: dict) -> str:
-    if row["kind"] == "session":
-        return f"{row['name']}  ({row['state']})"
-    if row["kind"] == "host":
-        return f"host {row['hosts'][0]['host_session_id']}" if row["hosts"] else "host"
-    if row["kind"] == "worktree":
-        return f"worktree {row['path']}"
-    return f"error {row['session_id']}" if row.get("session_id") else "error"
-
-
 def _oracle_row_lines(row: dict) -> list[str]:
+    from ..oracle.recommend import row_label
+
     signals = row["signals"]
     flag = _ORACLE_FLAGS[0 if any(s["alert"] for s in signals) else 1 if signals else 2]
     said = "; ".join(f"{s['kind']}: {s['detail']}" for s in signals) or "-"
-    lines = [f"  {flag}  {_oracle_row_label(row):<40} {said}"]
+    lines = [f"  {flag}  {row_label(row):<40} {said}"]
     advice = row["recommendation"]
     if advice:
         command = " ".join(advice["argv"])
@@ -2712,6 +2704,100 @@ def cmd_oracle_list(args) -> int:
             lines.extend(_oracle_row_lines(row))
     text = "\n".join(lines) or f"  no projects registered in {index.home}"
     return emit(args, document, text)
+
+
+def _real_oracle_notifier():
+    from ..hosts.claude_code_launch import applescript_string
+    from ..oracle.notify import OsascriptNotifier
+
+    return OsascriptNotifier(quote=applescript_string)
+
+
+def _oracle_notifier():
+    """The notifier ``oracle watch`` and ``notify-test`` post through.
+
+    A seam, like ``_oracle_cache``: the suite replaces it with a recorder, so
+    no test posts a real notification. The oracle defines the notifier and
+    imports nothing from ``hosts/``; the AppleScript quoting it needs is the
+    host launcher's, handed in here (ADR-007 D13).
+    """
+    return _real_oracle_notifier()
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _oracle_tick_lines(result) -> list[str]:
+    lines = [
+        f"  ALERT  {a['project']}  {a['subject']}  {a['kind']}: {a['detail']}"
+        + ("" if a["notified"] else "  (not notified)")
+        for a in result.alerts
+    ]
+    lines.append(
+        f"tick: {_plural(result.rows, 'row')}, {_plural(len(result.alerts), 'new alert')}, "
+        f"{result.elapsed:.2f}s; snapshot {result.snapshot_path}"
+    )
+    return lines
+
+
+def cmd_oracle_watch(args) -> int:
+    """Tick: scan, write the snapshot, alert once per rising edge.
+
+    ``--once`` runs one tick and lets a failure surface as this command's
+    error. Without it the loop runs until interrupted, a failed tick is logged
+    to stderr and the next one runs, and a tick prints only when it has news
+    (with ``--json``, one line per tick).
+    """
+    from ..oracle.signals import Thresholds
+    from ..oracle.watcher import Watcher
+
+    if not args.interval > 0:
+        raise UsageError(f"--interval must be positive, not {args.interval:g}")
+    if not args.stuck_minutes > 0:
+        raise UsageError(f"--stuck-minutes must be positive, not {args.stuck_minutes:g}")
+    watcher = Watcher(
+        _project_index(),
+        None if args.no_notify else _oracle_notifier(),
+        interval=args.interval,
+        cache=_oracle_cache(),
+        thresholds=Thresholds(stuck_minutes=args.stuck_minutes),
+    )
+    if args.once:
+        result = watcher.tick()
+        return emit(args, result.to_dict(), "\n".join(_oracle_tick_lines(result)))
+
+    def report(result) -> None:
+        if getattr(args, "json", False):
+            print(json.dumps(result.to_dict(), sort_keys=True, default=str), flush=True)
+        elif result.alerts:
+            print("\n".join(_oracle_tick_lines(result)), flush=True)
+
+    try:
+        watcher.run(on_tick=report)
+    except KeyboardInterrupt:
+        pass
+    return EXIT_OK
+
+
+def cmd_oracle_notify_test(args) -> int:
+    """Post one notification through the same seam the watcher uses."""
+    from ..oracle.notify import Notification, NotifyError
+
+    try:
+        _oracle_notifier().notify(
+            Notification(
+                title="invariant oracle",
+                message="notify-test: oracle alerts will reach you here",
+            )
+        )
+    except NotifyError as exc:
+        raise NotifyError(
+            f"the test notification was not delivered: {exc}\n"
+            f"  On macOS, check that notifications are allowed for the app "
+            f"osascript posts as (System Settings > Notifications)."
+        ) from exc
+    return emit(args, {"sent": True}, "sent one notification")
 
 
 # -- host bridge -------------------------------------------------------
@@ -3433,6 +3519,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--project", help="one project, by its key, root or name")
     q.set_defaults(func=cmd_oracle_list)
+    q = oracle.add_parser(
+        "watch",
+        help="scan every few seconds, write the snapshot, alert once per rising edge",
+    )
+    q.add_argument("--once", action="store_true", help="one tick, then exit")
+    q.add_argument("--interval", type=float, default=5.0, help="seconds between ticks")
+    q.add_argument(
+        "--stuck-minutes", type=float, default=20.0,
+        help="a running turn silent this long is stuck",
+    )
+    q.add_argument(
+        "--no-notify", action="store_true",
+        help="post nothing; new alerts stay owed to a watcher that does",
+    )
+    q.set_defaults(func=cmd_oracle_watch)
+    q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
+    q.set_defaults(func=cmd_oracle_notify_test)
 
     hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
     q = hooks.add_parser("install")

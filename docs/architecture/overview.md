@@ -27,6 +27,8 @@ graph TD
         OATTN[attention]
         OSCAN[scan]
         OSIG["signals / recommend"]
+        OWATCH[watcher]
+        ONOTIFY[notify]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -84,6 +86,13 @@ graph TD
     CLI --> OSCAN
     CLI --> OSIG
     CLI -. injects ClaudeCodeProbe .-> CCLAUNCH
+    CLI --> OWATCH
+    CLI --> ONOTIFY
+    CLI -. injects applescript_string .-> CCLAUNCH
+    OWATCH --> OSCAN
+    OWATCH --> OSIG
+    OWATCH --> OINDEX
+    OWATCH --> ONOTIFY
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -196,6 +205,18 @@ and the CLI injects it (`CLI -. injects ClaudeCodeProbe .-> CCLAUNCH`). No
 for one (ADR-007 D11). `CCLAUNCH --> CCTEL` is the probe composing the
 transcript reader that already knew the host's on-disk layout; it is an arrow
 inside `hosts/`.
+
+`OWATCH` is the oracle's only loop (increment 4). Its arrows are the tick in
+order: `OWATCH --> OSCAN` and `OWATCH --> OSIG` scan and assess exactly as
+`oracle list` does, `OWATCH --> OINDEX` is the project list plus `HomeStore`,
+the home's store, through which the snapshot and the de-dup ledger are written
+atomically and the ledger is locked, and `OWATCH --> ONOTIFY` is the seam an
+alert leaves through. The watcher names a notifier protocol and never a
+channel. The real channel, `osascript`, needs AppleScript quoting, which
+`claude_code_launch.applescript_string` already owns for `session handoff`.
+So the CLI hands that function to `OsascriptNotifier`
+(`CLI -. injects applescript_string .-> CCLAUNCH`), the same dotted injection
+as the probe, and still no `oracle → hosts` arrow exists (ADR-007 D13).
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -544,7 +565,7 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Increments 1 to 3 deliver the modules below; the rest of
+project (IDEA_012). Increments 1 to 4 deliver the modules below; the rest of
 the package is planned in [oracle.md](oracle.md).
 
 | Module | Owns | Never does |
@@ -554,7 +575,9 @@ the package is planned in [oracle.md](oracle.md).
 | `attention` | `<state_root>/attention/<host-id>.json` — what one host session is waiting on, how its turn ended, its pid; the write and clear rules per event | Decide what a hook event means (the host adapter does); lock; raise into a hook (the CLI guards every call) |
 | `scan` | One read-only snapshot per registered project: live sessions with their hosts nested, orphan hosts, leaked worktrees, and one error row per project or record that cannot be read; host liveness (pid exists, and is still the host); the cache that keeps a repeat scan cheap | Write anything; name a state; import `hosts/` (host facts arrive through the injected `HostProbe`) |
 | `signals` | `classify(row, now, thresholds)`: alerts (waiting, gate blocked, stuck, finished, error) and markers, each with a stable key | Read a store, a process table or the wall clock |
-| `recommend` | `recommend(row, signals)`: one next step as label, argv, cwd and kind; `assess` joins rows, signals and steps into the `oracle list --json` document | Run anything; answer a prompt |
+| `recommend` | `recommend(row, signals)`: one next step as label, argv, cwd and kind; `assess` joins rows, signals and steps into the `oracle list --json` document; `row_label`, the one name a row is shown by | Run anything; answer a prompt |
+| `watcher` | The tick: scan, assess, the atomic `oracle/snapshot.json`, and the rising-edge de-dup ledger `oracle/alerts.json` that decides what notifies; the loop that survives a failed tick | Decide what a signal means (`signals` does); know how a notification is delivered; write under a project's state root |
+| `notify` | The `Notifier` protocol and `Notification`; `OsascriptNotifier`, with the quoting injected; `RecordingNotifier` for tests | Import `hosts/`; decide what deserves a notification |
 
 ### `adapters/`
 
@@ -868,9 +891,13 @@ per repository:
 ~/.invariant/               $INVARIANT_HOME overrides it (ADR-007)
   projects.json             the oracle's project index; one entry per state root
   locks/projects.lock       advisory lock for the index's read-modify-write
+  locks/alerts.lock         advisory lock for the alert ledger
+  oracle/snapshot.json      the watcher's last tick; derived, safe to delete
+  oracle/alerts.json        the rising-edge de-dup ledger; derived, safe to delete
 ```
 
-It holds no project's runtime state — only which projects exist. The one
+It holds no project's runtime state — only which projects exist, and what the
+watcher derived from them. The one
 thing of the oracle's inside a project is the attention sidecar,
 `<state root>/attention/`, which that project's own hooks write.
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from .scan import ROW_ERROR, ROW_HOST, ROW_WORKTREE, ProjectSnapshot, Row
+from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, ProjectSnapshot, Row
 from .signals import (
     ERROR,
     FINISHED,
@@ -171,7 +171,8 @@ def assess(
 ) -> dict[str, Any]:
     """Snapshots as one document: every row with its signals and its next step.
 
-    What ``oracle list --json`` prints, and what the watcher will write.
+    What ``oracle list --json`` prints, and what the watcher writes as its
+    snapshot.
     """
     projects = []
     for snapshot in snapshots:
@@ -192,3 +193,18 @@ def assess(
             }
         )
     return {"now": now, "projects": projects}
+
+
+def row_label(row: dict[str, Any]) -> str:
+    """How a row of the :func:`assess` document is named to a person.
+
+    One spelling for ``oracle list``'s table and the watcher's notifications,
+    so the two always call a row the same thing.
+    """
+    if row["kind"] == ROW_SESSION:
+        return f"{row['name']}  ({row['state']})"
+    if row["kind"] == ROW_HOST:
+        return f"host {row['hosts'][0]['host_session_id']}" if row["hosts"] else "host"
+    if row["kind"] == ROW_WORKTREE:
+        return f"worktree {row['path']}"
+    return f"error {row['session_id']}" if row.get("session_id") else "error"

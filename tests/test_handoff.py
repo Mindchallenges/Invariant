@@ -506,6 +506,7 @@ class TestTheLaunchPlan:
         sys.platform != "darwin" or shutil.which("osascript") is None,
         reason="needs osascript; evaluates a string literal and opens nothing",
     )
+    @pytest.mark.real_osascript
     def test_osascript_reads_the_literal_back_unchanged(self):
         plan = self.plan()
         literal = launch.applescript_string(plan.shell_line)

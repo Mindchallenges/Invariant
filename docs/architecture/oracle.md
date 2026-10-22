@@ -14,7 +14,7 @@ description of the current behaviour.
 | 1 | Home, project index, `oracle projects` commands, auto-registration | **shipped** |
 | 2 | Attention sidecar and the `Notification` hook | **shipped** |
 | 3 | Read-only scan, `classify`, `recommend`, `oracle list` | **shipped** |
-| 4 | Watcher, rising-edge de-dup ledger, notifier, `watch --once`, `notify-test` | planned |
+| 4 | Watcher, rising-edge de-dup ledger, notifier, `watch`, `notify-test` | **shipped** |
 | 5 | Gate cache for recommendation detail | planned |
 | 6 | launchd `install` / `uninstall` | planned |
 | 7 | Textual TUI behind the `invariant[oracle]` extra | planned |
@@ -32,7 +32,9 @@ graph TD
         ATTN[attention]
         SCAN[scan]
         SIGNALS["signals / recommend"]
-        WATCH["watcher / notify / launchd (planned)"]
+        WATCH[watcher]
+        NOTIFY[notify]
+        LAUNCHD["launchd (planned)"]
         TUI["tui (planned)"]
     end
 
@@ -50,7 +52,10 @@ graph TD
     CLI --> SCAN
     CLI --> SIGNALS
     CLI -- reads the AttentionSignal left by --> HOST
+    CLI --> WATCH
+    CLI --> NOTIFY
     CLI -. injects ClaudeCodeProbe from .-> HOST
+    CLI -. injects applescript_string from .-> HOST
     ATTN --> STORE
     INDEX --> STORE
     INDEX --> MANIFEST
@@ -62,8 +67,11 @@ graph TD
     SCAN --> MANIFEST
     SCAN --> GIT
     SIGNALS --> SCAN
-    WATCH -. planned .-> SCAN
-    WATCH -. planned .-> SIGNALS
+    WATCH --> SCAN
+    WATCH --> SIGNALS
+    WATCH --> INDEX
+    WATCH --> NOTIFY
+    LAUNCHD -. planned .-> WATCH
     TUI -. planned .-> SCAN
 ```
 
@@ -106,9 +114,10 @@ summary:
   checkout, provided a manifest exists there.
 - No clock times. The format also keeps keys it does not know, and refuses a
   newer `version` instead of rewriting it.
-- Writes take `JsonStore.locked`. The home holds only `projects.json` and
-  `locks/`. A project state root's `sessions/` and `pipelines/` are never laid
-  out here.
+- Writes take `JsonStore.locked`, through `HomeStore`, the home's store,
+  which the watcher shares. The home holds `projects.json`, `locks/` and the
+  watcher's `oracle/`. A project state root's `sessions/` and `pipelines/` are
+  never laid out here.
 
 | Operation | Behaviour |
 |---|---|
@@ -281,7 +290,7 @@ history. Every signal carries `key = project|subject|kind|discriminator`, where
 the subject is the session id, `host:<id>`, `worktree:<path>` or `project`. The
 discriminator changes exactly when the condition is a new occurrence — a new
 prompt, a different set of refusing rules, another test run, a new turn — so
-increment 4's ledger can alert once per rising edge.
+the watcher's ledger can alert once per rising edge.
 
 A failed run in the red phase is the proof `test.new_test_fails` asks for, not
 an error, which is why the red phase is excluded alongside `read_as_red`.
@@ -320,8 +329,8 @@ would otherwise be told to adopt the same session. The suite parses every
 `argv` in the table with the real CLI parser.
 
 `assess(snapshots, now, thresholds)` joins each row with its signals and its
-recommendation. It is the `invariant oracle list --json` document and what the
-watcher will write.
+recommendation. It is the `invariant oracle list --json` document, and the body
+of the watcher's snapshot.
 
 ### `invariant oracle list`
 
@@ -331,7 +340,98 @@ flagged `ALERT`, `note` or `ok` with its signals, and a `next` line with the
 recommended command and where to run it. No `Context` is built, so it runs
 from any directory. See [cli.md](cli.md), "Oracle".
 
-### Known gap: a host rooted in another repository (BUG_040)
+## Shipped: the watcher and the notifier
+
+### `oracle/watcher`
+
+`Watcher(index, notifier, clock, interval, cache, thresholds)` runs one tick
+at a time. A tick does four things in order:
+
+1. **Scan** every registered project with `scan_all`, read-only as before.
+2. **Assess** it with `assess`, the same document `oracle list --json` prints.
+3. **Write the snapshot**, `<oracle home>/oracle/snapshot.json`. It is that
+   document plus `home`, `version`, `generated`, `watcher_pid` and
+   `interval`, written atomically, so a reader never sees half of one.
+4. **De-duplicate and notify** through the ledger,
+   `<oracle home>/oracle/alerts.json`.
+
+`run(once, max_ticks, on_tick)` repeats the tick and sleeps so that ticks
+start one `interval` apart. A tick that raises is logged to stderr, and the
+loop goes on. `watch --once` calls one tick directly, so a failure there is the
+command's error.
+
+**The ledger makes "once" true.** It maps each alert's signal key
+(`project|subject|kind|discriminator`, see "oracle/signals") to `{since,
+notified}`. Each tick applies these rules:
+
+| Case | What happens |
+|---|---|
+| A key not in the ledger | A rising edge. It is added, notified, and reported. |
+| A key already there, `notified: true` | Not news. Nothing is sent. |
+| A key already there, `notified: false` | Owed. Either there was no notifier (`--no-notify`) or delivery failed. The next tick that can deliver it does. |
+| A key the tick no longer sees | Dropped, so the same condition coming back alerts again. |
+| A key of a project this tick could not read | Kept. "Cannot read" is not "cleared", and a broken manifest must not re-alert everything in the project once it is fixed. |
+| The same condition, recurring as a new occurrence | Has a new discriminator, so it is a new key and alerts again. Examples are a new prompt, another failed test run, or a different set of refusing rules. |
+
+Only alerts notify. Markers never do. There is no repeat timer in v1. The
+read-modify-write runs under the home's lock (`locks/alerts.lock`), so the
+daemon and a `watch --once` cannot both announce one edge. After the first
+failed delivery in a tick, the rest of that tick's edges are left owed instead
+of being tried one by one.
+
+**Both files are derived and safe to delete.** Deleting the snapshot costs
+nothing, because the next tick writes it again. Deleting the ledger costs at
+most one repeat of each live alert. A ledger that is not a JSON object, or
+that has another `version` or shape, is replaced, not refused, because it is
+the watcher's own derived state and not a record anybody else writes. The
+formats are in [state_model.md](state_model.md), "User-level state".
+
+**The latency budget.** A permission prompt is written to the sidecar by the
+`Notification` hook at once. The next tick sees it, so the time from prompt
+to ping is at most one `interval` (5 s) plus one tick. Measured on this
+machine: the suite's three projects with five sessions each, all waiting, took
+0.10 s for a cold tick and 0.04 s warm, and the suite asserts under 2 s. This
+repository's real state root took 0.09 s for a cold `watch --once`. That is
+well inside IDEA_012's 30-second acceptance, and inside the plan's "under 10 s"
+with room to spare.
+
+### `oracle/notify`
+
+`Notifier` is a protocol with one method, `notify(Notification)`. A
+`Notification` has a `title`, a `message`, an optional `subtitle` and an
+optional `sound`.
+
+- `OsascriptNotifier` runs `osascript -e 'display notification … with title
+  … subtitle … sound name …'`. The script is one argument, with no shell in
+  between. A refusal or a missing `osascript` raises `NotifyError`, which
+  exits 1.
+- `RecordingNotifier` keeps what it was asked to send. It is for tests, and
+  its `fail` flag makes it refuse.
+
+The watcher titles a notification `invariant: <project>`. The subtitle is the
+row's label, which is the label `oracle list` prints (`recommend.row_label`,
+one spelling for both). The message is the signal's detail. A high or medium
+alert plays `Glass`, and a low one (finished) is a silent banner.
+
+**The quoting is injected** (ADR-007 D13). Turning text into an AppleScript
+string literal already has an owner: `hosts/claude_code_launch.applescript_string`.
+The oracle may not import `hosts/`, so `OsascriptNotifier` takes the quoting
+function as an argument. The CLI's `_oracle_notifier` seam passes in the
+host's function. This is the `HostProbe` shape again. The suite replaces the
+seam with a recorder for every test, and a `conftest.py` guard makes
+`subprocess.Popen` refuse `osascript` unless a test is marked
+`real_osascript`. The one test that runs it evaluates a string literal and
+posts nothing.
+
+### `invariant oracle watch` and `notify-test`
+
+`watch` runs the loop until it is interrupted. In text mode it prints only the
+ticks that have news. With `--json` it prints one line per tick. `--once` runs
+a single tick and prints its result. `--no-notify` sends nothing, and the edges
+it sees stay owed to a watcher that does notify. `notify-test` posts one
+notification through the same seam. See [cli.md](cli.md), "Oracle".
+
+## Known gap: a host rooted in another repository (BUG_040)
 
 A host session is attributed to the project its hooks resolve, and its
 transcript to the project directory it was started in. A host started in one
@@ -345,11 +445,6 @@ fixed; BUG_040 owns it.
 The plan approved on 2026-10-22 sets out the shape below. Each part is written
 up properly when it ships.
 
-- **Watcher and alerts** (increment 4). A 5-second tick writes
-  `snapshot.json` under the oracle home. A rising-edge de-dup ledger
-  (`alerts.json`) makes sure the same edge never alerts twice. Notifications
-  go through a notifier seam (osascript). Adds `watch --once` and
-  `notify-test`.
 - **Gate cache** (increment 5). Gates are evaluated only when the fingerprint
   changes and the session is idle. The result feeds recommendation detail and
   never raises an alert.

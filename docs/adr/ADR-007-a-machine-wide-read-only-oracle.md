@@ -1,8 +1,9 @@
 # ADR-007 — A machine-wide, read-only oracle
 
 - **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012,
-  D5–D10 by increment 2, and D11–D12 by increment 3. The later decisions are listed under "Still to
-  decide", and each is recorded here when its increment lands. The status
+  D5–D10 by increment 2, D11–D12 by increment 3, and D13–D15 by increment 4.
+  The later decisions are listed under "Still to decide", and each is
+  recorded here when its increment lands. The status
   becomes Accepted when the oracle ships.
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. This record adds the first state this library keeps
@@ -178,7 +179,7 @@ under the state root, which is never committed, rendered or published, so they
 are outside what `privacy.clean` screens. And "how long has this host been
 waiting" is the oracle's whole question, so a duration alone cannot answer it.
 The watcher's snapshot and its de-dup ledger are user-level and get their own
-ruling when increment 4 lands.
+ruling, D14.
 
 ### D10 — A sidecar write can never change a verdict, and the probe writes none
 
@@ -235,6 +236,72 @@ sessions raise no "finished" or "teardown pending" signal. That is the honest
 answer for a lifecycle that never merges, and it is visible: the rows still
 list and still alert on everything the host reports.
 
+### D13 — The notifier is a seam, and its quoting is injected from the host
+
+The watcher hands a `Notification` to a `Notifier` (`oracle/notify`) and knows
+nothing about delivery. A phone push (IDEA_013) would be a second
+implementation, not a change to the watcher. The CLI chooses the notifier
+through one seam, `_oracle_notifier`. The suite replaces that seam with a
+recorder for every test, and a guard in `conftest.py` refuses `osascript` to
+any test not marked as evaluating a script that does nothing.
+
+v1's channel is `osascript -e 'display notification …'`, and that needs text
+turned into AppleScript string literals. That rule already has an owner,
+`hosts/claude_code_launch.applescript_string`, which `session handoff` relies
+on. There were three ways to reach it:
+
+- **Import it from `oracle/notify`.** Rejected. This is the `oracle → hosts`
+  arrow D11 rules out, and `tests/test_oracle_scan.py` scans for it.
+- **Copy the escaping into the oracle.** Rejected. It would be two
+  definitions of one rule, and they would drift.
+- **Move it to a neutral module below both.** This was the honest long-term
+  home, because AppleScript quoting is macOS knowledge and not Claude Code
+  knowledge. It was not taken here, because it moves a function the handoff
+  path and its tests own, for a seam this one injection already serves.
+
+So `OsascriptNotifier(quote=…)` takes the quoting function as an argument,
+and the CLI passes `applescript_string`. This is D11's shape again: the oracle
+names what it needs, a host module supplies it, and the CLI joins the two. If
+a second caller outside `hosts/` ever needs the quoting, the move becomes the
+right answer.
+
+### D14 — Clock times in the watcher's files: user-level, derived, uncommitted
+
+The snapshot carries `generated`, and the assessed `now` that `oracle list
+--json` already prints. The ledger carries a `since` per alert. These are the
+second exception to "Storing what was measured, not when", and they rest on
+D9's argument with one more reason. They live under the oracle home, which is
+outside every repository, so they are never committed, rendered or screened.
+The files are derived on every tick, so a time in them records only when this
+machine last looked. `generated` and `since` use the sidecar's spelling: UTC,
+to the second, ISO 8601.
+
+### D15 — One notification per rising edge, through a ledger that forgets
+
+"The same rising edge never alerts twice" is kept by a ledger of signal keys,
+not by remembering notifications. A key the watcher has seen does not notify
+again. A key it no longer sees is dropped, so a condition that clears and
+returns is a new edge. A new occurrence of the same kind of condition already
+has a new discriminator (increment 3), so it is a new key. There is no repeat
+timer in v1. A reminder for an alert left unanswered would be a separate
+decision.
+
+Three refinements keep the rule honest:
+
+- **`notified: false` is owed, not spent.** An edge seen by `--no-notify`, or
+  whose delivery failed, is delivered by the next tick that can deliver it.
+  A dry look therefore never swallows an alert the daemon owes.
+- **A project that could not be read keeps its keys.** "Cannot read" is not
+  "cleared". Otherwise one broken manifest would re-alert every live
+  condition in its project once it was fixed.
+- **The read-modify-write is locked**, so the daemon and a `watch --once`
+  cannot both announce one edge.
+
+The ledger is derived. One that cannot be read, or has another version or
+shape, is replaced, not refused, which is the opposite of the project
+index's rule (D3). The index is a source of truth, and the ledger costs at most
+one repeat of each live alert to rebuild.
+
 ## Still to decide (later increments of IDEA_012)
 
 These are recorded so the record is complete. They are not decided yet.
@@ -243,6 +310,3 @@ These are recorded so the record is complete. They are not decided yet.
   stripped, and never answer a permission prompt.
 - **The first daemon** (launchd) and **the first optional dependency**
   (Textual, as `invariant[oracle]`).
-- **How clock times are scoped** in the watcher's snapshot and de-dup ledger.
-  Both are user-level, not committed, and outside the privacy scope. D9
-  settles this for the attention sidecar only.

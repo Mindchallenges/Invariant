@@ -76,12 +76,13 @@ class ProjectEntry:
         return bool(self.root) and (Path(self.root) / MANIFEST_RELPATH).is_file()
 
 
-class _HomeStore(JsonStore):
+class HomeStore(JsonStore):
     """A JSON store over the oracle home.
 
     The base class's ``ensure_root`` lays out a PROJECT state root —
     ``sessions/``, ``pipelines/`` — which has no meaning here. The home holds
-    the index and its lock directory and nothing else.
+    the index, its lock directory and the watcher's ``oracle/`` directory
+    (:mod:`invariant.oracle.watcher`), and nothing else.
     """
 
     def ensure_root(self) -> None:
@@ -143,7 +144,7 @@ class ProjectIndex:
 
     def __init__(self, home: Path) -> None:
         self.home = Path(home)
-        self._store = _HomeStore(self.home)
+        self._store = HomeStore(self.home)
 
     # -- reads ---------------------------------------------------------
 

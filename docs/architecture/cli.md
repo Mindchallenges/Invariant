@@ -45,8 +45,9 @@ Nothing reaches the engine another way.
 
   One store sits outside every repository and so outside this rule: the
   oracle's user-level directory (`$INVARIANT_HOME`, else `~/.invariant`;
-  ADR-007). It holds which projects exist and nothing of any project's, and
-  only `init`, the SessionStart hook and the `oracle` commands write it.
+  ADR-007). It holds which projects exist, plus the watcher's derived
+  snapshot and alert ledger, and nothing of any project's. Only `init`, the
+  SessionStart hook and the `oracle` commands write it.
 
 ## Setup
 
@@ -818,17 +819,41 @@ invariant oracle list [--project NAME] [--json]
     "scanned_at", "elapsed", "rows": [{<row>, "signals": [{"kind",
     "severity", "alert", "detail", "key", "cause"}], "recommendation":
     {"label", "argv", "cwd", "kind", "env"} | null}]}]}.
+
+invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify] [--json]
+    Every --interval seconds: scan every registered project, write the
+    snapshot (<oracle home>/oracle/snapshot.json — the `oracle list --json`
+    document plus version, generated, watcher_pid and interval), and post one
+    notification per rising edge of an alert, de-duplicated through the
+    ledger (<oracle home>/oracle/alerts.json). An edge alerts once; a
+    condition that clears and returns alerts again; markers never notify.
+    --once runs one tick and exits, and a failure in it is this command's
+    error (exit 3 for a home it cannot write). Without --once it runs until
+    interrupted (exit 0), a failed tick is logged to stderr and the next one
+    runs, and the text prints only ticks with news; --json prints one line
+    per tick. --stuck-minutes is the threshold for `stuck`. --no-notify posts
+    nothing: the edges it sees are recorded as owed, and a later watcher that
+    notifies delivers them. Both numbers must be positive (exit 2). JSON:
+    {"snapshot", "ledger", "rows", "elapsed", "alerts": [{"key", "project",
+    "subject", "kind", "severity", "detail", "since", "notified"}]}.
+
+invariant oracle notify-test [--json]
+    Post one notification through the seam the watcher uses, to check that
+    notifications reach you. A delivery failure exits 1 with the reason.
+    JSON: {"sent": true}.
 ```
 
 The other two routes into the index are automatic: `init` (above) and the
 first SessionStart in a project, which `invariant hook session-start`
 registers after computing its response — reading first, locking only for a
 missing project, skipped for `doctor`'s probe, and swallowing any failure so
-the hook's output cannot change. The rest of the oracle's surface — `watch`,
-`tui`, `install`, `uninstall`, `notify-test` — is planned and not yet shipped.
+the hook's output cannot change. The rest of the oracle's surface — `tui`,
+`install`, `uninstall` — is planned and not yet shipped.
 
 `oracle list` writes nothing anywhere: not to any project's state root, and
-not to the oracle home. The signal and recommendation tables it prints from
+not to the oracle home. `oracle watch` writes only its two derived files and
+their lock under the oracle home, never under a project's state root; both
+files are safe to delete. The signal and recommendation tables it prints from
 are in [oracle.md](oracle.md).
 
 A gate refusal from `pipeline advance`, `session transition`, `session

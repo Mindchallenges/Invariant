@@ -1652,6 +1652,10 @@ the machine — so it keeps a directory per USER:
 $INVARIANT_HOME, else ~/.invariant/
   projects.json         the project index
   locks/projects.lock   advisory lock for its read-modify-write
+  locks/alerts.lock     advisory lock for the ledger's read-modify-write
+  oracle/               the watcher's derived state; safe to delete
+    snapshot.json       the last tick's assessed view of every project
+    alerts.json         the rising-edge de-dup ledger
 ```
 
 ```json
@@ -1680,3 +1684,29 @@ only when its `root` no longer carries a manifest.
 wherever the hook's store is the inert one (BUG_059). The test suite points
 `INVARIANT_HOME` at a temporary directory for every test, so no test can add to
 the index on the machine running it.
+
+### The watcher's derived state
+
+`oracle watch` (IDEA_012 increment 4) keeps two files under `oracle/`. Neither
+is a record of anything: each is derived from the projects' own state on every
+tick.
+
+```json
+{"version": 1, "generated": "<iso>", "watcher_pid": 4242, "interval": 5.0,
+ "home": "<oracle home>", "now": 1792640000.0,
+ "projects": ["<each project entry of oracle list --json>"]}
+```
+
+```json
+{"version": 1,
+ "alerts": {"<project>|<subject>|<kind>|<discriminator>":
+              {"since": "<iso>", "notified": true}}}
+```
+
+| Property | Why |
+|---|---|
+| **Derived, safe to delete** | The snapshot is rewritten every tick. Deleting the ledger costs at most one repeat of each live alert. A ledger that cannot be read, or has another version or shape, is replaced and not refused, because nothing but the watcher writes it and nothing is lost by starting it again. The index, which is a source of truth, refuses instead. |
+| **Atomic replace** | A reader, such as the planned TUI, never sees half a snapshot. |
+| **The ledger is locked** | The daemon and a `watch --once` run at the same time must not both announce one edge, so the read-modify-write takes `locks/alerts.lock`. The snapshot is not locked: the last writer wins, and either one is a whole tick. |
+| **Clock times, machine-local** | `generated` and `since` are UTC to the second, the attention sidecar's spelling, and `now` is the assessed epoch `oracle list --json` already prints. They are the second exception to "Storing what was measured, not when". They are scoped by where they live: outside every repository, never committed or rendered, and outside what `privacy.clean` screens (ADR-007 D14). |
+| **`notified: false` is owed, not spent** | An edge seen with no notifier, or whose delivery failed, is delivered by the next tick that can deliver it. A key that is no longer seen is dropped, so the condition returning is a new edge. A project that could not be read keeps its keys. |

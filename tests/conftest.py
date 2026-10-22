@@ -152,6 +152,67 @@ def _no_real_successor_watch(monkeypatch):
     return inert
 
 
+@pytest.fixture(autouse=True)
+def _no_real_notifier(monkeypatch):
+    """No test posts a real macOS notification (IDEA_012 increment 4).
+
+    ``oracle watch`` and ``oracle notify-test`` reach the notifier through one
+    seam, ``_oracle_notifier``, replaced here suite-wide by a recorder. A test
+    about what was sent reads the recorder this fixture returns.
+    """
+    from invariant.oracle.notify import RecordingNotifier
+
+    recorder = RecordingNotifier()
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_notifier", lambda: recorder, raising=False
+    )
+    return recorder
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_osascript: the test runs osascript on purpose, for a script that "
+        "opens, posts and changes nothing",
+    )
+
+
+def _program_of(args) -> str:
+    if isinstance(args, (str, bytes)):
+        first = args.split()[0] if args.split() else ""
+    else:
+        first = next(iter(args), "")
+    first = first.decode() if isinstance(first, bytes) else str(first)
+    return Path(first).name
+
+
+@pytest.fixture(autouse=True)
+def _no_real_osascript(request, monkeypatch):
+    """No test runs ``osascript``, by any route, unless it says it means to.
+
+    ``osascript`` opens Terminal windows (``session handoff``) and posts
+    notifications (the oracle). Every route to it is a seam the suite replaces,
+    and this is the backstop: ``subprocess.Popen`` — which ``run`` and every
+    other helper start through — refuses the program. A test that evaluates a
+    pure AppleScript expression on purpose carries ``real_osascript``.
+    """
+    if request.node.get_closest_marker("real_osascript"):
+        return
+    import subprocess
+
+    real_init = subprocess.Popen.__init__
+
+    def guarded(self, args, *rest, **kwargs):
+        if _program_of(args) == "osascript":
+            raise AssertionError(
+                f"a test ran osascript: {args!r}; replace the seam, or mark the "
+                f"test real_osascript if it evaluates a script with no effect"
+            )
+        real_init(self, args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded)
+
+
 def write_manifest(root: Path, body: dict) -> Path:
     path = root / MANIFEST_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
