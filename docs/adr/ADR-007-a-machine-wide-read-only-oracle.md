@@ -1,7 +1,7 @@
 # ADR-007 — A machine-wide, read-only oracle
 
-- **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012, and
-  D5–D10 by increment 2. The later decisions are listed under "Still to
+- **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012,
+  D5–D10 by increment 2, and D11–D12 by increment 3. The later decisions are listed under "Still to
   decide", and each is recorded here when its increment lands. The status
   becomes Accepted when the oracle ships.
 - **Date:** 2026-10-22
@@ -193,6 +193,47 @@ verdict, an exit status or a degraded marker. The same helper records
 own `JsonStore`, which is the inert store for a probe, and the CLI also skips
 the write explicitly, so a probe does not walk the process table either
 (BUG_059).
+
+### D11 — Host facts reach the oracle through a probe the CLI injects
+
+The scan needs two things only the agent host knows: which transcripts belong
+to a project, and whether a live pid is still the host. Both already have
+homes in `hosts/` (`ClaudeCodeTranscripts`; `is_claude_process_name`). The
+oracle does not import them. `oracle/scan` defines the shape it reads,
+`HostProbe` — `transcripts(root)` and `is_host_process(pid)` — and
+`hosts/claude_code_launch.ClaudeCodeProbe` implements it without importing the
+oracle. The CLI injects it through a seam (`_oracle_cache`), which the suite
+replaces.
+
+This is the shape telemetry already has: `core/stats` defines `SampleSource`,
+the host implements it, and the CLI injects it into `domains/stats`. The
+alternative was for `oracle/scan` to import the host modules directly. It was
+rejected for D6's reason in the other direction: the oracle would carry Claude
+Code knowledge that a second host adapter would have to fork, and an arrow from
+the layer below the CLI into the layer above it would appear. A test scans
+`oracle/` for `hosts` imports.
+
+The pid-existence half of liveness (`os.kill(pid, 0)`) is not host knowledge
+and stays in the oracle, so a scan with no probe still tells a dead pid from a
+live one.
+
+### D12 — Where a session is in its life is derived from its machine, never named
+
+The signals need to know that a session awaits a merge, has merged, or is
+still working. A project may shadow the session machine
+(`methodology.extra_machines`), so matching the shipped state names would
+misread exactly the projects that customised their lifecycle. The scan derives
+a stage per state from the machine's structure instead: the merge is the state
+the merge gate (`session.ff_merge_target`) guards; everything reachable after
+it short of the end is "landed"; a state with an edge into the merge is
+"reviewed"; one with an edge into that is "working"; terminal and abandon-role
+states are "ended"; the rest are "early". It is the D12 of `core/machines` —
+injection by role rather than by name — applied to a reader.
+
+A machine with no merge gate has no reviewed, working or landed stage, so its
+sessions raise no "finished" or "teardown pending" signal. That is the honest
+answer for a lifecycle that never merges, and it is visible: the rows still
+list and still alert on everything the host reports.
 
 ## Still to decide (later increments of IDEA_012)
 

@@ -803,15 +803,33 @@ invariant oracle projects remove KEY [--json]
 invariant oracle projects prune [--dry-run] [--json]
     Drop every entry whose root no longer carries a manifest. --dry-run names
     them and writes nothing. JSON: {"pruned": [...], "dry_run"}.
+
+invariant oracle list [--project NAME] [--json]
+    Scan every registered project once, read-only, and print each live
+    session with its hosts, each orphan host, each leaked worktree and each
+    project that could not be read, with the signals each raises and the
+    one next step recommended for it. --project narrows to one project,
+    matched as `projects remove` matches (key, root, then name); a NAME
+    matching nothing is a usage error (exit 2). The text is a status table:
+    a line per project with its scan time, then a line per row flagged
+    ALERT, note or ok, and a `next` line naming the recommended command and
+    the directory to run it in. It never runs one. Exit 0 whatever the rows
+    say: it is a query. JSON: {"home", "now", "projects": [{"project",
+    "scanned_at", "elapsed", "rows": [{<row>, "signals": [{"kind",
+    "severity", "alert", "detail", "key", "cause"}], "recommendation":
+    {"label", "argv", "cwd", "kind", "env"} | null}]}]}.
 ```
 
 The other two routes into the index are automatic: `init` (above) and the
 first SessionStart in a project, which `invariant hook session-start`
 registers after computing its response — reading first, locking only for a
 missing project, skipped for `doctor`'s probe, and swallowing any failure so
-the hook's output cannot change. The rest of the oracle's surface — `oracle
-list`, `watch`, `tui`, `install`, `uninstall`, `notify-test` — is planned and
-not yet shipped.
+the hook's output cannot change. The rest of the oracle's surface — `watch`,
+`tui`, `install`, `uninstall`, `notify-test` — is planned and not yet shipped.
+
+`oracle list` writes nothing anywhere: not to any project's state root, and
+not to the oracle home. The signal and recommendation tables it prints from
+are in [oracle.md](oracle.md).
 
 A gate refusal from `pipeline advance`, `session transition`, `session
 review` or `session merge` is also recorded for the oracle. The refused

@@ -34,9 +34,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
 
 from ..core import git
 from ..core.stats import Sample, SourceRef, Usage
@@ -357,6 +357,24 @@ class ClaudeCodeTranscripts:
             except OSError:
                 continue
         return found
+
+    def activity(self) -> dict[str, float]:
+        """Host session id to its transcript's last write, as an epoch.
+
+        Read by the oracle, through the probe the CLI injects, as one of a
+        host's signs of life. A modification time is read here and handed on,
+        never stored, so the "no stored clock time" rule ``_watermark`` keeps is
+        untouched. A transcript that vanishes between listing and reading is
+        skipped.
+        """
+        latest: dict[str, float] = {}
+        for path in self.paths():
+            try:
+                written = path.stat().st_mtime
+            except OSError:
+                continue
+            latest[path.stem] = max(written, latest.get(path.stem, written))
+        return latest
 
     def sessions(self) -> list[SourceRef]:
         return [

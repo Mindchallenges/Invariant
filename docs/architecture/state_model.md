@@ -1625,11 +1625,15 @@ is known about that host.
 pid is a claim that can go stale. The hook records `CLAUDE_PID` when Claude
 Code exports it to its hooks. Without it, a pid already on the record stands,
 and a host with none walks the parent chain to the first process named
-`claude`. `SessionEnd` clears the pid. The reader, which is the oracle's scan
-(increment 3), treats a host as alive only if the pid exists and `ps` still
-names it `claude`. That check runs at read time, because the pid can be reused
-after the host exits. A host that crashed without `SessionEnd` therefore stops
-reading as "waiting" once its process is gone.
+`claude`. `SessionEnd` clears the pid. The reader, which is the oracle's scan,
+treats a host as alive only if the pid exists and `ps` still names it
+`claude`. Existence is checked on every scan; the name is kept for 60 seconds
+and forgotten the moment the pid is seen dead. Both run at read time, because
+the pid can be reused after the host exits. A host that crashed without
+`SessionEnd` therefore stops reading as "waiting" once its process is gone. A
+record with no pid has unknown liveness, which no signal reads as gone. The
+scan reads the record through an `InertStore` and never writes it (see
+[oracle.md](oracle.md)).
 
 **Two surfaces of "blocked".** The Stop hook records the closeout's blocking
 rule ids, and a gated CLI command (`pipeline advance`, `session transition`,

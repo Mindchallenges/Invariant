@@ -25,6 +25,8 @@ graph TD
         OHOME[home]
         OINDEX[index]
         OATTN[attention]
+        OSCAN[scan]
+        OSIG["signals / recommend"]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -79,10 +81,23 @@ graph TD
     CLI --> OINDEX
     CLI --> OHOME
     CLI --> OATTN
+    CLI --> OSCAN
+    CLI --> OSIG
+    CLI -. injects ClaudeCodeProbe .-> CCLAUNCH
+    CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
     OINDEX --> MANIFEST
     OINDEX --> GIT
+    OSIG --> OSCAN
+    OSCAN --> OINDEX
+    OSCAN --> OATTN
+    OSCAN --> SESSION
+    OSCAN --> PIPELINE
+    OSCAN --> STORE
+    OSCAN --> MANIFEST
+    OSCAN --> FSM
+    OSCAN --> GIT
 
     SESSION --> FSM
     PIPELINE --> FSM
@@ -160,6 +175,27 @@ same way. The host pid the record carries comes from `claude_code_launch`
 (`host_pid`, else `find_host_pid`), which is the existing dotted
 `CLI → CCLAUNCH` arrow carrying two more names. A test scans `hosts/` for
 oracle imports, so no `hosts → oracle` arrow can appear unnoticed.
+
+`OSCAN` is the read the whole oracle rests on (increment 3), and its arrows
+are all reads. `OSCAN --> SESSION` and `OSCAN --> PIPELINE` reuse the domains'
+own record types and lookups over an `InertStore` (`OSCAN --> STORE`) built on
+the project's state root, so a scan answers with exactly what the domains
+would say and can write nothing. `OSCAN --> MANIFEST` loads each project's
+manifest from its recorded root, and `OSCAN --> FSM` is how a session's stage
+is derived from the project's own session machine rather than from state
+names. `OSCAN --> GIT` is `git worktree list`, for leaked worktrees. `OSIG -->
+OSCAN` is the pure half: `classify` and `recommend` read the scan's rows and
+nothing else.
+
+What the oracle needs to know about Claude Code — which transcripts are a
+project's, and whether a live pid is still `claude` — reaches it the way
+telemetry reaches `domains/stats`: the scan defines the shape it reads
+(`HostProbe`), `hosts/claude_code_launch` implements it as `ClaudeCodeProbe`,
+and the CLI injects it (`CLI -. injects ClaudeCodeProbe .-> CCLAUNCH`). No
+`oracle → hosts` arrow exists either, and `tests/test_oracle_scan.py` scans
+for one (ADR-007 D11). `CCLAUNCH --> CCTEL` is the probe composing the
+transcript reader that already knew the host's on-disk layout; it is an arrow
+inside `hosts/`.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -508,14 +544,17 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Increments 1 and 2 deliver the three modules below; the
-rest of the package is planned in [oracle.md](oracle.md).
+project (IDEA_012). Increments 1 to 3 deliver the modules below; the rest of
+the package is planned in [oracle.md](oracle.md).
 
 | Module | Owns | Never does |
 |---|---|---|
 | `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant` | Create it; read anything in it |
 | `index` | `projects.json` — every registered project once, keyed by its state root; register, remove, prune | Read or write anything under a project's state root; store a clock time |
 | `attention` | `<state_root>/attention/<host-id>.json` — what one host session is waiting on, how its turn ended, its pid; the write and clear rules per event | Decide what a hook event means (the host adapter does); lock; raise into a hook (the CLI guards every call) |
+| `scan` | One read-only snapshot per registered project: live sessions with their hosts nested, orphan hosts, leaked worktrees, and one error row per project or record that cannot be read; host liveness (pid exists, and is still the host); the cache that keeps a repeat scan cheap | Write anything; name a state; import `hosts/` (host facts arrive through the injected `HostProbe`) |
+| `signals` | `classify(row, now, thresholds)`: alerts (waiting, gate blocked, stuck, finished, error) and markers, each with a stable key | Read a store, a process table or the wall clock |
+| `recommend` | `recommend(row, signals)`: one next step as label, argv, cwd and kind; `assess` joins rows, signals and steps into the `oracle list --json` document | Run anything; answer a prompt |
 
 ### `adapters/`
 

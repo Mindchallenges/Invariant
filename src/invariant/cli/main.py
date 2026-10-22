@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -2645,6 +2646,74 @@ def cmd_oracle_projects_prune(args) -> int:
     )
 
 
+def _oracle_cache():
+    """The scan cache, with Claude Code's answers about hosts injected.
+
+    A seam, like ``_handoff_closer``: the suite replaces it, so no test reads
+    the real transcripts or asks ``ps`` about a real ``claude``. The oracle
+    defines the probe's shape and imports nothing from ``hosts/``; this is
+    where the two meet (ADR-007 D11).
+    """
+    from ..hosts.claude_code_launch import ClaudeCodeProbe
+    from ..oracle.scan import ScanCache
+
+    return ScanCache(probe=ClaudeCodeProbe())
+
+
+#: The flag column of ``oracle list``: an alert, a marker only, or nothing.
+_ORACLE_FLAGS = ("ALERT", "note ", "ok   ")
+
+
+def _oracle_row_label(row: dict) -> str:
+    if row["kind"] == "session":
+        return f"{row['name']}  ({row['state']})"
+    if row["kind"] == "host":
+        return f"host {row['hosts'][0]['host_session_id']}" if row["hosts"] else "host"
+    if row["kind"] == "worktree":
+        return f"worktree {row['path']}"
+    return f"error {row['session_id']}" if row.get("session_id") else "error"
+
+
+def _oracle_row_lines(row: dict) -> list[str]:
+    signals = row["signals"]
+    flag = _ORACLE_FLAGS[0 if any(s["alert"] for s in signals) else 1 if signals else 2]
+    said = "; ".join(f"{s['kind']}: {s['detail']}" for s in signals) or "-"
+    lines = [f"  {flag}  {_oracle_row_label(row):<40} {said}"]
+    advice = row["recommendation"]
+    if advice:
+        command = " ".join(advice["argv"])
+        where = f"  (in {advice['cwd']})" if advice["cwd"] else ""
+        lines.append(f"         next  {advice['label']}" + (f": {command}{where}" if command else ""))
+    return lines
+
+
+def cmd_oracle_list(args) -> int:
+    """Every live session in every registered project, with its next step.
+
+    A one-shot scan: read-only over each project's state root, one error row
+    per project that cannot be read, and no Context, so it runs from anywhere.
+    """
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    index = _project_index()
+    snapshots = scan_all(index, cache=_oracle_cache(), select=args.project)
+    document = assess(snapshots, time.time())
+    document["home"] = str(index.home)
+
+    lines: list[str] = []
+    for project in document["projects"]:
+        entry = project["project"]
+        lines.append(f"{entry['name']}  {entry['root']}  ({project['elapsed']:.2f}s)")
+        rows = project["rows"]
+        if not rows:
+            lines.append("  nothing live")
+        for row in rows:
+            lines.extend(_oracle_row_lines(row))
+    text = "\n".join(lines) or f"  no projects registered in {index.home}"
+    return emit(args, document, text)
+
+
 # -- host bridge -------------------------------------------------------
 
 
@@ -3359,6 +3428,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_oracle_projects_prune)
+    q = oracle.add_parser(
+        "list", help="every live session in every project, and its next step"
+    )
+    q.add_argument("--project", help="one project, by its key, root or name")
+    q.set_defaults(func=cmd_oracle_list)
 
     hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
     q = hooks.add_parser("install")

@@ -95,6 +95,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..core.errors import InvariantError
+from .claude_code_telemetry import ClaudeCodeTranscripts
 
 #: The binary looked up on PATH. Resolved, never assumed: a bare ``claude`` in
 #: the typed line would be resolved by whatever PATH the NEW window's login
@@ -501,6 +502,42 @@ def is_claude_process_name(name: str | None) -> bool:
     return name.strip().rsplit("/", 1)[-1] == CLAUDE_BINARY
 
 
+def process_name(pid: int) -> str | None:
+    """``ps -o comm=`` for ``pid``, or ``None`` when there is no such process."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = (proc.stdout or "").strip()
+    return name if proc.returncode == 0 and name else None
+
+
+class ClaudeCodeProbe:
+    """What the oracle needs to know about Claude Code, and nothing else.
+
+    The oracle's scan defines the shape it reads — a project's transcripts and
+    whether a live pid is still the host — and the CLI injects this. It
+    imports nothing from ``oracle/``, so no ``hosts -> oracle`` arrow exists
+    (ADR-007 D6, D11): the host answers questions, the layer above asks them.
+    """
+
+    def __init__(self, home: Path | None = None, name_of=None) -> None:
+        self.home = home
+        self.name_of = name_of if name_of is not None else process_name
+
+    def transcripts(self, root: Path) -> ClaudeCodeTranscripts:
+        return ClaudeCodeTranscripts(origin=Path(root), home=self.home)
+
+    def is_host_process(self, pid: int) -> bool:
+        return is_claude_process_name(self.name_of(pid))
+
+
 #: How far up the parent chain :func:`find_host_pid` looks. A hook is the
 #: host's child, or its grandchild through a shell; the bound only keeps a
 #: chain with no ``claude`` in it from costing more than a handful of ``ps``.
@@ -585,17 +622,7 @@ class DetachedCloser:
     """
 
     def process_name(self, pid: int) -> str | None:
-        try:
-            proc = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "comm="],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except OSError:
-            return None
-        name = proc.stdout.strip()
-        return name if proc.returncode == 0 and name else None
+        return process_name(pid)
 
     def close(self, pid: int, delay: int) -> None:
         subprocess.Popen(
