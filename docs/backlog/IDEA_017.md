@@ -39,6 +39,8 @@ user, and nothing in this idea changes that.
 * There is no path by which the oracle answers or approves a host permission
   prompt.
 
+**Note 2026-10-22:** IDEA_025 carves out the first action from this list: closing a leftover orphan host on confirm, with a confirm-time check of pid, process name and Claude session id. The rest of this list stays here, and IDEA_025's check is the pattern a process kill here should reuse. IDEA_025 also records three leftover sessions and worktrees in the other registered project for this list's clean-up.
+
 **Risks / open questions:**
 
 * A process kill or teardown on a misclassified session destroys work. The
