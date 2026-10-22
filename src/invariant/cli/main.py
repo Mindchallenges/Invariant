@@ -2660,6 +2660,17 @@ def _oracle_cache():
     return ScanCache(probe=ClaudeCodeProbe())
 
 
+def _oracle_gates():
+    """The gate cache ``oracle list`` and ``oracle watch`` add detail from.
+
+    A seam beside ``_oracle_cache``, so a test can count or stall the
+    evaluations. The real one evaluates over an inert store and writes nothing.
+    """
+    from ..oracle.gates import GateCache
+
+    return GateCache()
+
+
 #: The flag column of ``oracle list``: an alert, a marker only, or nothing.
 _ORACLE_FLAGS = ("ALERT", "note ", "ok   ")
 
@@ -2676,6 +2687,8 @@ def _oracle_row_lines(row: dict) -> list[str]:
         command = " ".join(advice["argv"])
         where = f"  (in {advice['cwd']})" if advice["cwd"] else ""
         lines.append(f"         next  {advice['label']}" + (f": {command}{where}" if command else ""))
+        if advice.get("detail"):
+            lines.append(f"               {advice['detail']}")
     return lines
 
 
@@ -2684,13 +2697,17 @@ def cmd_oracle_list(args) -> int:
 
     A one-shot scan: read-only over each project's state root, one error row
     per project that cannot be read, and no Context, so it runs from anywhere.
+    The idle sessions' gates are evaluated once, for the recommendation's
+    detail, and the wait for them is bounded by the gate cache's timeout.
     """
     from ..oracle.recommend import assess
     from ..oracle.scan import scan_all
 
     index = _project_index()
     snapshots = scan_all(index, cache=_oracle_cache(), select=args.project)
-    document = assess(snapshots, time.time())
+    now = time.time()
+    gates = _oracle_gates()
+    document = assess(snapshots, now, gates=gates.refresh(snapshots, now, wait=gates.timeout))
     document["home"] = str(index.home)
 
     lines: list[str] = []
@@ -2756,12 +2773,18 @@ def cmd_oracle_watch(args) -> int:
         raise UsageError(f"--interval must be positive, not {args.interval:g}")
     if not args.stuck_minutes > 0:
         raise UsageError(f"--stuck-minutes must be positive, not {args.stuck_minutes:g}")
+    gates = _oracle_gates()
     watcher = Watcher(
         _project_index(),
         None if args.no_notify else _oracle_notifier(),
         interval=args.interval,
         cache=_oracle_cache(),
         thresholds=Thresholds(stuck_minutes=args.stuck_minutes),
+        gates=gates,
+        # One tick that exits is a one-shot like `oracle list`: it waits for
+        # the gates. The loop never does; what finishes late is the next
+        # tick's.
+        gate_wait=gates.timeout if args.once else 0.0,
     )
     if args.once:
         result = watcher.tick()

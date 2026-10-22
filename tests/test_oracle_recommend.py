@@ -23,6 +23,7 @@ from test_oracle_signals import (
 
 from invariant.cli.main import build_parser
 from invariant.oracle import recommend as rec
+from invariant.oracle.gates import GateReport, OwedGate
 from invariant.oracle.index import ProjectEntry
 from invariant.oracle.recommend import Recommendation, assess, recommend
 from invariant.oracle.scan import (
@@ -205,7 +206,7 @@ def test_failed_tests_outrank_a_blocked_gate():
 def test_a_recommendation_serialises():
     body = Recommendation("l", ("a", "b"), "/c", rec.RUN, {"K": "v"}).to_dict()
     assert body == {"label": "l", "argv": ["a", "b"], "cwd": "/c", "kind": "run",
-                    "env": {"K": "v"}}
+                    "env": {"K": "v"}, "detail": ""}
 
 
 class TestAssess:
@@ -232,3 +233,78 @@ class TestAssess:
         row = session_row(pipeline=PipelineView(methodology="tdd", state="red"))
         document = assess([ProjectSnapshot(project=entry, rows=[row])], NOW)
         assert document["projects"][0]["rows"][0]["pipeline"]["state"] == "red"
+
+
+# -- gate detail (increment 5) -------------------------------------------------
+
+ALL_PASS = OwedGate("test.all_pass", "block", "2 failed", True, ("refactor", "reviewing"))
+COVERAGE = OwedGate("coverage.meets_floor", "warn", "", False, ("committed",))
+
+
+def blocked_row(**fields) -> Row:
+    return session_row(
+        hosts=[host(attention(turn="ended", blocked={"rules": ["test.all_pass"]}))], **fields
+    )
+
+
+def gated(row: Row, report: GateReport | None) -> Recommendation | None:
+    return recommend(row, classify(row, NOW), report)
+
+
+class TestGateDetail:
+    def test_a_refused_row_names_every_gate_owed_and_what_it_wants(self):
+        advice = gated(blocked_row(), GateReport("green", (ALL_PASS, COVERAGE)))
+        assert advice.argv == ("invariant", "pipeline", "gates")
+        assert advice.detail == (
+            "owed: test.all_pass (block, to refactor, reviewing): 2 failed; "
+            "coverage.meets_floor (warn, to committed)"
+        )
+
+    def test_a_stale_answer_says_which_state_it_is_from(self):
+        advice = gated(blocked_row(), GateReport("red", (ALL_PASS,), stale=True))
+        assert advice.detail.startswith("as of red, owed: test.all_pass")
+
+    def test_nothing_owed_says_the_refusal_may_be_cleared(self):
+        advice = gated(blocked_row(), GateReport("green"))
+        assert "nothing is owed now" in advice.detail
+
+    @pytest.mark.parametrize("report", [
+        GateReport("green", timed_out=True), GateReport("green", error="boom"),
+    ], ids=["timed-out", "error"])
+    def test_no_answer_adds_no_detail(self, report):
+        assert gated(blocked_row(), report).detail == ""
+
+    def test_without_a_report_nothing_changes(self):
+        assert gated(blocked_row(), None).detail == ""
+        assert gated(session_row(), None) is None
+
+    def test_a_quiet_row_gets_the_hint_as_its_step(self):
+        advice = gated(session_row(), GateReport("green", (ALL_PASS, COVERAGE)))
+        assert advice.kind == rec.INFO and advice.argv == ()
+        assert advice.label == "next owed: test.all_pass (to refactor)"
+
+    def test_another_step_carries_the_hint_as_detail(self):
+        row = session_row(state="reviewed", stage=STAGE_REVIEWED)
+        advice = gated(row, GateReport("green", (ALL_PASS,)))
+        assert advice.argv[:3] == ("invariant", "session", "merge")
+        assert advice.detail == "next owed: test.all_pass (to refactor)"
+
+    @pytest.mark.parametrize("report", [
+        GateReport("green", (ALL_PASS,), stale=True), GateReport("green", (COVERAGE,)),
+    ], ids=["stale", "advisory-only"])
+    def test_no_hint_from_a_stale_or_advisory_answer(self, report):
+        assert gated(session_row(), report) is None
+
+    def test_gates_never_change_the_signals(self):
+        entry = ProjectEntry(key=PROJECT, root=ROOT, name="alpha", via="manual")
+        rows = [blocked_row(), session_row(session_id="s2", name="task-s2")]
+        snapshot = ProjectSnapshot(project=entry, rows=rows, scanned_at=NOW)
+        reports = {(PROJECT, "s1"): GateReport("green", (ALL_PASS,)),
+                   (PROJECT, "s2"): GateReport("green", (ALL_PASS,))}
+        plain = assess([snapshot], NOW)
+        with_gates = assess([snapshot], NOW, gates=reports)
+        for before, after in zip(plain["projects"][0]["rows"],
+                                 with_gates["projects"][0]["rows"], strict=True):
+            assert before["signals"] == after["signals"]
+            assert before["gates"] is None
+            assert after["gates"]["owed"][0]["rule_id"] == "test.all_pass"

@@ -211,6 +211,12 @@ class PipelineView:
     red_phase: str = "red"
     test_runs: int = 0
     last_test: dict[str, Any] | None = None
+    #: How many transitions the pipeline has made, and when its record was
+    #: last written (``st_mtime_ns``; ``None`` if it could not be read). Two
+    #: of the facts the gate cache's fingerprint is made of: evidence is
+    #: recorded without a transition, so the write time is what moves.
+    transitions: int = 0
+    written_ns: int | None = None
 
 
 @dataclass
@@ -479,6 +485,8 @@ class _ProjectReader:
             task=pipeline.task,
             test_runs=len(runs),
             last_test=runs[-1] if runs and isinstance(runs[-1], dict) else None,
+            transitions=len(pipeline.history) if isinstance(pipeline.history, list) else 0,
+            written_ns=_mtime_ns(self.store.root / self.pipelines.relpath(session_id)),
         )
         try:
             machine = self.pipelines.machine_for(pipeline)
@@ -591,6 +599,13 @@ def _latest(values: Iterable[float | None]) -> float | None:
 def _mtime(path: Path) -> float | None:
     try:
         return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
     except OSError:
         return None
 

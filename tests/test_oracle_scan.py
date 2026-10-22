@@ -266,6 +266,9 @@ class TestTheMachine:
         assert row.pipeline.last_test["failed"] == 2
         assert row.pipeline.red_phase == "red"
         assert row.pipeline.landed is False
+        assert row.pipeline.transitions == 0
+        record = Path(machine_world["alpha"].state_root) / "pipelines" / "a-live.json"
+        assert row.pipeline.written_ns == record.stat().st_mtime_ns
 
     def test_last_activity_is_the_latest_sign_of_life(self, machine_world):
         row = rows_of(self.scan(machine_world)["alpha"], ROW_SESSION)["a-live"]
@@ -423,6 +426,20 @@ class TestBrokenProjects:
 
 
 # -- the stages, from the machine's structure -----------------------------------
+
+
+class TestPipelineFacts:
+    def test_transitions_count_the_history(self, tmp_path):
+        alpha = make_project(tmp_path, "alpha")
+        put_session(alpha, id="s", name="n-s", state="working", origin=str(alpha.root))
+        put_pipeline(alpha, "s", methodology="tdd", state="red",
+                     history=[{"from": "designing", "to": "red"}])
+        [snapshot] = scan_all(ProjectIndex(oracle_home()), cache=ScanCache())
+        [row] = [r for r in snapshot.rows if r.session_id == "s"]
+        assert row.pipeline.transitions == 1
+
+    def test_an_unreadable_write_time_is_none(self):
+        assert scan_module._mtime_ns(Path("/no/such/pipeline.json")) is None
 
 
 class TestStages:

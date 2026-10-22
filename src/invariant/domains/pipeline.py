@@ -216,7 +216,13 @@ class PipelineDomain:
             return None, None
         return usage.to_dict(), host_session_id
 
-    def _path(self, session_id: str) -> str:
+    def relpath(self, session_id: str) -> str:
+        """Where a session's pipeline record lives, under the state root.
+
+        Public because a reader that watches the record rather than loading it
+        (the oracle's gate cache keys on its modification time) must name the
+        same file this domain writes, not a second spelling of it.
+        """
         return f"pipelines/{session_id}.json"
 
     def machine_for(self, pipeline: Pipeline) -> Machine:
@@ -238,7 +244,7 @@ class PipelineDomain:
     # -- lookup --------------------------------------------------------
 
     def current(self, session_id: str) -> Pipeline | None:
-        raw = self.store.read(self._path(session_id), {})
+        raw = self.store.read(self.relpath(session_id), {})
         current = raw.get("current") if isinstance(raw, dict) else None
         return Pipeline.from_dict(current) if current else None
 
@@ -252,7 +258,7 @@ class PipelineDomain:
         return pipeline
 
     def history(self, session_id: str) -> list[dict]:
-        raw = self.store.read(self._path(session_id), {})
+        raw = self.store.read(self.relpath(session_id), {})
         return list(raw.get("completed", [])) if isinstance(raw, dict) else []
 
     # -- lifecycle -----------------------------------------------------
@@ -946,12 +952,12 @@ class PipelineDomain:
         self, session_id: str, pipeline: Pipeline, archive: Pipeline | None = None
     ) -> None:
         self.store.ensure_root()
-        raw = self.store.read(self._path(session_id), {}) or {}
+        raw = self.store.read(self.relpath(session_id), {}) or {}
         completed = list(raw.get("completed", []))
         if archive is not None:
             completed.append(archive.to_dict())
         self.store.write(
-            self._path(session_id),
+            self.relpath(session_id),
             {"current": pipeline.to_dict(), "completed": completed},
         )
 

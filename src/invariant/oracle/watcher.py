@@ -3,7 +3,11 @@
 Each tick does four things in order:
 
 1. **scan** every registered project (:func:`scan_all`, read-only);
-2. **assess** it (:func:`assess`) — the ``oracle list --json`` document;
+2. **assess** it (:func:`assess`) — the ``oracle list --json`` document, with
+   the gate cache's answers as recommendation detail when a
+   :class:`~invariant.oracle.gates.GateCache` is given. The cache lives across
+   ticks and evaluates in its own threads; a tick waits ``gate_wait`` seconds
+   for it at most (none, by default), so a slow rule cannot stretch the tick;
 3. **write the snapshot**, ``<oracle home>/oracle/snapshot.json``: that
    document plus ``version``, ``generated``, ``watcher_pid`` and ``interval``,
    atomically replaced, so a reader never sees half of one;
@@ -39,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import StateError
+from .gates import GateCache
 from .index import HomeStore, ProjectIndex
 from .notify import Notification, Notifier
 from .recommend import assess, row_label
@@ -106,9 +111,13 @@ class Watcher:
         thresholds: Thresholds | None = None,
         sleep: Callable[[float], None] | None = None,
         log: Callable[[str], None] | None = None,
+        gates: GateCache | None = None,
+        gate_wait: float = 0.0,
     ) -> None:
         if not interval > 0:
             raise ValueError(f"the interval must be positive, not {interval!r}")
+        if gate_wait < 0:
+            raise ValueError(f"the gate wait cannot be negative, not {gate_wait!r}")
         self.index = index
         self.notifier = notifier
         self.clock = clock
@@ -117,6 +126,8 @@ class Watcher:
         self.thresholds = thresholds or Thresholds()
         self._sleep = sleep
         self.log = log or _stderr
+        self.gates = gates
+        self.gate_wait = gate_wait
         self.store = HomeStore(index.home)
 
     @property
@@ -133,7 +144,12 @@ class Watcher:
         started = time.perf_counter()
         now = self.clock()
         snapshots = scan_all(self.index, clock=lambda: now, cache=self.cache)
-        document = assess(snapshots, now, self.thresholds)
+        reports = (
+            self.gates.refresh(snapshots, now, wait=self.gate_wait)
+            if self.gates is not None
+            else None
+        )
+        document = assess(snapshots, now, self.thresholds, gates=reports)
         document.update(
             home=str(self.index.home),
             version=SNAPSHOT_VERSION,

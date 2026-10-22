@@ -814,11 +814,17 @@ invariant oracle list [--project NAME] [--json]
     matching nothing is a usage error (exit 2). The text is a status table:
     a line per project with its scan time, then a line per row flagged
     ALERT, note or ok, and a `next` line naming the recommended command and
-    the directory to run it in. It never runs one. Exit 0 whatever the rows
+    the directory to run it in, and under it the gates owed when they are
+    known. It never runs one. The gates of each idle session with a running
+    pipeline are evaluated once, read-only, in the session's worktree, and
+    the wait for them is bounded by a 10-second timeout; they add detail to
+    the recommendation and never raise an alert. Exit 0 whatever the rows
     say: it is a query. JSON: {"home", "now", "projects": [{"project",
     "scanned_at", "elapsed", "rows": [{<row>, "signals": [{"kind",
     "severity", "alert", "detail", "key", "cause"}], "recommendation":
-    {"label", "argv", "cwd", "kind", "env"} | null}]}]}.
+    {"label", "argv", "cwd", "kind", "env", "detail"} | null, "gates":
+    {"pipeline_state", "owed": [{"rule_id", "level", "message", "blocks",
+    "to", "fix"}], "stale", "timed_out", "error"} | null}]}]}.
 
 invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify] [--json]
     Every --interval seconds: scan every registered project, write the
@@ -833,7 +839,9 @@ invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify
     runs, and the text prints only ticks with news; --json prints one line
     per tick. --stuck-minutes is the threshold for `stuck`. --no-notify posts
     nothing: the edges it sees are recorded as owed, and a later watcher that
-    notifies delivers them. Both numbers must be positive (exit 2). JSON:
+    notifies delivers them. Gates are evaluated as `list` evaluates them, in
+    worker threads the loop never waits for; an answer that finishes between
+    ticks is the next tick's. --once waits for them, up to the timeout. Both numbers must be positive (exit 2). JSON:
     {"snapshot", "ledger", "rows", "elapsed", "alerts": [{"key", "project",
     "subject", "kind", "severity", "detail", "since", "notified"}]}.
 

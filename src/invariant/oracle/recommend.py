@@ -12,6 +12,14 @@ It recommends; it never runs anything, and it never answers a prompt. A host
 waiting on a permission prompt or a question is told to answer it in its own
 terminal — the oracle has no business approving a tool call for anybody.
 
+**Gate detail is data handed in.** What a session's pipeline owes is
+evaluated by the gate cache (``oracle/gates``), off the tick and only while
+the session is idle. :func:`recommend` takes that answer as an argument and
+stays pure: a ``gate_blocked`` row's step names the gates owed and what each
+wants, and a quieter row may carry a ``next owed:`` hint. The answer never
+changes which signals a row raises — an evaluated gate is a forecast, and only
+a refusal somebody met is an alert (ADR-007 D8).
+
 Where a command cannot name its session with ``--id`` (``pipeline gates``,
 ``pipeline test``), the recommendation carries ``INVARIANT_SESSION_ID`` in
 ``env`` instead, the explicit route session resolution already honours. Every
@@ -21,8 +29,9 @@ not exist cannot reach a confirm dialog.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
+from typing import TYPE_CHECKING, Any
 
 from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, ProjectSnapshot, Row
 from .signals import (
@@ -41,6 +50,9 @@ from .signals import (
     classify,
 )
 
+if TYPE_CHECKING:
+    from .gates import GateKey, GateReport
+
 RUN = "run"
 TERMINAL = "terminal"
 INFO = "info"
@@ -58,6 +70,8 @@ class Recommendation:
     cwd: str | None = None
     kind: str = INFO
     env: dict[str, str] = field(default_factory=dict)
+    #: What the gate cache found owed, in words; empty when it has no answer.
+    detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         body = asdict(self)
@@ -65,12 +79,15 @@ class Recommendation:
         return body
 
 
-def recommend(row: Row, signals: list[Signal]) -> Recommendation | None:
+def recommend(
+    row: Row, signals: list[Signal], gates: GateReport | None = None
+) -> Recommendation | None:
     """The one next step for ``row``, or ``None`` when nothing is owed.
 
     The first condition that holds wins, in the order a person would want them
     handled: an open question before anything else, then a failure, then a
-    refusal, then progress.
+    refusal, then progress. ``gates`` is the gate cache's answer for the row,
+    when it has one; it adds detail and never chooses the step.
     """
     by_kind: dict[str, list[Signal]] = {}
     for signal in signals:
@@ -89,7 +106,46 @@ def recommend(row: Row, signals: list[Signal]) -> Recommendation | None:
         )
     if row.kind == ROW_HOST:
         return _for_orphan(row)
-    return _for_session(row, has)
+    return _with_gates(_for_session(row, has), has(GATE_BLOCKED), gates)
+
+
+def _with_gates(
+    advice: Recommendation | None, blocked: bool, gates: GateReport | None
+) -> Recommendation | None:
+    """The step, with what the gate cache says is owed.
+
+    A refused row is told every gate owed and what each wants, even from an
+    answer the session has since moved past, marked as such. Any other row gets
+    a one-line hint of the blocking gates, from a current answer only; a row
+    with no step of its own gets the hint as its step.
+    """
+    if gates is None:
+        return advice
+    if blocked and advice is not None:
+        return replace(advice, detail=_owed_detail(gates))
+    names = ", ".join(g.rule_id for g in gates.blocking)
+    if gates.stale or not names:
+        return advice
+    hint = f"next owed: {names} (to {gates.blocking[0].to[0]})"
+    if advice is None:
+        return Recommendation(hint)
+    return replace(advice, detail=hint)
+
+
+def _owed_detail(gates: GateReport) -> str:
+    if gates.owed:
+        said = "; ".join(
+            f"{g.rule_id} ({g.level}, to {', '.join(g.to)})" + (f": {g.message}" if g.message else "")
+            for g in gates.owed
+        )
+        detail = f"owed: {said}"
+    elif gates.timed_out or gates.error:
+        return ""
+    else:
+        detail = "nothing is owed now; the refusal may already be cleared"
+    if gates.stale:
+        detail = f"as of {gates.pipeline_state}, {detail}"
+    return detail
 
 
 def _for_orphan(row: Row) -> Recommendation:
@@ -168,21 +224,26 @@ def assess(
     snapshots: list[ProjectSnapshot],
     now: float,
     thresholds: Thresholds | None = None,
+    gates: Mapping[GateKey, GateReport] | None = None,
 ) -> dict[str, Any]:
     """Snapshots as one document: every row with its signals and its next step.
 
     What ``oracle list --json`` prints, and what the watcher writes as its
-    snapshot.
+    snapshot. ``gates`` is the gate cache's answers by ``(project, session)``;
+    each row carries its own under ``gates``, or ``null``.
     """
+    gates = gates or {}
     projects = []
     for snapshot in snapshots:
         rows = []
         for row in snapshot.rows:
             signals = classify(row, now, thresholds)
-            advice = recommend(row, signals)
+            report = gates.get((row.project, row.session_id or ""))
+            advice = recommend(row, signals, report)
             body = row.to_dict()
             body["signals"] = [s.to_dict() for s in signals]
             body["recommendation"] = advice.to_dict() if advice else None
+            body["gates"] = report.to_dict() if report else None
             rows.append(body)
         projects.append(
             {

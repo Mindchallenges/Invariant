@@ -28,6 +28,7 @@ graph TD
         OSCAN[scan]
         OSIG["signals / recommend"]
         OWATCH[watcher]
+        OGATES[gates]
         ONOTIFY[notify]
     end
 
@@ -93,6 +94,15 @@ graph TD
     OWATCH --> OSIG
     OWATCH --> OINDEX
     OWATCH --> ONOTIFY
+    CLI --> OGATES
+    OWATCH --> OGATES
+    OGATES --> OSCAN
+    OGATES --> PIPELINE
+    OGATES --> SESSION
+    OGATES --> STORE
+    OGATES --> MANIFEST
+    OGATES --> RULES
+    OSIG -. reads the GateReport shape of .-> OGATES
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -217,6 +227,23 @@ channel. The real channel, `osascript`, needs AppleScript quoting, which
 So the CLI hands that function to `OsascriptNotifier`
 (`CLI -. injects applescript_string .-> CCLAUNCH`), the same dotted injection
 as the probe, and still no `oracle → hosts` arrow exists (ADR-007 D13).
+
+`OGATES` is the gate cache (increment 5), and the one place the oracle runs
+the engine's own evaluation rather than reading a record. `OGATES -->
+PIPELINE` is `evaluate_gates_by_destination`, the call `pipeline gates`
+makes, so the oracle cannot answer differently from the command it would
+recommend; `OGATES --> SESSION` reads the session record the rules are handed,
+and `OGATES --> STORE` is the `InertStore` both domains are built on, so a
+rule path that writes writes nothing. `OGATES --> MANIFEST` loads the session
+worktree's manifest, `OGATES --> RULES` is the `Evaluated` verdicts it
+summarises, and `OGATES --> OSCAN` reads the rows it fingerprints. `CLI -->
+OGATES` and `OWATCH --> OGATES` are its two callers, through the CLI's
+`_oracle_gates` seam. The dotted `OSIG -. reads the GateReport shape of .->
+OGATES` is a type only: `recommend` takes the report as data and stays pure,
+and nothing the cache answers reaches `classify`, so it can never raise an
+alert (ADR-007 D8, D16). `PipelineDomain.relpath` is public for this reader:
+the fingerprint watches the pipeline record's write time, and must name the
+file the domain writes rather than a second spelling of it.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -565,7 +592,7 @@ advance it. They are the only place where "what a session is" is encoded.
 ### `oracle/`
 
 The Session Oracle: a machine-wide view of every session in every invariant
-project (IDEA_012). Increments 1 to 4 deliver the modules below; the rest of
+project (IDEA_012). Increments 1 to 5 deliver the modules below; the rest of
 the package is planned in [oracle.md](oracle.md).
 
 | Module | Owns | Never does |
@@ -577,6 +604,7 @@ the package is planned in [oracle.md](oracle.md).
 | `signals` | `classify(row, now, thresholds)`: alerts (waiting, gate blocked, stuck, finished, error) and markers, each with a stable key | Read a store, a process table or the wall clock |
 | `recommend` | `recommend(row, signals)`: one next step as label, argv, cwd and kind; `assess` joins rows, signals and steps into the `oracle list --json` document; `row_label`, the one name a row is shown by | Run anything; answer a prompt |
 | `watcher` | The tick: scan, assess, the atomic `oracle/snapshot.json`, and the rising-edge de-dup ledger `oracle/alerts.json` that decides what notifies; the loop that survives a failed tick | Decide what a signal means (`signals` does); know how a notification is delivered; write under a project's state root |
+| `gates` | `GateCache`: what each idle session's pipeline owes, evaluated by the domain over an inert store, off the tick, once per fingerprint, at most two at a time, with a timeout that keeps the last answer; `GateReport`, the data `recommend` reads | Write anything; evaluate while a turn runs; persist an answer; raise an alert |
 | `notify` | The `Notifier` protocol and `Notification`; `OsascriptNotifier`, with the quoting injected; `RecordingNotifier` for tests | Import `hosts/`; decide what deserves a notification |
 
 ### `adapters/`

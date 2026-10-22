@@ -15,7 +15,7 @@ description of the current behaviour.
 | 2 | Attention sidecar and the `Notification` hook | **shipped** |
 | 3 | Read-only scan, `classify`, `recommend`, `oracle list` | **shipped** |
 | 4 | Watcher, rising-edge de-dup ledger, notifier, `watch`, `notify-test` | **shipped** |
-| 5 | Gate cache for recommendation detail | planned |
+| 5 | Gate cache for recommendation detail | **shipped** |
 | 6 | launchd `install` / `uninstall` | planned |
 | 7 | Textual TUI behind the `invariant[oracle]` extra | planned |
 
@@ -33,6 +33,7 @@ graph TD
         SCAN[scan]
         SIGNALS["signals / recommend"]
         WATCH[watcher]
+        GATES[gates]
         NOTIFY[notify]
         LAUNCHD["launchd (planned)"]
         TUI["tui (planned)"]
@@ -42,6 +43,7 @@ graph TD
         STORE[store]
         MANIFEST[manifest]
         GIT[git]
+        RULES[rules]
     end
 
     DOMAINS["domains/ (session, pipeline)"]
@@ -71,6 +73,14 @@ graph TD
     WATCH --> SIGNALS
     WATCH --> INDEX
     WATCH --> NOTIFY
+    CLI --> GATES
+    WATCH --> GATES
+    GATES --> SCAN
+    GATES --> DOMAINS
+    GATES --> STORE
+    GATES --> MANIFEST
+    GATES --> RULES
+    SIGNALS -. reads the GateReport shape of .-> GATES
     LAUNCHD -. planned .-> WATCH
     TUI -. planned .-> SCAN
 ```
@@ -297,7 +307,7 @@ an error, which is why the red phase is excluded alongside `read_as_red`.
 
 ### `oracle/recommend`
 
-`recommend(row, signals)` names one next step: a label, the exact `argv` and
+`recommend(row, signals, gates)` names one next step: a label, the exact `argv` and
 `cwd`, and a kind — `run` (an `invariant` command), `terminal` (one that
 belongs in a new host session) or `info` (nothing to run). The first row of the
 table that holds wins.
@@ -328,9 +338,11 @@ just tore several sessions down has several transcript-only hosts, and each
 would otherwise be told to adopt the same session. The suite parses every
 `argv` in the table with the real CLI parser.
 
-`assess(snapshots, now, thresholds)` joins each row with its signals and its
-recommendation. It is the `invariant oracle list --json` document, and the body
-of the watcher's snapshot.
+`assess(snapshots, now, thresholds, gates)` joins each row with its signals
+and its recommendation, and with the gate cache's answer for it under `gates`
+(`null` when there is none). It is the `invariant oracle list --json`
+document, and the body of the watcher's snapshot. How the gate answer changes
+a recommendation is in "Shipped: the gate cache" below.
 
 ### `invariant oracle list`
 
@@ -431,6 +443,63 @@ a single tick and prints its result. `--no-notify` sends nothing, and the edges
 it sees stay owed to a watcher that does notify. `notify-test` posts one
 notification through the same seam. See [cli.md](cli.md), "Oracle".
 
+## Shipped: the gate cache
+
+### `oracle/gates`
+
+A row says a gate refused only when a refusal was actually met: `blocked` in
+the attention sidecar (ADR-007 D8). It cannot say which gates are owed now, or
+what each wants, and without that the best recommendation is "run `pipeline
+gates`". `GateCache` supplies the detail by running
+`PipelineDomain.evaluate_gates_by_destination`, the evaluation `pipeline gates`
+prints, and keeps the answer in memory.
+
+| Rule | How |
+|---|---|
+| **Never a write** | The domains are built on an `InertStore` over the row's state root. The manifest is the session worktree's own (the main checkout's if the worktree has none), because the rules resolve the paths they compare against the manifest's root. The rules run with `cwd` set to the worktree, so their git questions are asked there. |
+| **Never while a turn runs** | A host mid-turn is using that worktree, and its own git commands must not meet ours. A session is evaluated when its current host's `turn` is `ended`. With no turn known, or a running turn whose host is known to be gone, it is evaluated after 2 minutes without activity. A running turn on a live host, or one whose liveness is unknown, is never evaluated. |
+| **Only when something moved** | The fingerprint is the session's `state` and `heartbeat`, the pipeline's `state` and transition count, and the pipeline record's `st_mtime_ns`. Evidence is recorded without a transition, so the write time is what moves for a new test run or a doc read. The scan supplies all five (`PipelineView.transitions`, `written_ns`), so fingerprinting costs no extra read. |
+| **Skipped when there is nothing to ask** | A row that is not a session, has no pipeline or a terminal one, is stranded, or whose worktree (else root) is not a directory. |
+| **Bounded** | Each evaluation runs in a daemon thread, at most 2 at once across every project, with a 10-second timeout. A worker that timed out keeps its slot until it really ends, so a hung `git` cannot multiply threads. A result later than the timeout is dropped. |
+| **A failure keeps the last answer** | A timeout or an error keeps the previous result, flagged `timed_out` or with `error`, and that fingerprint is not tried again. The next change of fingerprint is. |
+| **In memory** | Nothing is persisted. The watcher's cache lives across its ticks; a restarted watcher evaluates again. The answer reaches the snapshot only as part of the assessed document. |
+
+`refresh(snapshots, now, wait)` starts what is owed, waits up to `wait`
+seconds and returns a `GateReport` per `(state root, session id)`: the gates
+not met, once each, blocking first, each with its level, the first line of
+its message, its first fix and every edge out of the state that owes it. A
+report whose fingerprint has moved since is `stale`. The answers of sessions
+that are no longer live in a scanned project are forgotten.
+
+**It feeds the recommendation, never an alert.** `recommend(row, signals,
+gates)` takes the report as an argument, so it stays pure, and `classify`
+never sees it: the signals, and so the ledger and the notifications, are the
+same with or without it. The suite checks that.
+
+| Row | What the report adds |
+|---|---|
+| `gate_blocked` (or failed tests on a refused row) | `detail`: `owed: <rule> (<level>, to <edges>): <message>; …`. A stale report is prefixed `as of <pipeline state>,`. A report with nothing owed says the refusal may already be cleared. A report with only a timeout or an error adds nothing. |
+| Any other session row with a step | `detail`: `next owed: <blocking rules> (to <first edge>)`, from a current report only. |
+| A session row with no step | The same hint becomes its step, an `info` one with no command. |
+
+**Where it is wired.**
+
+| Caller | Wait |
+|---|---|
+| `Watcher(gates=…, gate_wait=0)` | The loop never waits: a tick starts what is owed and reports what has finished. An evaluation that finishes between ticks is the next tick's. |
+| `oracle watch --once` | Waits up to the timeout, because it is a one-shot like `list`. |
+| `oracle list` | Evaluates the eligible sessions once and waits up to the timeout. |
+
+The CLI reaches the cache through the `_oracle_gates` seam, as it does the scan
+cache. The text output prints the detail on its own line under `next`.
+
+**Measured** on this repository's real state root, against a scratch
+`INVARIANT_HOME`, on 2026-10-22: one live session, evaluated in 0.02 s in its
+worker. Watcher ticks with the gate cache took 0.11 s cold and about 0.03 s
+warm, the same as without it, and a `watch --once` that waited for the gates
+took 0.12 s. The suite stalls an evaluation and checks that the tick still
+returns in under 2 s.
+
 ## Known gap: a host rooted in another repository (BUG_040)
 
 A host session is attributed to the project its hooks resolve, and its
@@ -445,9 +514,6 @@ fixed; BUG_040 owns it.
 The plan approved on 2026-10-22 sets out the shape below. Each part is written
 up properly when it ships.
 
-- **Gate cache** (increment 5). Gates are evaluated only when the fingerprint
-  changes and the session is idle. The result feeds recommendation detail and
-  never raises an alert.
 - **launchd** (increment 6). A plist with an absolute interpreter and an
   explicit PATH, installed through a seam. `doctor` checks the interpreter.
 - **TUI** (increment 7). A Textual app behind the `invariant[oracle]` extra.

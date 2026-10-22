@@ -1,7 +1,8 @@
 # ADR-007 — A machine-wide, read-only oracle
 
 - **Status:** Proposed. D1–D4 are implemented by increment 1 of IDEA_012,
-  D5–D10 by increment 2, D11–D12 by increment 3, and D13–D15 by increment 4.
+  D5–D10 by increment 2, D11–D12 by increment 3, D13–D15 by increment 4,
+  and D16 by increment 5.
   The later decisions are listed under "Still to decide", and each is
   recorded here when its increment lands. The status
   becomes Accepted when the oracle ships.
@@ -301,6 +302,41 @@ The ledger is derived. One that cannot be read, or has another version or
 shape, is replaced, not refused, which is the opposite of the project
 index's rule (D3). The index is a source of truth, and the ledger costs at most
 one repeat of each live alert to rebuild.
+
+### D16 — Gates are evaluated off the tick, for an idle session, and only ever as detail
+
+D8 settled that an alert is a refusal somebody met. Increment 5 adds the
+other half: an evaluation of what is owed, for the recommendation. Four
+choices shape it.
+
+- **The domain's own evaluation, over an inert store.** The cache calls
+  `PipelineDomain.evaluate_gates_by_destination`, the call `pipeline gates`
+  makes, with the session record and the worktree as `cwd`, so the oracle
+  cannot tell a person something the command it recommends would contradict.
+  Both domains are built on an `InertStore`. The rules are written to read,
+  and the inert store makes that a guarantee rather than a convention, which
+  is the BUG_059 argument.
+- **Never while a turn runs.** The rules ask git questions in the session's
+  worktree. A host mid-turn is using it, and a watcher's `git diff` must not
+  meet the host's own git commands there. So a session is evaluated when its
+  turn has ended, or, with no turn known or its host gone, after two quiet
+  minutes. The alternative, evaluating every tick, was rejected for the same
+  reason and for cost.
+- **Once per fingerprint, off the tick.** The fingerprint is the session's
+  state and heartbeat, the pipeline's state and transition count, and the
+  pipeline record's write time. Evaluation runs in daemon threads, at most two
+  at once, with a ten-second timeout. The watcher's tick never waits for them,
+  so a slow rule cannot stretch the five-second budget the latency acceptance
+  rests on; `oracle list` and `watch --once`, which are one-shots, wait up to
+  the timeout. A timeout or an error keeps the last answer, flagged, and the
+  same fingerprint is not tried again. Daemon threads, not a pool, because an
+  interpreter exit must not wait on a hung `git`.
+- **Detail, never an alert, and never stored.** `recommend` receives the
+  report as data and `classify` never sees it, so the ledger and the
+  notifications are identical with or without it. The cache is memory only;
+  the answers appear in the snapshot as part of the assessed document, which
+  is derived and rewritten every tick (D14). Persisting them would make a
+  forecast look like a record.
 
 ## Still to decide (later increments of IDEA_012)
 
