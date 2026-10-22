@@ -11,7 +11,8 @@ dashboards, more actions, an idle alert) are their own ideas, IDEA_013 to
 IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose three
 increments have shipped: the page, confirm-first actions from it, and the
 page served always by a second LaunchAgent ("Shipped: the web page" below,
-ADR-008).
+ADR-008). IDEA_026 serves that page over HTTPS with Tailscale's certificate
+("Over HTTPS" below, ADR-008 D19–D24).
 
 | # | Increment | Status |
 |---|---|---|
@@ -47,6 +48,7 @@ graph TD
         WEBPAGE[webpage]
         WEBACT["webactions (IDEA_023 inc 2)"]
         WEBSVC["webservice (IDEA_023 inc 3)"]
+        TLS["tls (IDEA_026)"]
         DEVICES[devices]
     end
 
@@ -129,6 +131,11 @@ graph TD
     WEBSVC --> WEBACT
     WEBSVC --> SCAN
     WEBSVC --> INDEX
+    CLI --> TLS
+    WEBSVC --> TLS
+    TLS --> WEB
+    TLS --> HOME
+    WEB -. serves the Served of .-> TLS
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -703,11 +710,12 @@ ADR-008's. The person-facing setup is the guide's
 
 | Module | Owns | Never does |
 |---|---|---|
-| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, each line naming its row by `row_key` and, when the app acts, its action; each project's quiet orphan hosts and leaked worktrees folded into one summary) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps), and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
+| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, each line naming its row by `row_key` and, when the app acts, its action; each project's quiet orphan hosts and leaked worktrees folded into one summary) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps; with a `Served`, TLS per connection in that connection's thread, and a `307` to the https name for plain HTTP), the HTTPS rules (only the certificate's name as `Host`, the `https` origin, the `Secure` cookie), the plain-HTTP warning, and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
 | `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, the action, the job and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
 | `webpage` | The HTML: the self-contained page with its inline style and script, the confirm panel and the action list, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce |
 | `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
-| `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; its report, `oracle/web.json`; `web_status` and its wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
+| `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; keep the certificate due, swap a renewal into the listener, listen again over HTTPS or plain HTTP when that changes; its report, `oracle/web.json`; `web_status`, `cert_text` and their wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
+| `tls` | The page's certificate (IDEA_026): `issue`, Tailscale's CLI asked through stdout; `split_pem` and `cert_info`, the chain, the key, the names and the expiry, read with the standard library; `Certificates`, the kept `web/tls/oracle.pem` and when to ask again; `Served`, the certificate and context a listener serves, swapped together; `RecordingIssuer` for tests | Run `tailscale` except through its injected runner; write the key anywhere but its owner-only file; replace a good pair with one that does not load |
 
 ### Where it listens
 
@@ -716,9 +724,11 @@ Only on the Mac's Tailscale addresses: those in `100.64.0.0/10` or
 `fd7a:115c:a1e0::/48`, as `tailscale ip` reports them, else as `ifconfig`
 lists them on a tunnel interface (`utun*`, `tailscale*`). Never the wildcard.
 With none, `oracle web` refuses to start (exit 1). `--allow-loopback` serves
-on `127.0.0.1` instead, only when no tailnet address exists. A request whose
-`Host` is not a bound address, a `*.ts.net` name or, on loopback,
-`localhost`, gets a 421 (ADR-008 D1, D2).
+on `127.0.0.1` instead, only when no tailnet address exists. Over HTTPS, a
+request whose `Host` is not the certificate's name gets a 421 naming the
+https URL. Over plain HTTP, one whose `Host` is not a bound address, a
+`*.ts.net` name or, on loopback, `localhost`, gets a 421 (ADR-008 D1, D2,
+D22).
 
 ### Who gets an answer
 
@@ -733,8 +743,8 @@ on `127.0.0.1` instead, only when no tailnet address exists. A request whose
 | `GET /api/job?id=<id>` | 401 | the job, to the device that started it; else 404 |
 | anything else | 401 | 404, or 405 for a method that is not `GET` |
 
-The token is the `invariant_oracle` cookie (`HttpOnly; SameSite=Strict`), or
-an `Authorization: Bearer` header. The token is checked before anything is
+The token is the `invariant_oracle` cookie (`HttpOnly; SameSite=Strict`, and
+`Secure` over HTTPS), or an `Authorization: Bearer` header. The token is checked before anything is
 read, so an unpaired request costs no scan. Every response is `no-store`,
 `nosniff` and `Referrer-Policy: same-origin`: a referrer, and a `?code=` in
 it, never leaves the origin, while the page's own form `POST` keeps its real
@@ -780,7 +790,7 @@ ADR-008 D8–D13):
 | the row waits on a prompt, the argv is not `invariant`, the cwd does not exist, the kind is unknown | the confirm shows the reason and offers no Run; an action is a 409 with it |
 | the nonce is unknown, spent, expired, another device's or another row's | 403; it is spent either way |
 | the step changed since the confirm, the row is gone, the row's last action still runs, four already run | 409 |
-| no `Origin`, a foreign one, or `Sec-Fetch-Site` other than `same-origin` | 403, before the body is read |
+| no `Origin`, a foreign one (another host, port or scheme: an `http://` origin on the HTTPS page), or `Sec-Fetch-Site` other than `same-origin` | 403, before the body is read |
 | the audit start line cannot be written | 503; nothing ran |
 
 **The audit log.** `<oracle home>/web/actions.log`, owner-only from
@@ -804,7 +814,8 @@ once. More are closed unanswered. A malformed `Content-Length` is a 400
 ### Pairing
 
 `oracle web pair` issues a 10-character code that lives 5 minutes
-(`--ttl`) and works once, and prints a link per tailnet address. Ten wrong
+(`--ttl`) and works once, and prints its link: the https name once a valid
+certificate is kept, else a plain-HTTP link per tailnet address. Ten wrong
 codes in a row cancel every pending one. The pairing form's `POST` refuses a
 foreign `Origin` and lets a missing one through: the code, not the cookie, is
 its credential (ADR-008 D11). `oracle web devices` lists the
@@ -813,9 +824,12 @@ specified in [state_model.md](state_model.md), "User-level state".
 
 ### The seams
 
-The CLI reaches discovery through `_oracle_web_addresses` and the server
-through `_oracle_web_server`, and the suite replaces both for every test
-(`RecordingWeb`). An action leaves through the TUI's own seams,
+The CLI reaches discovery through `_oracle_web_addresses`, the server
+through `_oracle_web_server` and the certificate through
+`_oracle_web_certificates`, and the suite replaces all three for every test
+(`RecordingWeb`, and a `RecordingIssuer` that refuses until a test hands it a
+self-signed fixture from `tests/fixtures/tls`). The one TLS test that opens a
+socket serves a fixture on loopback. An action leaves through the TUI's own seams,
 `_oracle_runner` and `_handoff_launcher`, which the suite replaces with
 recorders, so no test runs a command or opens a window. The `conftest.py` program guard refuses `tailscale`. Its
 socket guard refuses any `bind`, `connect`, `connect_ex` or `sendto` past
@@ -857,6 +871,8 @@ stateDiagram-v2
     serving --> serving: same addresses (look again in 30 s)
     serving --> serving: addresses changed: close, bind the new ones
     serving --> waiting: addresses gone: close
+    serving --> serving: certificate renewed (same name): swapped in, no rebind
+    serving --> serving: first certificate, lost, or a new name: close, bind over https or http
     serving --> [*]: stopped (report removed)
     waiting --> [*]: stopped (report removed)
 ```
@@ -877,12 +893,62 @@ prints that under the watcher's lines, and `doctor` adds `oracle web
 interpreter` and `oracle web page` when the web plist exists, asking launchd
 nothing (ADR-008 D17).
 
+**The certificate, inside the loop** (IDEA_026, ADR-008 D19–D23). With the
+tailnet up, each look also calls `Certificates.ensure`: it reads the kept
+`web/tls/oracle.pem` and asks Tailscale through the seam only when fewer than
+30 days remain or there is none, at most hourly while the answer stays the
+same (every 10 minutes with none). A renewal for the same name is swapped
+into the running listener's `Served`, so the next connection gets it with no
+restart. A first certificate, a lost one (expired, renewal failing) or one
+for a new name makes the loop listen again: over HTTPS on the same port,
+whose plain-HTTP requests get only a `307` to the https name, or over plain
+HTTP with the page's warning. The report gains `scheme` and `certificate`,
+which `oracle status` prints as `certificate  <name> expires <when> (in N
+days)` and `doctor` checks as `oracle web certificate`.
+
 **The page recovers.** The refresh loop never stops (D6), so a listener or
 agent restart is recovered by itself within the backoff. A look at the page
 (visible again, focus, restored, back online) cuts the backoff short and
 reads at once, with no second read while one is in flight. A job the
 restarted server no longer knows (`/api/job` 404) is reported lost, with a
-pointer to the audit log, instead of being polled forever (D18).
+pointer to the audit log, instead of being polled forever (D18). A page open
+over plain HTTP when the listener moves to HTTPS gets the redirect on its
+next read, which it does not follow; it reloads, and the browser follows the
+redirect to the https name (D23).
+
+### Over HTTPS (IDEA_026)
+
+The page is served with the Let's Encrypt certificate Tailscale issues for the
+Mac's MagicDNS name, once the person turns on HTTPS Certificates in the
+Tailscale admin console (ADR-008 D19–D24).
+
+```mermaid
+sequenceDiagram
+    participant Loop as WebService (oracle web --wait)
+    participant Certs as tls.Certificates
+    participant TS as Tailscale CLI (via the seam)
+    participant Srv as WebServer listener
+    Loop->>Certs: ensure() each look while the tailnet is up
+    Certs->>Certs: read web/tls/oracle.pem; due if < 30 days or none
+    Certs->>TS: status --json (CertDomains, else Self.DNSName)
+    Certs->>TS: cert --cert-file - --key-file - <name>
+    TS-->>Certs: chain then key, on stdout
+    Certs->>Certs: write candidate 0600, load it, rename over oracle.pem
+    Certs-->>Loop: Certificate(name, not_after)
+    alt same name, newer certificate
+        Loop->>Srv: Served.renew(cert, fresh SSLContext): next connection
+    else first, lost, or a new name
+        Loop->>Srv: close; bind again over https, or http with a warning
+    end
+    Loop->>Loop: report scheme and certificate in oracle/web.json
+```
+
+| Case | What is served |
+|---|---|
+| A valid certificate | HTTPS on the port, at the certificate's name only. A plain-HTTP request gets `307` to `https://<name>:<port>/` and nothing else. The cookie is `Secure`; the `Origin` must be `https` |
+| None to be had | Plain HTTP, as before, with a red warning on the page and the pairing form, `PLAIN HTTP` on `oracle web`'s output, `certificate NONE` in `oracle status` and a failing `doctor` row. Asked for again every 10 minutes |
+| A renewal fails | The kept certificate while it is valid, the failure in `status` and the log; `doctor` fails 14 days before expiry |
+| `--allow-loopback` | Plain HTTP on loopback, no warning, nothing asked of Tailscale |
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

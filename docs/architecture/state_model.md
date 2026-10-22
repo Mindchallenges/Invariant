@@ -1662,6 +1662,8 @@ $INVARIANT_HOME, else ~/.invariant/
   web/                  the web page's records; NOT derived (0700)
     devices.json        token hashes and pending pairing codes (0600)
     actions.log         what the page ran: a start and an end line each (0600)
+    tls/                the page's certificate (0700)
+      oracle.pem        Tailscale's certificate chain, then its key (0600)
   locks/devices.lock    advisory lock for its read-modify-write
 ```
 
@@ -1728,18 +1730,42 @@ time its state changes:
 ```json
 {"version": 1, "pid": 4242, "state": "waiting|serving",
  "addresses": ["<tailnet address>"], "port": 7341,
- "urls": ["http://<tailnet address>:7341/"], "since": "<iso>", "error": null}
+ "urls": ["https://<host>.<tailnet>.ts.net:7341/"], "since": "<iso>", "error": null,
+ "scheme": "https|http",
+ "certificate": {"name": "<host>.<tailnet>.ts.net", "not_after": 1800000000.0,
+                 "expires": "<iso>", "error": null}}
 ```
+
+`scheme` and `certificate` were added by IDEA_026 (ADR-008 D23), within
+version 1: a reader that does not know them reads the rest as before.
+`certificate` is the one being served (`name`, `not_after` and `expires` are
+`null` over plain HTTP) and `error` is why the last request to Tailscale
+failed, until one succeeds. Over plain HTTP `urls` lists each address with
+`http://`, as before.
 
 | Property | Why |
 |---|---|
 | **Derived, safe to delete** | It says what one running process is doing, nothing more, so it sits in `oracle/` beside the snapshot. The loop removes it when it stops; `oracle uninstall` removes it after the `bootout`, because launchd's SIGTERM ends the process first. A report left by a process that died says so: its `pid` is checked alive on every read. |
-| **Written on a change, not on a timer** | `waiting` to `serving`, a new address set, a new bind error. `since` is when the state began, so a steady loop writes nothing. Its pid's liveness, not the file's age, says whether anything is behind it. |
+| **Written on a change, not on a timer** | `waiting` to `serving`, a new address set, a new bind error, a certificate renewed, lost or failing. `since` is when the state began, so a steady loop writes nothing. Its pid's liveness, not the file's age, says whether anything is behind it. |
 | **`error` means waiting for a reason** | A bind that failed (a port in use) leaves `state: waiting` with the error. `doctor` fails on it; waiting for Tailscale with no error passes. |
 | **Clock times, machine-local** | `since` is UTC to the second: the D14 exception again, under the home and never committed. |
 
 `web.log` is the agent's output, like `watcher.log`: appended to, never read
 back, safe to delete. It holds the state changes and never a request line.
+
+### The page's certificate
+
+`<oracle home>/web/tls/oracle.pem` is the HTTPS certificate the web page
+serves (IDEA_026, ADR-008 D19): the chain Tailscale issued for the Mac's
+MagicDNS name, followed by its private key, as PEM.
+
+| Property | Why |
+|---|---|
+| **One file** | `ssl` loads the key from the certificate's own file, so a crash can never leave a certificate beside another one's key. |
+| **Owner-only from creation** | `web/` and `web/tls/` are `0700`; the file is written through a temporary file created `0600` and exclusively, then renamed over it (`home.write_private`). The key is never readable by anyone else, not even briefly. |
+| **Replaced only by a pair that loads** | A new one is written to `web/tls/candidate.pem`, loaded once, and renamed over `oracle.pem`; one whose key does not match, which names another host, or which has expired is removed and the kept one stays. |
+| **Neither a record nor a report** | It is not derived from anything invariant holds, but deleting it costs only one request to Tailscale, which keeps its own copy. `oracle uninstall` leaves it, with the rest of `web/`. |
+| **No clock time stored** | Its expiry is read from the certificate itself whenever it is needed. |
 
 ### The paired devices
 

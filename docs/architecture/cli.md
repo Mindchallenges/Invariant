@@ -151,7 +151,11 @@ invariant doctor
     error stands. Its detail is where the page serves (or that it waits for
     Tailscale, which passes), the paired device count and the last action
     from the audit log. Both read files and ask launchd nothing (ADR-008
-    D17).
+    D17). When that report names a certificate, a third row, `oracle web
+    certificate`, fails while the page is served over plain HTTP (its detail
+    says why: HTTPS Certificates off in the Tailscale admin console, or
+    Tailscale not answering) or once fewer than 14 days remain before the
+    certificate expires (ADR-008 D21, D23).
 
     The "hook shims actually run" row executes every installed shim, so it
     proves the shim resolves the CLI, the engine imports, the rules evaluate
@@ -928,8 +932,11 @@ invariant oracle status [--json]
     STALE when it is older than three of its own intervals, or missing: no
     watcher is writing it. Then the web page's half: its agent, installed
     and loaded, its port and interpreter; where the page serves, or that it
-    waits for Tailscale, and whether the process reporting it is alive; the
-    paired device count; and the last action from the audit log. With no
+    waits for Tailscale, and whether the process reporting it is alive; its
+    certificate (the name, when it expires and in how many days, "renewing"
+    inside the last 30, a failed renewal; or NONE and why, over plain
+    HTTP); the paired device count; and the last action from the audit
+    log. With no
     web agent and no report, one line says how to install it. Exit 0
     whatever it finds: it is a query. JSON:
     {"agent": {"plist_path", "installed", "loaded", "interpreter",
@@ -937,7 +944,7 @@ invariant oracle status [--json]
     {"path", "exists", "age", "interval", "stale", "watcher_pid"}, "web":
     {"agent": <as agent>, "page": {"path", "exists", "state", "pid",
     "running", "addresses", "port", "urls", "since", "error", "unreadable",
-    "devices", "devices_error", "last_action"}}}.
+    "scheme", "certificate", "devices", "devices_error", "last_action"}}}.
 
 invariant oracle web [--port 7341] [--allow-loopback | --wait]
     Serve the dashboard to paired devices, with the TUI's confirm-first
@@ -970,6 +977,17 @@ invariant oracle web [--port 7341] [--allow-loopback | --wait]
     A --port outside 1-65535 exits 2; an address it cannot bind exits 1.
     macOS may ask once for Local Network permission for the Python that
     serves it.
+    Over HTTPS (IDEA_026, ADR-008 D19-D24): it asks Tailscale's CLI for the
+    Let's Encrypt certificate of the Mac's MagicDNS name (`status --json`,
+    then `cert --cert-file - --key-file - <name>`, through stdout), keeps it
+    in <oracle home>/web/tls/oracle.pem, owner-only, and serves HTTPS on the
+    same port at that name: https://<host>.<tailnet>.ts.net:<port>/. Then
+    only that name is a Host (others get 421 naming the https URL), the
+    Origin must be https, the cookie is Secure, and a plain-HTTP request gets
+    only a 307 to the https name. With no certificate to be had it serves
+    plain HTTP as before and says so: "PLAIN HTTP: ..." here, and a red line
+    on the page and the pairing form. --allow-loopback is always plain HTTP
+    and asks Tailscale nothing.
     --wait is the mode the web agent runs (ADR-008 D16): with no Tailscale
     address it waits, looking every 10 s, instead of exiting; it binds when
     one appears, looks again every 30 s while serving, listens again when
@@ -977,14 +995,22 @@ invariant oracle web [--port 7341] [--allow-loopback | --wait]
     every 10 s. It never binds anything outside Tailscale's ranges, and
     --wait with --allow-loopback exits 2. Each change is one line on stdout
     and in <oracle home>/oracle/web.json, which it removes when it stops.
+    Under --wait the certificate is kept by the loop: it asks Tailscale again
+    once fewer than 30 days remain (hourly until a newer one comes), or
+    every 10 minutes while it has none, and swaps a renewal into the running
+    listener with no restart. A first certificate, a lost one or a new name
+    makes it listen again, over HTTPS or plain HTTP.
 
 invariant oracle web pair [--name device] [--ttl 300] [--port PORT] [--allow-loopback] [--json]
-    Issue a one-time pairing code, valid --ttl seconds, and print it with a
-    link per Tailscale address (http://<address>:<port>/pair?code=<code>).
+    Issue a one-time pairing code, valid --ttl seconds, and print it with its
+    link: https://<host>.<tailnet>.ts.net:<port>/pair?code=<code> when a
+    valid certificate is kept (read from the file; Tailscale is not asked),
+    else one per Tailscale address (http://<address>:<port>/pair?code=<code>).
     The port is --port, else the one the page reports serving on, else the
     one its agent was installed with, else 7341.
     Opening the link shows a form; its button pairs the device, which keeps
-    an HttpOnly, SameSite=Strict cookie. Only the code's hash is stored.
+    an HttpOnly, SameSite=Strict cookie, Secure over HTTPS. Only the code's
+    hash is stored.
     Without a Tailscale address it still issues the code and says so.
     JSON: {"code", "name", "expires", "links"}.
 
@@ -1012,7 +1038,8 @@ but `web/devices.json` under the oracle home, when a device pairs, and
 `web/actions.log`, one line when an action from the page starts and one when
 it ends; what a confirmed action changes is what that command changes.
 `pair` and `revoke` write `web/devices.json` too. Both files are created
-owner-only. `oracle web --wait` also writes its report, `oracle/web.json`,
+owner-only, and so is `web/tls/oracle.pem`, the HTTPS certificate and its
+key, which `oracle web` writes when Tailscale hands it one. `oracle web --wait` also writes its report, `oracle/web.json`,
 derived and removed when it stops. `oracle install` and `uninstall` are the
 only commands that write outside a repository and the oracle home: the two
 plists under ~/Library/LaunchAgents. The signal and recommendation tables it prints from

@@ -4,7 +4,10 @@ The Session Oracle can show its dashboard on your phone: which session needs
 you, what each one recommends, and a button for each step it can run, which
 asks you to confirm first. The page is served by your Mac and reached over
 your own Tailscale network, so session data never leaves your devices and
-nothing on the public internet can reach it.
+nothing on the public internet can reach it. It is served over HTTPS at your
+Mac's Tailscale name, `https://<mac name>.<tailnet>.ts.net:7341/`, with a
+Let's Encrypt certificate Tailscale issues, so the phone's browser shows it as
+secure.
 
 This page sets it up end to end. The decisions behind it are in ADR-008, and
 the design is in [the oracle's architecture page](../architecture/oracle.md).
@@ -12,7 +15,8 @@ the design is in [the oracle's architecture page](../architecture/oracle.md).
 ## What you need
 
 - A Mac with invariant installed (see [Installation](installation.md)).
-- Tailscale on the Mac and on the phone, both signed in to the same tailnet.
+- Tailscale on the Mac and on the phone, both signed in to the same tailnet,
+  with MagicDNS on (it is by default) and HTTPS Certificates turned on (step 2).
 - Optionally, the watcher agent (`invariant oracle install`). Without it the
   page still works: it scans on each refresh and says "watcher not running".
   With it, the page reads the watcher's snapshot and you also get macOS
@@ -31,7 +35,23 @@ tailscale ip -4      # or, with only the app: /Applications/Tailscale.app/Conten
 It prints an address in the `100.x.y.z` range. If it prints nothing,
 Tailscale is not connected yet.
 
-## 2. Install the page
+## 2. Turn on HTTPS certificates
+
+Open the Tailscale admin console in a browser, go to the DNS page, and under
+HTTPS Certificates choose Enable. This is once per tailnet. It lets each
+machine get a Let's Encrypt certificate for its MagicDNS name; invariant asks
+Tailscale for the Mac's when the page starts, and renews it by itself before
+it expires (every 90 days). Nothing else is configured.
+
+One thing to know before you enable it: every Let's Encrypt certificate is
+recorded in public Certificate Transparency logs, so your Mac's Tailscale
+name, `<mac name>.<tailnet>.ts.net`, becomes publicly visible. The name
+reaches nothing off your tailnet, and no session data, address or path is
+published. If you would rather not publish the name, rename the Mac in
+Tailscale first, or leave HTTPS off: the page then works over plain HTTP, with
+a red warning on it.
+
+## 3. Install the page
 
 ```bash
 invariant oracle install            # the watcher, if you do not have it yet
@@ -47,24 +67,32 @@ serves on port 7341. Pass `--port N` to choose another, and run `install
 The page binds only your Mac's Tailscale address, never every interface. If
 Tailscale is not up when you log in, the agent waits and binds as soon as
 Tailscale connects. If the address changes, or Tailscale goes away and comes
-back, the agent follows it. You do not need to restart anything.
+back, the agent follows it. When the certificate is due, the agent renews it
+and the next connection gets the new one. You do not need to restart
+anything.
 
 `invariant oracle status` should end with lines like these:
 
 ```text
   web agent    installed, loaded, port 7341 (~/Library/LaunchAgents/dev.invariant.oracle.web.plist)
   web python   ok  ~/.local/share/uv/tools/invariant/bin/python
-  web page     serving http://<tailnet address>:7341/ (pid 4242, since <time>)
+  web page     serving https://<mac name>.<tailnet>.ts.net:7341/ (pid 4242, since <time>)
+  certificate  <mac name>.<tailnet>.ts.net expires <date> (in 89 days)
   devices      0 paired devices
   last action  none yet
 ```
 
 `web page` says `waiting for a Tailscale address` until Tailscale connects.
+`certificate` says when the certificate expires. Within its last 30 days it
+adds `renewing`: the agent is asking Tailscale for the next one, and you do
+nothing. If it says `NONE: serving plain http`, the page has no certificate
+and the rest of the line says why; see Troubleshooting.
 
 To serve the page by hand instead, in a terminal, run `invariant oracle web`.
-It stops with Ctrl-C, and it refuses to start when Tailscale is not up.
+It stops with Ctrl-C, and it refuses to start when Tailscale is not up. It
+asks Tailscale for the certificate once when it starts.
 
-## 3. Pair your phone
+## 4. Pair your phone
 
 Every device must be paired once. Nothing else gets past the "not paired"
 page.
@@ -73,14 +101,17 @@ page.
 invariant oracle web pair --name phone
 ```
 
-It prints a code and a link per tailnet address:
+It prints a code and the link to open:
 
 ```text
 pairing code for phone: ABCDE-FGHJK
   it works once, for 5 minutes
   open on the device, while the page is served ('invariant oracle install --web', or 'invariant oracle web'):
-    http://<tailnet address>:7341/pair?code=ABCDEFGHJK
+    https://<mac name>.<tailnet>.ts.net:7341/pair?code=ABCDEFGHJK
 ```
+
+Before the Mac has a certificate, the link is plain HTTP, one per tailnet
+address: `http://<tailnet address>:7341/pair?code=…`.
 
 Open the link on the phone, with Tailscale connected there, and press "Pair
 this device". The phone keeps a cookie from then on, and the page opens. The
@@ -88,12 +119,19 @@ code works once and expires after five minutes (`--ttl` changes that).
 Opening the link alone pairs nothing, so a chat app's link preview cannot use
 it up.
 
-You can type the address by hand instead: open `http://<tailnet
-address>:7341/pair` and enter the code. If MagicDNS is on, the Mac's name
-works too: `http://<mac name>.<tailnet>.ts.net:7341/pair`. Add the page to
-the phone's home screen to open it like an app.
+You can type the address by hand instead: open
+`https://<mac name>.<tailnet>.ts.net:7341/pair` and enter the code. Use the
+name, not the `100.x.y.z` address: the certificate names the Mac's name, so
+the address gets a certificate warning and then only a "not this server"
+page. Add the page to the phone's home screen to open it like an app.
 
-## 4. List and revoke devices
+**A phone paired before HTTPS.** A cookie belongs to the name or address it
+was set on. A phone paired at the `100.x.y.z` address has no cookie for the
+Mac's name, so it shows "not paired" there once: run `pair` again and open
+the new link. A page you left open over plain HTTP moves itself to the https
+name on its next refresh.
+
+## 5. List and revoke devices
 
 ```bash
 invariant oracle web devices          # each device's id, name and when it paired
@@ -129,6 +167,11 @@ the agent, a reboot or a Tailscale reconnect), the page recovers by itself.
 Switching back to the tab, or unlocking the phone with it open, makes it read
 again at once.
 
+A red line under the title saying the page is served over plain HTTP means
+the Mac has no HTTPS certificate yet; it says why. The page still works.
+Once the Mac gets a certificate, a page left open over plain HTTP moves
+itself to the https name on its next refresh.
+
 A row with something to run has a button. Pressing it shows exactly what
 would run, where, and with which variables. Nothing runs until you press Run
 it. A step that resumes a session opens a Terminal window on the Mac, whether
@@ -140,18 +183,23 @@ Every action is logged on the Mac in `~/.invariant/web/actions.log`, and
 ## Troubleshooting
 
 Start with `invariant oracle status` and `invariant doctor`. When the page's
-agent is installed, `doctor` has two rows for it: `oracle web interpreter`
-and `oracle web page`. The agent's log is `~/.invariant/oracle/web.log`.
+agent is installed, `doctor` has rows for it: `oracle web interpreter`,
+`oracle web page`, and `oracle web certificate` once the agent has reported
+on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 
 | What you see | Why, and what to do |
 |---|---|
 | `web page  waiting for a Tailscale address` | Tailscale is not connected on the Mac. Connect it, and the page binds within about 10 seconds. |
 | `web page  waiting: cannot listen on … port 7341: …` | Another program holds the port, or a hand-run `invariant oracle web` does. Stop it, or reinstall on another port: `invariant oracle install --web --port 7342`. The agent retries every 10 seconds. |
 | `web page  NOT running` | The process that served the page is gone. If `web agent` says `NOT loaded`, run `invariant oracle install --web` again. Otherwise read the log. |
+| `certificate  NONE: serving plain http; … HTTPS Certificates look off …` | HTTPS Certificates are not enabled for your tailnet. Enable them on the DNS page of the Tailscale admin console (step 2). The agent asks again every 10 minutes, so the page moves to https by itself; `invariant oracle install --web` restarts it at once. |
+| `certificate  NONE: serving plain http; …` with another reason | Tailscale did not answer, or refused. The reason is Tailscale's own. Check that Tailscale is connected, then wait 10 minutes or reinstall the agent as above. Meanwhile the page works over plain HTTP, with a red warning at its top. |
+| `certificate  … last renewal failed: …` | The certificate is still valid and still served; the agent keeps asking every hour. `doctor` fails once fewer than 14 days remain. Fix what the reason says. |
+| The phone warns that the certificate does not match | You opened the `100.x.y.z` address. Open the `*.ts.net` name instead, or the link `pair` prints. |
 | `web python  MISSING` | The interpreter in the plist was moved or reinstalled, for example by `uv tool upgrade`. Run `invariant oracle install --web` to point the agent at the current one. |
 | The phone times out, but the Mac says serving | Allow Local Network for Python (see above). Check that Tailscale is connected on the phone, and that the address on the phone matches the one `status` prints. |
 | The phone shows "not paired" | The device was revoked, its cookie was cleared, or it is a different browser. Pair it again. |
-| "not this server" (421) | The address in the browser is not the Mac's tailnet address or its `*.ts.net` name. Use the link `pair` prints. |
+| "not this server" (421) | Over HTTPS, the browser named something other than the Mac's `*.ts.net` name, such as its address; the page names the right URL. Over plain HTTP, it was not the Mac's tailnet address or its name. Use the link `pair` prints. |
 | A step shows "The server restarted and no longer knows this action's result" | The agent restarted while the step ran. What ran, and how it ended, if it got that far, is in `~/.invariant/web/actions.log`. |
 | The pairing link names the wrong port | `pair` uses the port the page reports, else the installed one. Pass `--port` to override it. |
 
@@ -164,4 +212,5 @@ invariant oracle uninstall            # both agents
 
 Both remove the plist and the page's status file. Paired devices and the
 action log are records, so they are kept: re-installing brings the same
-devices back. To forget them as well, delete `~/.invariant/web/`.
+devices back. The certificate is kept too, in `~/.invariant/web/tls/`. To
+forget all of them as well, delete `~/.invariant/web/`.

@@ -7,8 +7,9 @@ the first state of its kind here, and the reasons it is shaped as it is are
 recorded in ADR-007.
 
 Some of what lives there is private to its owner: the paired devices' token
-hashes and the log of what the web page ran (ADR-008). Those are created
-owner-only, through :func:`private_dir` and :func:`append_private`, rather
+hashes, the log of what the web page ran and its certificate's private key
+(ADR-008). Those are created owner-only, through :func:`private_dir`,
+:func:`append_private` and :func:`write_private`, rather
 than created with the process default and narrowed afterwards, which would
 leave them readable for the moment in between.
 """
@@ -61,6 +62,30 @@ def private_dir(path: Path) -> Path:
     except OSError as exc:
         raise StateError(f"cannot make {path} private to its owner: {exc}") from exc
     return path
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """Replace ``path`` with ``data`` atomically, in a file created owner-only.
+
+    The bytes go into a temporary file beside it, created ``0600`` and
+    exclusively (a stale one left by a crash is removed first, never reused),
+    which is then renamed over ``path``. A reader sees the old file or the new
+    one, and nobody else can read either.
+    """
+    private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    try:
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, flags, PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise StateError(f"cannot write {path}: {exc}") from exc
 
 
 def append_private(path: Path, text: str) -> None:

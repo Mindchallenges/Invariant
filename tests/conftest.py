@@ -286,6 +286,26 @@ def oracle_web(monkeypatch):
     return recorder
 
 
+@pytest.fixture(autouse=True)
+def oracle_certificates(monkeypatch):
+    """No test asks Tailscale for a certificate (IDEA_026).
+
+    ``oracle web`` gets its HTTPS certificate through one seam,
+    ``_oracle_web_certificates``, beside the address discovery and the
+    server. It is replaced here suite-wide by a ``RecordingIssuer`` that
+    refuses until a test hands it one of the self-signed fixtures under
+    ``tests/fixtures/tls``, so by default the page falls back to plain http.
+    The program guard below refuses ``tailscale`` as the backstop.
+    """
+    from invariant.oracle.tls import RecordingIssuer
+
+    issuer = RecordingIssuer()
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_web_certificates", lambda: issuer, raising=False
+    )
+    return issuer
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

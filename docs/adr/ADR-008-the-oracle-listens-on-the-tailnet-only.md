@@ -3,7 +3,9 @@
 - **Status:** Accepted. D1–D7 are implemented by IDEA_023 increment 1 (the
   read-only page). D8, the remote confirm, and D9–D14, its details and the
   listener's hardening, are implemented by increment 2. D15–D18, the page
-  served always by a LaunchAgent, are implemented by increment 3.
+  served always by a LaunchAgent, are implemented by increment 3. D19–D24,
+  the page over HTTPS with Tailscale's certificate, are implemented by
+  IDEA_026; D22 replaces D3's "Not `Secure`" note.
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. It amends ADR-007 in two places: the oracle gains a
   network listener, and D18's confirm-first actions will gain a second surface
@@ -99,11 +101,12 @@ redeem. The command prints it with a link per tailnet address,
   paired}`, and `oracle web revoke <id>` removes one hash. That device's next
   request gets nothing, and the others are untouched.
 
-**Not `Secure`.** The page is plain HTTP over WireGuard, and a browser will not
-send a `Secure` cookie over HTTP to any host but `localhost`. The tailnet
-already encrypts and authenticates the transport. `Secure` comes with HTTPS
-if the page is ever served through `tailscale serve` and its certificate,
-which would be a later decision.
+**`Secure` once served over HTTPS (amended by D22).** As first shipped, the
+page was plain HTTP over WireGuard and the cookie was not `Secure`, because a
+browser will not send a `Secure` cookie over HTTP to any host but `localhost`.
+IDEA_026 serves the page over HTTPS, and the cookie it sets there is
+`Secure`. Over the plain-HTTP fallback (D21) it is not, for the same reason
+as before.
 
 **A store that cannot be read verifies nobody.** `verify` fails closed. Every
 other operation refuses a corrupt store, a newer version or a malformed shape
@@ -424,6 +427,158 @@ The device's cookie survives every restart, because `devices.json` is a
 record (D3). An open confirm's nonce does not, which only means opening the
 confirm again.
 
+### D19 — The certificate is Tailscale's, fetched through stdout and kept owner-only
+
+The page is served with the Let's Encrypt certificate Tailscale issues for the
+Mac's MagicDNS name, `<host>.<tailnet>.ts.net`. The person turns on "HTTPS
+Certificates" on the DNS page of the Tailscale admin console once; nothing
+else is configured. `oracle/tls.issue` asks the Tailscale CLI two things:
+`status --json`, for the name (its `CertDomains`, else `Self.DNSName`, the
+trailing dot stripped; never a name written into invariant), then `cert
+--cert-file - --key-file - <name>`, which prints the chain and then the key to
+stdout.
+
+- **Stdout, not a path.** The Mac App Store and standalone apps' CLI is
+  sandboxed: given a path outside its container, `cert` fails with "operation
+  not permitted" on its temporary file. Given `-`, it prints. invariant then
+  writes the file itself.
+- **One lookup for the CLI.** `web.tailscale_binaries`, the address
+  discovery's own, which tries `tailscale` on `PATH` and then the app bundle's
+  absolute path. The LaunchAgent's minimal `PATH` therefore cannot hide it.
+- **One file, owner-only from creation.** `<oracle home>/web/tls/oracle.pem`
+  holds the chain followed by the key, `0600` in `0700` directories, written
+  through a temporary file created `0600` and renamed over it
+  (`home.write_private`, D14's rule). One file, because `ssl` loads the key
+  from the certificate's own file, so no crash can leave a certificate beside
+  another one's key. A new pair is loaded once from a candidate file before it
+  replaces the kept one, so a key that does not match, a certificate for
+  another name or an expired one never displaces a good pair.
+- **It lives in `web/`**, beside the paired devices, because the key is a
+  secret and `web/` is the home's private directory. It is not a record:
+  deleting it costs one request to Tailscale.
+- **A seam.** The CLI reaches `issue` through `_oracle_web_certificates`,
+  beside `_oracle_web_addresses` and `_oracle_web_server` (D7). The suite
+  replaces it with a recorder that hands back a self-signed fixture or
+  refuses, and the program guard still refuses `tailscale`.
+
+Reading a certificate's name and expiry uses a small DER reader over the
+standard library, so the core install stays PyYAML-only.
+
+### D20 — Once there is a certificate, HTTPS only
+
+With a certificate, every listener speaks TLS on the same port, 7341, and
+plain HTTP is not served. A connection is read in its own thread: if its
+first byte is not a TLS handshake, it gets `307` with `Location:
+https://<name>:<port>/`, `Cache-Control: no-store`, no body, and is closed. No
+page, no JSON and no cookie is read or sent over it. The location is built
+from the certificate's name and the listening port, never from the request's
+`Host`, so it cannot be steered elsewhere. A `307`, not a `308`: a browser
+caches a permanent redirect, and the fallback in D21 may need plain HTTP on
+that port again.
+
+`oracle web` in the foreground follows the same rule: it asks for the
+certificate once at start and serves HTTPS with it. `--allow-loopback`
+serves plain HTTP on loopback as before, because the certificate does not
+name loopback.
+
+### D21 — No certificate: plain HTTP, said loudly, never a locked-out phone
+
+When no usable certificate can be had (HTTPS Certificates off for the
+tailnet, Tailscale not answering, the kept one expired and renewal failing),
+the page is served over plain HTTP, exactly as before IDEA_026, and says so:
+
+- the page and the pairing form carry a red line at the top naming why;
+- `oracle web` prints `PLAIN HTTP: …` with the reason, and the agent's log
+  says it once;
+- `oracle/web.json` records `scheme: http` and the error, `oracle status`
+  prints `certificate  NONE: serving plain http; <why>`, and `doctor`'s
+  `oracle web certificate` row fails.
+
+Refusing to serve was the alternative. It would make a console setting, or
+a Tailscale hiccup at login, lock the phone out of the page entirely, and
+plain HTTP over WireGuard is the transport ADR-008 shipped with and judged
+sufficient (D3 as first written). A warning keeps the page usable and the
+gap visible. The loop asks Tailscale again every 10 minutes while it has no
+certificate, so turning HTTPS Certificates on reaches the page within that,
+without a restart.
+
+A kept certificate that is still valid is always served, even while renewing
+it fails: the fallback is for no certificate, not for a late one.
+
+### D22 — The name is the page: `Host`, `Origin`, the pairing link and the cookie
+
+The certificate names the MagicDNS name, not the `100.x` or `fd7a:` address,
+so over HTTPS the page is that name and nothing else:
+
+- **`Host`.** Only the certificate's name, any port, case and a trailing dot
+  ignored. A bare address cannot reach this check without the person
+  clicking through the browser's name-mismatch warning first, so it is not
+  rewarded with a redirect: it gets a 421 whose text names the https URL.
+  Another `*.ts.net` name, which D2 admitted over HTTP, is refused too: the
+  certificate does not cover it. Over plain HTTP, D2's rule stands.
+- **`Origin`.** The pairing form's and the actions' checks (D10, D11) compare
+  the scheme the page is served over, `https`, as well as the host and port.
+  An `http://` origin is refused by an HTTPS page.
+- **The pairing link.** `oracle web pair` prints one link,
+  `https://<name>:<port>/pair?code=…`, whenever a valid certificate is kept.
+  It reads the kept file and asks Tailscale nothing. Without one it prints a
+  plain-HTTP link per address, as before.
+- **The cookie** gains `Secure` when it is set over HTTPS.
+
+A device paired over plain HTTP at an address keeps a cookie for that
+address, which the name does not receive. It pairs once more at the name.
+One paired at the name over HTTP keeps its cookie: a cookie is the host's,
+whatever the scheme.
+
+### D23 — Renewal runs inside the loop and reaches the next connection
+
+`WebService`'s loop (D16) also keeps the certificate. On each look at a
+tailnet that is up, `Certificates.ensure` reads the kept file and asks
+Tailscale for a new one only once fewer than 30 days remain (a 90-day
+Let's Encrypt certificate; Tailscale renews its own copy at about that
+point), and then at most once an hour until a newer one comes back.
+
+A renewal for the same name is swapped into the running listener with no
+restart. What a listener serves is a `Served`: the certificate and a fresh
+`SSLContext` built from it, replaced together. Each connection reads that
+pair once, when it arrives, and wraps itself with that context, so the next
+connection gets the new certificate and a handshake under way keeps the one
+it began with.
+
+- **Not `load_cert_chain` on the live context.** That mutates a context
+  other threads are handshaking with, and a key that fails to match would
+  leave it half-replaced. A fresh context is built and loaded first, and only
+  a context that loaded is swapped in.
+- **Not a rebuilt listener.** Closing and binding again drops the
+  connections in flight and races the port. A listener is rebuilt only when
+  what it is changes: the first certificate (plain HTTP to HTTPS), its loss
+  (HTTPS to plain HTTP), or a certificate for a new name (a renamed Mac).
+
+The report, `oracle/web.json`, gains `scheme` and `certificate: {name,
+not_after, expires, error}`, rewritten whenever the certificate served
+changes. `oracle status` prints its name and expiry, `renewing` inside the
+30 days, and the last renewal's failure. `doctor`'s `oracle web certificate`
+row fails over plain HTTP or once fewer than 14 days remain, by which point
+renewal has failed for two weeks.
+
+**The open page follows the move.** A page left open over plain HTTP when the
+listener switches to HTTPS gets the D20 redirect on its next state read. The
+read does not follow redirects (`redirect: "manual"`), sees an opaque
+redirect, and reloads the page, which the browser then follows to the https
+name. D6's loop is otherwise unchanged: a failed read backs off and shows
+`updated N s ago`, STALE once three intervals old.
+
+### D24 — The machine's name is published in Certificate Transparency logs
+
+Every certificate Let's Encrypt issues is logged publicly, so the Mac's
+MagicDNS name, `<host>.<tailnet>.ts.net`, becomes public. The user accepted
+this on 2026-10-22. The name reaches nothing off the tailnet: it resolves
+only through MagicDNS, and the listener binds only tailnet addresses (D1).
+No session data, port or path is published, only the name. Someone who
+wants to keep a machine's name out of the logs can rename the Mac in
+Tailscale before turning HTTPS on, or leave HTTPS Certificates off and keep
+the D21 fallback.
+
 ## Alternatives rejected
 
 - **Wildcard plus firewall plus token.** See D1. The token would be the only
@@ -431,8 +586,17 @@ confirm again.
 - **`tailscale serve` in front of a loopback server.** It brings HTTPS and
   tailnet identity headers, but it reconfigures the user's Tailscale node,
   depends on that feature being enabled for the tailnet, and leaves a proxy
-  rule behind when invariant is gone. It remains open as an option for later,
-  and would allow `Secure`.
+  rule behind when invariant is gone. It would also proxy from loopback, which
+  weakens D1's tailnet-only bind and D2's `Host` check. IDEA_026 closed it:
+  the oracle's own listener serves TLS (D19–D23).
+- **Refusing to serve without a certificate.** See D21: a console setting
+  would lock the phone out of the page.
+- **Writing the certificate through `tailscale cert`'s own file paths.** The
+  sandboxed app's CLI cannot write outside its container (D19).
+- **`load_cert_chain` on the live context, or a listener rebuilt per
+  renewal.** See D23.
+- **Redirecting a bare tailnet address to the name.** See D22: the request
+  arrives only after a certificate warning was clicked through.
 - **A web framework (Flask, FastAPI, aiohttp).** Not needed: one page, one
   JSON route and one form. `http.server.ThreadingHTTPServer` does it, and the
   core install stays PyYAML-only. The page needs no extra either, unlike the

@@ -16,6 +16,14 @@ by launchd in a loop. :class:`WebService` waits instead (D16):
 * **A failure waits too.** A port in use, or a bind refused, is logged once
   and tried again, so nothing here exits for a condition time can mend.
 
+* **It keeps the certificate** (IDEA_026, D19-D24). With a
+  :class:`~invariant.oracle.tls.Certificates`, each look at the tailnet also
+  asks whether the certificate is due, and asks Tailscale for one when it is.
+  A renewal is swapped into the running listener, which serves it from the
+  next connection, with no restart. A first certificate, a lost one, or one
+  for a new name means listening again, over HTTPS or, without one, over
+  plain HTTP with a warning.
+
 It says what it is doing in ``<oracle home>/oracle/web.json`` (D17), the
 watcher's derived directory: a report, not a record, removed when the loop
 stops and safe to delete. :func:`web_status` reads it, with the paired-device
@@ -24,6 +32,7 @@ count and the audit log's last line, for ``oracle status`` and ``doctor``.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
@@ -35,6 +44,14 @@ from ..core.errors import InvariantError, StateError
 from .devices import DeviceStore
 from .index import HomeStore
 from .scan import pid_exists
+from .tls import (
+    RENEW_BEFORE,
+    WARN_BEFORE,
+    CertError,
+    Certificates,
+    Served,
+    expires_text,
+)
 from .web import WebError, tailnet_addresses
 from .webactions import AuditLog
 
@@ -50,6 +67,8 @@ RECHECK_SECONDS = 30.0
 
 WAITING = "waiting"
 SERVING = "serving"
+
+DAY = 86400.0
 
 
 class Listener(Protocol):
@@ -71,14 +90,16 @@ def _print(line: str) -> None:
 class WebService:
     """Serve the page on the tailnet's addresses, whenever there are any.
 
-    ``discover`` answers the addresses; ``serve`` makes a listener for a set
-    of them; ``wait(seconds)`` pauses and answers ``True`` to stop.
+    ``discover`` answers the addresses; ``serve(addresses, served)`` makes a
+    listener for a set of them, over HTTPS when ``served`` is a certificate;
+    ``wait(seconds)`` pauses and answers ``True`` to stop. Without
+    ``certificates`` the page is plain HTTP and nothing is asked of Tailscale.
     """
 
     def __init__(
         self,
         discover: Callable[[], list[str]],
-        serve: Callable[[list[str]], Listener],
+        serve: Callable[[list[str], Served | None], Listener],
         home: Path,
         *,
         port: int,
@@ -86,6 +107,7 @@ class WebService:
         log: Callable[[str], None] = _print,
         clock: Callable[[], float] = time.time,
         pid: int | None = None,
+        certificates: Certificates | None = None,
     ) -> None:
         self.discover = discover
         self.serve = serve
@@ -95,10 +117,17 @@ class WebService:
         self.clock = clock
         self.pid = os.getpid() if pid is None else pid
         self.store = HomeStore(Path(home))
+        self.certificates = certificates
         self.server: Listener | None = None
         self.bound: list[str] = []
         self.urls: list[str] = []
+        #: The certificate to serve, when there is one; ``listening`` is the one
+        #: the open listener was made with.
+        self.served: Served | None = None
+        self.listening: Served | None = None
         self._said: tuple[Any, ...] | None = None
+        self._reported: tuple[Any, ...] | None = None
+        self._cert_said: str | None = None
 
     def run(self) -> None:
         """Step, then wait, until ``wait`` says stop; close on the way out."""
@@ -110,30 +139,39 @@ class WebService:
             self.close()
 
     def step(self) -> float:
-        """One look at the tailnet; the seconds until the next."""
+        """One look at the tailnet and the certificate; the seconds until the next."""
         found = self._addresses()
+        if found:
+            self._certificate()
         if self.server is not None:
-            if found == self.bound:
+            if found == self.bound and self.served is self.listening:
+                # Steady: only a renewed certificate is news, and it is reported.
+                self._enter(SERVING, None, "")
                 return RECHECK_SECONDS
-            if found:
+            if not found:
+                self.log("the tailnet went away; closing the page until it is back")
+            elif found != self.bound:
                 self.log(f"the tailnet addresses changed ({', '.join(self.bound)} -> "
                          f"{', '.join(found)}); listening again")
+            elif self.served is not None:
+                self.log(f"listening again over https as {self.served.name}")
             else:
-                self.log("the tailnet went away; closing the page until it is back")
+                self.log("listening again over plain http: no certificate to serve")
             self._stop()
         if not found:
             self._enter(WAITING, None, "no Tailscale address on this Mac; waiting for one, "
                         f"looking every {WAIT_SECONDS:g} s. The page is served only on "
                         "the tailnet.")
             return WAIT_SECONDS
-        server = self.serve(found)
+        served = self.served
+        server = self.serve(found, served)
         try:
             urls = server.start()
         except WebError as exc:
             self._enter(WAITING, str(exc), f"{exc}; trying again every {WAIT_SECONDS:g} s")
             return WAIT_SECONDS
         server.serve_in_background()
-        self.server, self.bound, self.urls = server, found, urls
+        self.server, self.bound, self.urls, self.listening = server, found, urls, served
         self._enter(SERVING, None, "\n".join(f"serving the oracle on {url}" for url in urls))
         return RECHECK_SECONDS
 
@@ -156,22 +194,73 @@ class WebService:
             self.log(f"could not ask for the Tailscale addresses: {exc}")
             return []
 
+    def _certificate(self) -> None:
+        """Ask for a certificate when one is due, and decide which one to serve.
+
+        The same name renewed is swapped into :attr:`served` in place, so the
+        listener serves it from its next connection. A first one, another
+        name, or none at all replaces :attr:`served`, which the caller turns
+        into listening again.
+        """
+        if self.certificates is None:
+            return
+        certificate = self.certificates.ensure()
+        served = self.served
+        try:
+            if certificate is None:
+                self.served = None
+            elif served is not None and certificate.name == served.name:
+                if certificate.fingerprint != served.certificate.fingerprint:
+                    served.renew(certificate, self.certificates.context(certificate))
+                    self.log(f"renewed the certificate for {certificate.name}; it expires "
+                             f"{expires_text(certificate.not_after)}")
+            else:
+                self.served = Served(certificate, self.certificates.context(certificate))
+                self.log(f"the certificate for {certificate.name} expires "
+                         f"{expires_text(certificate.not_after)}")
+        except CertError:
+            # A context that will not load: keep serving what already loaded.
+            self.served = served
+        error = self.certificates.error
+        if error != self._cert_said:
+            self._cert_said = error
+            if error and self.served is None:
+                self.log(f"no certificate, so the page is served over plain http: {error}")
+            elif error:
+                self.log(f"could not renew the certificate: {error}")
+
     def _stop(self) -> None:
         if self.server is not None:
             self.server.close()
-        self.server, self.bound, self.urls = None, [], []
+        self.server, self.bound, self.urls, self.listening = None, [], [], None
+
+    def _tls_report(self) -> dict[str, Any] | None:
+        if self.certificates is None:
+            return None
+        served = self.listening
+        return {
+            "name": served.name if served is not None else None,
+            "not_after": served.not_after if served is not None else None,
+            "expires": expires_text(served.not_after) if served is not None else None,
+            "error": self.certificates.error,
+        }
 
     def _enter(self, state: str, error: str | None, message: str) -> None:
-        """Report ``state``, and log it, only when something changed."""
+        """Report ``state`` when it, or the certificate served, changed; log the first."""
         said = (state, error, tuple(self.bound))
-        if said == self._said:
+        tls = self._tls_report()
+        reported = (said, json.dumps(tls, sort_keys=True))
+        if reported == self._reported:
             return
-        self._said = said
-        self.log(message)
+        if said != self._said and message:
+            self.log(message)
+        self._said, self._reported = said, reported
         report = {
             "version": STATE_VERSION, "pid": self.pid, "state": state,
             "addresses": list(self.bound), "port": self.port, "urls": list(self.urls),
             "since": _iso(self.clock()), "error": error,
+            "scheme": "https" if self.listening is not None else "http",
+            "certificate": tls,
         }
         try:
             self.store.write(WEB_STATE_FILE, report)
@@ -189,6 +278,7 @@ def web_status(home: Path, alive: Callable[[int | None], bool] = pid_exists) -> 
         "path": str(home / WEB_STATE_FILE), "exists": (home / WEB_STATE_FILE).is_file(),
         "state": None, "pid": None, "running": False, "addresses": [], "port": None,
         "urls": [], "since": None, "error": None, "unreadable": None,
+        "scheme": None, "certificate": None,
     }
     try:
         report = HomeStore(home).read(WEB_STATE_FILE)
@@ -197,7 +287,8 @@ def web_status(home: Path, alive: Callable[[int | None], bool] = pid_exists) -> 
     if report is not None and not isinstance(report, dict):
         status["unreadable"] = f"{WEB_STATE_FILE} is not an object"
     elif isinstance(report, dict):
-        for key in ("state", "pid", "addresses", "port", "urls", "since", "error"):
+        for key in ("state", "pid", "addresses", "port", "urls", "since", "error", "scheme",
+                    "certificate"):
             if key in report:
                 status[key] = report[key]
         status["running"] = bool(alive(status["pid"]))
@@ -229,6 +320,44 @@ def page_text(status: dict[str, Any]) -> str:
     if status["error"]:
         return f"waiting: {status['error']} (pid {pid}, since {status['since']})"
     return f"waiting for a Tailscale address (pid {pid}, since {status['since']})"
+
+
+def _certificate(status: dict[str, Any]) -> dict[str, Any] | None:
+    cert = status.get("certificate")
+    return cert if isinstance(cert, dict) else None
+
+
+def cert_ok(status: dict[str, Any], now: float) -> bool:
+    """Whether the page is served over HTTPS with time to spare.
+
+    Fails over plain HTTP, and once fewer than two weeks remain: renewal starts
+    a month ahead, so by then it has been failing for two weeks.
+    """
+    cert = _certificate(status)
+    not_after = cert.get("not_after") if cert else None
+    return (status.get("scheme") == "https" and isinstance(not_after, (int, float))
+            and not_after - now > WARN_BEFORE)
+
+
+def cert_text(status: dict[str, Any], now: float) -> str:
+    """The certificate in one line: its name and expiry, or why there is none."""
+    cert = _certificate(status)
+    if cert is None:
+        return "not reported"
+    error = cert.get("error")
+    not_after = cert.get("not_after")
+    if not cert.get("name") or not isinstance(not_after, (int, float)):
+        return f"NONE: serving plain http; {error or 'no certificate'}"
+    left = not_after - now
+    if left <= 0:
+        text = f"{cert['name']} EXPIRED {cert.get('expires')}"
+    else:
+        text = f"{cert['name']} expires {cert.get('expires')} (in {int(left // DAY)} days)"
+        if left <= RENEW_BEFORE:
+            text += "; renewing"
+    if error:
+        text += f"; last renewal failed: {error}"
+    return text
 
 
 def last_action_text(entry: dict[str, Any] | None) -> str:

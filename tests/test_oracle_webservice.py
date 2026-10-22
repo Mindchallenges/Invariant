@@ -29,7 +29,7 @@ import pytest
 
 from invariant.cli import main as cli_main
 from invariant.cli.main import main
-from invariant.oracle import launchd, webservice
+from invariant.oracle import launchd, tls, webservice
 from invariant.oracle.devices import DeviceStore
 from invariant.oracle.home import oracle_home
 from invariant.oracle.launchd import (
@@ -41,6 +41,7 @@ from invariant.oracle.launchd import (
     search_path,
     web_plist_for,
 )
+from invariant.oracle.tls import Certificates, Issued, RecordingIssuer
 from invariant.oracle.web import WebError
 from invariant.oracle.webactions import AUDIT_FILE, AuditLog
 from invariant.oracle.webservice import (
@@ -145,16 +146,20 @@ class TestTheInstallerByLabel:
 
 
 class FakeServer:
-    def __init__(self, addresses: list[str], port: int, fail: str | None = None) -> None:
+    def __init__(self, addresses: list[str], port: int, fail: str | None = None,
+                 served=None) -> None:
         self.addresses = addresses
         self.port = port
         self.fail = fail
+        self.served = served
         self.background = False
         self.closed = False
 
     def start(self) -> list[str]:
         if self.fail:
             raise WebError(self.fail)
+        if self.served is not None:
+            return [f"https://{self.served.name}:{self.port}/"]
         return [f"http://{a}:{self.port}/" for a in self.addresses]
 
     def serve_in_background(self) -> None:
@@ -167,7 +172,7 @@ class FakeServer:
 class World:
     """A tailnet a test moves, and the service over it."""
 
-    def __init__(self, home: Path) -> None:
+    def __init__(self, home: Path, certificates=None) -> None:
         self.home = home
         self.found: list[str] = []
         self.servers: list[FakeServer] = []
@@ -177,6 +182,7 @@ class World:
         self.service = WebService(
             self.discover, self.serve, home, port=7341, wait=lambda s: True,
             log=self.logged.append, clock=lambda: self.now, pid=4242,
+            certificates=certificates,
         )
 
     def discover(self) -> list[str]:
@@ -184,8 +190,8 @@ class World:
             raise RuntimeError("tailscale hung")
         return list(self.found)
 
-    def serve(self, addresses: list[str]) -> FakeServer:
-        server = FakeServer(addresses, 7341, self.fail)
+    def serve(self, addresses: list[str], served=None) -> FakeServer:
+        server = FakeServer(addresses, 7341, self.fail, served)
         self.servers.append(server)
         return server
 
@@ -748,3 +754,275 @@ class TestPairPort:
         oracle_web.addresses = [TS4]
         main(["oracle", "web", "pair"])
         assert "oracle install --web" in capsys.readouterr().out
+
+
+# -- IDEA_026: the certificate, inside the loop ------------------------------------
+
+TLS_FIXTURES = Path(__file__).parent / "fixtures" / "tls"
+TS_NAME = "mac.example.ts.net"
+#: When fixture a expires (``openssl x509 -enddate``), and a moment early in its life.
+A_EXPIRES = 2_108_058_344.0
+EARLY = 1_800_000_000.0
+
+
+def fixture_issued(which: str = "a", name: str = TS_NAME) -> Issued:
+    return Issued(name, (TLS_FIXTURES / f"{which}.crt").read_text(),
+                  (TLS_FIXTURES / f"{which}.key").read_text())
+
+
+class TlsWorld(World):
+    def __init__(self, home: Path, issued: Issued | None = None) -> None:
+        self.issuer = RecordingIssuer(issued)
+        self.certificates = Certificates(home, self.issuer, clock=lambda: self.now)
+        super().__init__(home, certificates=self.certificates)
+        self.now = EARLY
+
+
+@pytest.fixture
+def tls_world(tmp_path) -> TlsWorld:
+    return TlsWorld(tmp_path / "home", fixture_issued("a"))
+
+
+def test_the_fixture_expiry_is_what_the_certificate_says():
+    assert tls.cert_info((TLS_FIXTURES / "a.crt").read_text()).not_after == A_EXPIRES
+
+
+class TestTheServiceOverTls:
+    def test_it_serves_https_from_the_start_and_reports_the_expiry(self, tls_world):
+        tls_world.found = [TS4]
+        assert tls_world.service.step() == webservice.RECHECK_SECONDS
+        (server,) = tls_world.servers
+        assert server.served is not None and server.served.name == TS_NAME
+        state = tls_world.state()
+        assert state["state"] == SERVING and state["scheme"] == "https"
+        assert state["urls"] == [f"https://{TS_NAME}:7341/"]
+        assert state["certificate"] == {
+            "name": TS_NAME, "not_after": A_EXPIRES, "expires": "2036-10-19T19:45:44Z",
+            "error": None,
+        }
+        assert any("certificate" in line and TS_NAME in line for line in tls_world.logged)
+
+    def test_no_tailnet_asks_tailscale_for_nothing(self, tls_world):
+        tls_world.service.step()
+        assert tls_world.issuer.calls == 0
+
+    def test_with_no_certificate_it_serves_http_and_says_why(self, tmp_path):
+        world = TlsWorld(tmp_path / "home", None)
+        world.found = [TS4]
+        world.service.step()
+        (server,) = world.servers
+        assert server.served is None
+        state = world.state()
+        assert state["scheme"] == "http" and state["urls"] == [f"http://{TS4}:7341/"]
+        assert state["certificate"]["name"] is None
+        assert "no certificate in the test suite" in state["certificate"]["error"]
+        assert sum("plain http" in line for line in world.logged) == 1
+        world.service.step()
+        assert sum("plain http" in line for line in world.logged) == 1
+
+    def test_when_a_certificate_arrives_it_listens_again_over_https(self, tmp_path):
+        world = TlsWorld(tmp_path / "home", None)
+        world.found = [TS4]
+        world.service.step()
+        world.issuer.issued = fixture_issued("a")
+        world.now += tls.RETRY_MISSING
+        world.service.step()
+        first, second = world.servers
+        assert first.closed and first.served is None
+        assert not second.closed and second.served.name == TS_NAME
+        assert world.state()["scheme"] == "https"
+        assert any("https" in line and "listening again" in line for line in world.logged)
+
+    def test_a_renewal_swaps_the_certificate_without_listening_again(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        (server,) = tls_world.servers
+        old_context = server.served.context
+        tls_world.issuer.issued = fixture_issued("b")
+        tls_world.now = A_EXPIRES - tls.RENEW_BEFORE + 60
+        assert tls_world.service.step() == webservice.RECHECK_SECONDS
+        assert tls_world.servers == [server] and not server.closed
+        assert server.served.context is not old_context
+        assert server.served.not_after > A_EXPIRES
+        state = tls_world.state()
+        assert state["certificate"]["not_after"] == server.served.not_after
+        assert any(line.startswith("renewed the certificate") for line in tls_world.logged)
+
+    def test_a_steady_certificate_writes_nothing_new(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        before = list(tls_world.logged)
+        tls_world.service.step()
+        assert tls_world.logged == before and tls_world.issuer.calls == 1
+
+    def test_a_failed_renewal_keeps_https_and_reports_the_error(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        tls_world.issuer.issued = None
+        tls_world.now = A_EXPIRES - 3 * 86400
+        tls_world.service.step()
+        (server,) = tls_world.servers
+        assert not server.closed
+        state = tls_world.state()
+        assert state["scheme"] == "https"
+        assert "no certificate in the test suite" in state["certificate"]["error"]
+
+    def test_an_expired_certificate_falls_back_to_http(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        tls_world.issuer.issued = None
+        tls_world.now = A_EXPIRES + 1
+        tls_world.service.step()
+        first, second = tls_world.servers
+        assert first.closed and second.served is None
+        assert tls_world.state()["scheme"] == "http"
+        assert any("plain http" in line for line in tls_world.logged)
+
+    def test_a_renamed_machine_listens_again_under_the_new_name(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        tls_world.issuer.issued = fixture_issued("c", name="renamed.example.ts.net")
+        tls_world.now = A_EXPIRES - tls.RENEW_BEFORE + 60
+        tls_world.service.step()
+        first, second = tls_world.servers
+        assert first.closed and second.served.name == "renamed.example.ts.net"
+
+    def test_a_context_that_will_not_build_is_http(self, tls_world, monkeypatch):
+        def broken(path):
+            raise tls.CertError("cannot load: broken")
+
+        monkeypatch.setattr(tls, "context_for", broken)
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        assert tls_world.servers[0].served is None
+        assert "broken" in tls_world.state()["certificate"]["error"]
+
+
+class TestCertificateStatus:
+    def test_serving_https_with_time_to_spare(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        status = web_status(tls_world.home, alive=lambda pid: True)
+        assert status["scheme"] == "https"
+        assert status["certificate"]["name"] == TS_NAME
+        assert webservice.cert_ok(status, EARLY) is True
+        text = webservice.cert_text(status, EARLY)
+        assert TS_NAME in text and "expires 2036-10-19T19:45:44Z" in text and "days" in text
+        assert "renew" not in text
+
+    def test_inside_the_renewal_window_it_says_so(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        status = web_status(tls_world.home, alive=lambda pid: True)
+        now = A_EXPIRES - 20 * 86400
+        assert webservice.cert_ok(status, now) is True
+        assert "renewing" in webservice.cert_text(status, now)
+
+    def test_close_to_expiry_with_a_failing_renewal_fails(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        tls_world.issuer.issued = None
+        tls_world.now = A_EXPIRES - 3 * 86400
+        tls_world.service.step()
+        status = web_status(tls_world.home, alive=lambda pid: True)
+        assert webservice.cert_ok(status, tls_world.now) is False
+        text = webservice.cert_text(status, tls_world.now)
+        assert "last renewal failed" in text and "no certificate in the test suite" in text
+
+    def test_plain_http_fails_and_says_why(self, tmp_path):
+        world = TlsWorld(tmp_path / "home", None)
+        world.found = [TS4]
+        world.service.step()
+        status = web_status(world.home, alive=lambda pid: True)
+        assert webservice.cert_ok(status, EARLY) is False
+        text = webservice.cert_text(status, EARLY)
+        assert text.startswith("NONE: serving plain http") and "test suite" in text
+
+    def test_a_report_without_a_certificate(self, world):
+        world.found = [TS4]
+        world.service.step()
+        status = web_status(world.home, alive=lambda pid: True)
+        assert status["certificate"] is None
+        assert webservice.cert_text(status, EARLY) == "not reported"
+        assert webservice.cert_ok(status, EARLY) is False
+
+    def test_an_expired_one_in_the_report(self, tls_world):
+        tls_world.found = [TS4]
+        tls_world.service.step()
+        status = web_status(tls_world.home, alive=lambda pid: True)
+        assert "EXPIRED" in webservice.cert_text(status, A_EXPIRES + 1)
+
+
+class TestCertificateCommands:
+    def report(self, certificate: dict | None, scheme: str = "https") -> None:
+        path = oracle_home() / WEB_STATE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "version": 1, "state": SERVING, "pid": os.getpid(), "port": 7400,
+            "addresses": [TS4], "urls": [f"https://{TS_NAME}:7400/"],
+            "since": "2026-10-22T10:00:00Z", "error": None, "scheme": scheme,
+            "certificate": certificate,
+        }))
+
+    def test_status_prints_the_certificate_line(self, web_agent, capsys, monkeypatch):
+        main(["oracle", "install", "--web", "--port", "7400"])
+        self.report({"name": TS_NAME, "not_after": A_EXPIRES,
+                     "expires": "2036-10-19T19:45:44Z", "error": None})
+        monkeypatch.setattr(cli_main.time, "time", lambda: EARLY)
+        capsys.readouterr()
+        main(["oracle", "status"])
+        out = capsys.readouterr().out
+        assert "certificate" in out and "expires 2036-10-19T19:45:44Z" in out
+        main(["oracle", "status", "--json"])
+        assert last_json(capsys)["web"]["page"]["certificate"]["name"] == TS_NAME
+
+    def test_doctor_has_a_certificate_row(self, project, monkeypatch, capsys, web_agent):
+        web_agent.install(web_plist_for(sys.executable, oracle_home(), 7341,
+                                        path="/bin", pin_home=False))
+        self.report({"name": None, "not_after": None, "expires": None,
+                     "error": "HTTPS Certificates are off"}, scheme="http")
+        monkeypatch.chdir(project)
+        assert main(["doctor", "--json"]) == 1
+        rows = TestDoctorWeb().rows(capsys)
+        row = rows["oracle web certificate"]
+        assert row["ok"] is False and "HTTPS Certificates are off" in row["detail"]
+
+    def test_doctor_passes_a_healthy_certificate(self, project, monkeypatch, capsys,
+                                                 web_agent):
+        web_agent.install(web_plist_for(sys.executable, oracle_home(), 7341,
+                                        path="/bin", pin_home=False))
+        self.report({"name": TS_NAME, "not_after": A_EXPIRES,
+                     "expires": "2036-10-19T19:45:44Z", "error": None})
+        monkeypatch.setattr(cli_main.time, "time", lambda: EARLY)
+        monkeypatch.chdir(project)
+        main(["doctor", "--json"])
+        assert TestDoctorWeb().rows(capsys)["oracle web certificate"]["ok"] is True
+
+    def test_doctor_has_no_certificate_row_without_a_report(self, project, monkeypatch,
+                                                            capsys, web_agent):
+        web_agent.install(web_plist_for(sys.executable, oracle_home(), 7341,
+                                        path="/bin", pin_home=False))
+        monkeypatch.chdir(project)
+        main(["doctor", "--json"])
+        assert "oracle web certificate" not in TestDoctorWeb().rows(capsys)
+
+    def test_wait_mode_serves_https_through_the_seam(self, oracle_web, oracle_certificates,
+                                                     capsys):
+        oracle_certificates.issued = fixture_issued("a")
+        oracle_web.addresses = [TS4]
+        seen = []
+        oracle_web.script = [
+            lambda: seen.append(json.loads((oracle_home() / WEB_STATE_FILE).read_text()))
+        ]
+        assert main(["oracle", "web", "--wait", "--port", "7400"]) == 0
+        (server,) = oracle_web.servers
+        assert server.served.name == TS_NAME and server.app.served is server.served
+        assert seen[0]["scheme"] == "https"
+        assert f"https://{TS_NAME}:7400/" in capsys.readouterr().out
+
+    def test_wait_mode_without_a_certificate_warns_on_the_page(self, oracle_web, capsys):
+        oracle_web.addresses = [TS4]
+        main(["oracle", "web", "--wait"])
+        (server,) = oracle_web.servers
+        assert server.served is None
+        assert "no certificate in the test suite" in server.app.insecure

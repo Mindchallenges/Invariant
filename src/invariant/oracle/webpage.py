@@ -25,6 +25,13 @@ the row key and the confirm's nonce and nothing else. The result is polled
 from ``/api/job`` while the refresh loop goes on, and the device's recent
 actions come back with every refresh.
 
+**It follows the page to HTTPS** (ADR-008 D23). The state fetch does not
+follow a redirect. Once the Mac serves HTTPS, a page still open over plain
+HTTP is answered with a redirect to the https name, which the fetch sees as an
+opaque redirect; the page then reloads itself, and the browser follows the
+redirect to the page at its https name. A tailnet page served over plain HTTP
+says so at the top (``warning``), and so does the pairing form.
+
 The loop's logic and the small action helpers are the ``ORACLE`` object, which
 touches no page, so the suite drives it under ``node``.
 """
@@ -51,6 +58,8 @@ h2 { font-size: 15px; margin: 18px 0 6px; }
 #fresh.stale { color: var(--red); font-weight: 600; }
 #banner { background: rgba(191,108,0,.15); padding: 6px 8px; border-radius: 6px; margin-top: 6px;
           font-size: 13px; }
+#insecure { background: rgba(209,36,47,.15); color: var(--red); font-weight: 600;
+            padding: 6px 8px; border-radius: 6px; margin-top: 6px; font-size: 13px; }
 .line { border-left: 4px solid var(--line); padding: 6px 8px; margin: 6px 0;
         border-radius: 4px; background: rgba(127,127,127,.06); overflow-wrap: anywhere; }
 .line.nested { margin-left: 16px; font-size: 13px; color: var(--dim); }
@@ -154,6 +163,10 @@ const ORACLE = (function () {{
   function actionLabel(kind) {{
     return kind === "terminal" ? "open a session\u2026" : "run\u2026";
   }}
+  // The Mac moved the page to HTTPS: the fetch saw a redirect it did not follow.
+  function moved(response) {{
+    return response.type === "opaqueredirect";
+  }}
   function jobText(job) {{
     if (job.state !== "done") return "running";
     const took = " in " + Number(job.elapsed || 0).toFixed(1) + "s";
@@ -164,7 +177,7 @@ const ORACLE = (function () {{
   }}
   return {{retryDelay: retryDelay, ageOf: ageOf, freshnessText: freshnessText,
           makeLoop: makeLoop, actionBody: actionBody, actionLabel: actionLabel,
-          jobText: jobText, jobPoll: jobPoll}};
+          jobText: jobText, jobPoll: jobPoll, moved: moved}};
 }})();
 
 if (typeof document !== "undefined") {{
@@ -388,7 +401,12 @@ if (typeof document !== "undefined") {{
     interval: DEFAULT_INTERVAL,
     now: () => Date.now(),
     fetchState: async () => {{
-      const response = await fetch("/api/state", {{cache: "no-store", credentials: "same-origin"}});
+      const response = await fetch("/api/state", {{cache: "no-store", credentials: "same-origin",
+                                                   redirect: "manual"}});
+      if (ORACLE.moved(response)) {{
+        location.reload();
+        throw new Error("the page moved to HTTPS; opening it there");
+      }}
       if (response.status === 401) throw new Error("this device is not paired any more");
       if (!response.ok) {{
         let message = "HTTP " + response.status;
@@ -438,10 +456,15 @@ def _document(nonce: str, title: str, body: str, script: str = "") -> str:
     )
 
 
-def page(nonce: str, interval: float = DEFAULT_INTERVAL) -> str:
+def _warning(warning: str | None) -> str:
+    return f'<div id="insecure">{escape(warning)}</div>' if warning else ""
+
+
+def page(nonce: str, interval: float = DEFAULT_INTERVAL, warning: str | None = None) -> str:
     """The dashboard: a header with its freshness line, then the projects."""
     body = (
         "<header><h1>invariant oracle · <span id=\"count\">loading</span></h1>"
+        f"{_warning(warning)}"
         "<div id=\"fresh\">never updated: no read has succeeded yet</div>"
         "<div id=\"banner\" hidden></div></header>"
         "<section id=\"jobs\"></section>"
@@ -470,10 +493,11 @@ def not_paired(nonce: str) -> str:
     )
 
 
-def pair_form(nonce: str, code: str) -> str:
+def pair_form(nonce: str, code: str, warning: str | None = None) -> str:
     """The form a pairing link opens. Opening it spends nothing; the button does."""
     body = (
         "<h1>Pair this device</h1>"
+        f"{_warning(warning)}"
         "<p>The code was printed by 'invariant oracle web pair' on the Mac. "
         "It works once, for a few minutes.</p>"
         '<form method="post" action="/pair">'

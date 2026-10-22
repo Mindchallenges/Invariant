@@ -37,6 +37,8 @@ graph TD
         OWEB["web (ADR-008)"]
         OPAGE[webpage]
         OWACT[webactions]
+        OWSVC[webservice]
+        OTLS["tls (IDEA_026)"]
         ODEV[devices]
     end
 
@@ -140,6 +142,17 @@ graph TD
     OWACT --> OSCAN
     OWACT --> OSIG
     OWACT --> OHOME
+    CLI --> OWSVC
+    OLAUNCHD -. its second plist runs oracle web --wait .-> OWSVC
+    OWSVC --> OWEB
+    OWSVC --> ODEV
+    OWSVC --> OWACT
+    OWSVC --> OSCAN
+    OWSVC --> OINDEX
+    CLI --> OTLS
+    OWSVC --> OTLS
+    OTLS --> OWEB
+    OTLS --> OHOME
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -332,6 +345,18 @@ and no rule. `OWACT --> OSCAN` is the stable row key the page names a row by.
 the audit log and the paired devices, created private (ADR-008 D9–D14). The
 action reaches the runner and the terminal launcher through the `Actions` the
 CLI builds, so still no `oracle → hosts` arrow appears.
+
+`OWSVC` is the loop the web page's LaunchAgent runs (`oracle web --wait`,
+ADR-008 D15–D18): it waits for the tailnet, binds it through `OWEB`, follows
+it, and reports in `oracle/web.json`; `OWSVC --> ODEV`, `OWACT` and `OINDEX`
+are what `web_status` reads for `oracle status` and `doctor`. It went
+undrawn here when increment 3 shipped, though `oracle.md` had it. `OTLS` is
+the page's HTTPS certificate (IDEA_026, ADR-008 D19–D24): `OTLS --> OWEB` is
+the address discovery's own lookup for Tailscale's CLI and its runner, and
+`OTLS --> OHOME` the owner-only file the key is kept in. `OWSVC --> OTLS`
+keeps the certificate due and swaps a renewal into the listener, and `CLI -->
+OTLS` is the foreground's certificate, `oracle web pair`'s https link, and
+the `_oracle_web_certificates` seam the suite replaces.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -686,7 +711,7 @@ over Tailscale (IDEA_023) is shipping in increments; see
 
 | Module | Owns | Never does |
 |---|---|---|
-| `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant`; `private_dir` and `append_private`, which create a directory or file owner-only from the start | Create the home itself; read anything in it |
+| `home` | Where the user-level state lives: `$INVARIANT_HOME`, else `~/.invariant`; `private_dir`, `append_private` and `write_private`, which create a directory or file owner-only from the start | Create the home itself; read anything in it |
 | `index` | `projects.json` — every registered project once, keyed by its state root; register, remove, prune | Read or write anything under a project's state root; store a clock time |
 | `attention` | `<state_root>/attention/<host-id>.json` — what one host session is waiting on, how its turn ended, its pid; the write and clear rules per event | Decide what a hook event means (the host adapter does); lock; raise into a hook (the CLI guards every call) |
 | `scan` | One read-only snapshot per registered project: live sessions with their hosts nested, orphan hosts, leaked worktrees, and one error row per project or record that cannot be read; host liveness (pid exists, and is still the host); the cache that keeps a repeat scan cheap | Write anything; name a state; import `hosts/` (host facts arrive through the injected `HostProbe`) |
@@ -699,10 +724,12 @@ over Tailscale (IDEA_023) is shipping in increments; see
 | `dashboard` | What `oracle tui` shows: the snapshot while it is fresh, else an in-process scan behind a banner; each row as a line with its tone; the `ALERT` / `note` / `ok` flag `oracle list` prints too | Import Textual; run anything |
 | `actions` | A recommendation as a confirmable `Step`, the exact lines the confirm modal shows, the refusals (a waiting row, a non-`invariant` argv, a missing cwd), and the dispatch of a confirmed step to an injected runner or terminal launcher; `run_subprocess`, the real runner | Import `hosts/`; run a step nobody confirmed; answer a prompt |
 | `tui` | The Textual app: the table, its refresh, and the confirm, info and output modals. Imported only by `oracle tui` | Decide what `dashboard` and `actions` decide |
-| `web` | `oracle web`: the Tailscale-only bind and its discovery, the `Host` check, the page's view and freshness, `WebApp` (requests to responses, the `Origin` rules) and `WebServer` (the stdlib server, one per address, with a socket timeout and caps on headers and connections) | Bind the wildcard; answer an unpaired device with anything but "not paired"; decide what may run |
+| `web` | `oracle web`: the Tailscale-only bind and its discovery, the `Host` check, the page's view and freshness, `WebApp` (requests to responses, the `Origin` rules) and `WebServer` (the stdlib server, one per address, with a socket timeout and caps on headers and connections; over HTTPS, TLS per connection with the certificate `tls` keeps, and only a redirect for plain HTTP) | Bind the wildcard; answer an unpaired device with anything but "not paired"; decide what may run |
 | `webactions` | The page's confirm-first actions over `actions`: the confirm view, the single-use nonce bound to device and row, the action re-derived from a fresh scan, one at a time per row, its polled result, and the audit log `web/actions.log` | Run an `argv`, `cwd` or environment a client sent; add a refusal of its own; answer a prompt |
 | `webpage` | The page's HTML, inline CSS and script, with its self-refreshing loop, and the small "not paired" and pairing pages | Load anything from another origin; turn a row's text into markup |
 | `devices` | `web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Store a token or code in the clear; let a device in when the file cannot be read |
+| `webservice` | The loop behind `oracle web --wait`: wait for the tailnet, bind and follow it, keep the certificate due and swap a renewal in; its report `oracle/web.json`, and the status and doctor wording | Bind outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
+| `tls` | The page's certificate from Tailscale's CLI, through stdout; the kept `web/tls/oracle.pem`, owner-only; when it is due; the certificate and context a listener serves, swapped together | Run `tailscale` except through its injected runner; replace a good pair with one that does not load |
 
 ### `adapters/`
 
@@ -1024,6 +1051,9 @@ per repository:
                             codes for `oracle web`; a source of truth, 0600
   web/actions.log           one line per start and end of an action from the
                             page; a record, never rewritten, 0600
+  web/tls/oracle.pem        the page's HTTPS certificate chain and its key,
+                            from Tailscale; 0600 in a 0700 directory, safe to
+                            delete (asked for again)
   locks/devices.lock        advisory lock for its read-modify-write
 
 ~/Library/LaunchAgents/dev.invariant.oracle.plist

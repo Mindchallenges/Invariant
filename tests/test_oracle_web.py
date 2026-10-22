@@ -1050,7 +1050,7 @@ class TestTheCommands:
         assert code == 0
         (server,) = oracle_web.servers
         assert server.addresses == [TS4, TS6] and server.port == 7400
-        assert server.served
+        assert server.foreground
         assert f"http://{TS4}:7400/" in out and f"http://[{TS6}]:7400/" in out
         assert "invariant oracle web pair" in out
 
@@ -1165,3 +1165,313 @@ def test_the_web_modules_import_no_host_and_no_toolkit():
         source = (Path(web.__file__).parent / name).read_text()
         imports = re.findall(r"^\s*(?:from|import)\s+(\S+)", source, re.MULTILINE)
         assert not [i for i in imports if "hosts" in i or "textual" in i or "tui" in i], name
+
+
+# -- IDEA_026: the page over HTTPS, with Tailscale's certificate ---------------------
+
+TLS_FIXTURES = Path(__file__).parent / "fixtures" / "tls"
+TS_NAME = "mac.example.ts.net"
+
+
+def _served(tmp_path, which: str = "a"):
+    """A ``Served`` over a fixture certificate, kept as the oracle would keep it."""
+    from invariant.oracle.tls import Certificates, Issued, RecordingIssuer, Served
+
+    pem = (TLS_FIXTURES / f"{which}.crt").read_text()
+    key = (TLS_FIXTURES / f"{which}.key").read_text()
+    certs = Certificates(tmp_path / f"tls-{which}", RecordingIssuer(Issued(TS_NAME, pem, key)),
+                         clock=lambda: 1_800_000_000.0)
+    cert = certs.ensure()
+    return Served(cert, certs.context(cert)), certs
+
+
+def _tls_app(store, served, bound=(TS4,)):
+    return WebApp(store, lambda: _loaded({"projects": []}), list(bound), clock=Clock(),
+                  nonce=lambda: "N0NCE", served=served)
+
+
+class TestTheHostUnderTls:
+    def test_only_the_certificates_name_is_this_server(self):
+        assert host_allowed(f"{TS_NAME}:7341", [TS4], name=TS_NAME)
+        assert host_allowed(f"{TS_NAME.upper()}.:7341", [TS4], name=TS_NAME)
+        assert host_allowed(TS_NAME, [TS4], name=TS_NAME)
+        assert not host_allowed(f"{TS4}:7341", [TS4], name=TS_NAME)
+        assert not host_allowed("other-mac.example.ts.net:7341", [TS4], name=TS_NAME)
+        assert not host_allowed(None, [TS4], name=TS_NAME)
+
+    def test_a_bare_address_is_told_the_name_and_given_nothing_else(self, store, tmp_path):
+        served, _ = _served(tmp_path)
+        token = _paired(store)
+        response = _get(_tls_app(store, served), "/", token=token, host=f"{TS4}:7341")
+        assert response.status == 421
+        assert f"https://{TS_NAME}:7341/".encode() in response.body
+        response = _get(_tls_app(store, served), "/", token=token, host=f"[{TS6}]")
+        assert response.status == 421 and f"https://{TS_NAME}/".encode() in response.body
+
+    def test_the_name_answers(self, store, tmp_path):
+        served, _ = _served(tmp_path)
+        token = _paired(store)
+        response = _get(_tls_app(store, served), "/", token=token, host=f"{TS_NAME}:7341")
+        assert response.status == 200
+
+
+class TestCookieAndOriginOverHttps:
+    def test_the_pairing_cookie_is_secure(self, store, tmp_path):
+        served, _ = _served(tmp_path)
+        pairing = store.issue("phone", ttl=300)
+        response = _post(_tls_app(store, served), "/pair", f"code={pairing.code}".encode(),
+                         host=f"{TS_NAME}:7341",
+                         headers={"origin": f"https://{TS_NAME}:7341"})
+        assert response.status == 303
+        cookie = response.header("set-cookie")
+        assert "; Secure" in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+
+    def test_over_plain_http_it_is_not(self, store):
+        pairing = store.issue("phone", ttl=300)
+        cookie = _post(_app(store), "/pair", f"code={pairing.code}".encode()).header("set-cookie")
+        assert "Secure" not in cookie
+
+    def test_the_http_origin_is_refused_once_the_page_is_https(self, store, tmp_path):
+        served, _ = _served(tmp_path)
+        pairing = store.issue("phone", ttl=300)
+        response = _post(_tls_app(store, served), "/pair", f"code={pairing.code}".encode(),
+                         host=f"{TS_NAME}:7341",
+                         headers={"origin": f"http://{TS_NAME}:7341"})
+        assert response.status == 403
+
+    def test_an_action_needs_the_https_origin(self, store, tmp_path):
+        from invariant.oracle.web import _origin_required
+
+        headers = {"host": f"{TS_NAME}:7341", "origin": f"https://{TS_NAME}:7341"}
+        assert _origin_required(headers, "https")
+        assert not _origin_required(headers, "http")
+        assert not _origin_required({**headers, "origin": f"http://{TS_NAME}:7341"}, "https")
+
+
+class TestThePlainHttpWarning:
+    def test_the_page_and_the_pair_form_carry_it(self, store):
+        token = _paired(store)
+        app = WebApp(store, lambda: _loaded({"projects": []}), [TS4], clock=Clock(),
+                     nonce=lambda: "n", insecure="no certificate: <HTTPS off>")
+        page = _get(app, "/", token=token).body.decode()
+        assert 'id="insecure"' in page and "no certificate: &lt;HTTPS off&gt;" in page
+        form = _get(app, "/pair?code=X").body.decode()
+        assert 'id="insecure"' in form and "&lt;HTTPS off&gt;" in form
+
+    def test_without_one_neither_does(self, store):
+        token = _paired(store)
+        assert 'id="insecure"' not in _get(_app(store), "/", token=token).body.decode()
+        assert 'id="insecure"' not in _get(_app(store), "/pair").body.decode()
+
+
+class TestThePageFollowsAMove:
+    def test_the_state_fetch_does_not_follow_a_redirect_and_reloads_on_one(self):
+        script = _script()
+        assert 'redirect: "manual"' in script
+        assert "ORACLE.moved(response)" in script and "location.reload()" in script
+
+    @pytest.mark.skipif(ENGINE is None, reason="no JavaScript engine runs here")
+    def test_moved_is_an_opaque_redirect_only(self):
+        harness = _script() + r"""
+(typeof print === "function" ? print : console.log)(JSON.stringify([
+  ORACLE.moved({type: "opaqueredirect", status: 0}),
+  ORACLE.moved({type: "basic", status: 200}),
+  ORACLE.moved({type: "basic", status: 401}),
+]));
+"""
+        out = subprocess.run([*ENGINE, harness], capture_output=True, text=True, timeout=30,
+                             check=True)
+        assert json.loads(out.stdout) == [True, False, False]
+
+
+def _tls_get(port: int, path: str = "/", host: str = TS_NAME, headers: dict | None = None):
+    """One request over TLS to loopback, naming the certificate's host; nothing verified."""
+    import http.client
+    import ssl
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    connection = http.client.HTTPSConnection(LOOPBACK, port, timeout=5, context=context)
+    try:
+        connection.connect()
+        peer = connection.sock.getpeercert(binary_form=True)
+        connection.request("GET", path, headers={"Host": f"{host}:{port}", **(headers or {})})
+        answer = connection.getresponse()
+        return answer.status, answer.read(), dict(answer.getheaders()), peer
+    finally:
+        connection.close()
+
+
+def _der(which: str) -> bytes:
+    import ssl
+
+    return ssl.PEM_cert_to_DER_cert((TLS_FIXTURES / f"{which}.crt").read_text())
+
+
+class TestTheServerOverTls:
+    def test_it_serves_https_on_its_name_and_renews_without_a_restart(self, store, tmp_path):
+        served, _ = _served(tmp_path, "a")
+        token = _paired(store)
+        server = WebServer(_tls_app(store, served, bound=[LOOPBACK]), [LOOPBACK], 0,
+                           served=served)
+        try:
+            urls = server.start()
+            port = server.port
+            assert urls == [f"https://{TS_NAME}:{port}/"]
+            server.serve_in_background()
+            status, body, _, peer = _tls_get(port, "/api/state",
+                                             headers={"Cookie": f"{COOKIE_NAME}={token}"})
+            assert status == 200 and json.loads(body)["view"] == {"projects": [], "alerts": 0}
+            assert peer == _der("a")
+            renewed, _ = _served(tmp_path, "b")
+            served.renew(renewed.certificate, renewed.context)
+            status, _, _, peer = _tls_get(port, "/api/state",
+                                          headers={"Cookie": f"{COOKIE_NAME}={token}"})
+            assert status == 200 and peer == _der("b")
+        finally:
+            server.close()
+
+    def test_plain_http_gets_only_a_redirect_to_the_https_name(self, store, tmp_path):
+        served, _ = _served(tmp_path)
+        token = _paired(store)
+        server = WebServer(_tls_app(store, served, bound=[LOOPBACK]), [LOOPBACK], 0,
+                           served=served)
+        try:
+            server.start()
+            server.serve_in_background()
+            status, body, headers = _http(f"http://{LOOPBACK}:{server.port}/api/state?x=1",
+                                          headers={"Cookie": f"{COOKIE_NAME}={token}"})
+            assert status == 307
+            assert headers["Location"] == f"https://{TS_NAME}:{server.port}/"
+            assert body == b"" and headers["Cache-Control"] == "no-store"
+        finally:
+            server.close()
+
+    def test_a_failed_handshake_or_a_silent_client_is_closed_quietly(self, store, tmp_path):
+        import socket
+
+        served, _ = _served(tmp_path)
+        server = WebServer(_tls_app(store, served, bound=[LOOPBACK]), [LOOPBACK], 0,
+                           served=served, request_timeout=0.5)
+        try:
+            server.start()
+            server.serve_in_background()
+            with socket.create_connection((LOOPBACK, server.port), timeout=5) as raw:
+                raw.sendall(b"\x16\x03\x01\x00\x05junk!")
+                try:
+                    answer = raw.recv(64)
+                except ConnectionResetError:
+                    answer = b""
+                assert b"HTTP" not in answer
+            with socket.create_connection((LOOPBACK, server.port), timeout=5) as raw:
+                assert raw.recv(64) == b""
+            with socket.create_connection((LOOPBACK, server.port), timeout=5) as raw:
+                raw.shutdown(socket.SHUT_WR)
+                assert raw.recv(64) == b""
+            status, _, _, _ = _tls_get(server.port, "/")
+            assert status == 401
+        finally:
+            server.close()
+
+
+class TestTheCommandsOverTls:
+    def issue(self, oracle_certificates, which: str = "a") -> None:
+        from invariant.oracle.tls import Issued
+
+        oracle_certificates.issued = Issued(
+            TS_NAME, (TLS_FIXTURES / f"{which}.crt").read_text(),
+            (TLS_FIXTURES / f"{which}.key").read_text())
+
+    def test_web_serves_https_when_tailscale_gives_a_certificate(
+            self, capsys, oracle_web, oracle_certificates):
+        self.issue(oracle_certificates)
+        oracle_web.addresses = [TS4]
+        code, out = run_cli(capsys, "oracle", "web", "--port", "7400")
+        assert code == 0
+        (server,) = oracle_web.servers
+        assert server.served is not None and server.served.name == TS_NAME
+        assert server.app.served is server.served and server.app.insecure is None
+        assert f"https://{TS_NAME}:7400/" in out and "http://" not in out
+        assert "expires" in out
+
+    def test_without_a_certificate_it_serves_http_and_says_why(
+            self, capsys, oracle_web, oracle_certificates):
+        oracle_web.addresses = [TS4]
+        code, out = run_cli(capsys, "oracle", "web")
+        assert code == 0
+        (server,) = oracle_web.servers
+        assert server.served is None
+        assert "no certificate in the test suite" in server.app.insecure
+        assert f"http://{TS4}:7341/" in out
+        assert "PLAIN HTTP" in out and "no certificate in the test suite" in out
+
+    def test_loopback_is_plain_http_with_no_warning_and_asks_for_nothing(
+            self, capsys, oracle_web, oracle_certificates):
+        code, _ = run_cli(capsys, "oracle", "web", "--allow-loopback")
+        assert code == 0
+        assert oracle_web.servers[0].served is None
+        assert oracle_web.servers[0].app.insecure is None
+        assert oracle_certificates.calls == 0
+
+    def test_a_certificate_that_will_not_load_falls_back_to_http(
+            self, capsys, oracle_web, oracle_certificates, monkeypatch):
+        from invariant.oracle import tls
+
+        self.issue(oracle_certificates)
+        oracle_web.addresses = [TS4]
+
+        def broken(path):
+            raise tls.CertError(f"cannot load {path}: broken")
+
+        monkeypatch.setattr(tls, "context_for", broken)
+        code, out = run_cli(capsys, "oracle", "web")
+        assert code == 0 and oracle_web.servers[0].served is None
+        assert "broken" in out
+
+    def test_pair_links_the_https_name_once_a_certificate_is_kept(
+            self, capsys, oracle_web, oracle_certificates):
+        self.issue(oracle_certificates)
+        oracle_web.addresses = [TS4]
+        run_cli(capsys, "oracle", "web")
+        code, out = run_cli(capsys, "oracle", "web", "pair", "--json")
+        assert code == 0
+        body = json.loads(out)
+        assert body["links"] == [f"https://{TS_NAME}:7341/pair?code={body['code']}"]
+
+    def test_pair_ignores_an_expired_certificate(
+            self, capsys, oracle_web, oracle_certificates, monkeypatch):
+        from invariant.oracle import tls
+
+        self.issue(oracle_certificates)
+        oracle_web.addresses = [TS4]
+        run_cli(capsys, "oracle", "web")
+        monkeypatch.setattr(cli_main.time, "time", lambda: 5_000_000_000.0)
+        body = json.loads(run_cli(capsys, "oracle", "web", "pair", "--json")[1])
+        assert body["links"][0].startswith(f"http://{TS4}:")
+        assert tls.read_certificate(oracle_home()) is not None
+
+    def test_the_certificate_seam_is_the_recorder_and_the_real_one_asks_tailscale(
+            self, oracle_certificates, monkeypatch):
+        from invariant.oracle import tls
+
+        assert cli_main._oracle_web_certificates() is oracle_certificates
+        asked = []
+        monkeypatch.setattr(tls, "issue", lambda run: asked.append(run) or "issued")
+        assert cli_main._real_oracle_web_certificates()() == "issued"
+        assert asked[0].keywords == {"timeout": tls.CERT_TIMEOUT}
+        assert asked[0].func is web.run_program
+
+
+def test_run_program_takes_a_timeout(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "out", "")
+
+    monkeypatch.setattr(web.subprocess, "run", fake_run)
+    assert web.run_program(["true"], timeout=99) == (0, "out")
+    assert seen["timeout"] == 99
+    web.run_program(["true"])
+    assert seen["timeout"] == web.PROGRAM_TIMEOUT

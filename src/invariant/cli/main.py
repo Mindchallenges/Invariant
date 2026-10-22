@@ -672,7 +672,14 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
     plist, and the report the serving loop keeps, whose pid is checked alive.
     """
     from ..oracle.home import oracle_home
-    from ..oracle.webservice import last_action_text, page_ok, page_text, web_status
+    from ..oracle.webservice import (
+        cert_ok,
+        cert_text,
+        last_action_text,
+        page_ok,
+        page_text,
+        web_status,
+    )
 
     interpreter = _oracle_web_installer().interpreter_check()
     if interpreter is None:
@@ -684,7 +691,11 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
     )
     detail = (f"{page_text(status)}; {devices}; "
               f"last action {last_action_text(status['last_action'])}")
-    return [("oracle web interpreter", *interpreter), ("oracle web page", page_ok(status), detail)]
+    rows = [("oracle web interpreter", *interpreter), ("oracle web page", page_ok(status), detail)]
+    if status["certificate"] is not None:
+        now = time.time()
+        rows.append(("oracle web certificate", cert_ok(status, now), cert_text(status, now)))
+    return rows
 
 
 def _report_checks(args, checks: list[tuple[str, bool, str]]) -> int:
@@ -3139,7 +3150,7 @@ def _agent_lines(agent, label: str) -> list[str]:
 def _oracle_web_status() -> tuple[dict, list[str]]:
     """``oracle status``'s web half: the agent, the page, the devices, the last action."""
     from ..oracle.home import oracle_home
-    from ..oracle.webservice import last_action_text, page_text, web_status
+    from ..oracle.webservice import cert_text, last_action_text, page_text, web_status
 
     agent = _oracle_web_installer().status()
     page = web_status(oracle_home())
@@ -3156,8 +3167,10 @@ def _oracle_web_status() -> tuple[dict, list[str]]:
         _plural(page["devices"], "paired device") if page["devices"] is not None
         else f"cannot read: {page['devices_error']}"
     )
+    lines.append(f"  web page     {page_text(page)}")
+    if page["certificate"] is not None:
+        lines.append(f"  certificate  {cert_text(page, time.time())}")
     lines += [
-        f"  web page     {page_text(page)}",
         f"  devices      {devices}",
         f"  last action  {last_action_text(page['last_action'])}",
     ]
@@ -3214,6 +3227,25 @@ def _oracle_web_server():
     return _real_oracle_web_server()
 
 
+def _real_oracle_web_certificates():
+    import functools
+
+    from ..oracle import tls, web
+
+    run = functools.partial(web.run_program, timeout=tls.CERT_TIMEOUT)
+    return lambda: tls.issue(run)
+
+
+def _oracle_web_certificates():
+    """How ``oracle web`` gets its HTTPS certificate: ``() -> Issued``.
+
+    A seam, beside ``_oracle_web_addresses``: the real one asks Tailscale's
+    CLI, through stdout. The suite replaces it with a recorder that hands back
+    a test certificate or refuses, so no test asks Tailscale (IDEA_026).
+    """
+    return _real_oracle_web_certificates()
+
+
 def _real_oracle_web_wait():
     def wait(seconds: float) -> bool:
         time.sleep(seconds)
@@ -3249,6 +3281,7 @@ def cmd_oracle_web(args) -> int:
 
     from ..oracle.dashboard import load
     from ..oracle.devices import DeviceStore
+    from ..oracle.tls import Certificates
     from ..oracle.web import LOOPBACK, WebApp, choose_bind
     from ..oracle.webactions import AuditLog, RemoteActions
 
@@ -3272,20 +3305,30 @@ def cmd_oracle_web(args) -> int:
             return _oracle_scan_document(index, cache, gates)
 
     remote = RemoteActions(_oracle_actions(), scan, AuditLog(index.home))
+    certificates = Certificates(index.home, _oracle_web_certificates())
 
-    def listener(bound: list[str]):
+    def listener(bound: list[str], served=None):
+        insecure = None
+        if served is None and bound != [LOOPBACK]:
+            insecure = _plain_http_warning(certificates.error)
         app = WebApp(devices, lambda: load(index.home, time.time(), scan), bound,
-                     remote=remote)
-        return _oracle_web_server()(app, bound, port)
+                     remote=remote, served=served, insecure=insecure)
+        return _oracle_web_server()(app, bound, port, served)
 
     if args.wait:
-        return _serve_always(listener, index.home, port)
-    server = listener(addresses)
+        return _serve_always(listener, index.home, port, certificates)
+    served = None if addresses == [LOOPBACK] else _served_once(certificates)
+    server = listener(addresses, served)
     urls = server.start()
     paired = len(devices.devices())
     lines = [f"serving the oracle on {url}" for url in urls]
     if addresses == [LOOPBACK]:
         lines.append("  loopback only: no Tailscale address was found; this Mac alone can open it")
+    elif served is not None:
+        lines.append(f"  over HTTPS as {served.name}; its certificate expires "
+                     f"{_expires(served.not_after)}")
+    else:
+        lines.append(f"  {_plain_http_warning(certificates.error)}")
     lines.append(
         f"  {_plural(paired, 'paired device')}; pair one with 'invariant oracle web pair'. "
         f"Ctrl-C stops it."
@@ -3298,12 +3341,36 @@ def cmd_oracle_web(args) -> int:
     return EXIT_OK
 
 
-def _serve_always(listener, home, port: int) -> int:
+def _plain_http_warning(error: str | None) -> str:
+    return (f"PLAIN HTTP: no HTTPS certificate from Tailscale ({error or 'none yet'}). "
+            f"See 'invariant oracle status' and the guide, 'The oracle on your phone'.")
+
+
+def _expires(not_after: float) -> str:
+    from ..oracle.tls import expires_text
+
+    return expires_text(not_after)
+
+
+def _served_once(certificates):
+    """The foreground's certificate, asked for once; ``None`` means plain HTTP."""
+    from ..oracle.tls import CertError, Served
+
+    certificate = certificates.ensure()
+    if certificate is None:
+        return None
+    try:
+        return Served(certificate, certificates.context(certificate))
+    except CertError:
+        return None
+
+
+def _serve_always(listener, home, port: int, certificates) -> int:
     """``oracle web --wait``: serve whenever there is a tailnet, under the agent."""
     from ..oracle.webservice import WebService
 
     service = WebService(_oracle_web_addresses(), listener, home, port=port,
-                         wait=_oracle_web_wait())
+                         wait=_oracle_web_wait(), certificates=certificates)
     try:
         service.run()
     except KeyboardInterrupt:
@@ -3321,6 +3388,7 @@ def cmd_oracle_web_pair(args) -> int:
     """Issue a one-time pairing code, and the link a phone opens to use it."""
     from ..oracle.devices import DeviceStore
     from ..oracle.home import oracle_home
+    from ..oracle.tls import read_certificate
     from ..oracle.web import LOOPBACK, tailnet_addresses, url_for
 
     port = _web_port(args.port if args.port is not None else _serving_port())
@@ -3328,7 +3396,15 @@ def cmd_oracle_web_pair(args) -> int:
     if not found and args.allow_loopback:
         found = [LOOPBACK]
     pairing = DeviceStore(oracle_home()).issue(args.name, ttl=args.ttl)
-    links = [url_for(address, port, f"/pair?code={pairing.code}") for address in found]
+    path = f"/pair?code={pairing.code}"
+    # Once a certificate is kept, the page is served over HTTPS at its name,
+    # and nowhere else (ADR-008 D22).
+    certificate = read_certificate(oracle_home())
+    if found and found != [LOOPBACK] and certificate is not None and (
+            certificate.not_after > time.time()):
+        links = [f"https://{certificate.name}:{port}{path}"]
+    else:
+        links = [url_for(address, port, path) for address in found]
     lines = [
         f"pairing code for {pairing.name}: {pairing.code[:5]}-{pairing.code[5:]}",
         f"  it works once, for {_minutes(args.ttl)}",

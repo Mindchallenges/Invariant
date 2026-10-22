@@ -21,6 +21,12 @@ in ADR-008. In short:
   (``oracle/webactions``, ADR-008 D8–D12). ``GET /api/job`` is its result.
 * **A slow or greedy client is cut off**: a socket timeout per request, a cap
   on headers, and a cap on connections at once.
+* **Over HTTPS once there is a certificate** (IDEA_026, ADR-008 D19-D24).
+  With a :class:`~invariant.oracle.tls.Served`, each listener speaks TLS with
+  Tailscale's certificate for the Mac's MagicDNS name, answers only that name
+  in ``Host``, wants the ``https`` origin, and marks the cookie ``Secure``. A
+  plain-HTTP request to it gets a redirect to the https name and nothing else.
+  Without one the page is plain HTTP, as before, with a warning on it.
 
 :class:`WebApp` turns a :class:`Request` into a :class:`Response` and knows
 nothing about sockets, so it is tested without one. :class:`WebServer` is the
@@ -38,6 +44,7 @@ import secrets
 import shutil
 import socket
 import socketserver
+import ssl
 import subprocess
 import threading
 import time
@@ -46,7 +53,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
 from ..core.errors import InvariantError
@@ -58,6 +65,9 @@ from .scan import ROW_HOST, ROW_WORKTREE, row_key
 from .watcher import STALE_INTERVALS
 from .webactions import RemoteActions
 from .webpage import MAX_BACKOFF
+
+if TYPE_CHECKING:
+    from .tls import Served
 
 #: Tailscale's IPv4 range (the CGNAT block) and its IPv6 ULA prefix.
 TAILNET_RANGES = (
@@ -93,6 +103,18 @@ MAX_CONNECTIONS = 32
 
 #: A paired cookie lasts as long as browsers let one (400 days, Chrome's cap).
 COOKIE_MAX_AGE = 400 * 24 * 3600
+
+#: The first byte of a TLS connection: a handshake record. Anything else on a
+#: TLS listener is plain HTTP, or nothing a browser sends.
+TLS_HANDSHAKE = 0x16
+
+#: What a plain-HTTP request to a TLS listener gets: a redirect to the https
+#: name, uncached, with no body. ``{location}`` is built from the certificate's
+#: name, never from the request's ``Host``.
+_MOVED = (
+    "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\n"
+    "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+)
 
 Runner = Callable[[list[str]], tuple[int, str]]
 
@@ -155,11 +177,11 @@ def tailscale_binaries(which: Callable[[str], str | None] = shutil.which) -> lis
     return found
 
 
-def run_program(argv: list[str]) -> tuple[int, str]:
+def run_program(argv: list[str], timeout: float = PROGRAM_TIMEOUT) -> tuple[int, str]:
     """``argv``'s exit status and output; 127 when it cannot be started."""
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, check=False, timeout=PROGRAM_TIMEOUT
+            argv, capture_output=True, text=True, check=False, timeout=timeout
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, str(exc)
@@ -199,28 +221,44 @@ def choose_bind(found: list[str], allow_loopback: bool) -> list[str]:
     )
 
 
-def url_for(address: str, port: int, path: str = "/") -> str:
+def url_for(address: str, port: int, path: str = "/", scheme: str = "http") -> str:
     host = f"[{address}]" if ":" in address else address
-    return f"http://{host}:{port}{path}"
+    return f"{scheme}://{host}:{port}{path}"
 
 
-def host_allowed(header: str | None, bound: list[str]) -> bool:
-    """Whether a request's ``Host`` names this server.
-
-    A bound address, a MagicDNS name (``*.ts.net``), or, when loopback is
-    bound, ``localhost``. Anything else is a page that resolved its own name
-    to this address, and gets nothing.
-    """
+def _split_host(header: str | None) -> tuple[str, str | None] | None:
+    """A ``Host`` header's host, lower case without a trailing dot, and its port."""
     if not header:
-        return False
+        return None
     header = header.strip().lower()
     if header.startswith("["):
         end = header.find("]")
         if end < 0:
-            return False
-        host = header[1:end]
+            return None
+        host, rest = header[1:end], header[end + 1:]
+        port = rest[1:] if rest.startswith(":") else None
+    elif header.count(":") == 1:
+        host, port = header.split(":", 1)
     else:
-        host = header.rsplit(":", 1)[0] if header.count(":") == 1 else header
+        host, port = header, None
+    return host.rstrip("."), port or None
+
+
+def host_allowed(header: str | None, bound: list[str], name: str | None = None) -> bool:
+    """Whether a request's ``Host`` names this server.
+
+    Over HTTPS, the certificate's ``name`` and nothing else: an address would
+    not match the certificate, so a request naming one came past a browser's
+    warning. Over plain HTTP, a bound address, a MagicDNS name (``*.ts.net``),
+    or, when loopback is bound, ``localhost``. Anything else is a page that
+    resolved its own name to this address, and gets nothing.
+    """
+    split = _split_host(header)
+    if split is None:
+        return False
+    host = split[0]
+    if name is not None:
+        return host == name
     if host in bound:
         return True
     if LOOPBACK in bound:
@@ -403,7 +441,7 @@ def _token(headers: Mapping[str, str]) -> str | None:
     return morsel.value if morsel else None
 
 
-def _same_origin(headers: Mapping[str, str]) -> bool:
+def _same_origin(headers: Mapping[str, str], scheme: str) -> bool:
     """No ``Origin``, or one naming the host the request was sent to.
 
     The pairing form's rule: a missing ``Origin`` is let through there, and
@@ -412,17 +450,18 @@ def _same_origin(headers: Mapping[str, str]) -> bool:
     origin = headers.get("origin")
     if origin is None:
         return True
-    return _origin_names_host(origin, headers)
+    return _origin_names_host(origin, headers, scheme)
 
 
-def _origin_names_host(origin: str, headers: Mapping[str, str]) -> bool:
+def _origin_names_host(origin: str, headers: Mapping[str, str], scheme: str) -> bool:
+    """``origin`` is this page's: the scheme it is served over, and the ``Host``."""
     target = urlsplit(origin)
-    return target.scheme == "http" and (
+    return target.scheme == scheme and (
         target.netloc.lower() == headers.get("host", "").strip().lower()
     )
 
 
-def _origin_required(headers: Mapping[str, str]) -> bool:
+def _origin_required(headers: Mapping[str, str], scheme: str) -> bool:
     """An action's rule: an ``Origin`` naming this server, never a missing one.
 
     A browser sends ``Origin`` with every ``POST`` a page makes, its own
@@ -431,7 +470,7 @@ def _origin_required(headers: Mapping[str, str]) -> bool:
     is refused as well.
     """
     origin = headers.get("origin")
-    if not origin or not _origin_names_host(origin, headers):
+    if not origin or not _origin_names_host(origin, headers, scheme):
         return False
     return headers.get("sec-fetch-site", "same-origin") == "same-origin"
 
@@ -463,7 +502,10 @@ class WebApp:
     """Request in, response out. Reads the machine only for a paired device.
 
     Without ``remote`` it only reads: no line offers an action and the action
-    routes are not there.
+    routes are not there. With ``served`` it is the page over HTTPS: the
+    certificate's name is the only ``Host``, the origin is ``https`` and the
+    cookie ``Secure``. ``insecure`` is why a tailnet page is plain HTTP, shown
+    on the page and the pairing form.
     """
 
     def __init__(
@@ -474,6 +516,8 @@ class WebApp:
         clock: Callable[[], float] = time.time,
         nonce: Callable[[], str] = lambda: secrets.token_urlsafe(16),
         remote: RemoteActions | None = None,
+        served: Served | None = None,
+        insecure: str | None = None,
     ) -> None:
         self.devices = devices
         self.load = load
@@ -481,15 +525,18 @@ class WebApp:
         self.clock = clock
         self.nonce = nonce
         self.remote = remote
+        self.served = served
+        self.insecure = insecure
+        self.scheme = "https" if served is not None else "http"
         # One read at a time: a phone and a laptop open at once share it.
         self._reading = threading.Lock()
 
     def handle(self, request: Request) -> Response:
         headers = {k.lower(): v for k, v in request.headers.items()}
         nonce = self.nonce()
-        if not host_allowed(headers.get("host"), self.bound):
-            return Response(HTTPStatus.MISDIRECTED_REQUEST, b"not this server\n",
-                            [("Content-Type", "text/plain"), *_BASE_HEADERS])
+        name = self.served.name if self.served is not None else None
+        if not host_allowed(headers.get("host"), self.bound, name):
+            return self._misdirected(headers.get("host"), name)
         target = urlsplit(request.path)
         if target.path == "/pair":
             return self._pair(request, headers, target.query, nonce)
@@ -506,7 +553,7 @@ class WebApp:
                 nonce, "not allowed", "Only a confirmed action is sent here."), nonce,
                 [("Allow", "GET")])
         if target.path == "/":
-            return _html(HTTPStatus.OK, webpage.page(nonce), nonce)
+            return _html(HTTPStatus.OK, webpage.page(nonce, warning=self.insecure), nonce)
         if target.path == "/api/state":
             return self._state(device)
         query = parse_qs(target.query)
@@ -523,6 +570,15 @@ class WebApp:
             return _json(HTTPStatus.OK, job)
         return _html(HTTPStatus.NOT_FOUND, webpage.message(nonce, "not found", target.path),
                      nonce)
+
+    def _misdirected(self, header: str | None, name: str | None) -> Response:
+        """421. Over HTTPS, the one place the page is: its name, on this port."""
+        text = "not this server\n"
+        if name is not None:
+            port = (_split_host(header) or ("", None))[1]
+            text = f"not this server; open https://{name}{f':{port}' if port else ''}/\n"
+        return Response(HTTPStatus.MISDIRECTED_REQUEST, text.encode(),
+                        [("Content-Type", "text/plain"), *_BASE_HEADERS])
 
     def _state(self, device: Device) -> Response:
         try:
@@ -542,7 +598,7 @@ class WebApp:
         """``POST /api/act``: the row key and the nonce, from this page only."""
         if request.method != "POST":
             return _json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST a confirmed action"})
-        if not _origin_required(headers):
+        if not _origin_required(headers, self.scheme):
             return _json(HTTPStatus.FORBIDDEN, {
                 "error": "an action must come from this page (its Origin); nothing ran"})
         fields = _action_fields(headers, request.body)
@@ -557,7 +613,8 @@ class WebApp:
               nonce: str) -> Response:
         if request.method == "GET":
             code = (parse_qs(query).get("code") or [""])[0]
-            return _html(HTTPStatus.OK, webpage.pair_form(nonce, code), nonce)
+            return _html(HTTPStatus.OK, webpage.pair_form(nonce, code, warning=self.insecure),
+                         nonce)
         if request.method != "POST":
             return _html(HTTPStatus.METHOD_NOT_ALLOWED,
                          webpage.message(nonce, "not allowed", "GET or POST only."), nonce,
@@ -566,7 +623,7 @@ class WebApp:
         if content_type != "application/x-www-form-urlencoded":
             return _html(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                          webpage.message(nonce, "not paired", "Send the pairing form."), nonce)
-        if not _same_origin(headers):
+        if not _same_origin(headers, self.scheme):
             return _html(HTTPStatus.FORBIDDEN, webpage.message(
                 nonce, "not paired", "That form did not come from this page."), nonce)
         code = (parse_qs(request.body.decode("utf-8", "replace")).get("code") or [""])[0]
@@ -577,6 +634,8 @@ class WebApp:
                          nonce)
         cookie = (f"{COOKIE_NAME}={token}; Path=/; Max-Age={COOKIE_MAX_AGE}; "
                   f"HttpOnly; SameSite=Strict")
+        if self.served is not None:
+            cookie += "; Secure"
         return Response(HTTPStatus.SEE_OTHER, b"",
                         [("Location", "/"), ("Set-Cookie", cookie), *_BASE_HEADERS])
 
@@ -638,6 +697,7 @@ class _Server(ThreadingHTTPServer):
     allow_reuse_address = False
     request_timeout = REQUEST_TIMEOUT
     slots: threading.BoundedSemaphore
+    served: Served | None = None
 
     def process_request(self, request, client_address) -> None:
         # One thread per connection, up to a cap: past it a connection is
@@ -657,6 +717,38 @@ class _Server(ThreadingHTTPServer):
         finally:
             self.slots.release()
 
+    def finish_request(self, request, client_address) -> None:
+        """Over HTTPS, the handshake, in this connection's own thread.
+
+        The context is read once, here, so a renewal reaches the next
+        connection. A connection that does not open with a TLS handshake gets
+        :data:`_MOVED` and is closed: plain HTTP is never served here. One
+        that says nothing within the timeout, or fails its handshake, is
+        closed without a word.
+        """
+        served = self.served
+        if served is None:
+            super().finish_request(request, client_address)
+            return
+        request.settimeout(self.request_timeout)
+        try:
+            first = request.recv(1, socket.MSG_PEEK)
+            if not first:
+                return
+            if first[0] != TLS_HANDSHAKE:
+                request.recv(MAX_BODY)
+                port = self.server_address[1]
+                request.sendall(_MOVED.format(location=f"https://{served.name}:{port}/")
+                                .encode("ascii"))
+                return
+            connection = served.context.wrap_socket(request, server_side=True)
+        except (OSError, ssl.SSLError):
+            return
+        try:
+            self.RequestHandlerClass(connection, client_address, self)
+        finally:
+            connection.close()
+
     def server_bind(self) -> None:
         # HTTPServer.server_bind asks socket.getfqdn for the bound address's
         # name: a reverse lookup that can leave the machine and that nothing
@@ -671,7 +763,10 @@ class _Server6(_Server):
 
 
 class WebServer:
-    """One ``ThreadingHTTPServer`` per bound address, all serving one app."""
+    """One ``ThreadingHTTPServer`` per bound address, all serving one app.
+
+    With ``served``, each speaks TLS with its certificate, read per connection.
+    """
 
     def __init__(
         self,
@@ -680,12 +775,14 @@ class WebServer:
         port: int,
         request_timeout: float = REQUEST_TIMEOUT,
         max_connections: int = MAX_CONNECTIONS,
+        served: Served | None = None,
     ) -> None:
         self.app = app
         self.addresses = list(addresses)
         self.port = port
         self.request_timeout = request_timeout
         self.max_connections = max_connections
+        self.served = served
         self.servers: list[_Server] = []
         self.stopped = threading.Event()
         self._running: list[_Server] = []
@@ -700,13 +797,14 @@ class WebServer:
                 server.app = self.app  # type: ignore[attr-defined]
                 server.request_timeout = self.request_timeout
                 server.slots = threading.BoundedSemaphore(self.max_connections)
+                server.served = self.served
                 self.servers.append(server)
                 port = server.server_address[1]
         except OSError as exc:
             self.close()
             raise WebError(f"cannot listen on {address} port {port}: {exc}") from exc
         self.port = port
-        return [url_for(address, port) for address in self.addresses]
+        return urls_for(self.addresses, port, self.served)
 
     def serve_in_background(self) -> None:
         for server in self.servers:
@@ -733,6 +831,13 @@ class WebServer:
         self.stopped.set()
 
 
+def urls_for(addresses: list[str], port: int, served: Served | None) -> list[str]:
+    """Where the page is: its https name once, else each address over http."""
+    if served is not None:
+        return [f"https://{served.name}:{port}/"]
+    return [url_for(address, port) for address in addresses]
+
+
 # -- for tests ------------------------------------------------------------------------
 
 
@@ -743,17 +848,18 @@ class RecordingServer:
     app: WebApp
     addresses: list[str]
     port: int
+    served: Served | None = None
     started: bool = False
-    served: bool = False
+    foreground: bool = False
     background: bool = False
     closed: bool = False
 
     def start(self) -> list[str]:
         self.started = True
-        return [url_for(address, self.port) for address in self.addresses]
+        return urls_for(self.addresses, self.port, self.served)
 
     def serve(self) -> None:
-        self.served = True
+        self.foreground = True
 
     def serve_in_background(self) -> None:
         self.background = True
@@ -784,8 +890,9 @@ class RecordingWeb:
         self.script.pop(0)()
         return False
 
-    def _make(self, app: WebApp, addresses: list[str], port: int) -> RecordingServer:
-        server = RecordingServer(app, list(addresses), port)
+    def _make(self, app: WebApp, addresses: list[str], port: int,
+              served: Served | None = None) -> RecordingServer:
+        server = RecordingServer(app, list(addresses), port, served)
         self.servers.append(server)
         return server
 
