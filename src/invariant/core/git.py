@@ -287,6 +287,21 @@ def file_at(cwd: Path, rev: str, path: str) -> str | None:
     return out
 
 
+def resolve_commit(cwd: Path, rev: str) -> str | None:
+    """The full hash of the commit ``rev`` names, or ``None`` if it names none.
+
+    ``None`` also covers git being absent and ``cwd`` not being a repository,
+    so a caller recording ``rev`` as evidence refuses rather than storing a
+    string nothing can check. A name opening with ``-`` is never handed to git,
+    where it would be read as an option.
+    """
+    rev = (rev or "").strip()
+    if not rev or rev.startswith("-"):
+        return None
+    code, out, _ = _run(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], cwd)
+    return out if code == 0 and out else None
+
+
 def unpushed_files(cwd: Path) -> list[Path] | None:
     """Paths touched by commits the upstream does not have yet.
 

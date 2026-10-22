@@ -97,6 +97,7 @@ graph TD
     RULES --> adapters
     RULES --> GIT
     SESSION --> GIT
+    WORKITEM --> GIT
     MANIFEST --> GIT
     CCTEL --> GIT
     MANIFEST --> PRIVACY
@@ -148,7 +149,15 @@ exactly one name — `DEFAULT_PATTERNS`, the single authoritative default
 pattern set — so the manifest's default and a bare `PrivacyScanner()` cannot
 drift apart (AUD-15).
 
-The four arrows into `git` were drawn late. The module has been imported by
+`WORKITEM --> GIT` is the newest arrow into `git` and carries one call,
+`resolve_commit`. A ruled closure (`item transition --ruling --evidence`)
+records the commit a maintainer's ruling rests on, and the domain resolves it
+to a full hash before anything is written: a name that is no commit here is
+refused, because evidence nothing can check is an assertion with a field name
+(IDEA_019). Like every other reader of the module it treats "git could not
+answer" as a refusal, never as a pass.
+
+The four arrows into `git` before it were drawn late. The module has been imported by
 `core/rules`, `core/manifest`, `domains/session` and the telemetry host since
 long before this document named it — the narrowing discussion below even
 appeals to "`core/git` for the worktrees placed beside it" — while the diagram
@@ -429,7 +438,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `items` | The work-item model and the pluggable store backends that read and write it | Know an item's lifecycle — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
-| `git` | Read-only queries about the repository — worktrees, branches, the staged set and the bytes staged for a path | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing |
+| `git` | Read-only queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, and the commit a revision names | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 
@@ -445,7 +454,9 @@ advance it. They are the only place where "what a session is" is encoded.
 - **`pipeline`** — one task's progress through the configured methodology.
   Scoped to a session; a session runs pipelines in sequence.
 - **`workitem`** — ideas and bugs, their statuses, and the transitions between
-  them. Persisted through `core/items` into whichever backend the project uses.
+  them, including a ruled transition whose rows record who ruled and on which
+  commit. Persisted through `core/items` into whichever backend the project
+  uses.
 - **`memorystore`** — validation, dedup, and index regeneration over the
   memory directory. Not an FSM; a set of invariants plus repair operations.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for

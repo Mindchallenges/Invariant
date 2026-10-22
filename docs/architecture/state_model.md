@@ -1163,11 +1163,17 @@ stateDiagram-v2
     }
     state "bug" as B {
         [*] --> filed
-        filed --> reproduced
+        filed --> reproduced: red test, or a ruling (red with the fix reverted)
         filed --> not_reproducible
-        reproduced --> fixed
+        filed --> wont_fix
+        reproduced --> fixed: item.bug_reproduced_before_fix
+        reproduced --> not_reproducible
+        reproduced --> wont_fix
         fixed --> verified
-        verified --> closed
+        fixed --> reproduced
+        verified --> closed: item.residue_matches_status
+        verified --> reproduced
+        verified --> wont_fix
     }
 ```
 
@@ -1175,6 +1181,72 @@ The `filed → reproduced` edge is load-bearing: a bug may not enter `fixed`
 without having passed through `reproduced`, because a fix for an unreproduced
 defect proves nothing. The repro-proving agent owns that transition and is the
 only actor allowed to make it.
+
+### An already-fixed bug closes through a ruling, not a new edge
+
+`bug-reproducer` has a fourth verdict besides "red", "blind" and "device
+only": ALREADY-FIXED — the test passes on the base branch, goes red with a
+named commit reverted, and that commit is the fix. The only engine route from
+`filed` used to be `not_reproducible`, which records "we tried and it did not
+fire" about a defect that was real and is fixed, so a consuming project
+hand-edited the status instead and kept no record of the ruling at all
+(IDEA_019).
+
+`invariant item transition <id> fixed --ruling "<who, date>" --evidence
+<commit>` records it, and **the bug machine is unchanged**. Two shapes were
+weighed:
+
+| | A `filed → fixed` edge, legal with a ruling | One ruled command recording `filed → reproduced → fixed` |
+|---|---|---|
+| The invariant above | Broken in its literal form; the gate would have to learn an exception | Kept: `fixed` is still reached only through `reproduced` |
+| `item.bug_reproduced_before_fix`, `item.history_matches_status` | Both need a second accepted shape | Both read the history as they always have |
+| What the reproduction row claims | — | A reproduction on the pre-fix tree, which is exactly what a test red with the fix reverted is |
+
+The second is chosen because the invariant's reason is satisfied rather than
+waived: the reason "a fix for an unreproduced defect proves nothing" is about
+evidence, and a test that goes red with the fix reverted IS that evidence. The
+row does not pretend it was walked: it carries `intermediate: true` and
+`item show` prints "recorded on the ruling, not walked".
+
+What the command does, in order:
+
+1. `--ruling` and `--evidence` come together or not at all; either alone is
+   refused, naming the one that is missing. The evidence is resolved to a full
+   hash through `core/git.resolve_commit`, and a name that is no commit here is
+   refused — a ruling resting on a string nothing can check is not provenance.
+2. Where the machine has no direct edge, the route is the **one** state both
+   edges reach (`_one_step_between`), read from the machine rather than named
+   in code. None, or two, and the edge is refused as before — `filed →
+   verified` is two unwalked states, and a ruling vouches for one. Without a
+   ruling, the refusal names the ruled route instead of leaving `--force` as
+   the only visible way past it.
+3. Each step is gated as if it were walked — the exit gates of the state left
+   and the entry gates of the state entered, with the item as the previous
+   step left it — and **nothing is written unless every step passes**. Then
+   one save writes both rows.
+4. Every row the command writes carries `ruling` and `evidence`; a ruling on
+   an edge that does exist (`reproduced → fixed`) annotates that one row.
+
+Who may rule is recorded, not enforced. The ruling text names the person and
+the date, and `bug-reproducer` still never runs the command itself: it reports
+ALREADY-FIXED with the commit and names this command, and the user runs it. A
+verdict without the revert-red check — the test passed, the commit was found
+by `git log` — is not a reproduction, and its route stays `not_reproducible`.
+
+**Body text.** A transition writes status and history and never rewrites the
+body, on every backend — pinned by a round-trip test per backend on this
+path, including the `sphinx_needs` fixture BUG_065 was fixed against. On
+`sphinx_needs` the ruling itself is not yet stored: that backend persists no
+history (BUG_073), so there the status is right and the provenance survives
+only in version control until that lands.
+
+**Retirement is deferred.** Moving a closed entry into a backend-declared
+closed store in the same transition is the other half of IDEA_019, and it
+shares its manifest key with BUG_074 (c), whose id scan must read the same
+store. The proposed key is `items.closed_path` — unset by default, so the
+markdown backend grows no archive — and it lands with BUG_074 rather than
+here: the only backend that wants a closed store today is the one that cannot
+yet keep the ruling.
 
 A separate field records *residue* — what remains owed after the status says
 done, such as a device soak that has not been run. Status and residue are

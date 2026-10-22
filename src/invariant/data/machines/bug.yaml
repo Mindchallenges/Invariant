@@ -3,7 +3,10 @@ kind: item
 description: >
   A reported defect. The filed -> reproduced edge is load-bearing: a fix for an
   unreproduced defect proves nothing, so 'fixed' is unreachable without passing
-  through a reproduction.
+  through a reproduction. An already-fixed bug keeps that rule: a test red
+  with the fix reverted is a reproduction on the pre-fix tree, and
+  'item transition <id> fixed --ruling ... --evidence <commit>' records
+  filed -> reproduced -> fixed on that ruling, with no edge added here.
 initial: filed
 terminal: [closed, not_reproducible, wont_fix]
 states:

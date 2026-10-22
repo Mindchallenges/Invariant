@@ -9,13 +9,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..core.errors import GateFailure, UsageError
+from ..core.errors import GateFailure, TransitionError, UsageError
+from ..core.git import resolve_commit
 from ..core.items import Item, backend_for
 from ..core.machines import load_item_machine
-from ..core.manifest import Level
 from ..core.rules import Evaluated, RuleContext, evaluate
 
 ITEM_TYPES = ("idea", "bug")
+
+
+def _one_step_between(machine, source: str, target: str) -> str | None:
+    """The single state both ``source -> X`` and ``X -> target`` reach, if one.
+
+    Read from the machine rather than named here, so a project's own item
+    machine answers for itself. Two candidates are no answer: a ruling records
+    one step it vouches for, and choosing between two would be a guess.
+    """
+    between = [s for s in machine.next_states(source) if machine.can(s, target)]
+    return between[0] if len(between) == 1 else None
+
+
+def _refuse_edge(machine, source: str, target: str, via: str | None) -> None:
+    try:
+        machine.require_edge(source, target)
+    except TransitionError as exc:
+        if via is None:
+            raise
+        raise TransitionError(
+            f"{exc}. A ruled route through {via!r} exists: add --ruling "
+            f"\"<who, date>\" and --evidence <commit> to record {source} -> "
+            f"{via} -> {target} on that ruling"
+        ) from None
 
 
 class WorkItemDomain:
@@ -86,53 +110,109 @@ class WorkItemDomain:
         reason: str | None = None,
         force: bool = False,
         cwd: Path | None = None,
+        ruling: str | None = None,
+        evidence: str | None = None,
     ) -> tuple[Item, list[Evaluated]]:
+        """Move an item to ``target``, through its machine's gates.
+
+        ``ruling`` and ``evidence`` are a maintainer's ruling and the commit it
+        rests on. Given together, they are recorded on every history row this
+        call writes, and they buy exactly one thing beyond the record: where
+        the machine has no direct edge, but one state lies between that both
+        edges reach, the call records that state too, on the ruling's
+        authority. That is how bug-reproducer's ALREADY-FIXED verdict closes
+        a ``filed`` bug: its test is red with the fix reverted, which is a
+        reproduction on the pre-fix tree, so ``filed -> reproduced -> fixed``
+        is written as one command and `fixed` is still reached only through
+        ``reproduced``. Each step is gated as if walked; nothing is written
+        unless every step passes, and then in one save.
+        """
         item = self.get(item_id)
         machine = self.machine(item.type)
+        provenance = self._provenance(ruling, evidence)
 
+        path = [target]
         structural_override = False
-        if item.status != target:
-            try:
-                machine.require_edge(item.status, target)
-            except Exception:
-                if not force:
-                    raise
+        if item.status != target and not machine.can(item.status, target):
+            via = _one_step_between(machine, item.status, target)
+            if via and provenance:
+                path = [via, target]
+            elif force:
                 structural_override = True
+            else:
+                _refuse_edge(machine, item.status, target, via)
 
+        work = Item.from_dict(item.to_dict())
+        verdicts: list[Evaluated] = []
+        rows: list[dict] = []
+        for step in path:
+            step_verdicts = self._gate(machine, work, step, cwd)
+            verdicts += step_verdicts
+            blocking = [v for v in step_verdicts if v.blocks]
+            if blocking and not force:
+                raise GateFailure(
+                    f"{len(blocking)} gate(s) block {work.status!r} -> {step!r} "
+                    f"for {item.id}",
+                    verdicts=verdicts,
+                )
+            overridden = bool(blocking or (structural_override and step == target))
+            if force and overridden and not reason:
+                raise UsageError(
+                    "--force requires --reason: an override that records no "
+                    "rationale is indistinguishable from the gate never having run"
+                )
+            row = {
+                "from": work.status,
+                "to": step,
+                "reason": reason,
+                "forced": bool(force and overridden),
+            }
+            if provenance:
+                row.update(provenance)
+                if step != target:
+                    row["intermediate"] = True
+            rows.append(row)
+            work.history.append(row)
+            work.status = step
+
+        item.history.extend(rows)
+        item.status = target
+        self.backend.save(item)
+        return item, verdicts
+
+    def _gate(self, machine, item: Item, target: str, cwd: Path | None) -> list[Evaluated]:
         gate_ids = list(machine.state(item.status).exit_gates)
         gate_ids += [g for g in machine.state(target).entry_gates if g not in gate_ids]
-
         ctx = RuleContext(
             manifest=self.manifest,
             cwd=Path(cwd or Path.cwd()),
             extra={"item": item.to_dict(), "target_status": target},
         )
-        verdicts = evaluate(gate_ids, ctx)
-        blocking = [v for v in verdicts if v.blocks]
+        return evaluate(gate_ids, ctx)
 
-        if blocking and not force:
-            raise GateFailure(
-                f"{len(blocking)} gate(s) block {item.status!r} -> {target!r} "
-                f"for {item.id}",
-                verdicts=verdicts,
-            )
-        if force and (blocking or structural_override) and not reason:
+    def _provenance(self, ruling: str | None, evidence: str | None) -> dict | None:
+        """The ruling and its commit, both or neither; the commit must resolve."""
+        ruling = (ruling or "").strip()
+        evidence = (evidence or "").strip()
+        if not ruling and not evidence:
+            return None
+        if not ruling:
             raise UsageError(
-                "--force requires --reason: an override that records no "
-                "rationale is indistinguishable from the gate never having run"
+                "--evidence needs --ruling: name who ruled and when, so the "
+                "record says whose judgement the commit stands on"
             )
-
-        item.history.append(
-            {
-                "from": item.status,
-                "to": target,
-                "reason": reason,
-                "forced": bool(force and (blocking or structural_override)),
-            }
-        )
-        item.status = target
-        self.backend.save(item)
-        return item, verdicts
+        if not evidence:
+            raise UsageError(
+                "--ruling needs --evidence: name the commit the ruling rests on; "
+                "a ruling with no commit is an assertion nothing can check"
+            )
+        sha = resolve_commit(self.manifest.root, evidence)
+        if sha is None:
+            raise UsageError(
+                f"--evidence {evidence!r} names no commit in this repository; "
+                "nothing was recorded"
+            )
+        return {"ruling": ruling, "evidence": sha}
 
     def add_residue(self, item_id: str, text: str) -> Item:
         item = self.get(item_id)

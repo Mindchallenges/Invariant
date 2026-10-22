@@ -566,9 +566,22 @@ here" must not have the side effect of moving.
 invariant item new <type> [--title <t>] [--field k=v]...
 invariant item list [--type <t>] [--status <s>] [--open]
 invariant item show <id>
-invariant item transition <id> <status> [--residue <text>]
+invariant item transition <id> <status> [--reason <text>] [--force]
+                          [--ruling "<who, date>" --evidence <commit>]
+    --ruling and --evidence come as a pair; either alone is refused, naming
+    the missing one, and --evidence must resolve to a commit. Every history
+    row the command writes carries both. Where the machine has no direct
+    edge but exactly one state lies between, that state is recorded too, on
+    the ruling — how an ALREADY-FIXED bug goes filed -> reproduced -> fixed
+    in one command and one write (state_model.md, "An already-fixed bug
+    closes through a ruling").
 invariant item residue <id> [--add <text> | --clear <text>]
 ```
+
+`item show` prints the history, one row per line, with its reason, `forced`,
+the ruling and the evidence commit, and marks a row recorded on a ruling
+rather than walked — which is what tells a ruled close apart from a
+`not_reproducible` one.
 
 ## Memory
 

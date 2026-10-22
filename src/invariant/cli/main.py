@@ -2299,6 +2299,8 @@ def cmd_item_show(args) -> int:
         text.append("  fields   " + ", ".join(f"{k}={v}" for k, v in item.fields.items()))
     if item.residue:
         text.append("  owed     " + "; ".join(item.residue))
+    for n, row in enumerate(item.history):
+        text.append(("  history  " if n == 0 else " " * 11) + _history_line(row))
     if item.body:
         text.extend(["", item.body])
     return emit(args, item.to_dict(), "\n".join(text))
@@ -2310,12 +2312,38 @@ def cmd_item_transition(args) -> int:
         # The verdicts are reported by the failure path below; a clean
         # transition has nothing to say about them.
         item, _verdicts = ctx.items.transition(
-            args.id, args.status, reason=args.reason, force=args.force, cwd=ctx.cwd
+            args.id,
+            args.status,
+            reason=args.reason,
+            force=args.force,
+            cwd=ctx.cwd,
+            ruling=args.ruling,
+            evidence=args.evidence,
         )
     except GateFailure as exc:
         report_verdicts(exc.verdicts, args)
         raise
-    return emit(args, item.to_dict(), f"{item.id} -> {item.status}")
+    text = f"{item.id} -> {item.status}"
+    if len(item.history) > 1 and item.history[-2].get("intermediate"):
+        text += f"  (through {item.history[-2]['to']}, recorded on the ruling)"
+    return emit(args, item.to_dict(), text)
+
+
+def _history_line(row: dict) -> str:
+    """One history row as ``item show`` prints it."""
+    line = f"{row.get('from')} -> {row.get('to')}"
+    notes = []
+    if row.get("reason"):
+        notes.append(str(row["reason"]))
+    if row.get("forced"):
+        notes.append("forced")
+    if row.get("ruling"):
+        notes.append(f"ruled by {row['ruling']}")
+    if row.get("evidence"):
+        notes.append(f"evidence {str(row['evidence'])[:12]}")
+    if row.get("intermediate"):
+        notes.append("recorded on the ruling, not walked")
+    return line + (f"  ({'; '.join(notes)})" if notes else "")
 
 
 def cmd_item_residue(args) -> int:
@@ -2941,6 +2969,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("status")
     q.add_argument("--reason")
     q.add_argument("--force", action="store_true")
+    q.add_argument("--ruling", help="who ruled, and when; needs --evidence")
+    q.add_argument("--evidence", help="the commit the ruling rests on; needs --ruling")
     q.set_defaults(func=cmd_item_transition)
 
     q = item.add_parser("residue")

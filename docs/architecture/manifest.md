@@ -903,6 +903,19 @@ A backend implements read, write, list, and transition-persist. The lifecycle
 FSM and the id scheme live above it in `domains/workitem`, so switching
 backends does not change item semantics.
 
+**A transition never drops or rewrites body text**, on any backend: it writes
+the status and the history rows and nothing else the item holds. Each backend
+carries a round-trip test on the ruled closure path that proves it — the
+markdown body byte for byte, the JSON `body` value, and on `sphinx_needs` a
+diff in which the status line is the only line that changes (IDEA_019). A
+ruling's `ruling` and `evidence` keys travel in the history rows, so they are
+kept wherever history is: in the markdown frontmatter and the JSON document,
+and not yet on `sphinx_needs` (below).
+
+No backend declares a closed store yet. The key proposed for one,
+`items.closed_path`, is to be agreed with BUG_074 (c) and is unset by default;
+see the state model, "An already-fixed bug closes through a ruling".
+
 ### The `sphinx_needs` round trip
 
 A reStructuredText backlog is usually written by hand, so the backend's
@@ -957,4 +970,5 @@ it is appended to the end.
 **`history` is not persisted by this backend.** The directive has no
 representation for a transition log yet, so `item.history_matches_status`
 cannot be satisfied on a `sphinx_needs` project for any item past its initial
-status, and an item's audit trail lives only in version control.
+status, and an item's audit trail — a ruled closure's ruling and evidence
+commit included — lives only in version control (BUG_073).
