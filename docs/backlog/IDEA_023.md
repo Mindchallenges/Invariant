@@ -2,14 +2,37 @@
 id: IDEA_023
 type: idea
 title: Session Oracle web dashboard over Tailscale, with confirm-first actions
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: built in 19be448, 33bdf8b, ccec29d
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: built in 19be448, 33bdf8b, ccec29d; HTTPS via IDEA_026 (888af9b)
+  forced: false
+- from: in_progress
+  to: done
+  reason: 'Shipped 2026-10-23: 19be448, 33bdf8b, ccec29d, HTTPS via IDEA_026 (888af9b),
+    fixes BUG_079, BUG_083, BUG_084; used live from a phone over the tailnet'
+  forced: false
 priority: high
 effort: L
 tier: '3'
 area: oracle, cli/main
 ---
+
+**Shipped 2026-10-23** (commits 19be448, 33bdf8b, ccec29d; HTTPS via IDEA_026,
+commit 888af9b; fixes BUG_079, BUG_083, BUG_084). Verified live the same day: a
+phone paired over HTTPS on the Mac's tailnet name (the two older http-era
+pairings were revoked). The page auto-refreshed ("updated 6s ago"). From
+mobile Safari a confirm on a session row showed the exact argv, cwd and env,
+with Cancel first and a 120 s expiry; Run it returned the output page (exit 2
+in 3.2 s). The exit 2 came from the target project's own destination
+discovery (several simulators booted, no INVARIANT_DESTINATION_ID), not from
+the oracle.
 
 **The want.** You can watch and steer the Session Oracle (IDEA_012) from your
 phone while you are away from the Mac. Today the only dashboard is `invariant
