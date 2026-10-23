@@ -12,6 +12,37 @@ secure.
 This page sets it up end to end. The decisions behind it are in ADR-008, and
 the design is in [the oracle's architecture page](../architecture/oracle.md).
 
+## What is changing
+
+The page is being redesigned as a mobile control panel (IDEA_027, ADR-009).
+The setup on this page stays the same: Tailscale, the LaunchAgent, pairing,
+and confirm-first actions. What changes is what you see and what you can do
+from it:
+
+- The first screen leads with a strip of counts (need you, problems,
+  working, leftovers), and each count jumps to its group. Sessions that need
+  you come first.
+- Cards use plain words, such as "Waiting for your permission" or "52 tests
+  failing", instead of engine state names, paths and process ids. Those
+  stay one tap away, under "Technical details" in a session's own view.
+- A session has a detail view, and any command can be copied.
+- A confirm opens from the bottom of the screen. It says in one line what
+  will happen, shows the command, and hides the exact folder and environment
+  behind a toggle.
+- A failed action says why in one sentence, with the full output behind
+  "Show full output".
+- The page can be added to the home screen as an app, with its own icon. On
+  iOS it may need pairing once more from inside the app. This page will say
+  how, once that is checked.
+- Later, after two fixes it depends on: closing a leftover Claude window and
+  cleaning up stranded sessions and folders, each confirmed first. Each
+  lists what it deletes and checks again that nothing is using it when you
+  press the button.
+
+The page still never answers a permission prompt. The design is in
+[the control panel's design page](../architecture/oracle-panel.md). This
+guide is updated as each part ships.
+
 ## What you need
 
 - A Mac with invariant installed (see [Installation](installation.md)).

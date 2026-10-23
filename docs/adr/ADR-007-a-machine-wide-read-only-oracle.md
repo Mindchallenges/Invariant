@@ -7,6 +7,10 @@
   increment 7. Nothing is left to decide for v1; the follow-ons are their own
   ideas (IDEA_013 to IDEA_018, and IDEA_023, the web dashboard over
   Tailscale, whose listener and pairing ADR-008 records).
+- **Amended by:** ADR-008 (a network listener, and a second confirm surface)
+  and ADR-009 (2026-10-23), which ends the oracle's read-only premise: the
+  scan, watcher and gate cache stay read-only, and a confirmed action may now
+  change or delete things, such as closing a host or removing a worktree.
 - **Date:** 2026-10-22
 - **Supersedes:** nothing. This record adds the first state this library keeps
   outside any project.

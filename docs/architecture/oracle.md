@@ -12,7 +12,8 @@ IDEA_018, and IDEA_023, the web dashboard over Tailscale, whose three
 increments have shipped: the page, confirm-first actions from it, and the
 page served always by a second LaunchAgent ("Shipped: the web page" below,
 ADR-008). IDEA_026 serves that page over HTTPS with Tailscale's certificate
-("Over HTTPS" below, ADR-008 D19–D24).
+("Over HTTPS" below, ADR-008 D19–D24). IDEA_027 is turning that page into a
+mobile control panel ("What is changing: the control panel" below, ADR-009).
 
 | # | Increment | Status |
 |---|---|---|
@@ -970,6 +971,34 @@ sequenceDiagram
 | A renewal fails | The kept certificate while it is valid, the failure in `status` and the log; `doctor` fails 14 days before expiry |
 | Tailscale answers `status --json` with something that is not JSON | Treated as no certificate; the error quotes the answer's first line (`did not print JSON; it said: …`) |
 | `--allow-loopback` | Plain HTTP on loopback, no warning, nothing asked of Tailscale |
+
+## What is changing: the control panel (IDEA_027)
+
+The web page above is being redesigned as a mobile control panel. The
+decisions are ADR-009's, and the design of record (screens, components,
+tokens, wording, the increment plan) is
+[oracle-panel.md](oracle-panel.md). Until each increment lands, the
+sections above describe what is served.
+
+- **Increments 3 to 5** change only the view and the page, and add a failure
+  summariser. A new pure module, `oracle/panel`, groups the rows by
+  attention (needs you, problems, working, idle; leftovers on their own
+  screen), counts them for the summary strip and words every label from one
+  table. `web.view` calls it, and `webactions` reads its confirm and result
+  wording. Then a session detail view, copy command, bottom-sheet confirms,
+  the home-screen app (manifest, icon, safe areas, under the same CSP and
+  token), and a one-line reason for a failed action.
+- **Increments 6 and 7** give the oracle destructive powers: close a
+  leftover host (IDEA_025) and the clean-up and unstick actions (IDEA_017).
+  This amends ADR-007's read-only premise (ADR-009 D1). The scan, the
+  watcher and the gate cache stay read-only. Each destructive action is
+  confirmed, re-checks its precondition at confirm time, runs as an
+  `invariant` command with no refusal override, and is never offered on a
+  row BUG_040 (below) may have misattributed. They wait for IDEA_024 (every
+  live host's pid) and BUG_078 (true last activity).
+
+This section and the graph in "Where it sits" are updated as each increment
+ships.
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

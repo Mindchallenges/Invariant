@@ -22,6 +22,7 @@ architecture/state_model
 architecture/manifest
 architecture/cli
 architecture/oracle
+architecture/oracle-panel
 ```
 
 ```{toctree}
@@ -36,6 +37,7 @@ adr/ADR-005-session-handoff-launches-a-host
 adr/ADR-006-proved-not-fixed-is-a-pipeline-outcome
 adr/ADR-007-a-machine-wide-read-only-oracle
 adr/ADR-008-the-oracle-listens-on-the-tailnet-only
+adr/ADR-009-the-oracle-page-becomes-a-mobile-control-panel
 ```
 
 ```{toctree}
