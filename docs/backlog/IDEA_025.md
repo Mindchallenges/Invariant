@@ -2,14 +2,21 @@
 id: IDEA_025
 type: idea
 title: Session Oracle sorts orphan hosts and closes a leftover on confirm
-status: proposed
+status: dropped
 residue: []
-history: []
+history:
+- from: proposed
+  to: dropped
+  reason: 'Folded into IDEA_027 (2026-10-23): its scope v1 is built there unchanged
+    as the orphan-host and close-host increment'
+  forced: false
 priority: high
 effort: M
 tier: '2'
 area: oracle, cli/main, hosts/claude_code_launch
 ---
+
+**Dropped 2026-10-23:** folded into IDEA_027 (the mobile-first control panel), which builds this scope v1 unchanged as its orphan-host and close-host increment. The body below stays the spec of record.
 
 **The want.** The oracle tells you which orphan hosts are leftovers you can
 close, and lets you close one safely, instead of listing every orphan as the

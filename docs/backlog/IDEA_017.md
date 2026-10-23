@@ -2,14 +2,21 @@
 id: IDEA_017
 type: idea
 title: Session Oracle can clean up and unstick sessions, each on confirm
-status: proposed
+status: dropped
 residue: []
-history: []
+history:
+- from: proposed
+  to: dropped
+  reason: 'Folded into IDEA_027 (2026-10-23): its action list is built there as the
+    panel''s clean-up and unstick controls'
+  forced: false
 priority: medium
 effort: M
 tier: '5'
 area: oracle, cli/main
 ---
+
+**Dropped 2026-10-23:** folded into IDEA_027 (the mobile-first control panel), which builds this action list as its clean-up and unstick controls. The body below stays the spec of record for those actions.
 
 **The want.** The Session Oracle (IDEA_012) can clean up and unstick
 sessions, not just run their recommended next command. v1's actions run the
