@@ -15,10 +15,11 @@ in ADR-008. In short:
   name, which keeps a DNS-rebinding page from talking to the server.
 * **It reads, and acts only on a confirm.** ``GET /`` is the page and ``GET
   /api/state`` the ``oracle list --json`` document, with the view the page
-  draws and how fresh it is. ``GET /api/confirm`` shows a row's step exactly
-  as the TUI's confirm does, with a nonce; ``POST /api/act`` runs it, carrying
-  only the row key and that nonce, from the page's own origin
-  (``oracle/webactions``, ADR-008 D8–D12). ``GET /api/job`` is its result.
+  draws (``oracle/panel``'s) and how fresh it is. ``GET /api/confirm`` shows
+  a row's step as the TUI's confirm does, with a nonce and the sheet's words;
+  ``POST /api/act`` runs it, carrying only the row key and that nonce, from
+  the page's own origin (``oracle/webactions``, ADR-008 D8–D12). ``GET
+  /api/job`` is its result.
 * **A slow or greedy client is cut off**: a socket timeout per request, a cap
   on headers, and a cap on connections at once.
 * **Over HTTPS once there is a certificate** (IDEA_026, ADR-008 D19-D24).
@@ -57,11 +58,9 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
 from ..core.errors import InvariantError
-from . import webpage
-from .dashboard import AMBER, FLAG_ALERT, RED, Loaded, freshness, lines
+from . import panel, webpage
+from .dashboard import Loaded, freshness
 from .devices import COOKIE_NAME, Device, DeviceStore, PairingError
-from .recommend import RUN, TERMINAL
-from .scan import ROW_HOST, ROW_WORKTREE, row_key
 from .watcher import STALE_INTERVALS
 from .webactions import RemoteActions
 from .webpage import MAX_BACKOFF
@@ -291,75 +290,16 @@ def retry_delay(interval: float, failures: int) -> float:
     return min(interval * 2**failures, MAX_BACKOFF)
 
 
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" + ("" if count == 1 else "s")
+def view(loaded: Loaded, acting: bool = False,
+         jobs: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """What the page draws: ``oracle/panel``'s view of the document.
 
-
-def _line(line, acting: bool) -> dict[str, Any]:
-    advice = line.row.get("recommendation") or {}
-    kind = advice.get("kind")
-    return {
-        "key": line.key,
-        "row": row_key(line.row),
-        "action": kind if acting and not line.nested and kind in (RUN, TERMINAL) else None,
-        "kind": line.row.get("kind"),
-        "subject": line.subject,
-        "stage": line.stage,
-        "status": line.status,
-        "tone": line.tone,
-        "signals": [{"text": text, "tone": tone} for text, tone in line.signals],
-        "next": line.next,
-        "label": "" if line.nested else advice.get("label", ""),
-        "detail": "" if line.nested else advice.get("detail") or "",
-        "where": "" if line.nested else advice.get("cwd") or "",
-        "nested": line.nested,
-    }
-
-
-def _noise(line) -> bool:
-    """An orphan host or a leaked worktree that raises no alert."""
-    return (
-        not line.nested
-        and line.row.get("kind") in (ROW_HOST, ROW_WORKTREE)
-        and line.tone not in (RED, AMBER)
-    )
-
-
-def view(loaded: Loaded, acting: bool = False) -> dict[str, Any]:
-    """The rows as the page draws them, project by project.
-
-    Each project's quiet orphan hosts and leaked worktrees are folded into one
-    summary line, because a project that tore down many sessions has many of
-    them and they bury the rows that matter. One that raises an alert stays.
-    Each line names its row by its stable key; with ``acting``, a row whose
-    step is ``run`` or ``terminal`` says so, and the page offers its confirm.
+    The groups, the strip's counts, the leftovers and each session's detail,
+    every word from the panel's one table (ADR-009 D2, D3). With ``acting``, a
+    row whose step runs gets its button; ``jobs`` are the device's recent
+    actions, listed on their session.
     """
-    projects = []
-    alerts = 0
-    for project in loaded.document.get("projects", []):
-        entry = project.get("project", {})
-        shown, folded = [], []
-        for line in lines({"projects": [project]}):
-            (folded if _noise(line) else shown).append(_line(line, acting))
-            if not line.nested and line.status == FLAG_ALERT:
-                alerts += 1
-        counts = {ROW_HOST: 0, ROW_WORKTREE: 0}
-        for line in folded:
-            counts[line["kind"]] += 1
-        summary = ", ".join(
-            _plural(count, noun)
-            for count, noun in ((counts[ROW_HOST], "orphan host"),
-                                (counts[ROW_WORKTREE], "leaked worktree"))
-            if count
-        )
-        projects.append({
-            "name": entry.get("name", ""),
-            "root": entry.get("root", ""),
-            "elapsed": project.get("elapsed"),
-            "lines": shown,
-            "noise": {"summary": summary, "lines": folded},
-        })
-    return {"projects": projects, "alerts": alerts}
+    return panel.view(loaded.document, acting=acting, jobs=jobs)
 
 
 def freshness_fields(loaded: Loaded, served_at: float) -> dict[str, Any]:
@@ -565,7 +505,8 @@ class WebApp:
                 nonce, "not allowed", "Only a confirmed action is sent here."), nonce,
                 [("Allow", "GET")])
         if target.path == "/":
-            return _html(HTTPStatus.OK, webpage.page(nonce, warning=self.insecure), nonce)
+            return _html(HTTPStatus.OK, webpage.page(nonce, panel.WORDS, warning=self.insecure),
+                         nonce)
         if target.path == "/api/state":
             return self._state(device)
         query = parse_qs(target.query)
@@ -599,11 +540,12 @@ class WebApp:
         except Exception as exc:  # noqa: BLE001 - shown to the page; the next read runs
             return _json(HTTPStatus.SERVICE_UNAVAILABLE,
                          {"error": f"{type(exc).__name__}: {exc}"})
+        jobs = self.remote.recent(device) if self.remote is not None else []
         return _json(HTTPStatus.OK, {
             "document": loaded.document,
-            "view": view(loaded, acting=self.remote is not None),
+            "view": view(loaded, acting=self.remote is not None, jobs=jobs),
             "freshness": freshness_fields(loaded, self.clock()),
-            "jobs": self.remote.recent(device) if self.remote is not None else [],
+            "jobs": jobs,
         })
 
     def _act(self, request: Request, headers: Mapping[str, str], device: Device) -> Response:

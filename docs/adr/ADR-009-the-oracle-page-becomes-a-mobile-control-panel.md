@@ -1,10 +1,10 @@
 # ADR-009 — The oracle page becomes a mobile control panel, and the oracle gains destructive powers
 
-- **Status:** Accepted, not yet implemented. The user approved the mobile
+- **Status:** Accepted, partly implemented. The user approved the mobile
   mockup on 2026-10-23. IDEA_027 builds it in increments (D14): D2–D6, D8,
-  D11 and D12 land with increment 3, D10 with increment 4, D9 with increment
-  5, and D1's destructive actions with D7's guards in increments 6 and 7,
-  after IDEA_024 and BUG_078. The design of record (screens, components,
+  D11 and D12 shipped with increment 3; D10 lands with increment 4, D9 with
+  increment 5, and D1's destructive actions with D7's guards in increments 6
+  and 7, after IDEA_024 and BUG_078. The design of record (screens, components,
   tokens, wording) is [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23
 - **Supersedes:** nothing. It amends ADR-007 in one place: the oracle is no

@@ -13,7 +13,8 @@ increments have shipped: the page, confirm-first actions from it, and the
 page served always by a second LaunchAgent ("Shipped: the web page" below,
 ADR-008). IDEA_026 serves that page over HTTPS with Tailscale's certificate
 ("Over HTTPS" below, ADR-008 D19–D24). IDEA_027 is turning that page into a
-mobile control panel ("What is changing: the control panel" below, ADR-009).
+mobile control panel: its increment 3, the plain-language panel, has shipped
+("The control panel" below, ADR-009), and increments 4 to 7 are to come.
 
 | # | Increment | Status |
 |---|---|---|
@@ -46,6 +47,7 @@ graph TD
         ACTIONS[actions]
         TUI["tui (Textual, the [oracle] extra)"]
         WEB["web (IDEA_023, ADR-008)"]
+        PANEL["panel (IDEA_027, ADR-009)"]
         WEBPAGE[webpage]
         WEBACT["webactions (IDEA_023 inc 2)"]
         WEBSVC["webservice (IDEA_023 inc 3)"]
@@ -113,8 +115,10 @@ graph TD
     WEB --> DASH
     WEB --> DEVICES
     WEB --> WEBPAGE
-    WEB --> SCAN
+    WEB --> PANEL
     WEB --> WATCH
+    PANEL --> SCAN
+    PANEL --> SIGNALS
     WEBPAGE --> WATCH
     DEVICES --> INDEX
     DEVICES --> HOME
@@ -124,7 +128,7 @@ graph TD
     WEBACT --> SCAN
     WEBACT --> HOME
     WEBACT --> SIGNALS
-    WEB --> SIGNALS
+    WEBACT --> PANEL
     CLI --> WEBSVC
     LAUNCHD -. its second plist runs oracle web --wait .-> WEBSVC
     WEBSVC --> WEB
@@ -711,9 +715,10 @@ ADR-008's. The person-facing setup is the guide's
 
 | Module | Owns | Never does |
 |---|---|---|
-| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, each line naming its row by `row_key` and, when the app acts, its action; each project's quiet orphan hosts and leaked worktrees folded into one summary) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps; with a `Served`, TLS per connection in that connection's thread, and a `307` to the https name for plain HTTP), the HTTPS rules (only the certificate's name as `Host`, the `https` origin, the `Secure` cookie), the plain-HTTP warning, and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
-| `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, the action, the job and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
-| `webpage` | The HTML: the self-contained page with its inline style and script, the confirm panel and the action list, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce |
+| `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, which is `panel.view`, with the device's recent jobs) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps; with a `Served`, TLS per connection in that connection's thread, and a `307` to the https name for plain HTTP), the HTTPS rules (only the certificate's name as `Host`, the `https` origin, the `Secure` cookie), the plain-HTTP warning, and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
+| `panel` | The control panel's view model (IDEA_027, ADR-009): the attention groups and their order, the summary strip's counts, the leftovers, each session's detail, and the one wording table (`WORDS`, chips, sentences, lanes and phases, `step_words`, `confirm_words`, `result_words`, `copy_line`). Pure: the `assess` document in, words out | Import `actions`, `webactions` or `hosts/`; show an engine name, a path, an argv, a pid or a host id outside a detail's "Technical details"; give a fact it does not know a phrase |
+| `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, with the sheet's words from `panel`, the action, the job with its result's words, and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
+| `webpage` | The HTML: the self-contained control panel with its token CSS and its script (the overview, detail and leftovers screens, the confirm and result bottom sheets, copy), `WORDS` embedded from `panel`, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce; hold a word of its own |
 | `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
 | `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; keep the certificate due, swap a renewal into the listener, listen again over HTTPS or plain HTTP when that changes; its report, `oracle/web.json`; `web_status`, `cert_text` and their wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
 | `tls` | The page's certificate (IDEA_026): `issue`, Tailscale's CLI asked through stdout; `split_pem` and `cert_info`, the chain, the key, the names and the expiry, read with the standard library; `Certificates`, the kept `web/tls/oracle.pem` and when to ask again; `Served`, the certificate and context a listener serves, swapped together; `RecordingIssuer` for tests | Run `tailscale` except through its injected runner; write the key anywhere but its owner-only file; replace a good pair with one that does not load |
@@ -741,7 +746,7 @@ D22).
 | `POST /pair` (form, same origin) | redeems the code: a 303 to `/` with the cookie, else 403 | the same |
 | `GET /` | 401, a minimal "not paired" page | the page |
 | `GET /api/state` | 401, the same page | `{document, view, freshness, jobs}`; a read that raises is a 503 with its error, and the next read runs |
-| `GET /api/confirm?row=<key>` | 401 | what the confirm shows: `{row, subject, kind, lines, refused, nonce, expires_in}`; no `row` is a 400, a row not there a 404 |
+| `GET /api/confirm?row=<key>` | 401 | what the confirm shows: `{row, subject, kind, lines, words, refused, nonce, expires_in}`; no `row` is a 400, a row not there a 404 |
 | `POST /api/act` (JSON or form: `row`, `nonce`) | 401 | needs a same-origin `Origin`: 202 with the job, else 403 (origin, nonce), 409 (refused, changed, busy), 503 (no read, no audit) |
 | `GET /api/job?id=<id>` | 401 | the job, to the device that started it; else 404 |
 | anything else | 401 | 404, or 405 for a method that is not `GET` |
@@ -760,37 +765,76 @@ and `connect-src 'self'`.
 
 `document` is `oracle list --json`'s, read through `dashboard.load` (the
 snapshot while fresh, else a scan, behind its banner). One read runs at a
-time. `view` is per project: its lines, from `dashboard.lines`, with the TUI's
-tones. A waiting session is red. The recommendation is shown as text: label,
-command, directory and detail. The quiet orphan hosts and leaked worktrees
-come last, behind one line such as "12 orphan hosts, 1 leaked worktree, no
-alert", which opens on a tap and stays open across refreshes. `freshness` is
-`{source, age, interval, stale_after, stale, text, served_at, banner}`.
+time. `view` is `panel.view` of it, the control panel's view model
+(IDEA_027 increment 3, ADR-009 D2–D5, D8): the summary strip's four tiles,
+the groups in attention order (needs you, problems, working, idle) with
+their cards, the leftovers card and screen, and each session's detail,
+keyed by its row key. `jobs` are the device's last 20 actions, each with its
+result in words. `freshness` is `{source, age, interval, stale_after, stale,
+text, served_at, banner}`. The screens, components, tokens and every word are
+specified in [oracle-panel.md](oracle-panel.md); this section says how they
+are served.
 
-The script fetches `/api/state` on a timer at the snapshot's interval, with
-no meta refresh, so the scroll position survives. After a failure it waits
-the interval doubled per failure, up to 60 s, and it never stops. The top
-line says `updated N s ago` and turns red once the rows are older than
-`stale_after`, three intervals. The loop's logic is the `ORACLE` object,
-which touches no page, and the suite drives it under `node`, else macOS's
-`jsc`.
+```mermaid
+graph LR
+    DOC["assess document"] --> PV["panel.view"]
+    JOBS["device's jobs"] --> PV
+    PV --> STATE["/api/state: view"]
+    WORDS["panel.WORDS"] --> PAGE["GET /: the page, WORDS embedded"]
+    STATE --> SCRIPT["ORACLE.screen: overview, detail or leftovers"]
+    PAGE --> SCRIPT
+```
+
+**The page holds no vocabulary** (ADR-009 D3). The fixed strings are
+`panel.WORDS`, embedded in the script as JSON when `GET /` is served (with
+`<`, `>` and `&` escaped, so no word can end the script). Every other word,
+the chips, sentences, button labels, ages and the leftovers' lines, arrives
+in `view`. The default view, the strip, the cards and the leftovers card,
+holds no path, argv, pid, host id or engine state name, which a test checks
+against the machine fixture. Those live in a detail's "Technical details".
+
+**Drawing.** The script's `ORACLE` object owns the loop and every screen's
+drawing: `ORACLE.screen(view, ui, h, on, now)` takes an element builder `h`
+and the actions `on`, so the suite runs it, and the whole script against a
+fake document, under `node` or macOS's `jsc` (`tests/test_oracle_webpage.py`).
+The detail and leftovers screens are views inside the page, not routes, and
+`history.pushState` makes the phone's back gesture return to the overview at
+the scroll position it left. A detail whose session has gone falls back to
+the overview.
+
+**Refresh.** The script fetches `/api/state` on a timer at the snapshot's
+interval, with no meta refresh. After a failure it waits the interval
+doubled per failure, up to 60 s, says so under the header, and never stops.
+The freshness line says `Live · updated N s ago` and turns red, `Stale ·
+updated N s ago`, once the rows are older than `stale_after`, three
+intervals. A refresh redraws the screen the person is on and keeps the open
+detail, every open disclosure and the scroll position. An open sheet is not
+redrawn by a refresh.
 
 ### Actions from the page
 
-A row whose step is `run` or `terminal` has a button (`run…`, `open a
-session…`); an `info` step, a nested host line and a row with no step have
-none. The actions are the TUI's, under the TUI's rules (ADR-007 D18,
-ADR-008 D8–D13):
+A card in needs you or problems whose step is `run` or `terminal` has a
+primary button named from the wording table ("Re-run tests…", "Merge…",
+"Resume…"), and so does the step in its detail. An `info` step, a row with no
+step and a step the table does not know have none. A row waiting on a prompt
+has no button at all: its card opens its detail (ADR-009 D8). The actions are
+the TUI's, under the TUI's rules (ADR-007 D18, ADR-008 D8–D13):
 
 | Step | What happens |
 |---|---|
-| press the button | `GET /api/confirm`: the server scans afresh, finds the row by its key, derives the step and answers `refusal`'s reason, or the `info` text, or `Actions.describe`'s lines (the exact `argv`, `cwd`, each added variable and the note that host markers and `INVARIANT_SESSION_ID` are removed) and a nonce. A terminal step adds the launch line and the Remote Control name. Cancel is focused; nothing has run |
-| press Run it (Open it) | `POST /api/act` with `{row, nonce}` and nothing else. The nonce is spent; the server scans again, checks every refusal again and that the step is the one confirmed (`command_of`), reserves the row, writes the audit start line, and answers 202 with a job. A thread runs `Actions.perform` |
-| afterwards | the panel polls `/api/job` every second until the job is done: `exit N in T s` and the output's last 64 KiB, or `launched` with the successor watch's verdict for a terminal. The state loop keeps refreshing throughout, and `/api/state` carries the device's last 20 jobs, so a reload still shows the result |
+| press the button | `GET /api/confirm`: the server scans afresh, finds the row by its key, derives the step and answers `refusal`'s reason, or the `info` text, or the TUI's confirm lines and a nonce, with `words`: `panel.confirm_words`, the sheet's title, sentence, deed, the command as one shell line, the place in plain words, the exact folder, each added variable and a terminal's launch line (previewed once). The bottom sheet shows the question, the command with Copy, the rest behind "Exact folder and environment", the deed over Cancel, which is focused, and the nonce counting down; at zero the deed is disabled and "Look again" asks for a new confirm. A destructive step (`session teardown`) lists what it deletes, puts Cancel first and the command behind "Exact command". Nothing has run |
+| press the deed ("Run tests", "Merge", "Open window") | `POST /api/act` with `{row, nonce}` and nothing else. The nonce is spent; the server scans again, checks every refusal again and that the step is the one confirmed (`command_of`), reserves the row, writes the audit start line, and answers 202 with a job. A thread runs `Actions.perform` |
+| afterwards | the sheet polls `/api/job` every second until the job is done, then shows its `words` (`panel.result_words`: "Done in N s", "Failed, exit N", "Opened in a new window") and the output's last 64 KiB behind a closed "Show full output". The state loop keeps refreshing throughout, and `/api/state` carries the device's last 20 jobs, which a session's detail lists under "Recent", so a reload still shows the result |
+
+**Copy.** The detail's step and every confirm carry Copy, which puts
+`panel.copy_line` on the clipboard: `shlex.join` of the argv, its pinned
+variables leading as `NAME=value`. It runs nothing and spends no nonce. Over
+plain HTTP the clipboard is not available, so the command is shown and
+selected instead (ADR-009 D5).
 
 | Refused when | Answer |
 |---|---|
-| the row waits on a prompt, the argv is not `invariant`, the cwd does not exist, the kind is unknown | the confirm shows the reason and offers no Run; an action is a 409 with it |
+| the row waits on a prompt, the argv is not `invariant`, the cwd does not exist, the kind is unknown | the confirm shows the reason and offers no deed; an action is a 409 with it |
 | the nonce is unknown, spent, expired, another device's or another row's | 403; it is spent either way |
 | the step changed since the confirm, the row is gone, the row's last action still runs, four already run | 409 |
 | no `Origin`, a foreign one (another host, port or scheme: an `http://` origin on the HTTPS page), or `Sec-Fetch-Site` other than `same-origin` | 403, before the body is read |
@@ -972,22 +1016,22 @@ sequenceDiagram
 | Tailscale answers `status --json` with something that is not JSON | Treated as no certificate; the error quotes the answer's first line (`did not print JSON; it said: …`) |
 | `--allow-loopback` | Plain HTTP on loopback, no warning, nothing asked of Tailscale |
 
-## What is changing: the control panel (IDEA_027)
+## The control panel (IDEA_027)
 
 The web page above is being redesigned as a mobile control panel. The
 decisions are ADR-009's, and the design of record (screens, components,
 tokens, wording, the increment plan) is
-[oracle-panel.md](oracle-panel.md). Until each increment lands, the
-sections above describe what is served.
+[oracle-panel.md](oracle-panel.md).
 
-- **Increments 3 to 5** change only the view and the page, and add a failure
-  summariser. A new pure module, `oracle/panel`, groups the rows by
-  attention (needs you, problems, working, idle; leftovers on their own
-  screen), counts them for the summary strip and words every label from one
-  table. `web.view` calls it, and `webactions` reads its confirm and result
-  wording. Then a session detail view, copy command, bottom-sheet confirms,
-  the home-screen app (manifest, icon, safe areas, under the same CSP and
-  token), and a one-line reason for a failed action.
+- **Increment 3 has shipped**: the plain-language panel. `oracle/panel`
+  groups the rows by attention, counts them for the summary strip, and words
+  every label from one table; `web.view` is its view, `webactions` reads its
+  confirm and result words, and `webpage` draws the overview, the session
+  detail, the leftovers screen and the bottom sheets ("What the page shows"
+  and "Actions from the page" above).
+- **Increments 4 and 5** are to come: the home-screen app (manifest, icon,
+  safe areas, under the same CSP and token) and a one-line reason for a
+  failed action.
 - **Increments 6 and 7** give the oracle destructive powers: close a
   leftover host (IDEA_025) and the clean-up and unstick actions (IDEA_017).
   This amends ADR-007's read-only premise (ADR-009 D1). The scan, the

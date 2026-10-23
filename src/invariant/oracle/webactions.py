@@ -1,10 +1,10 @@
 """The web page's confirm-first actions: a transport over ``oracle/actions``.
 
 The rules are the TUI's (ADR-007 D18): ``step_for`` turns a row into a step,
-``refusal`` says why it may not run, ``Actions.describe`` is the confirm text
-and ``Actions.perform`` is the dispatch. Nothing here adds a rule about what
-may run. What a confirm from another device needs on top is here (ADR-008
-D8–D12):
+``refusal`` says why it may not run, ``confirm_lines`` (``Actions.describe``,
+with the launch previewed once) is the confirm text and ``Actions.perform`` is
+the dispatch. Nothing here adds a rule about what may run. What a confirm from
+another device needs on top is here (ADR-008 D8–D12):
 
 * **The server decides what runs.** The page names a row by its stable key
   (:func:`~invariant.oracle.scan.row_key`) and nothing else. The server reads
@@ -23,6 +23,9 @@ D8–D12):
 * **Every action is audited** (:class:`AuditLog`): a line when it starts and a
   line when it ends, in ``<oracle home>/web/actions.log``, owner-only from
   creation. An action that cannot be recorded does not run.
+
+The confirm and every job also carry their words from ``oracle/panel``: the
+sheet's title, sentence and deed, and the result's headline (ADR-009 D3, D6).
 
 The oracle never answers a permission prompt, and neither does this: there is
 no route to one, and ``refusal`` refuses a step on a row that waits on one.
@@ -43,11 +46,13 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import StateError
+from . import panel
 from .actions import (
     Actions,
     Outcome,
     Step,
     command_of,
+    confirm_lines,
     refusal,
     step_for,
     terminal_request,
@@ -242,13 +247,16 @@ class Job:
     _began: float = field(default=0.0, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        """The job as the page reads it, with its outcome in the panel's words."""
+        body = {
             "id": self.id, "row": self.row, "subject": self.subject, "kind": self.kind,
             "argv": list(self.argv), "cwd": self.cwd, "started": self.started,
             "remote_control": self.remote_control, "state": self.state, "ok": self.ok,
             "status": self.status, "output": self.output, "elapsed": self.elapsed,
             "audit_error": self.audit_error,
         }
+        body["words"] = panel.result_words(body)
+        return body
 
 
 class RemoteActions:
@@ -285,9 +293,14 @@ class RemoteActions:
         return find_row(document, key), None
 
     def confirm(self, device: Device, key: str) -> Answer:
-        """What the confirm view shows for row ``key``, and its nonce if it may run."""
+        """What the confirm view shows for row ``key``, and its nonce if it may run.
+
+        ``lines`` are the TUI's confirm, word for word; ``words`` are the same
+        step in the panel's words, for the bottom sheet (ADR-009 D6).
+        """
         body: dict[str, Any] = {"row": key, "nonce": None, "refused": None, "lines": [],
-                                "kind": None, "subject": "", "expires_in": None}
+                                "kind": None, "subject": "", "expires_in": None,
+                                "words": None}
         row, failed = self._read(key)
         if failed:
             return Answer(HTTPStatus.SERVICE_UNAVAILABLE, {**body, "refused": failed})
@@ -303,7 +316,10 @@ class RemoteActions:
             return Answer(HTTPStatus.OK, {**body, "refused": reason})
         if step.kind == INFO:
             return Answer(HTTPStatus.OK, {**body, "lines": [t for t in (step.label, step.detail) if t]})
-        lines = self.actions.describe(step)
+        launch = self.actions.launch_line(step)
+        lines = confirm_lines(step, launch)
+        words = panel.confirm_words(row, row.get("project_name") or "", step.argv, step.kind,
+                                    step.cwd, step.env, launch)
         if step.kind == TERMINAL:
             name, _ = terminal_request(step)
             lines.append(
@@ -312,7 +328,7 @@ class RemoteActions:
             )
         confirm = self.confirms.issue(device.id, key, step)
         return Answer(HTTPStatus.OK, {**body, "lines": lines, "nonce": confirm.nonce,
-                                      "expires_in": self.confirms.ttl})
+                                      "expires_in": self.confirms.ttl, "words": words})
 
     def act(self, device: Device, key: str, nonce: str) -> Answer:
         """Run row ``key``'s step, which ``nonce`` confirmed, if it still may."""

@@ -36,7 +36,7 @@ import test_oracle_scan
 from invariant.cli import main as cli_main
 from invariant.cli.main import main
 from invariant.core.errors import InvariantError, StateError, UsageError
-from invariant.oracle import dashboard, web, webpage
+from invariant.oracle import dashboard, panel, web, webpage
 from invariant.oracle.devices import (
     CODE_LENGTH,
     COOKIE_NAME,
@@ -443,58 +443,50 @@ def _document(world) -> dict:
 
 
 class TestView:
-    def test_every_project_is_there_with_its_sessions(self, machine_world):
-        shown = view(_loaded(_document(machine_world)))
-        names = [p["name"] for p in shown["projects"]]
-        assert names == ["alpha", "beta", "gamma"]
-        alpha = shown["projects"][0]
-        subjects = [line["subject"] for line in alpha["lines"]]
-        assert any("a-live" in s for s in subjects)
+    """``web.view`` is the panel's view; ``test_oracle_panel`` pins the panel itself."""
 
-    def test_a_waiting_session_is_red_and_counted(self, machine_world):
+    def test_the_machine_is_grouped_by_attention(self, machine_world):
         shown = view(_loaded(_document(machine_world)))
-        alpha = shown["projects"][0]
-        waiting = next(l for l in alpha["lines"] if "a-live" in l["subject"] and not l["nested"])
-        assert waiting["tone"] == dashboard.RED
-        assert waiting["status"] == dashboard.FLAG_ALERT
-        assert any(s["text"].startswith("waiting") and s["tone"] == dashboard.RED
-                   for s in waiting["signals"])
-        assert shown["alerts"] >= 1
+        assert [g["id"] for g in shown["groups"]][:2] == ["needs", "problems"]
+        assert [t["id"] for t in shown["tiles"]] == ["needs", "problems", "working",
+                                                      "leftovers"]
+        needs = shown["groups"][0]["cards"]
+        assert any(c["row"].endswith("|a-live") for c in needs)
+        assert any(c["row"].endswith("|g-rev") for c in needs)
 
-    def test_orphan_hosts_and_leaked_worktrees_collapse_into_a_summary(self, machine_world):
+    def test_a_waiting_session_needs_you_and_has_no_button(self, machine_world):
+        shown = view(_loaded(_document(machine_world)), acting=True)
+        waiting = next(c for c in shown["groups"][0]["cards"] if c["row"].endswith("|a-live"))
+        assert waiting["button"] is None and waiting["tap"] is True
+        assert waiting["chips"][0]["text"] == "Waiting for your permission"
+
+    def test_orphan_hosts_and_leaked_worktrees_are_leftovers(self, machine_world):
         shown = view(_loaded(_document(machine_world)))
-        beta = shown["projects"][1]
-        assert all(l["kind"] not in ("host", "worktree") or l["tone"] in ("red", "amber")
-                   for l in beta["lines"])
-        noise = beta["noise"]
-        assert noise["lines"]
-        assert {l["kind"] for l in noise["lines"]} <= {"host", "worktree"}
-        assert "orphan host" in noise["summary"]
-        assert "1 leaked worktree" in noise["summary"]
+        assert shown["summary"]["leftovers"] >= 2
+        hosts, folders = shown["leftovers"]["sections"]
+        assert hosts["count"] >= 1 and folders["count"] == 1
+        assert "1 left-over folder" in shown["leftovers_card"]["line"]
+        shown_rows = [c["row"] for g in shown["groups"] for c in g["cards"]]
+        assert not [r for r in shown_rows if "|worktree:" in r or "|host:" in r]
 
-    def test_a_project_with_no_noise_says_nothing(self, machine_world):
-        shown = view(_loaded(_document(machine_world)))
-        alpha = shown["projects"][0]
-        assert alpha["noise"] == {"summary": "", "lines": []}
+    def test_the_recommendation_is_a_step_with_its_command_to_copy(self, machine_world):
+        shown = view(_loaded(_document(machine_world)), acting=True)
+        rev = next(d for k, d in shown["details"].items() if k.endswith("|g-rev"))
+        assert rev["step"]["copy"] == "invariant session merge --id g-rev"
+        assert rev["step"]["button"] == {"text": "Merge…"}
 
-    def test_the_recommendation_is_text(self, machine_world):
-        shown = view(_loaded(_document(machine_world)))
-        gamma = shown["projects"][2]
-        rev = next(l for l in gamma["lines"] if "g-rev" in l["subject"])
-        assert rev["next"] == "invariant session merge --id g-rev"
-        assert rev["label"]
-        assert rev["where"] == str(machine_world["gamma"].root)
-
-    def test_an_orphan_host_with_an_alert_is_not_collapsed(self):
+    def test_an_orphan_host_with_an_alert_is_not_a_leftover(self):
         document = {"projects": [{"project": {"key": "k", "name": "p", "root": "/p"},
                                   "elapsed": 0.0,
-                                  "rows": [{"kind": "host", "hosts": [{"host_session_id": "h"}],
+                                  "rows": [{"kind": "host", "project": "k",
+                                            "hosts": [{"host_session_id": "h"}],
                                             "signals": [{"kind": "waiting", "detail": "x",
+                                                         "cause": "question",
                                                          "alert": True, "severity": "high"}],
                                             "recommendation": None}]}]}
         shown = view(_loaded(document))
-        assert len(shown["projects"][0]["lines"]) == 1
-        assert shown["projects"][0]["noise"]["lines"] == []
+        assert shown["summary"]["needs"] == 1 and shown["summary"]["leftovers"] == 0
+        assert shown["leftovers_card"] is None
 
     def test_freshness_follows_the_snapshot_rule(self):
         fresh = web.freshness_fields(_loaded({"projects": []}, age=2.0), served_at=10.0)
@@ -716,7 +708,7 @@ class TestPaired:
         assert response.header("content-type") == "application/json"
         body = json.loads(response.body)
         assert body["document"] == json.loads(json.dumps(document))
-        assert body["view"]["projects"][0]["name"] == "alpha"
+        assert body["view"]["groups"][0]["id"] == "needs"
         assert body["freshness"]["source"] == "snapshot"
         assert body["freshness"]["interval"] == 5.0
         assert body["freshness"]["stale"] is False
@@ -792,14 +784,14 @@ ENGINE = _javascript()
 
 
 def _script() -> str:
-    page = webpage.page("n", interval=5.0)
+    page = webpage.page("n", panel.WORDS, interval=5.0)
     start = page.index('<script nonce="n">') + len('<script nonce="n">')
     return page[start:page.index("</script>", start)]
 
 
 class TestThePageScript:
     def test_the_loop_is_on_a_timer_not_a_meta_refresh(self):
-        page = webpage.page("n", interval=5.0)
+        page = webpage.page("n", panel.WORDS, interval=5.0)
         assert "http-equiv" not in page
         script = _script()
         assert "setTimeout" in script and "fetch(" in script
@@ -847,8 +839,8 @@ const loop = ORACLE.makeLoop({
         assert result["failures"] == 0
         assert result["age"] == pytest.approx(3.5)
         assert result["later"] == pytest.approx(21.0)
-        assert result["fresh"] == {"text": "updated 4s ago", "stale": False}
-        assert result["stale"]["stale"] is True and "STALE" in result["stale"]["text"]
+        assert result["fresh"] == {"text": "Live · updated 4 s ago", "stale": False}
+        assert result["stale"] == {"text": "Stale · updated 21 s ago", "stale": True}
         assert result["never"]["stale"] is True
         assert result["cap"] == web.MAX_BACKOFF
 
@@ -1143,7 +1135,9 @@ class TestTheCommands:
         store = DeviceStore(oracle_home())
         token = _paired(store)
         body = json.loads(_get(app, "/api/state", token=token).body)
-        assert [p["name"] for p in body["view"]["projects"]] == ["alpha", "beta", "gamma"]
+        rows = [c["row"] for g in body["view"]["groups"] for c in g["cards"]]
+        assert {r.split("|")[1] for r in rows} == {
+            "a-live", "a-parked", "b-strand", "b-dead", "g-rev"}
         assert body["freshness"]["source"] == "scan"
 
     @pytest.mark.parametrize("port", ["0", "70000", "-1"])
@@ -1241,7 +1235,7 @@ def test_the_guard_refuses_the_real_tailscale():
 def test_the_web_modules_import_no_host_and_no_toolkit():
     import re
 
-    for name in ("web.py", "webpage.py", "devices.py"):
+    for name in ("web.py", "webpage.py", "devices.py", "panel.py"):
         source = (Path(web.__file__).parent / name).read_text()
         imports = re.findall(r"^\s*(?:from|import)\s+(\S+)", source, re.MULTILINE)
         assert not [i for i in imports if "hosts" in i or "textual" in i or "tui" in i], name
@@ -1402,7 +1396,7 @@ class TestTheServerOverTls:
             server.serve_in_background()
             status, body, _, peer = _tls_get(port, "/api/state",
                                              headers={"Cookie": f"{COOKIE_NAME}={token}"})
-            assert status == 200 and json.loads(body)["view"] == {"projects": [], "alerts": 0}
+            assert status == 200 and json.loads(body)["view"]["groups"] == []
             assert peer == _der("a")
             renewed, _ = _served(tmp_path, "b")
             served.renew(renewed.certificate, renewed.context)

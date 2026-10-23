@@ -16,8 +16,9 @@ the design is in [the oracle's architecture page](../architecture/oracle.md).
 
 The page is being redesigned as a mobile control panel (IDEA_027, ADR-009).
 The setup on this page stays the same: Tailscale, the LaunchAgent, pairing,
-and confirm-first actions. What changes is what you see and what you can do
-from it:
+and confirm-first actions.
+
+Shipped so far, the plain-language panel ("Using the page" below):
 
 - The first screen leads with a strip of counts (need you, problems,
   working, leftovers), and each count jumps to its group. Sessions that need
@@ -29,8 +30,12 @@ from it:
 - A confirm opens from the bottom of the screen. It says in one line what
   will happen, shows the command, and hides the exact folder and environment
   behind a toggle.
+
+Still to come:
+
 - A failed action says why in one sentence, with the full output behind
-  "Show full output".
+  "Show full output". Until then the result says "Failed, exit N", with the
+  output behind that toggle.
 - The page can be added to the home screen as an app, with its own icon. On
   iOS it may need pairing once more from inside the app. This page will say
   how, once that is checked.
@@ -200,26 +205,71 @@ interpreter (it may be listed as `python3` or by its version). The agent and
 
 ## Using the page
 
-The top line says `updated N s ago`. It turns red, with STALE, once the rows
-are older than three refresh intervals, which means the watcher stopped or
-the page cannot reach the Mac. The page refreshes itself every few seconds
-and keeps trying after a failure. When the Mac comes back (after a restart of
-the agent, a reboot or a Tailscale reconnect), the page recovers by itself.
-Switching back to the tab, or unlocking the phone with it open, makes it read
-again at once.
+**Sessions** is the first screen. Under its title, "Live · updated N s ago"
+says how fresh the rows are. It turns red and reads "Stale" once they are
+older than three refresh intervals, which means the watcher stopped or the
+page cannot reach the Mac. The page refreshes itself every few seconds and
+keeps trying after a failure, saying so under the title. When the Mac comes
+back (after a restart of the agent, a reboot or a Tailscale reconnect), the
+page recovers by itself. Switching back to the tab, or unlocking the phone
+with it open, makes it read again at once, and so does the round Refresh
+button.
 
 A red line under the title saying the page is served over plain HTTP means
 the Mac has no HTTPS certificate yet; it says why. The page still works.
 Once the Mac gets a certificate, a page left open over plain HTTP moves
 itself to the https name on its next refresh.
 
-A row with something to run has a button. Pressing it shows exactly what
-would run, where, and with which variables. Nothing runs until you press Run
-it. A step that resumes a session opens a Terminal window on the Mac, whether
-or not anyone is at it, and you can pick that session up from Claude Code's
-Remote Control on the phone. The page never answers a permission prompt.
-Every action is logged on the Mac in `~/.invariant/web/actions.log`, and
-`oracle status` shows the last one.
+**The strip** counts what needs you, the problems, what is working and the
+leftovers. Tap a count to jump to its group. A count of 0 still shows.
+
+**The groups**, in order:
+
+| Group | What is in it |
+|---|---|
+| Needs you | A Claude window waiting for your permission or your answer, and finished sessions ready for review or to merge |
+| Problems | Failing tests, a check that refused a step, no progress for a while, a broken hook, a Claude window that closed without saying so, a session whose folder is gone, a project that cannot be read |
+| Working | Claude is working on it, and nothing above holds |
+| Idle | Every other live session: waiting for your next message, paused, merged and ready to clean up |
+
+A card in Needs you or Problems shows its project, how long the condition
+has lasted, the session's title, its state in plain words and, when there is
+one, a button for its next step ("Re-run tests…", "Merge…", "Resume…") next
+to Details. A card waiting for your permission or answer has no button: tap
+it for its details, and answer the prompt in Claude on your Mac or phone. The
+page never answers a prompt. Working and idle sessions are one-line cards;
+tap one for its details.
+
+**A session's details** say what is going on in a sentence or two, the
+suggested next step with its button and a Copy button, "Recent" (the
+session's dated events and your own actions on it, newest first), and
+"Technical details", closed until you open it: the session id, its state and
+lane, its folder, and each Claude window's id and process id. Back, or the
+phone's back gesture, returns to where you were in the list.
+
+**Leftovers** are the Claude windows with no session and the left-over
+folders that need nothing from you. The tile or the card at the bottom of
+the list opens them. The first three of each kind show, then "Show N more".
+For now they are listed only; closing and removing them comes later.
+
+**Running a step.** The button opens a sheet from the bottom. It asks the
+question ("Re-run the tests?"), says in one sentence what happens and what
+it does not touch, and shows the command, with Copy, and where it runs in
+plain words. "Exact folder and environment" opens to show the exact folder
+and each variable it adds. Nothing runs until you press the button named for
+the deed ("Run tests", "Merge", "Open window"); Cancel is selected when the
+sheet opens. The confirm lasts two minutes and counts down; once it expires,
+"Look again" asks the Mac afresh. The result appears in the same sheet:
+"Done in N s", or "Failed, exit N", with the command's output behind "Show
+full output". A step that resumes a session opens a Terminal window on the
+Mac, whether or not anyone is at it, and you can pick that session up from
+Claude Code's Remote Control on the phone. Every action is logged on the Mac
+in `~/.invariant/web/actions.log`, and `oracle status` shows the last one.
+
+**Copy** puts the exact command on the clipboard, with any variable it needs
+in front, so you can run it in a terminal of your own. Copying runs nothing.
+Over plain HTTP the phone does not allow the clipboard, so the command is
+shown and selected for you to copy.
 
 ## Troubleshooting
 

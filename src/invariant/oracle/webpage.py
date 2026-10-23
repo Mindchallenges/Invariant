@@ -1,43 +1,49 @@
-"""The HTML the oracle's web server sends: one page and three small ones.
+"""The HTML the oracle's web server sends: the control panel and three small pages.
 
-Everything is inline, so the page needs nothing but the Mac it came from: no
-CDN, no font, no image. The script and the style carry the response's nonce,
-which the Content-Security-Policy ``oracle/web`` sends is the only thing it
-lets run. The script builds every element with ``textContent``, never
-``innerHTML``, so a row's text is never read as markup.
+The panel (IDEA_027, ADR-009) is one page with three screens drawn in it, the
+overview, a session's detail and the leftovers, and bottom sheets for a
+confirm and its result. Everything is inline, so the page needs nothing but
+the Mac it came from: no CDN, no font, no image; the few icons are inline SVG.
+The script and the style carry the response's nonce, which the
+Content-Security-Policy ``oracle/web`` sends is the only thing it lets run.
+The script builds every element with ``textContent``, never ``innerHTML``, so
+a row's text is never read as markup.
+
+**It holds no vocabulary** (ADR-009 D3). Every word it shows comes from
+``oracle/panel``: the fixed strings are embedded here as ``WORDS``, and the
+rest arrives with every read of ``/api/state``. The script groups, counts and
+words nothing; it draws what the view says.
 
 **It always refreshes** (ADR-008 D6). The script fetches ``/api/state`` on a
-timer, not with a meta refresh, so the scroll position and an opened summary
-survive. A failed fetch backs off — the interval doubled per failure, capped
-at :data:`MAX_BACKOFF` — and the loop never stops. When the page is looked
-at again (it becomes visible, regains focus, is restored, or the network
-comes back) a backoff is cut short and it reads at once, so a server that
-restarted is seen as soon as anyone looks. A line at the top says
-``updated N s ago`` and turns red once the rows are older than three
-intervals, the watcher's own staleness rule, which a stalled refresh reaches
-by itself.
+timer, not with a meta refresh. A failed fetch backs off, the interval
+doubled per failure, capped at :data:`MAX_BACKOFF`, and the loop never stops.
+When the page is looked at again (it becomes visible, regains focus, is
+restored, or the network comes back) a backoff is cut short and it reads at
+once. The freshness line says ``Live · updated N s ago`` and turns red,
+``Stale``, once the rows are older than three intervals. A refresh redraws the
+screen the person is on and keeps the open detail, the open disclosures and
+the scroll position; an open sheet is not redrawn at all.
 
-**It acts only on a second, explicit confirm** (ADR-008 D8–D12). A row whose
-step is ``run`` or ``terminal`` has a button. It fetches ``/api/confirm`` and
-shows what the server says would run, word for word as the TUI's confirm, with
-Cancel focused; only the second button posts ``/api/act``, and that carries
-the row key and the confirm's nonce and nothing else. The result is polled
-from ``/api/job`` while the refresh loop goes on, and the device's recent
-actions come back with every refresh.
+**It acts only on a second, explicit confirm** (ADR-008 D8–D12, ADR-009 D6).
+A card's primary button fetches ``/api/confirm`` and shows the step as a
+bottom sheet: the question, one sentence, the command with Copy, the exact
+folder and environment behind a toggle, and the deed button over Cancel,
+which holds focus. The sheet counts the nonce down and disables the deed when
+it expires. Only the deed posts ``/api/act``, carrying the row key and the
+nonce and nothing else; the result is polled from ``/api/job``.
 
-**It follows the page to HTTPS** (ADR-008 D23). The state fetch does not
-follow a redirect. Once the Mac serves HTTPS, a page still open over plain
-HTTP is answered with a redirect to the https name, which the fetch sees as an
-opaque redirect; the page then reloads itself, and the browser follows the
-redirect to the page at its https name. A tailnet page served over plain HTTP
-says so at the top (``warning``), and so does the pairing form.
+**It follows the page to HTTPS** (ADR-008 D23): a state fetch answered with a
+redirect it did not follow reloads the page.
 
-The loop's logic and the small action helpers are the ``ORACLE`` object, which
-touches no page, so the suite drives it under ``node``.
+The loop, the small helpers and every screen's drawing are the ``ORACLE``
+object, which touches no page: each draw function takes the view and an
+element builder, so the suite drives all of it under ``node`` or ``jsc``.
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from html import escape
 
 from .watcher import DEFAULT_INTERVAL, STALE_INTERVALS
@@ -45,404 +51,764 @@ from .watcher import DEFAULT_INTERVAL, STALE_INTERVALS
 #: The longest wait between two refreshes after failures, in seconds.
 MAX_BACKOFF = 60.0
 
-_STYLE = """
-:root { color-scheme: light dark; --red: #d1242f; --amber: #bf6c00; --dim: #8b8b8b;
-        --line: rgba(127,127,127,.25); }
-body { font: 15px/1.4 -apple-system, system-ui, sans-serif; margin: 0; padding: 0 12px 32px; }
-header { position: sticky; top: 0; padding: 10px 0 8px; backdrop-filter: blur(8px);
-         background: Canvas; border-bottom: 1px solid var(--line); }
-h1 { font-size: 17px; margin: 0; }
-h2 { font-size: 15px; margin: 18px 0 6px; }
-#count { font-weight: 600; }
-#fresh { font-size: 13px; color: var(--dim); }
-#fresh.stale { color: var(--red); font-weight: 600; }
-#banner { background: rgba(191,108,0,.15); padding: 6px 8px; border-radius: 6px; margin-top: 6px;
-          font-size: 13px; }
-#insecure { background: rgba(209,36,47,.15); color: var(--red); font-weight: 600;
-            padding: 6px 8px; border-radius: 6px; margin-top: 6px; font-size: 13px; }
-.line { border-left: 4px solid var(--line); padding: 6px 8px; margin: 6px 0;
-        border-radius: 4px; background: rgba(127,127,127,.06); overflow-wrap: anywhere; }
-.line.nested { margin-left: 16px; font-size: 13px; color: var(--dim); }
-.head { display: flex; justify-content: space-between; gap: 8px; }
-.subject { font-weight: 600; }
-.flag { font-size: 12px; }
-.stage { font-size: 13px; color: var(--dim); }
-.signal { font-size: 13px; }
-.next { margin-top: 4px; font-size: 13px; }
-.next code { display: block; white-space: pre-wrap; font-size: 12px; }
-.where, .detail { color: var(--dim); font-size: 12px; }
-.tone-red { border-left-color: var(--red); }
-.tone-red .subject, .tone-red .flag, .signal.tone-red { color: var(--red); }
-.tone-amber { border-left-color: var(--amber); }
-.signal.tone-amber, .tone-amber .flag { color: var(--amber); }
-.signal.tone-dim { color: var(--dim); }
-details.noise summary { color: var(--dim); font-size: 13px; padding: 4px 0; cursor: pointer; }
-.quiet { color: var(--dim); font-size: 13px; }
-form { display: grid; gap: 12px; max-width: 360px; margin-top: 16px; }
-input, button { font: inherit; padding: 10px; }
-input { text-transform: uppercase; letter-spacing: .1em; }
-button.act { margin-top: 6px; font-size: 13px; padding: 6px 10px; }
-#panel { position: fixed; left: 8px; right: 8px; bottom: 8px; max-height: 80vh; overflow: auto;
-         background: Canvas; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
-         box-shadow: 0 4px 24px rgba(0,0,0,.3); }
-#panel h3 { margin: 0 0 8px; font-size: 15px; }
-pre.lines, pre.output { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px;
-                        background: rgba(127,127,127,.1); padding: 8px; border-radius: 4px; }
-pre.output { max-height: 40vh; overflow: auto; }
-.buttons { display: flex; gap: 12px; margin: 8px 0; }
-.refused, .failed, .failed summary { color: var(--red); }
-details.job summary { font-size: 13px; padding: 4px 0; cursor: pointer; }
+#: The tokens of docs/architecture/oracle-panel.md, "Tokens", declared once.
+_TOKENS = """
+:root {
+  color-scheme: dark;
+  --bg: #0B0C0E; --bg-under-sheet: #050506;
+  --surface-card: #16181B; --surface-quiet: #121417; --surface-sheet: #17191C;
+  --surface-inset: #0F1113; --surface-button: #1F2226; --surface-pill: #23262A;
+  --tile-idle: #1A1C1F; --border: #24272B; --grabber: #3A3E44;
+  --text: #F2F3F5; --text-secondary: #A4AAB0; --text-tertiary: #C4C9CE;
+  --chevron: #8A9097; --link: #8FC1FF; --link-pressed: #B9D8FF; --live: #4ADE80;
+  --accent-needs: #FFC266; --tile-needs: #2B2114; --chip-needs: #3A2A12;
+  --accent-problem: #FF8F85; --tile-problem: #2A1716; --chip-problem: #3A1A18;
+  --accent-working: #8FC1FF; --tile-working: #14202D; --chip-working: #142436;
+  --accent-idle: #C4C9CE; --chip-idle: #23262A;
+  --accent-primary: #2563EB; --accent-destructive: #B91C1C; --tick-ground: #13261A;
+  --font: -apple-system, system-ui, "Segoe UI", sans-serif;
+  --mono: ui-monospace, Menlo, monospace;
+}
 """
 
-_SCRIPT = """
-"use strict";
-const MAX_BACKOFF = {max_backoff};
-const STALE_INTERVALS = {stale_intervals};
-const DEFAULT_INTERVAL = {interval};
+_STYLE = _TOKENS + """
+* { box-sizing: border-box; overflow-wrap: normal; word-break: normal; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/22px var(--font);
+       padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+                calc(34px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left)); }
+button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer;
+         -webkit-tap-highlight-color: transparent; }
+a { color: var(--link); text-decoration: none; }
+a:active, .link:active { color: var(--link-pressed); }
+h1, h2, p { margin: 0; }
+#top { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+.headrow { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+.headtext { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#title { font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.4px; }
+#top.sub #title, #top.sub #refresh { display: none; }
+.fresh { display: flex; align-items: center; gap: 6px; font-size: 13px;
+         color: var(--text-secondary); }
+.fresh .dot { width: 7px; height: 7px; border-radius: 4px; background: var(--live);
+              flex-shrink: 0; }
+.fresh.stale { color: var(--accent-problem); }
+.fresh.stale .dot { background: var(--accent-problem); }
+.iconbtn { width: 44px; height: 44px; border-radius: 22px; background: var(--surface-button);
+           display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.notice { border-radius: 14px; padding: 10px 14px; font-size: 14px; line-height: 20px; }
+#insecure { background: var(--tile-problem); color: var(--accent-problem); font-weight: 600; }
+#banner { background: var(--tile-needs); color: var(--accent-needs); }
+#error { background: var(--tile-problem); color: var(--accent-problem); }
+#screen { display: flex; flex-direction: column; gap: 20px; }
+#screen.sub { gap: 18px; }
+.strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.tile { border-radius: 14px; padding: 10px 8px; min-height: 44px; display: flex;
+        flex-direction: column; gap: 2px; }
+.tile .count { font-size: 24px; line-height: 28px; font-weight: 700; }
+.tile .label { font-size: 12px; font-weight: 600; }
+.tile-needs { background: var(--tile-needs); color: var(--accent-needs); }
+.tile-problems { background: var(--tile-problem); color: var(--accent-problem); }
+.tile-working { background: var(--tile-working); color: var(--accent-working); }
+.tile-leftovers { background: var(--tile-idle); color: var(--accent-idle); }
+.group { display: flex; flex-direction: column; gap: 10px; scroll-margin-top: 16px; }
+.heading, .section-label { font-size: 13px; font-weight: 600; letter-spacing: 0.6px;
+                           text-transform: uppercase; color: var(--text-secondary); }
+.group-needs .heading { color: var(--accent-needs); }
+.group-problems .heading { color: var(--accent-problem); }
+.group-working .heading { color: var(--accent-working); }
+.group-idle .heading { color: var(--accent-idle); }
+.card { background: var(--surface-card); border-radius: 18px; padding: 14px 16px;
+        display: flex; flex-direction: column; gap: 8px; text-align: left; width: 100%; }
+.card.tap { cursor: pointer; }
+.quiet-card { background: var(--surface-quiet); border: 1px solid var(--border); }
+.compact, .leftovers-card { flex-direction: row; justify-content: space-between;
+                            align-items: center; gap: 12px; min-height: 44px; }
+.compact-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.project, .kicker, .label { font-size: 12px; font-weight: 600; color: var(--text-secondary);
+                            text-transform: uppercase; letter-spacing: 0.4px; }
+.age { font-size: 12px; color: var(--text-secondary); flex-shrink: 0; }
+.meta .project, .compact-text .project { min-width: 0; overflow: hidden;
+                                         text-overflow: ellipsis; white-space: nowrap; }
+.card-title { font-size: 17px; line-height: 22px; font-weight: 600; }
+.note { font-size: 14px; line-height: 20px; color: var(--text-secondary); }
+.body { font-size: 15px; line-height: 22px; }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chip { font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 10px; }
+.tone-needs { background: var(--chip-needs); color: var(--accent-needs); }
+.tone-problem { background: var(--chip-problem); color: var(--accent-problem); }
+.tone-working { background: var(--chip-working); color: var(--accent-working); }
+.tone-idle { background: var(--chip-idle); color: var(--accent-idle); }
+.buttons { display: flex; gap: 8px; margin-top: 4px; }
+.btn { height: 44px; border-radius: 12px; font-size: 16px; font-weight: 600; display: flex;
+       align-items: center; justify-content: center; padding: 0 12px; flex: 1; }
+.btn.narrow { flex: 0 0 92px; }
+.btn.tall { height: 48px; font-size: 17px; }
+.btn.square { flex: 0 0 48px; height: 48px; padding: 0; }
+.btn.primary { background: var(--accent-primary); color: #FFFFFF; }
+.btn.secondary { background: var(--surface-button); }
+.btn.destructive { background: var(--accent-destructive); color: #FFFFFF; }
+.btn.sheet { height: 52px; border-radius: 14px; font-size: 17px; flex: none; width: 100%; }
+.btn.sheet.secondary { background: var(--surface-pill); }
+.btn:disabled { opacity: 0.4; }
+.chevron { color: var(--chevron); flex-shrink: 0; }
+.back { display: flex; align-items: center; gap: 4px; height: 44px; font-size: 17px;
+        color: var(--link); align-self: flex-start; padding: 0; }
+.detail-head { display: flex; flex-direction: column; gap: 6px; }
+.detail-title { font-size: 28px; line-height: 34px; font-weight: 700; letter-spacing: -0.3px; }
+.step { display: flex; flex-direction: column; gap: 4px; }
+.step-name { font-size: 17px; font-weight: 600; }
+.list { background: var(--surface-card); border-radius: 18px; display: flex;
+        flex-direction: column; }
+.list-row { min-height: 64px; padding: 10px 16px; display: flex; align-items: center;
+            justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); }
+.list-row:last-child { border-bottom: 0; }
+.row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.row-title { font-size: 16px; }
+.row-line { font-size: 13px; color: var(--text-secondary); }
+.more { min-height: 52px; padding: 0 16px; display: flex; align-items: center;
+        justify-content: space-between; color: var(--link); font-size: 15px; width: 100%; }
+.section-head { display: flex; justify-content: space-between; align-items: baseline;
+                padding: 0 4px; }
+.recent-row { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.recent-row .when { color: var(--text-secondary); flex-shrink: 0; }
+details.disclosure { background: var(--surface-quiet); border: 1px solid var(--border);
+                     border-radius: 18px; padding: 0 16px; }
+details summary { min-height: 52px; display: flex; align-items: center; font-size: 15px;
+                  font-weight: 600; color: var(--text-tertiary); cursor: pointer;
+                  list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+.disclosure-body { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px;
+                   font-size: 13px; color: var(--text-secondary); }
+.mono { font-family: var(--mono); font-size: 13px; }
+.scroll { overflow-x: auto; white-space: nowrap; }
+.quiet { color: var(--text-secondary); font-size: 14px; }
+#scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); }
+#sheet { position: fixed; left: 0; right: 0; bottom: 0; max-height: 92vh; overflow-y: auto;
+         background: var(--surface-sheet); border-radius: 24px 24px 0 0;
+         padding: 10px 16px calc(34px + env(safe-area-inset-bottom));
+         display: flex; flex-direction: column; gap: 16px; }
+.grabber { width: 36px; height: 5px; border-radius: 3px; background: var(--grabber);
+           align-self: center; flex-shrink: 0; }
+.sheet-head { display: flex; flex-direction: column; gap: 6px; }
+.sheet-title { font-size: 22px; line-height: 28px; font-weight: 700; }
+.sentence { font-size: 15px; line-height: 22px; color: var(--text-tertiary); }
+.inset { background: var(--surface-inset); border-radius: 14px; padding: 12px 14px;
+         display: flex; flex-direction: column; gap: 10px; }
+.inset.deletes { background: var(--tile-problem); color: var(--accent-problem); }
+.inset-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.command-text { font-size: 15px; }
+.pill { min-height: 44px; min-width: 44px; display: flex; align-items: center;
+        justify-content: center; }
+.pill span { height: 32px; padding: 0 10px; border-radius: 8px; background: var(--surface-pill);
+             font-size: 13px; font-weight: 600; display: flex; align-items: center; }
+.sheet-toggle { border-top: 1px solid var(--border); padding-top: 4px; }
+.sheet-toggle summary { min-height: 44px; font-size: 14px; font-weight: 400; }
+.sheet-buttons { display: flex; flex-direction: column; gap: 10px; }
+.expiry { font-size: 13px; color: var(--text-secondary); text-align: center; }
+.link { color: var(--link); min-height: 44px; padding: 0 8px; }
+.result-head { display: flex; align-items: center; gap: 12px; }
+.mark { width: 40px; height: 40px; border-radius: 20px; display: flex; align-items: center;
+        justify-content: center; flex-shrink: 0; background: var(--surface-pill); }
+.mark-failed { background: var(--chip-problem); color: var(--accent-problem); }
+.mark-ok { background: var(--tick-ground); color: var(--live); }
+.result-title { font-size: 20px; line-height: 26px; font-weight: 700; }
+pre.output { margin: 0; font: 12px/18px var(--mono); color: var(--text-secondary);
+             max-height: 160px; overflow: auto; white-space: pre; }
+.refused { color: var(--accent-problem); }
+form { display: grid; gap: 12px; max-width: 360px; margin-top: 16px; }
+input { font: inherit; padding: 10px; text-transform: uppercase; letter-spacing: .1em;
+        min-height: 44px; }
+form button { min-height: 44px; background: var(--accent-primary); color: #FFFFFF;
+              border-radius: 12px; font-weight: 600; }
+"""
 
-const ORACLE = (function () {{
-  function retryDelay(interval, failures) {{
+_SCRIPT = r"""
+"use strict";
+const MAX_BACKOFF = __MAX_BACKOFF__;
+const STALE_INTERVALS = __STALE_INTERVALS__;
+const DEFAULT_INTERVAL = __INTERVAL__;
+const WORDS = __WORDS__;
+
+const ORACLE = (function () {
+  function retryDelay(interval, failures) {
     if (failures <= 0) return interval;
     return Math.min(interval * Math.pow(2, failures), MAX_BACKOFF);
-  }}
-  function ageOf(state, now) {{
+  }
+  function ageOf(state, now) {
     if (!state.data || state.fetchedAt === null) return null;
     return state.data.freshness.age + Math.max(0, (now - state.fetchedAt) / 1000);
-  }}
-  function freshnessText(age, staleAfter) {{
-    if (age === null) return {{text: "never updated: no read has succeeded yet", stale: true}};
+  }
+  function fill(template, values) {
+    return String(template).replace(/\{(\w+)\}/g, (all, name) =>
+      Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : all);
+  }
+  function freshnessText(age, staleAfter) {
+    if (age === null) return {text: WORDS.never, stale: true};
     const stale = age > staleAfter;
-    let text = "updated " + Math.round(age) + "s ago";
-    if (stale) text += "; STALE: older than " + STALE_INTERVALS + " intervals";
-    return {{text: text, stale: stale}};
-  }}
-  function makeLoop(opts) {{
-    const state = {{failures: 0, data: null, fetchedAt: null}};
+    return {text: fill(stale ? WORDS.stale : WORDS.live, {age: Math.round(age)}), stale: stale};
+  }
+  function countdown(left) {
+    if (left <= 0) return {text: WORDS.expired, expired: true};
+    const whole = Math.ceil(left);
+    const time = Math.floor(whole / 60) + ":" + String(whole % 60).padStart(2, "0");
+    return {text: fill(WORDS.expires, {time: time}), expired: false};
+  }
+  function makeLoop(opts) {
+    const state = {failures: 0, data: null, fetchedAt: null};
     let timer = null;
     let inFlight = null;
-    async function read() {{
-      try {{
+    async function read() {
+      try {
         const data = await opts.fetchState();
         state.data = data;
         state.fetchedAt = opts.now();
         state.failures = 0;
         opts.onData(data);
-      }} catch (err) {{
+      } catch (err) {
         state.failures += 1;
         opts.onError(err, state.failures);
-      }} finally {{
+      } finally {
         const interval = state.data ? state.data.freshness.interval : opts.interval;
         timer = opts.schedule(tick, retryDelay(interval, state.failures) * 1000);
-      }}
-    }}
-    function tick() {{
+      }
+    }
+    function tick() {
       if (inFlight) return inFlight;
-      inFlight = read().finally(() => {{ inFlight = null; }});
+      inFlight = read().finally(() => { inFlight = null; });
       return inFlight;
-    }}
+    }
     // Read now, not at the end of a backoff: the page was looked at again,
     // or the network came back, and the server may be back with it.
-    function wake() {{
+    function wake() {
       if (inFlight) return inFlight;
       if (timer !== null && opts.cancel) opts.cancel(timer);
       timer = null;
       return tick();
-    }}
-    return {{tick: tick, wake: wake, state: state}};
-  }}
+    }
+    return {tick: tick, wake: wake, state: state};
+  }
   // A job poll's answer: show it, keep polling, or the server forgot it
   // (it restarted; the Mac's audit log still has the action).
-  function jobPoll(status) {{
+  function jobPoll(status) {
     if (status === 200) return "show";
     if (status === 404) return "lost";
     return "retry";
-  }}
-  function actionBody(row, nonce) {{
-    return JSON.stringify({{row: row, nonce: nonce}});
-  }}
-  function actionLabel(kind) {{
-    return kind === "terminal" ? "open a session\u2026" : "run\u2026";
-  }}
+  }
+  function actionBody(row, nonce) {
+    return JSON.stringify({row: row, nonce: nonce});
+  }
   // The Mac moved the page to HTTPS: the fetch saw a redirect it did not follow.
-  function moved(response) {{
+  function moved(response) {
     return response.type === "opaqueredirect";
-  }}
-  function jobText(job) {{
-    if (job.state !== "done") return "running";
-    const took = " in " + Number(job.elapsed || 0).toFixed(1) + "s";
-    if (job.status === null || job.status === undefined) {{
-      return (job.ok ? "launched" : "FAILED") + took;
-    }}
-    return (job.ok ? "" : "FAILED: ") + "exit " + job.status + took;
-  }}
-  return {{retryDelay: retryDelay, ageOf: ageOf, freshnessText: freshnessText,
-          makeLoop: makeLoop, actionBody: actionBody, actionLabel: actionLabel,
-          jobText: jobText, jobPoll: jobPoll, moved: moved}};
-}})();
+  }
+  function clock(at, now) {
+    const when = new Date(at * 1000);
+    if (when.toDateString() === new Date(now).toDateString()) {
+      return when.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+    }
+    return when.toLocaleDateString([], {day: "numeric", month: "short"});
+  }
 
-if (typeof document !== "undefined") {{
+  // -- drawing: h(tag, props, children) builds an element; on.* are the actions.
+  const ICONS = {
+    refresh: [["path", {d: "M21 12a9 9 0 1 1-2.6-6.4"}], ["path", {d: "M21 4v5h-5"}]],
+    right: [["path", {d: "M9 6l6 6-6 6"}]],
+    left: [["path", {d: "M15 6l-6 6 6 6"}]],
+    down: [["path", {d: "M6 9l6 6 6-6"}]],
+    copy: [["rect", {x: "9", y: "9", width: "11", height: "11", rx: "2"}],
+           ["path", {d: "M5 15V6a2 2 0 0 1 2-2h9"}]],
+    cross: [["path", {d: "M18 6L6 18"}], ["path", {d: "M6 6l12 12"}]],
+    tick: [["path", {d: "M5 12l5 5 9-10"}]],
+  };
+  function icon(h, name, size, stroke, cls) {
+    return h("svg", {cls: cls || "icon", attrs: {
+      width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+      "stroke-width": stroke || "2", "stroke-linecap": "round", "stroke-linejoin": "round",
+      "aria-hidden": "true"}}, ICONS[name].map((part) => h(part[0], {attrs: part[1]})));
+  }
+  function chips(h, list) {
+    return h("div", {cls: "chips"},
+             list.map((chip) => h("span", {cls: "chip tone-" + chip.tone, text: chip.text})));
+  }
+  function disclosure(h, ui, on, id, summary, body, cls) {
+    return h("details", {cls: cls || "disclosure", open: !!ui.open[id],
+                         on: {toggle: (event, node) => on.toggle(id, node.open)}},
+             [h("summary", {text: summary}), h("div", {cls: "disclosure-body"}, body)]);
+  }
+  function fullCard(h, on, card) {
+    const open = () => on.open(card.row);
+    const parts = [
+      h("div", {cls: "meta"}, [h("span", {cls: "project", text: card.project}),
+                               h("span", {cls: "age", text: card.age})]),
+      h("div", {cls: "card-title", text: card.title}),
+    ];
+    if (card.chips.length) parts.push(chips(h, card.chips));
+    if (card.note) parts.push(h("div", {cls: "note", text: card.note}));
+    if (card.tap) {
+      return h("div", {cls: "card tap", attrs: {role: "button", tabindex: "0"},
+                       on: {click: open}}, parts);
+    }
+    const buttons = [];
+    if (card.button) {
+      buttons.push(h("button", {cls: "btn primary", text: card.button.text,
+                                on: {click: () => on.confirm(card.row)}}));
+    }
+    buttons.push(h("button", {cls: "btn secondary" + (card.button ? " narrow" : ""),
+                              text: WORDS.details, on: {click: open}}));
+    parts.push(h("div", {cls: "buttons"}, buttons));
+    return h("div", {cls: "card"}, parts);
+  }
+  function compactCard(h, on, card) {
+    return h("button", {cls: "card compact", on: {click: () => on.open(card.row)}}, [
+      h("span", {cls: "compact-text"}, [
+        h("span", {cls: "project", text: card.project}),
+        h("span", {cls: "card-title", text: card.title}),
+        card.line ? h("span", {cls: "note", text: card.line}) : null]),
+      icon(h, "right", 18, "2", "chevron")]);
+  }
+  function overview(view, ui, h, on) {
+    const nodes = [h("nav", {cls: "strip"}, view.tiles.map((tile) => h("a", {
+      cls: "tile tile-" + tile.id, attrs: {href: tile.href},
+      on: tile.id === "leftovers" ? {click: (event) => on.leftovers(event)} : null,
+    }, [h("span", {cls: "count", text: tile.count}), h("span", {cls: "label", text: tile.label})])))];
+    for (const group of view.groups) {
+      nodes.push(h("section", {cls: "group group-" + group.id, attrs: {id: group.id}}, [
+        h("h2", {cls: "heading", text: group.heading}),
+        ...group.cards.map((card) => group.compact ? compactCard(h, on, card)
+                                                    : fullCard(h, on, card))]));
+    }
+    if (view.empty) nodes.push(h("p", {cls: "quiet", text: view.empty}));
+    const left = view.leftovers_card;
+    if (left) {
+      nodes.push(h("button", {cls: "card quiet-card leftovers-card",
+                              on: {click: (event) => on.leftovers(event)}}, [
+        h("span", {cls: "compact-text"}, [h("span", {cls: "row-title", text: left.title}),
+                                          h("span", {cls: "note", text: left.line})]),
+        icon(h, "right", 18, "2", "chevron")]));
+    }
+    return nodes;
+  }
+  function back(h, on) {
+    return h("button", {cls: "back", on: {click: () => on.back()}},
+             [icon(h, "left", 20, "2.2"), h("span", {text: WORDS.back})]);
+  }
+  function detail(view, ui, h, on, now) {
+    const d = view.details[ui.key];
+    const nodes = [back(h, on)];
+    const head = [h("span", {cls: "kicker", text: d.kicker}),
+                  h("h1", {cls: "detail-title", text: d.title})];
+    if (d.chips.length) head.push(chips(h, d.chips));
+    nodes.push(h("div", {cls: "detail-head"}, head));
+    if (d.going_on.length) {
+      nodes.push(h("div", {cls: "card"}, [h("span", {cls: "label", text: WORDS.going_on}),
+                                          h("p", {cls: "body", text: d.going_on.join(" ")})]));
+    }
+    if (d.step) {
+      const target = h("div", {cls: "mono scroll copy-text", text: d.step.copy, hidden: true});
+      const buttons = [];
+      if (d.step.button) {
+        buttons.push(h("button", {cls: "btn primary tall", text: d.step.button.text,
+                                  on: {click: () => on.confirm(d.row)}}));
+      }
+      buttons.push(h("button", {cls: "btn secondary square",
+                                attrs: {"aria-label": WORDS.copy_command},
+                                on: {click: (event, node) => on.copy(d.step.copy, node, target)}},
+                     [icon(h, "copy", 20)]));
+      nodes.push(h("div", {cls: "card"}, [
+        h("span", {cls: "label", text: WORDS.next_step}),
+        h("div", {cls: "step"}, [h("span", {cls: "step-name", text: d.step.name}),
+                                 h("span", {cls: "note", text: d.step.sentence})]),
+        h("div", {cls: "buttons"}, buttons), target]));
+    }
+    if (d.recent.length) {
+      nodes.push(h("span", {cls: "section-label", text: WORDS.recent}));
+      nodes.push(h("div", {cls: "card"}, d.recent.map((event) => h("div", {cls: "recent-row"}, [
+        h("span", {text: event.text}), h("span", {cls: "when", text: clock(event.at, now)})]))));
+    }
+    const tech = d.technical.lines.map((line) => h("div", {text: line}));
+    if (d.technical.path) tech.push(h("div", {cls: "mono scroll", text: d.technical.path}));
+    nodes.push(disclosure(h, ui, on, "technical:" + d.row, WORDS.technical, tech));
+    return nodes;
+  }
+  function leftovers(view, ui, h, on) {
+    const screen = view.leftovers;
+    const nodes = [back(h, on), h("div", {cls: "detail-head"}, [
+      h("h1", {cls: "detail-title", text: screen.title}),
+      h("p", {cls: "note", text: screen.intro})])];
+    for (const section of screen.sections) {
+      if (!section.count) continue;
+      const all = ui.more[section.id];
+      const rows = (all ? section.rows : section.rows.slice(0, section.shown)).map((row) =>
+        h("div", {cls: "list-row"}, [h("span", {cls: "row-text"}, [
+          h("span", {cls: "row-title", text: row.title}),
+          h("span", {cls: "row-line", text: row.line})])]));
+      if (section.more && !all) {
+        rows.push(h("button", {cls: "more", on: {click: () => on.more(section.id)}},
+                    [h("span", {text: section.more}), icon(h, "down", 18)]));
+      }
+      nodes.push(h("div", {cls: "section"}, [
+        h("div", {cls: "section-head"}, [h("span", {cls: "section-label", text: section.heading}),
+                                         h("span", {cls: "quiet", text: section.count})]),
+        h("div", {cls: "list"}, rows)]));
+    }
+    return nodes;
+  }
+  // The screen ui says, or the overview when its session has gone.
+  function screen(view, ui, h, on, now) {
+    if (ui.screen === "detail" && view.details[ui.key]) return detail(view, ui, h, on, now);
+    if (ui.screen === "leftovers") return leftovers(view, ui, h, on);
+    ui.screen = "overview";
+    ui.key = null;
+    return overview(view, ui, h, on);
+  }
+
+  function grabber(h) {
+    return h("div", {cls: "grabber", attrs: {"aria-hidden": "true"}});
+  }
+  function messageSheet(h, on, text, closable) {
+    const nodes = [grabber(h), h("p", {cls: "sentence", text: text})];
+    let close = null;
+    if (closable) {
+      close = h("button", {cls: "btn sheet secondary", text: WORDS.close,
+                           on: {click: () => on.close()}});
+      nodes.push(close);
+    }
+    return {nodes: nodes, focus: close};
+  }
+  function confirmSheet(h, on, data) {
+    if (data.refused || !data.nonce || !data.words) {
+      const text = data.refused ? fill(WORDS.not_run, {reason: data.refused})
+                                : WORDS.nothing_to_run;
+      return messageSheet(h, on, text, true);
+    }
+    const w = data.words;
+    const command = h("div", {cls: "mono scroll command-text", text: w.command});
+    const copy = h("button", {cls: "pill copy",
+                              on: {click: (event, node) => on.copy(w.command, node, command)}},
+                   [h("span", {text: WORDS.copy})]);
+    const block = h("div", {cls: "inset"}, [
+      h("div", {cls: "inset-head"}, [h("span", {cls: "label", text: WORDS.command}), copy]),
+      command, h("div", {cls: "note", text: w.place})]);
+    const exact = [];
+    if (w.cwd) exact.push(h("div", {cls: "mono scroll", text: w.cwd}));
+    for (const line of w.env) exact.push(h("div", {cls: "mono scroll", text: line}));
+    if (w.launch) exact.push(h("div", {cls: "mono scroll", text: w.launch}));
+    exact.push(h("div", {text: WORDS.runs_as}));
+    const nodes = [grabber(h), h("div", {cls: "sheet-head"}, [
+      h("h2", {cls: "sheet-title", text: w.title}), h("p", {cls: "sentence", text: w.sentence})])];
+    if (w.destructive) {
+      if (w.deletes.length) {
+        nodes.push(h("div", {cls: "inset deletes"}, [
+          h("span", {cls: "label", text: WORDS.this_deletes}),
+          ...w.deletes.map((line) => h("div", {text: line}))]));
+      }
+      nodes.push(h("details", {cls: "sheet-toggle"}, [
+        h("summary", {text: WORDS.exact_command}),
+        h("div", {cls: "disclosure-body"}, [block, ...exact])]));
+    } else {
+      nodes.push(block, h("details", {cls: "sheet-toggle"}, [
+        h("summary", {text: WORDS.exact}), h("div", {cls: "disclosure-body"}, exact)]));
+    }
+    const run = h("button", {cls: "btn sheet " + (w.destructive ? "destructive" : "primary"),
+                             text: w.button,
+                             on: {click: (event, node) => {
+                               node.disabled = true;
+                               on.act(data.row, data.nonce);
+                             }}});
+    const cancel = h("button", {cls: "btn sheet secondary", text: WORDS.cancel,
+                                on: {click: () => on.close()}});
+    const expiry = h("div", {cls: "expiry", text: countdown(data.expires_in).text});
+    nodes.push(h("div", {cls: "sheet-buttons"}, w.destructive ? [cancel, run] : [run, cancel]),
+               expiry);
+    return {nodes: nodes, focus: cancel, run: run, expiry: expiry};
+  }
+  function resultSheet(h, on, ui, job) {
+    const w = job.words;
+    const mark = h("span", {cls: "mark mark-" + w.tone},
+                   w.tone === "running" ? [] : [icon(h, w.tone === "ok" ? "tick" : "cross", 20,
+                                                     "2.4")]);
+    const nodes = [grabber(h), h("div", {cls: "result-head"}, [mark, h("div", {cls: "step"}, [
+      h("h2", {cls: "result-title", text: w.headline}),
+      h("span", {cls: "note", text: w.line})])])];
+    if (job.remote_control && job.state === "done" && job.ok) {
+      nodes.push(h("p", {cls: "sentence",
+                         text: fill(WORDS.remote_control, {name: job.remote_control})}));
+    }
+    if (job.output) {
+      nodes.push(disclosure(h, ui, on, "output:" + job.id, WORDS.show_output,
+                            [h("pre", {cls: "output", text: job.output})], "disclosure inset"));
+    }
+    if (job.audit_error) nodes.push(h("p", {cls: "refused", text: job.audit_error}));
+    const done = h("button", {cls: "btn sheet secondary", text: WORDS.done,
+                              on: {click: () => on.close()}});
+    nodes.push(done);
+    return {nodes: nodes, focus: done};
+  }
+  return {retryDelay: retryDelay, ageOf: ageOf, fill: fill, freshnessText: freshnessText,
+          countdown: countdown, makeLoop: makeLoop, actionBody: actionBody, jobPoll: jobPoll,
+          moved: moved, clock: clock, screen: screen, messageSheet: messageSheet,
+          confirmSheet: confirmSheet, resultSheet: resultSheet};
+})();
+
+if (typeof document !== "undefined") {
   const byId = (id) => document.getElementById(id);
-  const openNoise = new Set();
-  const openJobs = new Set();
+  const SVG = "http://www.w3.org/2000/svg";
+  const SVG_TAGS = {svg: true, path: true, rect: true};
+  const ui = {screen: "overview", key: null, open: {}, more: {}, scroll: {}};
+  let current = null;
   let lastError = "";
   let panelJob = null;
+  let countdownTimer = null;
 
-  function el(tag, cls, text) {{
-    const node = document.createElement(tag);
-    if (cls) node.className = cls;
-    if (text !== undefined && text !== null) node.textContent = String(text);
+  function h(tag, props, children) {
+    const p = props || {};
+    const node = SVG_TAGS[tag] ? document.createElementNS(SVG, tag) : document.createElement(tag);
+    if (p.cls) node.setAttribute("class", p.cls);
+    if (p.text !== undefined && p.text !== null) node.textContent = String(p.text);
+    const attrs = p.attrs || {};
+    for (const name of Object.keys(attrs)) node.setAttribute(name, String(attrs[name]));
+    if (p.open) node.open = true;
+    if (p.hidden) node.hidden = true;
+    const handlers = p.on || {};
+    for (const name of Object.keys(handlers)) {
+      node.addEventListener(name, (event) => handlers[name](event, node));
+    }
+    for (const child of children || []) if (child) node.appendChild(child);
     return node;
-  }}
+  }
 
-  function renderLine(line) {{
-    const card = el("div", "line tone-" + (line.tone || "plain") + (line.nested ? " nested" : ""));
-    const head = el("div", "head");
-    head.appendChild(el("span", "subject", line.subject));
-    head.appendChild(el("span", "flag", line.status));
-    card.appendChild(head);
-    if (line.stage) card.appendChild(el("div", "stage", line.stage));
-    for (const signal of line.signals) {{
-      card.appendChild(el("div", "signal tone-" + (signal.tone || "plain"), signal.text));
-    }}
-    if (line.label || line.next) {{
-      const next = el("div", "next");
-      if (line.label) next.appendChild(el("div", "label", "next: " + line.label));
-      if (line.next && line.next !== line.label) next.appendChild(el("code", null, line.next));
-      if (line.where) next.appendChild(el("div", "where", "in " + line.where));
-      if (line.detail) next.appendChild(el("div", "detail", line.detail));
-      card.appendChild(next);
-    }}
-    if (line.action) {{
-      const button = el("button", "act", ORACLE.actionLabel(line.action));
-      button.addEventListener("click", () => openConfirm(line.row));
-      card.appendChild(button);
-    }}
-    return card;
-  }}
+  function draw() {
+    if (!current) return;
+    const y = window.scrollY;
+    const nodes = ORACLE.screen(current.view, ui, h, on, Date.now());
+    byId("screen").replaceChildren(...nodes);
+    byId("screen").className = ui.screen === "overview" ? "" : "sub";
+    byId("top").className = ui.screen === "overview" ? "" : "sub";
+    window.scrollTo(0, y);
+  }
 
-  function showPanel(children) {{
-    const panel = byId("panel");
-    panel.replaceChildren(...children);
-    panel.hidden = false;
-  }}
+  function go(screen, key, push) {
+    ui.scroll[ui.screen] = window.scrollY;
+    ui.screen = screen;
+    ui.key = key || null;
+    ui.more = {};
+    if (push) history.pushState({screen: screen, key: ui.key}, "");
+    draw();
+    window.scrollTo(0, screen === "overview" ? (ui.scroll.overview || 0) : 0);
+  }
 
-  function closePanel() {{
+  function showSheet(built) {
+    const sheet = byId("sheet");
+    sheet.replaceChildren(...built.nodes);
+    sheet.hidden = false;
+    byId("scrim").hidden = false;
+    if (built.focus) built.focus.focus();
+  }
+
+  function closeSheet() {
     panelJob = null;
-    const panel = byId("panel");
-    panel.hidden = true;
-    panel.replaceChildren();
-  }}
+    if (countdownTimer !== null) clearInterval(countdownTimer);
+    countdownTimer = null;
+    const sheet = byId("sheet");
+    sheet.hidden = true;
+    sheet.replaceChildren();
+    byId("scrim").hidden = true;
+  }
 
-  function closeButton(text) {{
-    const button = el("button", "cancel", text);
-    button.addEventListener("click", closePanel);
-    return button;
-  }}
+  function message(text) {
+    showSheet(ORACLE.messageSheet(h, on, text, true));
+  }
 
-  async function openConfirm(row) {{
-    panelJob = null;
-    showPanel([el("div", "quiet", "asking the Mac what would run\u2026")]);
+  function select(target) {
+    if (!target) return;
+    target.hidden = false;
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  // Over HTTPS, the clipboard; over plain HTTP it is not there, so the text is
+  // selected instead (ADR-009 D5). Copying runs nothing and spends no nonce.
+  function copy(text, button, target) {
+    const said = () => {
+      const label = button.firstChild && button.firstChild.tagName === "SPAN"
+        ? button.firstChild : null;
+      if (label) label.textContent = WORDS.copied;
+      button.setAttribute("aria-label", WORDS.copied);
+    };
+    if (window.isSecureContext && navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(said, () => select(target));
+    } else {
+      select(target);
+    }
+  }
+
+  async function openConfirm(row) {
+    closeSheet();
+    showSheet(ORACLE.messageSheet(h, on, WORDS.loading, false));
     let data;
-    try {{
+    try {
       const response = await fetch("/api/confirm?row=" + encodeURIComponent(row),
-                                   {{cache: "no-store", credentials: "same-origin"}});
+                                   {cache: "no-store", credentials: "same-origin"});
       data = await response.json();
-    }} catch (err) {{
-      showPanel([el("p", "refused", "could not load the confirm: " + err.message),
-                 closeButton("close")]);
+    } catch (err) {
+      message(ORACLE.fill(WORDS.confirm_failed, {error: err.message}));
       return;
-    }}
-    const parts = [el("h3", null, data.subject || row)];
-    if (data.refused) {{
-      parts.push(el("p", "refused", "Not run: " + data.refused), closeButton("close"));
-      showPanel(parts);
-      return;
-    }}
-    parts.push(el("pre", "lines", data.lines.join("\\n")));
-    if (!data.nonce) {{
-      parts.push(closeButton("close"));
-      showPanel(parts);
-      return;
-    }}
-    const buttons = el("div", "buttons");
-    const cancel = closeButton("Cancel");
-    const go = el("button", "go", data.kind === "terminal" ? "Open it" : "Run it");
-    go.addEventListener("click", () => {{
-      go.disabled = true;
-      cancel.disabled = true;
-      confirmAct(row, data.nonce);
-    }});
-    buttons.appendChild(cancel);
-    buttons.appendChild(go);
-    parts.push(buttons, el("div", "quiet", "Nothing runs until you press " + go.textContent +
-                              ". This confirm lasts " + Math.round(data.expires_in) + "s."));
-    showPanel(parts);
-    cancel.focus();
-  }}
+    }
+    const built = ORACLE.confirmSheet(h, on, data);
+    showSheet(built);
+    if (!built.run) return;
+    const opened = Date.now();
+    countdownTimer = setInterval(() => {
+      const said = ORACLE.countdown(data.expires_in - (Date.now() - opened) / 1000);
+      built.expiry.textContent = said.text;
+      if (!said.expired) return;
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+      built.run.disabled = true;
+      built.expiry.appendChild(h("button", {cls: "link", text: WORDS.look_again,
+                                            on: {click: () => openConfirm(row)}}));
+    }, 1000);
+  }
 
-  async function confirmAct(row, nonce) {{
+  async function confirmAct(row, nonce) {
+    if (countdownTimer !== null) clearInterval(countdownTimer);
+    countdownTimer = null;
     let response, data;
-    try {{
-      response = await fetch("/api/act", {{
+    try {
+      response = await fetch("/api/act", {
         method: "POST", cache: "no-store", credentials: "same-origin",
-        headers: {{"Content-Type": "application/json"}}, body: ORACLE.actionBody(row, nonce),
-      }});
+        headers: {"Content-Type": "application/json"}, body: ORACLE.actionBody(row, nonce),
+      });
       data = await response.json();
-    }} catch (err) {{
-      showResult({{error: "the action may not have reached the Mac: " + err.message}});
+    } catch (err) {
+      message(ORACLE.fill(WORDS.unreached, {error: err.message}));
       return;
-    }}
-    if (response.status !== 202) {{
-      showResult({{error: data.error || "HTTP " + response.status}});
+    }
+    if (response.status !== 202) {
+      message(ORACLE.fill(WORDS.not_run, {reason: data.error || "HTTP " + response.status}));
       return;
-    }}
-    showResult({{job: data.job}});
+    }
+    showSheet(ORACLE.resultSheet(h, on, ui, data.job));
     if (data.job.state !== "done") pollJob(data.job.id);
-  }}
+  }
 
-  function showResult(result) {{
-    if (result.error) {{
-      showPanel([el("p", "refused", result.error), closeButton("close")]);
-      return;
-    }}
-    const job = result.job;
-    const failed = job.state === "done" && !job.ok;
-    const parts = [el("h3", null, job.subject),
-                   el("pre", "lines", job.argv.join(" ") + "\\nin " + job.cwd),
-                   el("div", failed ? "failed" : "", ORACLE.jobText(job))];
-    if (job.remote_control && job.state === "done" && job.ok) {{
-      parts.push(el("div", "quiet",
-                    "pick it up from Claude Code's Remote Control as " + job.remote_control));
-    }}
-    if (job.output) parts.push(el("pre", "output", job.output));
-    if (job.audit_error) parts.push(el("div", "refused", job.audit_error));
-    parts.push(closeButton("close"));
-    showPanel(parts);
-  }}
-
-  function pollJob(id) {{
+  function pollJob(id) {
     panelJob = id;
-    const poll = async () => {{
+    const poll = async () => {
       if (panelJob !== id) return;
-      try {{
+      try {
         const response = await fetch("/api/job?id=" + encodeURIComponent(id),
-                                     {{cache: "no-store", credentials: "same-origin"}});
+                                     {cache: "no-store", credentials: "same-origin"});
         const verdict = ORACLE.jobPoll(response.status);
-        if (verdict === "lost") {{
-          if (panelJob !== id) return;
-          showPanel([el("div", "refused", "The server restarted and no longer knows this "
-                        + "action's result. The Mac's audit log has it: web/actions.log "
-                        + "in the oracle home."), closeButton("close")]);
+        if (verdict === "lost") {
+          if (panelJob === id) message(WORDS.lost);
           return;
-        }}
-        if (verdict === "show") {{
+        }
+        if (verdict === "show") {
           const job = await response.json();
           if (panelJob !== id) return;
-          showResult({{job: job}});
+          showSheet(ORACLE.resultSheet(h, on, ui, job));
           if (job.state === "done") return;
-        }}
-      }} catch (err) {{}}
+        }
+      } catch (err) {}
       setTimeout(poll, 1000);
-    }};
+    };
     setTimeout(poll, 1000);
-  }}
+  }
 
-  function renderJobs(jobs) {{
-    const fragment = document.createDocumentFragment();
-    if (jobs.length) fragment.appendChild(el("h2", null, "your actions"));
-    for (const job of jobs) {{
-      const failed = job.state === "done" && !job.ok;
-      const details = el("details", "job" + (failed ? " failed" : ""));
-      details.open = openJobs.has(job.id);
-      details.addEventListener("toggle", () => {{
-        if (details.open) openJobs.add(job.id); else openJobs.delete(job.id);
-      }});
-      details.appendChild(el("summary", null, job.subject + ": " + ORACLE.jobText(job)));
-      details.appendChild(el("pre", "lines", job.argv.join(" ") + "\\nin " + job.cwd));
-      if (job.output) details.appendChild(el("pre", "output", job.output));
-      fragment.appendChild(details);
-    }}
-    byId("jobs").replaceChildren(fragment);
-  }}
+  const on = {
+    open: (key) => go("detail", key, true),
+    back: () => {
+      if (history.state && history.state.screen) history.back();
+      else go("overview", null, false);
+    },
+    leftovers: (event) => {
+      if (event && event.preventDefault) event.preventDefault();
+      go("leftovers", null, true);
+    },
+    toggle: (id, open) => { ui.open[id] = open; },
+    more: (id) => { ui.more[id] = true; draw(); },
+    confirm: (row) => openConfirm(row),
+    act: (row, nonce) => confirmAct(row, nonce),
+    copy: copy,
+    close: closeSheet,
+  };
 
-  function render(data) {{
-    const view = data.view;
-    const fragment = document.createDocumentFragment();
-    for (const project of view.projects) {{
-      const section = el("section", "project");
-      section.appendChild(el("h2", null, project.name));
-      if (!project.lines.length && !project.noise.lines.length) {{
-        section.appendChild(el("div", "quiet", "nothing live"));
-      }}
-      for (const line of project.lines) section.appendChild(renderLine(line));
-      if (project.noise.lines.length) {{
-        const details = el("details", "noise");
-        details.open = openNoise.has(project.name);
-        details.addEventListener("toggle", () => {{
-          if (details.open) openNoise.add(project.name); else openNoise.delete(project.name);
-        }});
-        details.appendChild(el("summary", null, project.noise.summary + ", no alert"));
-        for (const line of project.noise.lines) details.appendChild(renderLine(line));
-        section.appendChild(details);
-      }}
-      fragment.appendChild(section);
-    }}
-    if (!view.projects.length) fragment.appendChild(el("div", "quiet", "no projects registered"));
-    byId("projects").replaceChildren(fragment);
-    renderJobs(data.jobs || []);
-    byId("count").textContent = view.alerts ? view.alerts + " need you" : "nothing needs you";
+  function render(data) {
+    current = data;
+    draw();
     const banner = byId("banner");
     banner.textContent = data.freshness.banner || "";
     banner.hidden = !data.freshness.banner;
-    document.title = (view.alerts ? "(" + view.alerts + ") " : "") + "invariant oracle";
-  }}
+    document.title = data.view.doc_title;
+  }
 
-  const loop = ORACLE.makeLoop({{
+  const loop = ORACLE.makeLoop({
     interval: DEFAULT_INTERVAL,
     now: () => Date.now(),
-    fetchState: async () => {{
-      const response = await fetch("/api/state", {{cache: "no-store", credentials: "same-origin",
-                                                   redirect: "manual"}});
-      if (ORACLE.moved(response)) {{
+    fetchState: async () => {
+      const response = await fetch("/api/state", {cache: "no-store", credentials: "same-origin",
+                                                  redirect: "manual"});
+      if (ORACLE.moved(response)) {
         location.reload();
-        throw new Error("the page moved to HTTPS; opening it there");
-      }}
-      if (response.status === 401) throw new Error("this device is not paired any more");
-      if (!response.ok) {{
-        let message = "HTTP " + response.status;
-        try {{ message = (await response.json()).error || message; }} catch (e) {{}}
-        throw new Error(message);
-      }}
+        throw new Error(WORDS.moved);
+      }
+      if (response.status === 401) throw new Error(WORDS.not_paired_any_more);
+      if (!response.ok) {
+        let error = "HTTP " + response.status;
+        try { error = (await response.json()).error || error; } catch (e) {}
+        throw new Error(error);
+      }
       return response.json();
-    }},
+    },
     schedule: (fn, ms) => setTimeout(fn, ms),
     cancel: (handle) => clearTimeout(handle),
-    onData: (data) => {{ lastError = ""; render(data); showAge(); }},
-    onError: (err, failures) => {{
-      lastError = "refresh failed (" + failures + " in a row: " + err.message + "); retrying";
+    onData: (data) => { lastError = ""; render(data); showAge(); },
+    onError: (err, failures) => {
+      lastError = ORACLE.fill(WORDS.refresh_failed, {count: failures, error: err.message});
       showAge();
-    }},
-  }});
+    },
+  });
 
-  function showAge() {{
+  function showAge() {
     const data = loop.state.data;
     const staleAfter = data ? data.freshness.stale_after : STALE_INTERVALS * DEFAULT_INTERVAL;
     const said = ORACLE.freshnessText(ORACLE.ageOf(loop.state, Date.now()), staleAfter);
-    const fresh = byId("fresh");
-    fresh.textContent = said.text + (lastError ? " · " + lastError : "");
-    fresh.className = said.stale || lastError ? "stale" : "";
-  }}
+    byId("freshtext").textContent = said.text;
+    byId("fresh").className = "fresh" + (said.stale || lastError ? " stale" : "");
+    const error = byId("error");
+    error.textContent = lastError;
+    error.hidden = !lastError;
+  }
 
+  window.addEventListener("popstate", (event) => {
+    const state = event.state || {screen: "overview", key: null};
+    if (state.screen !== ui.screen || (state.key || null) !== ui.key) {
+      go(state.screen, state.key, false);
+    }
+  });
+  byId("refresh").addEventListener("click", () => loop.wake());
+  byId("scrim").addEventListener("click", closeSheet);
   setInterval(showAge, 1000);
-  document.addEventListener("visibilitychange", () => {{
+  document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") loop.wake();
-  }});
-  for (const name of ["online", "pageshow", "focus"]) {{
+  });
+  for (const name of ["online", "pageshow", "focus"]) {
     window.addEventListener(name, () => loop.wake());
-  }}
+  }
   loop.tick();
-}}
+}
 """
+
+_REFRESH_ICON = (
+    '<svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 4v5h-5"></path></svg>'
+)
 
 
 def _document(nonce: str, title: str, body: str, script: str = "") -> str:
@@ -450,6 +816,7 @@ def _document(nonce: str, title: str, body: str, script: str = "") -> str:
     return (
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="color-scheme" content="dark">'
         f"<title>{escape(title)}</title>"
         f'<style nonce="{nonce}">{_STYLE}</style></head>'
         f"<body>{body}{tail}</body></html>\n"
@@ -457,26 +824,42 @@ def _document(nonce: str, title: str, body: str, script: str = "") -> str:
 
 
 def _warning(warning: str | None) -> str:
-    return f'<div id="insecure">{escape(warning)}</div>' if warning else ""
+    return f'<div id="insecure" class="notice">{escape(warning)}</div>' if warning else ""
 
 
-def page(nonce: str, interval: float = DEFAULT_INTERVAL, warning: str | None = None) -> str:
-    """The dashboard: a header with its freshness line, then the projects."""
+def _script_json(value: object) -> str:
+    """JSON that cannot end the ``<script>`` it sits in."""
+    return (json.dumps(value, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+
+def page(nonce: str, words: Mapping[str, str], interval: float = DEFAULT_INTERVAL,
+         warning: str | None = None) -> str:
+    """The panel: a header with its freshness line, then the screen the script draws.
+
+    ``words`` are ``oracle/panel``'s fixed strings, embedded for the script.
+    """
     body = (
-        "<header><h1>invariant oracle · <span id=\"count\">loading</span></h1>"
+        '<header id="top"><div class="headrow"><div class="headtext">'
+        f'<h1 id="title">{escape(words["title"])}</h1>'
+        f'<div id="fresh" class="fresh stale"><span class="dot" aria-hidden="true"></span>'
+        f'<span id="freshtext">{escape(words["never"])}</span></div></div>'
+        f'<button id="refresh" class="iconbtn" aria-label="{escape(words["refresh"])}">'
+        f"{_REFRESH_ICON}</button></div>"
         f"{_warning(warning)}"
-        "<div id=\"fresh\">never updated: no read has succeeded yet</div>"
-        "<div id=\"banner\" hidden></div></header>"
-        "<section id=\"jobs\"></section>"
-        "<main id=\"projects\"></main>"
-        "<div id=\"panel\" role=\"dialog\" hidden></div>"
+        '<div id="banner" class="notice" hidden></div>'
+        '<div id="error" class="notice" hidden></div></header>'
+        '<main id="screen"></main>'
+        '<div id="scrim" hidden></div>'
+        '<div id="sheet" role="dialog" aria-modal="true" hidden></div>'
     )
-    script = _SCRIPT.format(
-        max_backoff=f"{MAX_BACKOFF:g}",
-        stale_intervals=STALE_INTERVALS,
-        interval=f"{interval:g}",
+    script = (
+        _SCRIPT.replace("__MAX_BACKOFF__", f"{MAX_BACKOFF:g}")
+        .replace("__STALE_INTERVALS__", str(STALE_INTERVALS))
+        .replace("__INTERVAL__", f"{interval:g}")
+        .replace("__WORDS__", _script_json(dict(words)))
     )
-    return _document(nonce, "invariant oracle", body, script)
+    return _document(nonce, words["title"], body, script)
 
 
 def message(nonce: str, title: str, text: str) -> str:

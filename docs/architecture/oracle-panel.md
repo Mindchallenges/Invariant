@@ -6,9 +6,11 @@ the server, transport and pairing it keeps, are in [oracle.md](oracle.md),
 "Shipped: the web page". The person-facing setup is the guide's
 [The oracle on your phone](../guide/oracle-web.md).
 
-**Status: designed, not built.** The user approved the mockup on 2026-10-23.
-Increments 3 to 7 build it ("Increment plan" below). Until increment 3
-lands, the page is still the one oracle.md describes.
+**Status: increment 3 shipped.** The user approved the mockup on 2026-10-23.
+Increments 3 to 7 build it ("Increment plan" below). Increment 3, the
+plain-language panel, is what the page serves now; "As built in increment 3"
+below records where it fills in what this page left open. Increments 4 to 7
+are not built.
 
 **Visual reference.** The approved mockup is a private claude.ai artifact of
 six 390-pixel-wide phone screens. The scratch files it was drawn from did not
@@ -35,8 +37,8 @@ graph TD
     CLI[cli — invariant oracle web]
     subgraph oracle["oracle/"]
         WEB["web (view, routes: + manifest, icon in inc 4)"]
-        PANEL["panel (inc 3: groups, summary, wording table)"]
-        WEBPAGE["webpage (inc 3: cards, detail, sheets; inc 4: manifest, icon)"]
+        PANEL["panel (inc 3, shipped: groups, summary, wording table)"]
+        WEBPAGE["webpage (inc 3, shipped: cards, detail, sheets; inc 4: manifest, icon)"]
         WEBACT["webactions (inc 5: failure summariser; inc 6–7: destructive kinds)"]
         ACTIONS[actions]
         DASH[dashboard]
@@ -47,7 +49,7 @@ graph TD
     WEB --> PANEL
     WEB --> WEBPAGE
     WEB --> WEBACT
-    PANEL --> DASH
+    PANEL --> SCAN
     PANEL --> SIGNALS
     WEBACT --> PANEL
     WEBACT --> ACTIONS
@@ -56,9 +58,13 @@ graph TD
 
 `webactions → panel` is for the confirm's and the result's words: the
 confirm sheet's title, sentence and button come from the same table as the
-card's button. Every arrow of oracle.md's graph stays as it is. The new
-ones are `web → panel`, `panel → dashboard`, `panel → signals` and
-`webactions → panel`.
+card's button. The new arrows are `web → panel`, `panel → scan` (for
+`row_key` and the row kinds), `panel → signals` (the signal kinds and
+`recommend`'s step kinds) and `webactions → panel`. As built, the panel
+needs nothing from `dashboard`, so the `panel → dashboard` arrow this page
+first drew is not there, and `web` no longer reads `scan` or `signals`
+itself: the two arrows `web → scan` and `web → signals` went with the old
+per-project view.
 
 ## Screens
 
@@ -452,13 +458,35 @@ differ:
 | No Idle group drawn | an Idle group after Working, compact cards, no tile | The user's order is needs you, problems, working, idle |
 | No success sheet drawn | the result sheet with a tick | Derived from screen 5 |
 
+## As built in increment 3
+
+Where the build had to decide something this page left open. Each is in
+`oracle/panel`'s table, the only place the strings are spelled.
+
+| Question | As built |
+|---|---|
+| The title of a row that is not a session (an alerting orphan host, an unreadable record) | "A Claude window with no session", "A record invariant cannot read"; a session with neither a name nor a task is "Unnamed session". The name drops its trailing id, and dashes become spaces |
+| "Paused" for a window that closed without saying so | "Its Claude window closed without saying so, so nothing is happening until you resume it." The "N ago" form waits for a true time: the only one today is the attention record's modification time, which BUG_078 shows is not one |
+| A sentence whose time or count is unknown | Its short form: "Claude asked for permission.", "The last test run failed.", "A check refused the last step." (the rules it knows are named, in plain words, from a short table of the common gates; an unknown rule is never named) |
+| "Its Claude window closed" on a card | the note for a `parked` or `host_gone` row, followed by the phase ("Its Claude window closed. Fixing a bug.") |
+| A compact card with no phase or no activity | "Active N min ago" alone, "Active now" under a minute, or nothing |
+| Leftover rows before increment 6 | A Claude window: "<project> · idle N" over "Still open on the Mac", "Already closed · record only" or "Process id not recorded", then "· window <first 8 of its id>". A folder: "<project> · <folder name>" over "On branch <branch>" or "Not on a branch". The card's breakdown is singular for one ("1 Claude window with no session") |
+| The never-read freshness line | "Stale · not updated yet" |
+| A failed refresh | a red line under the header, "Refresh failed N times in a row (<reason>). Retrying." |
+| The result before increment 5 | "Running…", "Done in N s", "Failed, exit N" (or "Failed" for a window that did not open), "Opened in a new window", the deed and "stopped after N s" under it, the output behind "Show full output". No "Why" yet: that is the summariser of increment 5 |
+| "Recent" entries | "Claude asked for permission", "Claude asked you a question", "A check refused the last step", "A hook failed", "Claude started working", "Claude finished its turn", "Its plan was updated", and "<deed>: <result>" for this device's actions |
+| More actions | Not drawn in increment 3. The server derives only a row's recommended step (ADR-008 D9), so a second action such as resume, when it is not the suggestion, needs a route of its own; increment 7 adds the section with its rows |
+| The destructive sheet for "Clean up…" | `session teardown` is the one destructive step that exists today. Its sheet lists the folder and the branch, ends its sentence with "This cannot be undone.", puts Cancel first and the command behind "Exact command". "Checked just now" waits for increment 7's re-check, so it is not shown |
+| Freshness on the detail and leftovers screens | The freshness line stays above the back link on every screen, so a stale read is never out of sight. The title and Refresh show on the overview only |
+| Copy feedback | the sheet's Copy reads "Copied"; the detail's icon button's label becomes "Copied" |
+
 ## Increment plan
 
 | # | Increment | Session | Acceptance (from IDEA_027) |
 |---|---|---|---|
 | 1 | Plan | done | The decisions are ADR-009's |
 | 2 | Mockup, approved 2026-10-23 | done | This page records it |
-| 3 | Plain-language panel: `oracle/panel`, the groups, strip, wording, detail view, copy, button wording, no mid-word wrap | this session (80e81a07) | First view fits 390 px and a count scrolls to its group; no default-view string holds a path, argv, pid, host UUID or engine state name; each is in Technical details |
+| 3 | Plain-language panel: `oracle/panel`, the groups, strip, wording, detail view, copy, button wording, no mid-word wrap | **shipped** (session 80e81a07) | First view fits 390 px and a count scrolls to its group; no default-view string holds a path, argv, pid, host UUID or engine state name; each is in Technical details |
 | 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | this session | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
 | 5 | Failure reasons: the summariser and the result sheet | this session | A failed action shows one plain sentence; the full output only after "Show full output" |
 | — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | later sessions | their own acceptance |
@@ -478,6 +506,9 @@ ago" and the stale flag, and every asset inline under the nonce CSP.
   Safari's cookie. The guide will say what to do either way.
 - **"Forget" a gone record.** Not specified by IDEA_025 or IDEA_017. Left
   out until the user asks for it.
-- **"Recent".** Which session events carry a recorded time is checked in
-  increment 3. The section shows only those, and is omitted when there are
-  none.
+- **"Recent".** Settled in increment 3: the events with a recorded time are
+  the current host's attention record (the prompt's `since`, a refusal's and
+  a broken hook's `since`, the turn's `turn_since`), the session's
+  `plan_touched`, and this device's own actions on the session. A test run
+  has no recorded time, so it is not listed. The section is omitted when
+  there are none.

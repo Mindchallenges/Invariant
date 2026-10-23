@@ -152,13 +152,17 @@ waits for it instead, and binds as soon as Tailscale connects.
 Open the link `pair` prints on the phone and press "Pair this device". The
 phone keeps a cookie from then on, and every other device gets only a "not
 paired" page. The page refreshes itself every few seconds and turns its
-"updated N s ago" line red if the rows stop moving.
+"Live · updated N s ago" line red, "Stale", if the rows stop moving. It leads
+with what needs you; the guide's [The oracle on your phone](oracle-web.md),
+"Using the page", walks through it.
 
-A row with something to run has a button. Pressing it shows exactly what
-would run, where, and with which variables, and nothing runs until you press
-Run it. The result (output, exit status, how long it took) appears on the
-page when the command ends, and your recent actions stay listed under the
-header. A step that resumes a session opens a Terminal window on the Mac,
+A card with something to run has a button named for its step, such as
+"Re-run tests…". Pressing it opens a sheet from the bottom that says what
+will happen, shows the command (with Copy) and, behind a toggle, the exact
+folder and variables. Nothing runs until you press the button named for the
+deed, such as "Run tests". The result appears in the same sheet when the
+command ends, and your recent actions are listed under "Recent" in each
+session's detail. A step that resumes a session opens a Terminal window on the Mac,
 whether or not anyone is at it, running `claude --remote-control <name>`;
 pick that session up from Claude Code's Remote Control on the phone. The page
 refuses what the TUI refuses, and it never answers a permission prompt.

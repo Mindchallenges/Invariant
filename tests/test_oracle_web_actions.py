@@ -236,6 +236,34 @@ class TestConfirm:
         world.remote.fresh = _raises
         assert world.remote.confirm(PHONE, world.key()).status == 503
 
+    def test_it_carries_the_sheets_words_from_the_panel(self, world):
+        world.document = _doc(_row(cwd=str(world.cwd), env={"INVARIANT_SESSION_ID": "s1"}))
+        words = world.remote.confirm(PHONE, world.key()).body["words"]
+        assert words["title"] == "Merge this session?"
+        assert words["button"] == "Merge"
+        assert words["command"] == "INVARIANT_SESSION_ID=s1 invariant session merge --id s1"
+        assert words["place"] == "In p"
+        assert words["cwd"] == str(world.cwd)
+        assert words["env"] == ["INVARIANT_SESSION_ID=s1"]
+        assert words["launch"] is None
+
+    def test_a_terminal_steps_words_carry_its_launch_line_previewed_once(self, world):
+        previews = []
+        world.actions.preview = lambda step: previews.append(step) or "cd x && claude"
+        world.document = _doc(_row(kind="terminal", cwd=str(world.cwd),
+                                   argv=("invariant", "session", "resume", "--id", "s1")))
+        body = world.remote.confirm(PHONE, world.key()).body
+        assert body["words"]["launch"] == "cd x && claude"
+        assert body["words"]["button"] == "Open window"
+        assert "  cd x && claude" in body["lines"]
+        assert len(previews) == 1
+
+    def test_a_refused_or_info_row_carries_no_words(self, world):
+        world.document = _doc(_refused("waiting", world.cwd))
+        assert world.remote.confirm(PHONE, world.key()).body["words"] is None
+        world.document = _doc(_row(kind="info", argv=(), cwd=None))
+        assert world.remote.confirm(PHONE, world.key()).body["words"] is None
+
 
 def _raises():
     raise RuntimeError("scan broke")
@@ -754,26 +782,32 @@ class TestOverHttp:
         app = _app(world, store)
         _act(app, token, {"row": "K|s1", "nonce": self._nonce(app, token, "K|s1")})
         body = json.loads(_get(app, "/api/state", token).body)
-        (line,) = body["view"]["projects"][0]["lines"]
-        assert line["row"] == "K|s1" and line["action"] == "run"
+        detail = body["view"]["details"]["K|s1"]
+        assert detail["step"]["button"] == {"text": "Merge…"}
         assert [j["row"] for j in body["jobs"]] == ["K|s1"]
+        assert body["jobs"][0]["words"] == {"headline": "Done in 1 s", "line": "Merge",
+                                            "tone": "ok"}
+        assert detail["recent"] == [{"text": "Merge: Done in 1 s",
+                                     "at": body["jobs"][0]["started"]}]
 
-    def test_info_and_nested_lines_get_no_action(self, world, store):
+    def test_an_info_step_gets_no_action_and_a_hosted_row_one_card(self, world, store):
         _, token = _paired(store)
         info = _row("s2", kind="info", argv=(), cwd=None)
         hosted = _row("s3", cwd=str(world.cwd))
         hosted["hosts"] = [{"host_session_id": "h3", "current": True, "alive": True}]
         world.document = _doc(info, hosted)
         body = json.loads(_get(_app(world, store), "/api/state", token).body)
-        lines = body["view"]["projects"][0]["lines"]
-        assert [(line["subject"].strip()[:6], line["action"]) for line in lines] == [
-            ("name-s", None), ("name-s", "run"), ("└ host", None)]
+        details = body["view"]["details"]
+        assert details["K|s2"]["step"] is None
+        assert details["K|s3"]["step"]["button"] == {"text": "Merge…"}
+        cards = [c["row"] for g in body["view"]["groups"] for c in g["cards"]]
+        assert sorted(cards) == ["K|s2", "K|s3"]
 
     def test_a_read_only_app_offers_no_action(self, world, store):
         _, token = _paired(store)
         app = _app(world, store, remote=False)
         body = json.loads(_get(app, "/api/state", token).body)
-        assert body["view"]["projects"][0]["lines"][0]["action"] is None
+        assert body["view"]["details"]["K|s1"]["step"]["button"] is None
         assert body["jobs"] == []
         assert _get(app, "/api/confirm?row=K%7Cs1", token).status == 404
         assert _act(app, token, {"row": "K|s1", "nonce": "x"}).status == 405
@@ -937,22 +971,20 @@ class TestThePageScript:
         harness = _script() + r"""
 (typeof print === "function" ? print : console.log)(JSON.stringify({
   body: JSON.parse(ORACLE.actionBody("K|s1", "n0")),
-  running: ORACLE.jobText({state: "running", started_ago: 3}),
-  ok: ORACLE.jobText({state: "done", ok: true, status: 0, elapsed: 1.24}),
-  failed: ORACLE.jobText({state: "done", ok: false, status: 3, elapsed: 2}),
-  launched: ORACLE.jobText({state: "done", ok: true, status: null, elapsed: 4}),
-  label: [ORACLE.actionLabel("run"), ORACLE.actionLabel("terminal")],
+  full: ORACLE.countdown(120),
+  later: ORACLE.countdown(65.2),
+  gone: ORACLE.countdown(0),
+  filled: ORACLE.fill("{a} and {b}", {a: 1}),
 }));
 """
         out = subprocess.run([*ENGINE, harness], capture_output=True, text=True, timeout=30,
                              check=True)
         result = json.loads(out.stdout)
         assert result["body"] == {"row": "K|s1", "nonce": "n0"}
-        assert result["running"] == "running"
-        assert result["ok"] == "exit 0 in 1.2s"
-        assert result["failed"] == "FAILED: exit 3 in 2.0s"
-        assert result["launched"] == "launched in 4.0s"
-        assert result["label"] == ["run…", "open a session…"]
+        assert result["full"] == {"text": "This confirm expires in 2:00", "expired": False}
+        assert result["later"] == {"text": "This confirm expires in 1:06", "expired": False}
+        assert result["gone"] == {"text": "This confirm expired.", "expired": True}
+        assert result["filled"] == "1 and {b}"
 
 
 # -- the command ------------------------------------------------------------------------------
@@ -972,17 +1004,16 @@ class TestTheCommand:
 
     def _key(self, app, token, session_id):
         body = json.loads(_get(app, "/api/state", token).body)
-        for project in body["view"]["projects"]:
-            for line in project["lines"]:
-                if line["row"].endswith("|" + session_id):
-                    return line["row"], line["action"]
+        for key, detail in body["view"]["details"].items():
+            if key.endswith("|" + session_id):
+                return key, (detail["step"] or {}).get("button")
         raise AssertionError(session_id)
 
     def test_it_acts_through_the_runner_seam(self, capsys, oracle_web, machine_world,
                                              monkeypatch, _no_real_oracle_runner):
         app, token = self._app(capsys, oracle_web, machine_world, monkeypatch)
         key, action = self._key(app, token, "g-rev")
-        assert action == "run"
+        assert action == {"text": "Merge…"}
         nonce = json.loads(_get(app, "/api/confirm?row=" + urllib.parse.quote(key),
                                 token).body)["nonce"]
         response = _act(app, token, {"row": key, "nonce": nonce})
@@ -1011,7 +1042,7 @@ class TestTheCommand:
         monkeypatch.setattr(launch, "resolve_claude", lambda: "/usr/local/bin/claude")
         app, token = self._app(capsys, oracle_web, machine_world, monkeypatch)
         key, action = self._key(app, token, "a-parked")
-        assert action == "terminal"
+        assert action == {"text": "Resume…"}
         shown = json.loads(_get(app, "/api/confirm?row=" + urllib.parse.quote(key),
                                 token).body)
         assert any("--remote-control" in line for line in shown["lines"])

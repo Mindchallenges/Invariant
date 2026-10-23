@@ -221,15 +221,18 @@ class Actions:
         self.terminal = terminal
         self.preview = preview
 
+    def launch_line(self, step: Step) -> str | None:
+        """The command a ``terminal`` step opens its window with, as previewed."""
+        if step.kind != TERMINAL or self.preview is None:
+            return None
+        try:
+            return self.preview(step)
+        except InvariantError as exc:
+            return f"(cannot preview the launch: {exc})"
+
     def describe(self, step: Step) -> list[str]:
         """What the confirm dialog shows for ``step``."""
-        launch = None
-        if step.kind == TERMINAL and self.preview is not None:
-            try:
-                launch = self.preview(step)
-            except InvariantError as exc:
-                launch = f"(cannot preview the launch: {exc})"
-        return confirm_lines(step, launch)
+        return confirm_lines(step, self.launch_line(step))
 
     def perform(self, step: Step) -> Outcome:
         """Do ``step``, which the person has confirmed. ``info`` has no action."""
