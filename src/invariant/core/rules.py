@@ -20,9 +20,10 @@ import os
 import re
 import shlex
 import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 from ..adapters import Adapter, get_adapter
 from . import git
@@ -140,17 +141,17 @@ class Verdict:
     skipped: bool = False
 
     @classmethod
-    def clean(cls, message: str = "", detail: str = "") -> "Verdict":
+    def clean(cls, message: str = "", detail: str = "") -> Verdict:
         return cls(ok=True, message=message, detail=detail)
 
     @classmethod
     def fail(
         cls, message: str, detail: str = "", fixes: Iterable[str] = ()
-    ) -> "Verdict":
+    ) -> Verdict:
         return cls(ok=False, message=message, detail=detail, fixes=tuple(fixes))
 
     @classmethod
-    def na(cls, message: str = "not applicable here", detail: str = "") -> "Verdict":
+    def na(cls, message: str = "not applicable here", detail: str = "") -> Verdict:
         return cls(ok=True, message=message, detail=detail, skipped=True)
 
 
@@ -159,7 +160,7 @@ class RuleSpec:
     id: str
     summary: str
     events: tuple[str, ...]
-    fn: Callable[["RuleContext"], Verdict]
+    fn: Callable[[RuleContext], Verdict]
 
 
 #: How each level prints when it is the part that decides whether work stops.
@@ -458,7 +459,7 @@ def evaluate(rule_ids: Iterable[str], ctx: RuleContext) -> list[Evaluated]:
             continue
         try:
             verdict = spec.fn(ctx)
-        except Exception as exc:  # a broken rule must be loud, not absent
+        except Exception as exc:  # noqa: BLE001 - a broken rule must be loud, not absent
             verdict = Verdict.fail(
                 f"rule {rule_id!r} raised {type(exc).__name__}: {exc}",
                 detail="This is a bug in the rule, not a finding about your work.",
@@ -568,8 +569,10 @@ def _isolated_before_edit(ctx: RuleContext) -> Verdict:
                 fixes=tuple(
                     [f"aim the edit inside your worktree: {w}" for w in worktrees[:4]]
                     + [
-                        "or, if this session has no worktree yet: "
-                        "invariant session isolate --execute --id <id>"
+                        (
+                            "or, if this session has no worktree yet: "
+                            "invariant session isolate --execute --id <id>"
+                        )
                     ]
                 ),
             )
@@ -1834,6 +1837,24 @@ def _test_all_pass(ctx: RuleContext) -> Verdict:
     events=(),
 )
 def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
+    # The floor's verdict is reached for the HELD files alone; advisory files
+    # are split off on the way in and reported on the way out, so not one
+    # branch of the floor below needed to learn that they exist. Every return
+    # in it — the no-row block, the trust checks, the ratchet — therefore
+    # applies to held files exactly as it did before the key existed.
+    advisory: list[tuple[str, str]] = []
+    held = _held_files_floor(ctx, advisory)
+    return _with_advisory_report(ctx, held, advisory)
+
+
+def _held_files_floor(ctx: RuleContext, advisory: list[tuple[str, str]]) -> Verdict:
+    """The floor over every file not under `coverage_advisory_paths`.
+
+    ``advisory`` is filled with ``(path, pattern)`` for each file split off,
+    for :func:`_with_advisory_report` to name. When the split leaves nothing
+    held, this returns a skip, which that function turns into the pass the
+    exception grants — saying so.
+    """
     floor = float(ctx.manifest.get("methodology.gates.coverage_min", 0) or 0)
     if floor <= 0:
         return Verdict.na("no coverage floor configured")
@@ -1861,6 +1882,15 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
             ctx, source_changed
         )
         excluded += declared_non_source
+
+        # A POLICY about where the floor binds, asked after the claims about
+        # what a path IS (above) and before any question about what was
+        # measured, because an advisory file is owed no measurement at all.
+        # An advisory-only change therefore never reaches the recording guard.
+        source_changed, split_off = _split_advisory(ctx, source_changed)
+        advisory.extend(split_off)
+        if split_off and not source_changed:
+            return Verdict.na("nothing held to the floor was touched")
 
         # Whether anything here is MEASURABLE is a different question from
         # whether anything was measured, and only the first is answerable
@@ -2011,6 +2041,13 @@ def _coverage_meets_floor(ctx: RuleContext) -> Verdict:
                 detail=set_aside,
             )
         coverage = touched
+    else:
+        # The wider scopes hold every measured row, so the split is over
+        # rows: an advisory row is reported, never held.
+        coverage, split_off = _split_advisory(ctx, coverage)
+        advisory.extend(split_off)
+        if split_off and not coverage:
+            return Verdict.na("no measured file is held to the floor")
 
     # How the measurement was obtained, carried into the verdict. A clean pass
     # measured on a run with a live hazard is not the same claim as one
@@ -3085,6 +3122,125 @@ def _excluded_by_manifest_globs(
     return kept, excluded
 
 
+_ADVISORY_KEY = "methodology.gates.coverage_advisory_paths"
+
+
+def _split_advisory(ctx: RuleContext, paths):
+    """Split ``paths`` into the ones held to the floor and the advisory ones.
+
+    ``paths`` is a set of project-relative paths or a ``{path: pct}`` mapping;
+    the held part comes back in the same shape, the advisory part as
+    ``(path, pattern as written)``. Matched by the same normaliser and glob
+    reader as `coverage_exclude` and `non_source`, so the three lists cannot
+    come to disagree about what a pattern names.
+    """
+    patterns = _declared_in_project(ctx, ctx.manifest.get(_ADVISORY_KEY) or [])
+    if not patterns:
+        return paths, []
+    split_off: list[tuple[str, str]] = []
+    kept = {} if isinstance(paths, dict) else set()
+    for rel in sorted(paths):
+        matched = _first_matching_glob(rel, patterns)
+        if matched is not None:
+            split_off.append((rel, matched))
+        elif isinstance(kept, dict):
+            kept[rel] = paths[rel]
+        else:
+            kept.add(rel)
+    return kept, split_off
+
+
+def _with_advisory_report(
+    ctx: RuleContext, held: Verdict, advisory: list[tuple[str, str]]
+) -> Verdict:
+    """The held files' verdict, with every advisory file named in it.
+
+    An advisory file never fails the gate, and is never silent in it either:
+    its figure when a run measured one, flagged when it is under the floor,
+    and "not measured" when nothing did — never an invented number. When the
+    held set came to nothing, the pass is GRANTED by the exception and the
+    message says so in full, because a pass that hides the reason it passed
+    is the silent green this gate exists to prevent.
+    """
+    if not advisory:
+        return held
+    floor = float(ctx.manifest.get("methodology.gates.coverage_min", 0) or 0)
+    report = _advisory_detail(ctx, advisory, floor)
+
+    if held.skipped:
+        message = (
+            f"{len(advisory)} touched source file(s) under {_ADVISORY_KEY}, "
+            f"where the {floor:g}% floor is advisory, and nothing held to the "
+            "floor needs a coverage run; a coverage run is still owed before "
+            "that list is removed"
+        )
+        reason = f"Held files: {held.message}." if held.message else ""
+        detail = " ".join(part for part in (report, reason, held.detail) if part)
+        return Verdict.clean(message, detail=detail)
+
+    detail = f"{held.detail}  {report}" if held.detail else report
+    if held.ok:
+        return Verdict.clean(
+            f"{held.message}; {len(advisory)} more advisory under "
+            f"coverage_advisory_paths, not held",
+            detail=detail,
+        )
+    return Verdict.fail(held.message, detail=detail, fixes=held.fixes)
+
+
+def _advisory_detail(
+    ctx: RuleContext, advisory: list[tuple[str, str]], floor: float
+) -> str:
+    recorded = ctx.evidence("coverage", {}) or {}
+    roots = _coverage_roots(ctx)
+    coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
+    entries: list[str] = []
+    for rel, pattern in advisory:
+        if not recorded:
+            entries.append(f"{rel} not measured, no coverage recorded ({pattern!r})")
+            continue
+        hits = [pct for f, pct in coverage.items() if _same_file(rel, f)]
+        if not hits:
+            entries.append(f"{rel} not measured, no coverage row ({pattern!r})")
+            continue
+        pct = float(hits[0])
+        below = f", below the {floor:g}% floor" if pct < floor else ""
+        entries.append(f"{rel} {pct:g}%{below} ({pattern!r})")
+    text = (
+        f"Advisory under {_ADVISORY_KEY}, so never held to the floor: "
+        + "; ".join(entries)
+        + "."
+    )
+    run = ctx.evidence("coverage_run", {}) or {}
+    overstating = run.get("overstating_hazards") or []
+    if recorded and overstating:
+        text += (
+            " These figures may read HIGH; live on the measuring run: "
+            + ", ".join(overstating)
+            + "."
+        )
+    return text
+
+
+def coverage_advisory_exception(manifest: Any) -> str | None:
+    """The standing exception `coverage_advisory_paths` grants, as one line.
+
+    ``None`` when the list is empty. A configured list is a phase state the
+    project chose deliberately, so the line is informational rather than a
+    failure, and it is shown where an operator looks when they suspect a
+    forgotten setting: the list is easy to leave behind once the phase that
+    needed it is over.
+    """
+    globs = [str(g) for g in (manifest.get(_ADVISORY_KEY) or [])]
+    if not globs:
+        return None
+    return (
+        f"ACTIVE EXCEPTION: the coverage floor is advisory for "
+        f"{', '.join(globs)} ({_ADVISORY_KEY}); a coverage run over those "
+        "paths is owed before the list is removed"
+    )
+
+
 def _first_matching_glob(rel: str, patterns: list[tuple[str, str]]) -> str | None:
     """The first declared glob ``rel`` falls under, named as it was written.
 
@@ -3508,8 +3664,7 @@ def _short_ref(ref: str) -> str:
     """`origin/session/x` and `session/x` name the same branch here."""
     cleaned = (ref or "").strip().removeprefix("refs/heads/").removeprefix("refs/remotes/")
     for remote_prefix in ("origin/", "upstream/"):
-        if cleaned.startswith(remote_prefix):
-            cleaned = cleaned[len(remote_prefix) :]
+        cleaned = cleaned.removeprefix(remote_prefix)
     return cleaned
 
 

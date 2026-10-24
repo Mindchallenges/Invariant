@@ -594,6 +594,44 @@ floor for a file that already clears the first. A record read only in PART is an
 error, never a smaller record: a dropped entry stops being enforced and stops
 being honoured at the same time, with nothing in any verdict to say so.
 
+A fourth lever answers a question about WHERE the floor binds rather than what
+a path is or what it once measured. A consuming project ruled that one
+development phase lands new, flag-off code under two subtrees on scoped suites,
+with the floor advisory there and blocking everywhere else, and one full
+coverage pass owed when the phase ends. Its only coverage lane was a full-suite
+run, so a milestone touching nothing but the new code could not land without
+that run or a force. Dropping the gate from the methodology, the way `bugfix`
+binds none, cannot tell shared code from new code, and was filed there as a
+defect. `methodology.gates.coverage_advisory_paths` is the key. It splits the
+touched source files, after the claims about what a path IS (`non_source`, the
+built-in prose and configuration suffixes) and before any question about what
+was measured, into ADVISORY and HELD:
+
+```mermaid
+graph TD
+    T["touched source files<br/>(after non_source and the built-in suffixes)"] --> S{"under a<br/>coverage_advisory_paths glob?"}
+    S -- no --> H["HELD: today's floor, unchanged<br/>no-record and no-row blocks, trust checks,<br/>floor, coverage_exclude, ratchet"]
+    S -- yes --> A["ADVISORY: never fails the gate"]
+    H --> V{"anything held?"}
+    V -- yes --> R["the held verdict, with every advisory file<br/>named: its figure, flagged under the floor,<br/>or not measured"]
+    V -- no --> P["PASS with no coverage run required,<br/>naming the count, the key, and the<br/>coverage run still owed before the list goes"]
+    A --> R
+    A --> P
+```
+
+The split happens on the way IN to the floor and the report on the way OUT, so
+no branch of the held-file logic learned that advisory files exist — which is
+the property that keeps every held-file guarantee intact. An advisory figure is
+never invented: with no coverage recorded the file reads "not measured", with a
+recording but no row it reads "no coverage row", and a run carrying an
+overstating hazard says its figures may read high. The same `_first_matching_glob`
+over `_declared_in_project` reads all three glob lists, so they cannot disagree
+about what a pattern names. A glob matching nothing is not an error at gate
+time; a configured list is instead an ACTIVE EXCEPTION row in `doctor`
+(`core.rules.coverage_advisory_exception`, one wording for both readers),
+informational for the reason the parked-session row is — the list is a
+deliberate phase state, and its removal is what ends the phase.
+
 `SESSION → PLAN` is the newest arrow into `core/`, and it is drawn for the
 reason `SESSION → STATS` is. The deliverable set a session owes is *stored* on
 the session document and *mutated* by the domain, which owns the store, the

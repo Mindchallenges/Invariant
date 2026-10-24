@@ -84,6 +84,7 @@ methodology:
     coverage_exclude: ["src/generated/**"]   # measured, reported, not held to the floor
     non_source: ["fixtures/**", "design/**"] # no run could produce a row; not code
     coverage_baseline: .claude/coverage-baseline.txt  # ratchet: below the floor but not below its entry passes
+    coverage_advisory_paths: ["web/**"]       # floor advisory here: reported, never blocks
 ```
 
 `coverage_exclude` and `non_source` answer different questions — "measured but
@@ -91,6 +92,16 @@ not held" against "cannot be measured at all" — and every path either one
 sets aside is named in the verdict. `coverage_baseline` is one
 `<path> <pct>` per line; a file regresses below its entry and the gate blocks,
 a file below the floor but at its entry does not.
+
+`coverage_advisory_paths` (shown above as `["web/**"]`, empty by default) is
+for a phase that lands new code on scoped test suites with one full coverage
+pass owed at its end. A touched file under one of its globs is named in the
+verdict with its figure, or as not measured, and never fails the gate; every
+other file is held exactly as before. A change that touches only advisory paths
+passes without a coverage run, and the verdict says so. `invariant doctor`
+lists a configured list as an active exception. Ending the phase is deleting
+the list, after the owed coverage run. Each of the three glob lists must be a
+YAML list: a bare string is refused at load.
 
 ## Sessions
 

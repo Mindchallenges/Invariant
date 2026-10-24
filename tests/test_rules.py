@@ -7,12 +7,12 @@ import pytest
 
 from invariant.core.manifest import Level
 from invariant.core.rules import (
-    _coverage_roots,
-    _relative_to_any,
-    _same_file,
     NORMALISED_PAYLOAD_KEYS,
     RuleContext,
     Verdict,
+    _coverage_roots,
+    _relative_to_any,
+    _same_file,
     all_rules,
     evaluate,
     evaluate_event,
@@ -1034,7 +1034,7 @@ class TestCoverageRule:
         and the index empties the touched set at exactly the state where the
         gate is asked its question.
         """
-        main, wt = ctx_factory.main, ctx_factory.wt
+        wt = ctx_factory.wt
         (wt / "a.py").write_text("x = 1\n", encoding="utf-8")
         run(["git", "add", "-A"], wt)
         run(["git", "commit", "-qm", "work"], wt)
@@ -1060,7 +1060,7 @@ class TestCoverageRule:
         into a project-wide one, and every legacy file below the floor then
         blocks a change that never went near it.
         """
-        main, wt = ctx_factory.main, ctx_factory.wt
+        wt = ctx_factory.wt
         pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
         session = {"worktree": str(wt), "base": "master", "files": []}
         result = only(
@@ -1073,7 +1073,7 @@ class TestCoverageRule:
         assert "legacy.py" not in (result.verdict.detail or "")
 
     def test_a_docs_only_change_has_nothing_for_the_floor_to_answer(self, ctx_factory):
-        main, wt = ctx_factory.main, ctx_factory.wt
+        wt = ctx_factory.wt
         (wt / "docs" / "architecture" / "overview.md").write_text("# hi\n", encoding="utf-8")
         run(["git", "add", "-A"], wt)
         run(["git", "commit", "-qm", "docs"], wt)
@@ -1095,7 +1095,7 @@ class TestCoverageRule:
         Reporting that as "nothing was touched" would skip the floor on real
         source work — the vacuous green this gate exists to prevent.
         """
-        main, wt = ctx_factory.main, ctx_factory.wt
+        wt = ctx_factory.wt
         pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
         session = {"worktree": str(wt), "base": "no-such-base", "files": []}
         result = only(
@@ -2920,7 +2920,7 @@ class TestPushBarrierAndExemptPaths:
     not hypothetical: it blocked a real push of already-committed memory.
     """
 
-    PUSH = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
+    PUSH: ClassVar[dict] = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
 
     @pytest.fixture(autouse=True)
     def publishing_on(self, ctx_factory):
@@ -2993,7 +2993,7 @@ class TestPublishingIsOptIn:
     about the project rather than about whichever session finished last.
     """
 
-    PUSH = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
+    PUSH: ClassVar[dict] = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
 
     def test_the_barrier_abstains_when_publishing_is_off(self, ctx_factory):
         ctx = ctx_factory(session={"state": "merged", "push_count": 3}, payload=self.PUSH)
@@ -5729,6 +5729,363 @@ class TestTheRecordedBaselineThatRatchetsTheFloor:
             self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
         )
         assert verdict.ok, verdict.message
+
+
+class TestPathsWhereTheFloorIsAdvisory:
+    """`methodology.gates.coverage_advisory_paths` — a floor held per subtree.
+
+    A consuming project ruled that one development phase lands NEW, flag-off
+    code under two subtrees on scoped suites, with the floor advisory there
+    and blocking everywhere else, and one full coverage pass owed at the phase
+    gate. Its only coverage lane is a full-suite run, so a milestone touching
+    nothing but the new code could not land without that run or a force.
+    Dropping the gate from the methodology cannot tell shared code from new
+    code; this key can.
+
+    Advisory files never fail the gate and are always NAMED in the verdict,
+    with their figure when one was measured and "not measured" when none was.
+    Everything else keeps today's floor exactly.
+    """
+
+    NEW = "web/sync/engine.py"
+    NEW_TOO = "web/sync/wire.py"
+    SHARED = "src/app/mod.py"
+    LIVE = "def f():\n    return g()\n"
+    BASELINE = "scripts/coverage_baseline.txt"
+
+    def ctx_for(self, ctx_factory, declared, coverage, advisory, baseline=None):
+        gates = {
+            "coverage_min": 90,
+            "coverage_scope": "touched",
+            "coverage_advisory_paths": advisory,
+        }
+        if baseline is not None:
+            gates["coverage_baseline"] = baseline
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {"gates": gates},
+            },
+        )
+        evidence = {"coverage": coverage} if coverage is not None else {}
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "",
+            },
+            pipeline={"evidence": evidence},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def wire(self, ctx_factory, measured, baseline_text=None):
+        out = {}
+        for rel, pct in measured.items():
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+            if pct is not None:
+                out[str(path)] = pct
+        if baseline_text is not None:
+            recorded = ctx_factory.wt / self.BASELINE
+            recorded.parent.mkdir(parents=True, exist_ok=True)
+            recorded.write_text(baseline_text, encoding="utf-8")
+        return out
+
+    # -- an advisory-only change ---------------------------------------
+
+    def test_an_advisory_only_change_passes_with_no_coverage_run(self, ctx_factory):
+        """The reported case: no evidence at all, and the gate still passes."""
+        self.wire(ctx_factory, {self.NEW: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW], None, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert not verdict.skipped, "a granted pass is not 'not applicable'"
+
+    def test_the_advisory_only_pass_names_the_exception_plainly(self, ctx_factory):
+        """A pass that hides the exception is the silent green this rule
+        exists to prevent: count, key, and the coverage run still owed."""
+        self.wire(ctx_factory, {self.NEW: None, self.NEW_TOO: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.NEW_TOO], None, ["web/**"])
+        )
+        assert "2 touched source file(s)" in verdict.message
+        assert "advisory" in verdict.message
+        assert "coverage_advisory_paths" in verdict.message
+        assert "coverage run is still owed" in verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py" in detail and "wire.py" in detail
+        assert "not measured" in detail
+
+    def test_no_figure_is_invented_when_nothing_was_measured(self, ctx_factory):
+        self.wire(ctx_factory, {self.NEW: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW], None, ["web/**"])
+        )
+        assert "%" not in (verdict.detail or "").replace("90%", "")
+
+    def test_an_advisory_file_below_the_floor_is_reported_not_failed(
+        self, ctx_factory
+    ):
+        measured = self.wire(ctx_factory, {self.NEW: 40.0, self.SHARED: 100.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py 40%" in detail
+        assert "below the 90% floor" in detail
+        assert "web/**" in detail
+
+    def test_an_advisory_only_change_with_evidence_reports_its_figures(
+        self, ctx_factory
+    ):
+        measured = self.wire(ctx_factory, {self.NEW: 40.0, self.NEW_TOO: 95.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.NEW_TOO], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert "coverage run is still owed" in verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py 40%" in detail
+        assert "wire.py 95%" in detail
+
+    def test_an_advisory_file_with_no_row_is_named_and_does_not_fail(
+        self, ctx_factory
+    ):
+        """The no-row block is a HELD-file guarantee; advisory files carry none."""
+        measured = self.wire(ctx_factory, {self.NEW: None, self.SHARED: 100.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py" in detail
+        assert "no coverage row" in detail
+
+    # -- held files keep today's floor ---------------------------------
+
+    def test_a_mixed_change_with_no_evidence_still_blocks(self, ctx_factory):
+        self.wire(ctx_factory, {self.NEW: None, self.SHARED: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], None, ["web/**"])
+        )
+        assert not verdict.ok
+        assert "no coverage was recorded" in verdict.message
+
+    def test_a_held_file_with_no_row_still_blocks(self, ctx_factory):
+        """An advisory row is not evidence for a held file: with it the only
+        measured row, the held file has no overlap at all and still blocks."""
+        measured = self.wire(ctx_factory, {self.NEW: 100.0, self.SHARED: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert not verdict.ok
+        assert "none of it covers the changed files" in verdict.message
+
+    def test_a_held_file_with_no_row_beside_a_measured_one_still_blocks(
+        self, ctx_factory
+    ):
+        other = "src/app/other.py"
+        measured = self.wire(
+            ctx_factory, {self.NEW: 100.0, self.SHARED: None, other: 100.0}
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.NEW, self.SHARED, other], measured, ["web/**"]
+            )
+        )
+        assert not verdict.ok
+        assert "1 changed source file(s) have no coverage row" in verdict.message
+        assert "mod.py" in (verdict.detail or "")
+
+    def test_a_held_file_below_the_floor_fails_while_advisory_passes(
+        self, ctx_factory
+    ):
+        measured = self.wire(ctx_factory, {self.NEW: 100.0, self.SHARED: 40.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert not verdict.ok
+        assert "1 file(s) below the 90% floor" in verdict.message
+        detail = verdict.detail or ""
+        assert "mod.py 40%" in detail
+        assert "engine.py 100%" in detail
+        assert "coverage_advisory_paths" in detail
+
+    def test_a_mixed_pass_still_says_what_was_advisory(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.NEW: 50.0, self.SHARED: 100.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert "coverage_advisory_paths" in verdict.message
+        assert "all 1 file(s) at or above 90%" in verdict.message
+
+    def test_the_ratchet_still_applies_to_held_files(self, ctx_factory):
+        measured = self.wire(
+            ctx_factory,
+            {self.NEW: 10.0, self.SHARED: 70.0},
+            f"{self.SHARED} 69.17\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"], self.BASELINE
+        )
+        assert self.verdict(ctx).ok
+
+        measured = self.wire(
+            ctx_factory,
+            {self.NEW: 10.0, self.SHARED: 60.0},
+            f"{self.SHARED} 69.17\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"], self.BASELINE
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "recorded coverage baseline" in verdict.message
+
+    def test_an_overstating_run_still_blocks_a_held_file(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.NEW: 100.0, self.SHARED: 100.0})
+        ctx = self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        ctx.pipeline["evidence"]["coverage_run"] = {
+            "overstating_hazards": ["demo.reads_high"]
+        }
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "cannot be trusted upward" in verdict.message
+
+    def test_an_overstating_run_is_named_beside_advisory_figures(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.NEW: 100.0})
+        ctx = self.ctx_for(ctx_factory, [self.NEW], measured, ["web/**"])
+        ctx.pipeline["evidence"]["coverage_run"] = {
+            "overstating_hazards": ["demo.reads_high"]
+        }
+        verdict = self.verdict(ctx)
+        assert verdict.ok
+        assert "demo.reads_high" in (verdict.detail or "")
+
+    def test_a_glob_matching_nothing_changes_nothing(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.SHARED: 40.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SHARED], measured, ["nothing/**"])
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+        assert "coverage_advisory_paths" not in (verdict.detail or "")
+
+    def test_a_spelling_variant_matches_through_the_shared_normaliser(
+        self, ctx_factory
+    ):
+        """Matched by `_declared_in_project`, like `coverage_exclude`."""
+        self.wire(ctx_factory, {self.NEW: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW], None, ["./web/"])
+        )
+        assert verdict.ok, verdict.message
+
+    def test_a_held_set_with_nothing_measurable_still_passes_with_the_exception(
+        self, ctx_factory
+    ):
+        """A held test file with no evidence is set aside on its own (BUG_019);
+        the advisory exception must not vanish from that verdict."""
+        test_file = "tests/test_mod.py"
+        self.wire(ctx_factory, {self.NEW: None, test_file: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, test_file], None, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert not verdict.skipped
+        assert "coverage_advisory_paths" in verdict.message
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_an_all_scope_floor_does_not_hold_an_advisory_row(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "all",
+                        "coverage_advisory_paths": ["web/**"],
+                    }
+                },
+            },
+        )
+        ctx = ctx_factory(
+            session={"id": "s1"},
+            pipeline={
+                "evidence": {
+                    "coverage": {"src/app.py": 100.0, "web/new.py": 10.0},
+                }
+            },
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "web/new.py 10%" in (verdict.detail or "")
+
+    def test_an_all_scope_floor_of_only_advisory_rows_passes_and_says_so(
+        self, ctx_factory
+    ):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "all",
+                        "coverage_advisory_paths": ["web/**"],
+                    }
+                },
+            },
+        )
+        ctx = ctx_factory(
+            session={"id": "s1"},
+            pipeline={"evidence": {"coverage": {"web/new.py": 10.0}}},
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert not verdict.skipped
+        assert "coverage run is still owed" in verdict.message
+
+    # -- the standing exception ----------------------------------------
+
+    def test_a_configured_list_is_reported_as_an_active_exception(self, tmp_path):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import coverage_advisory_exception
+
+        write_manifest(
+            tmp_path,
+            {
+                "version": 1,
+                "methodology": {
+                    "gates": {"coverage_advisory_paths": ["web/**", "Sync/**"]}
+                },
+            },
+        )
+        line = coverage_advisory_exception(Manifest.load(tmp_path))
+        assert line is not None
+        assert "ACTIVE EXCEPTION" in line
+        assert "web/**" in line and "Sync/**" in line
+        assert "owed" in line
+
+    def test_an_empty_list_is_no_exception(self, tmp_path):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import coverage_advisory_exception
+
+        write_manifest(tmp_path, {"version": 1})
+        assert coverage_advisory_exception(Manifest.load(tmp_path)) is None
 
 
 class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:

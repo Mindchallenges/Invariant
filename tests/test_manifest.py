@@ -178,6 +178,40 @@ class TestValidation:
         with pytest.raises(ManifestError, match="privacy.scope must be a list"):
             Manifest.load(tmp_path)
 
+    def test_coverage_advisory_paths_defaults_to_empty(self, minimal):
+        """The key is known, so `config show --provenance` lists it."""
+        assert minimal.get("methodology.gates.coverage_advisory_paths") == []
+        keys = {key for key, *_ in minimal.iter_provenance()}
+        assert "methodology.gates.coverage_advisory_paths" in keys
+
+    @pytest.mark.parametrize(
+        "key", ["coverage_advisory_paths", "coverage_exclude", "non_source"]
+    )
+    def test_a_glob_list_given_as_a_string_is_refused(self, tmp_path, key):
+        """A bare string iterates as characters, and one of them is `*`: the
+        whole tree would match. A mistyped relaxation is refused at load."""
+        write_manifest(tmp_path, {"methodology": {"gates": {key: "web/**"}}})
+        with pytest.raises(ManifestError, match=f"methodology.gates.{key}"):
+            Manifest.load(tmp_path)
+
+    def test_a_glob_list_given_as_null_reads_as_empty(self, tmp_path):
+        """A YAML `key:` with no value is null; every reader treats it as the
+        empty list, so load accepts it rather than refusing a non-relaxation."""
+        write_manifest(
+            tmp_path, {"methodology": {"gates": {"coverage_advisory_paths": None}}}
+        )
+        assert not Manifest.load(tmp_path).get(
+            "methodology.gates.coverage_advisory_paths"
+        )
+
+    def test_a_glob_list_entry_must_be_a_string(self, tmp_path):
+        write_manifest(
+            tmp_path,
+            {"methodology": {"gates": {"coverage_advisory_paths": [["web/**"]]}}},
+        )
+        with pytest.raises(ManifestError, match="coverage_advisory_paths"):
+            Manifest.load(tmp_path)
+
     def test_unknown_methodology_is_a_validation_error(self, tmp_path):
         """AUD-08: a mistyped `methodology.pipeline` used to surface only when
         a machine load happened to run — and several gates skipped, silently

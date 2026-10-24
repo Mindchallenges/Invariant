@@ -203,6 +203,38 @@ class TestDoctorAndConfig:
         assert "invariant init" in text
         assert "enforcement.rules.docs.read_architecture: warn" in text
 
+    def test_doctor_names_coverage_advisory_paths_as_an_active_exception(
+        self, project, capsys
+    ):
+        """A standing relaxation of the floor must not be forgotten in a
+        manifest: `doctor` says it is active and that a coverage run is owed,
+        without turning red, since the list is a deliberate phase state."""
+        import yaml
+
+        run("init", "--ecosystem", "python")
+        path = project / ".claude" / "invariant.yaml"
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body.setdefault("methodology", {}).setdefault("gates", {})[
+            "coverage_advisory_paths"
+        ] = ["web/**"]
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+        capsys.readouterr()
+
+        run("doctor")
+        text = out(capsys)
+        row = next(ln for ln in text.splitlines() if "coverage advisory paths" in ln)
+        assert "ACTIVE EXCEPTION" in row
+        assert "web/**" in row
+
+    def test_doctor_reports_no_advisory_exception_by_default(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        capsys.readouterr()
+        run("doctor")
+        row = next(
+            ln for ln in out(capsys).splitlines() if "coverage advisory paths" in ln
+        )
+        assert "none configured" in row
+
     def test_config_show_reports_provenance(self, project, capsys):
         run("init", "--ecosystem", "python")
         run("config", "show", "--provenance")

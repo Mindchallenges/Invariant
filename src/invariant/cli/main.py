@@ -24,6 +24,7 @@ from ..core.rules import (
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
     all_rules,
+    coverage_advisory_exception,
     evaluate,
 )
 from ..core.store import InertStore, JsonStore
@@ -640,6 +641,15 @@ def cmd_doctor(args) -> int:
             )
         except InvariantError:
             pass
+
+        # A standing relaxation of the coverage floor, named where an operator
+        # looks for a forgotten setting. Informational for the same reason the
+        # parked-session row is: the list is a deliberate phase state, and a
+        # doctor that stays red for a whole phase is one nobody reads.
+        advisory = coverage_advisory_exception(ctx.manifest)
+        checks.append(
+            ("coverage advisory paths", True, advisory or "none configured")
+        )
 
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()

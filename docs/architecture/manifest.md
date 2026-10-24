@@ -75,6 +75,19 @@ methodology:
                                # root holds are all ERRORS — a record read in part
                                # drops entries in both directions invisibly. Null
                                # by default.
+    coverage_advisory_paths: []  # globs where the floor is ADVISORY. A touched
+                               # file under one never fails the gate; the verdict
+                               # names it with its figure, flagged when it is under
+                               # the floor, or as "not measured" — never an
+                               # invented number. Everything else is held exactly
+                               # as before. A change touching ONLY advisory paths
+                               # passes with no coverage run, and its message says
+                               # so: the count, the key, and that a coverage run is
+                               # still owed before the list is removed. `doctor`
+                               # names a configured list as an ACTIVE EXCEPTION.
+                               # For a phase that lands new, flag-off code on
+                               # scoped suites; ending the phase is deleting the
+                               # list. Empty by default.
 
 enforcement:
   profile: standard            # strict | standard | loose
@@ -274,6 +287,7 @@ graph TD
 | `session.exempt_paths` | `_is_exempt` | exempt | **was not exempt**; now exempt | **was not exempt**; now exempt |
 | `methodology.gates.non_source` | `coverage.meets_floor`, `docs.updated` | held out | **was not held out**; now held out | **was not held out**; now held out |
 | `methodology.gates.coverage_exclude` | `coverage.meets_floor` | held out | **was not held out**; now held out | **was not held out**; now held out |
+| `methodology.gates.coverage_advisory_paths` | `coverage.meets_floor`, `doctor` | advisory | advisory (normalised from the start) | advisory |
 | `privacy.scope` entries and the `paths.*` its keywords name | `privacy.clean` | in scope | in scope (`Path()` already absorbed it) | in scope |
 | `paths.docs` | `docs.read_architecture`, `docs.updated` | every tree | every tree (resolved on join) | every tree |
 | `coverage_baseline` entries | `coverage.meets_floor` | matched | matched (`_same_file`); `x` and `./x` together are now refused as one file recorded twice | matched |
@@ -739,6 +753,11 @@ or `off`), an `enforcement.rules` KEY naming no registered rule, a non-list
 `privacy.scope`, an unknown `items.backend`, and — because several gates used
 to skip, silently and non-blocking, exactly when this was mistyped (AUD-08) —
 a `methodology.pipeline` that names no shipped or `extra_machines` machine.
+The three glob lists under `methodology.gates` — `coverage_exclude`,
+`non_source` and `coverage_advisory_paths` — must each be a list of strings:
+every one of them is a relaxation, and a bare string given for one was iterated
+character by character downstream, so `"web/**"` contributed a lone `*` that
+matches every path in the project.
 Existence is checked at load; whether the file parses as a machine of the
 right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it

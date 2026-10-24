@@ -363,6 +363,13 @@ invariant pipeline coverage
     row for one. A file that DOES carry a row is held to the floor like any
     other — setting aside is for an absent row, never for a low one.
 
+    A file under methodology.gates.coverage_advisory_paths is a different
+    case again: a POLICY about where the floor binds. It is named in the
+    verdict with its figure, or as not measured, and never fails the gate. A
+    change touching only such files needs no coverage run at all, and the
+    pass says so, naming the coverage run still owed before the list is
+    removed.
+
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
     reports as skipped, carrying that reason, for the rest of the pipeline —

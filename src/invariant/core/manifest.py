@@ -190,12 +190,21 @@ DEFAULTS: dict[str, Any] = {
         # that could clear it. Empty by default and every match named in the
         # verdict with the pattern that spent it: this is the project asserting
         # something the engine cannot check.
+        # `coverage_advisory_paths` is a list of glob patterns where the floor
+        # is ADVISORY: a touched file under one is reported with its figure, or
+        # as not measured, and never fails the gate, while every other file is
+        # held exactly as before. For a phase that lands new, flag-off code on
+        # scoped suites with one full coverage pass owed at its end — the end
+        # being the deletion of this list. A change touching only advisory
+        # paths passes without a coverage run and says so, and `doctor` names
+        # a configured list as an active exception so it is not forgotten.
         "gates": {
             "coverage_min": 90,
             "coverage_scope": "touched",
             "coverage_exclude": [],
             "coverage_baseline": None,
             "non_source": [],
+            "coverage_advisory_paths": [],
         },
     },
     "enforcement": {"profile": "standard", "rules": {}},
@@ -465,6 +474,22 @@ class Manifest:
         scope = self.data["privacy"]["scope"]
         if not isinstance(scope, list):
             raise ManifestError("privacy.scope must be a list")
+        # The coverage glob lists are each a RELAXATION, and a bare string
+        # given for one is iterated character by character downstream — so
+        # `"web/**"` contributes a lone `*`, which matches every path in the
+        # project. A mistyped narrowing must not become a project-wide one.
+        gates = self.data["methodology"].get("gates") or {}
+        for key in _GLOB_LIST_GATES:
+            value = gates.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, list) or not all(
+                isinstance(entry, str) for entry in value
+            ):
+                raise ManifestError(
+                    f"methodology.gates.{key} must be a list of glob strings, "
+                    f"got {value!r}"
+                )
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -604,6 +629,9 @@ class Manifest:
 
 
 # -- helpers -----------------------------------------------------------
+
+#: The `methodology.gates` keys whose value is a list of globs.
+_GLOB_LIST_GATES = ("coverage_exclude", "non_source", "coverage_advisory_paths")
 
 
 def project_relative(value: Any, bases: Iterable[Path | str | None] = ()) -> str | None:
