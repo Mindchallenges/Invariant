@@ -1663,6 +1663,35 @@ class TestCarriesExecutableCode:
 
         assert suffix in _COMPILED_SUFFIXES
 
+    # -- BUG_085: CocoaPods manifests are not compiled either ---------------
+
+    # Repro for BUG_085 — see the work-item entry.
+    # Fails while the defect is live. When the fix lands, delete the
+    # expected-failure wrapper; the assertion must then pass unchanged.
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_085 is live — delete this marker with the fix",
+    )
+    @pytest.mark.parametrize(
+        "relpath",
+        ["Podfile", "Podfile.lock", "ios/Podfile", "ios/Podfile.lock"],
+    )
+    def test_BUG_085_a_cocoapods_manifest_carries_no_executable_code(
+        self, tmp_path, relpath
+    ):
+        """`Podfile` is a Ruby DSL and `Podfile.lock` its lockfile. No Xcode
+        target compiles either, so `xccov` can never emit a row for them —
+        the same fact BUG_039 recorded for `Info.plist`. Asked with both
+        spellings, at the root and nested, exactly as `_explain_absent_rows`
+        asks it. `None` here is what leaves the coverage gate unsatisfiable.
+        """
+        path = tmp_path / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("platform :ios, '16.0'\n", encoding="utf-8")
+        assert (
+            self.adapter.carries_executable_code(path, Path(relpath)) is False
+        )
+
 
 class TestBUG041CoverageRowsAreNotSwiftOnly:
     """`parse_coverage` extracted only `.swift` rows.

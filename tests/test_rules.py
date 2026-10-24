@@ -4494,6 +4494,38 @@ class TestFilesThatCannotHaveACoverageRow:
         assert "Info.plist" in (verdict.detail or "")
         assert "no executable lines to measure" in (verdict.detail or "")
 
+    # Repro for BUG_085 — see the work-item entry.
+    # Fails while the defect is live. When the fix lands, delete the
+    # expected-failure wrapper; the assertion must then pass unchanged.
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_085 is live — delete this marker with the fix",
+    )
+    def test_BUG_085_a_touched_podfile_and_lockfile_are_set_aside_and_named(
+        self, ctx_factory
+    ):
+        """The reported case, at the layer the consuming project sees it.
+
+        A change touching `Podfile` and `Podfile.lock` beside a measured Swift
+        file was blocked with both listed as changed source files with no
+        coverage row. They are CocoaPods' Ruby DSL and its lockfile; no test
+        anyone could write would produce a row for either. Same expectation
+        as `Info.plist` above: pass, and name what was set aside.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Podfile", "platform :ios, '16.0'\n")
+        self.write(ctx_factory, "Podfile.lock", "PODFILE CHECKSUM: 0\n")
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Podfile", "Podfile.lock"],
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "Podfile" in (verdict.detail or "")
+        assert "Podfile.lock" in (verdict.detail or "")
+        assert "no executable lines to measure" in (verdict.detail or "")
+
     def test_a_touched_objective_c_file_still_blocks(self, ctx_factory):
         """The one-bit control for the relaxation above.
 
