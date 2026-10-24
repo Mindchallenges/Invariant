@@ -2,11 +2,11 @@
 
 - **Status:** Accepted, partly implemented. The user approved the mobile
   mockup on 2026-10-23. IDEA_027 builds it in increments (D14): D2–D6, D8,
-  D11 and D12 shipped with increment 3, and D10 with increment 4, whose two
-  iOS checks remain open (D10); D9 lands with increment 5, and D1's
-  destructive actions with D7's guards in increments 6 and 7, after IDEA_024
-  and BUG_078. The design of record (screens, components,
-  tokens, wording) is [oracle-panel.md](../architecture/oracle-panel.md).
+  D11 and D12 shipped with increment 3, D10 with increment 4 (its two iOS
+  checks remain open), and D9 with increment 5. D1's destructive actions
+  with D7's guards land in increments 6 and 7, after IDEA_024 and BUG_078.
+  The design of record (screens, components, tokens, wording) is
+  [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23
 - **Supersedes:** nothing. It amends ADR-007 in one place: the oracle is no
   longer read-only as a whole. Its scan, watcher and gate cache stay
@@ -228,6 +228,14 @@ the sentence:
   output: the last line that is neither blank nor a traceback frame.
 - It never infers a cause the output does not state. A reason that names
   the wrong cause is worse than none.
+
+As shipped in increment 5, invariant's own line is the CLI's error line,
+`invariant: <message>` at the start of a line; the table words the two
+discovery failures and quotes any other message as "invariant said: …".
+The fallback also skips progress bars and rules, and reads "Failed. <line>"
+when there is no exit status (a timeout, a launch failure). The details are
+in [oracle-panel.md](../architecture/oracle-panel.md), "As built in
+increment 5".
 
 ### D10 — The page installs as a home-screen app, under the same CSP and token
 

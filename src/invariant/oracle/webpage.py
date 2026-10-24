@@ -559,6 +559,10 @@ const ORACLE = (function () {
       nodes.push(h("p", {cls: "sentence",
                          text: fill(WORDS.remote_control, {name: job.remote_control})}));
     }
+    if (w.why) {
+      nodes.push(h("div", {cls: "inset why"}, [h("span", {cls: "label", text: WORDS.why}),
+                                                h("p", {cls: "sentence", text: w.why})]));
+    }
     if (job.output) {
       nodes.push(disclosure(h, ui, on, "output:" + job.id, WORDS.show_output,
                             [h("pre", {cls: "output", text: job.output})], "disclosure inset"));

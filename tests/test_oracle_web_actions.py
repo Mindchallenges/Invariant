@@ -472,6 +472,175 @@ class TestAct:
         assert world.audit()[-1]["exit"] is None
 
 
+# -- the failure summary (IDEA_027 increment 5, ADR-009 D9) ------------------------
+
+#: The motivating failure: a target's destination discovery that printed a
+#: multi-line shell script after invariant's own line. The reason names the
+#: key and drops the script.
+_DISCOVERY = (
+    "checking the destination\n"
+    "invariant: discovery for 'destination_id' produced nothing (exit 1). The command "
+    "was: set -e\n"
+    "booted=$(xcrun simctl list devices booted | awk '/Booted/ {print $NF}')\n"
+    "if [ $(echo \"$booted\" | wc -l) -ne 1 ]; then\n"
+    "  exit 1\n"
+    "fi\n"
+    "echo \"$booted\"\n"
+    "4 simulators are booted\n"
+)
+
+_PYTEST = (
+    "============================= test session starts ==============================\n"
+    "collected 4 items\n"
+    "\n"
+    "tests/test_a.py ..F.                                                     [100%]\n"
+    "\n"
+    "=================================== FAILURES ===================================\n"
+    "___________________________________ test_x ____________________________________\n"
+    "\n"
+    "    def test_x():\n"
+    ">       assert 1 == 2\n"
+    "E       assert 1 == 2\n"
+    "\n"
+    "tests/test_a.py:3: AssertionError\n"
+    "=========================== short test summary info ============================\n"
+    "FAILED tests/test_a.py::test_x - assert 1 == 2\n"
+    "========================= 1 failed, 3 passed in 0.12s ==========================\n"
+)
+
+_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "/r/tool.py", line 9, in <module>\n'
+    "    main()\n"
+    "    ~~~~^^\n"
+    '  File "/r/tool.py", line 5, in main\n'
+    "    raise ValueError(\"bad config\")\n"
+    "ValueError: bad config\n"
+)
+
+_CHAINED = (
+    "Traceback (most recent call last):\n"
+    '  File "/r/a.py", line 1, in <module>\n'
+    "KeyError: 'x'\n"
+    "\n"
+    "During handling of the above exception, another exception occurred:\n"
+    "\n"
+    "Traceback (most recent call last):\n"
+    '  File "/r/a.py", line 3, in <module>\n'
+    "    boom()\n"
+)
+
+_PROGRESS = (
+    "fetching\n"
+    "error: checksum mismatch for wheel.whl\n"
+    " 45%|████▌     | 45/100 [00:01<00:01]\r100%|██████████| 100/100 [00:02<00:00]\n"
+    "[=========>          ] 50%\n"
+    "tests/test_b.py ....                                                      [ 50%]\n"
+    "--------------------------------------------------------------------------------\n"
+)
+
+
+class TestFailureSummary:
+    """One plain sentence for a failed job, naming a cause only invariant wrote."""
+
+    @pytest.mark.parametrize("ok, status, output, why", [
+        pytest.param(False, 1, _DISCOVERY,
+                     "invariant could not find a value for destination_id.",
+                     id="discovery-produced-nothing"),
+        pytest.param(False, 2, "invariant: discovery for \"scheme\" timed out; the command "
+                     "was: sleep 99\n",
+                     "invariant ran out of time finding a value for scheme.",
+                     id="discovery-timed-out"),
+        pytest.param(False, 1, "verdict lines\ninvariant: the merge gates refused this "
+                     "session — nothing has been merged\n",
+                     "invariant said: the merge gates refused this session — nothing has "
+                     "been merged",
+                     id="an-invariant-refusal"),
+        pytest.param(False, 1, "\x1b[31minvariant: no session is active here\x1b[0m\n",
+                     "invariant said: no session is active here", id="ansi-coloured-own-line"),
+        pytest.param(False, 1, _PYTEST, "Failed, exit 1. 1 failed, 3 passed in 0.12s",
+                     id="pytest-failures"),
+        pytest.param(False, 1, _TRACEBACK, "Failed, exit 1. ValueError: bad config",
+                     id="a-traceback"),
+        pytest.param(False, 1, "starting up\n" + _CHAINED,
+                     "Failed, exit 1. KeyError: 'x'", id="a-traceback-cut-in-its-frames"),
+        pytest.param(False, 1, _PROGRESS,
+                     "Failed, exit 1. error: checksum mismatch for wheel.whl",
+                     id="progress-bars-and-rules"),
+        pytest.param(False, 2, "", "Failed, exit 2. It printed nothing.", id="empty-output"),
+        pytest.param(False, 2, "\n  \n\t\n", "Failed, exit 2. It printed nothing.",
+                     id="blank-output"),
+        pytest.param(False, 1, "=====\n-----\n", "Failed, exit 1. See the full output.",
+                     id="only-rules"),
+        pytest.param(False, None, "timed out after 600s", "Failed. timed out after 600s",
+                     id="a-timeout"),
+        pytest.param(False, None, "could not start invariant: [Errno 2] No such file or "
+                     "directory: 'invariant'",
+                     "Failed. could not start invariant: [Errno 2] No such file or "
+                     "directory: 'invariant'", id="a-launch-failure"),
+        pytest.param(False, None, "the session's folder is gone; no window was opened",
+                     "Failed. the session's folder is gone; no window was opened",
+                     id="a-terminal-refusal"),
+        pytest.param(False, 3, "  invariant: indented, so a tool's own text\n",
+                     "Failed, exit 3. invariant: indented, so a tool's own text",
+                     id="an-indented-line-is-not-invariants"),
+        pytest.param(False, 1, "myinvariant: not ours\n", "Failed, exit 1. myinvariant: not ours",
+                     id="another-prefix-is-not-invariants"),
+        pytest.param(False, 1, "invariant: \n", "Failed, exit 1. invariant:",
+                     id="an-empty-own-line-names-nothing"),
+        pytest.param(True, 0, "invariant: a warning on success\n", "", id="success-says-nothing"),
+    ])
+    def test_each_failure_reads_as_one_plain_line(self, ok, status, output, why):
+        assert webactions.summarise(ok, status, output) == why
+
+    def test_a_long_line_is_trimmed(self):
+        why = webactions.summarise(False, 1, "x" * 500 + "\n")
+        assert why.startswith("Failed, exit 1. xxx")
+        assert why.endswith("…")
+        assert len(why) <= len("Failed, exit 1. ") + webactions.MAX_REASON
+
+    def test_a_long_own_line_is_trimmed_too(self):
+        why = webactions.summarise(False, 1, "invariant: " + "y" * 500 + "\n")
+        assert why.startswith("invariant said: yyy") and why.endswith("…")
+        assert len(why) <= len("invariant said: ") + webactions.MAX_REASON
+
+    def test_the_last_own_line_wins(self):
+        output = "invariant: first\nsomething\ninvariant: second\nmore\n"
+        assert webactions.summarise(False, 1, output) == "invariant said: second"
+
+    def test_the_evidence_is_the_cause_and_the_last_meaningful_line(self):
+        assert webactions.evidence(_DISCOVERY) == webactions.Evidence(
+            own="discovery for 'destination_id' produced nothing (exit 1). The command was: "
+                "set -e",
+            last="4 simulators are booted", printed=True)
+        assert webactions.evidence("") == webactions.Evidence(None, None, printed=False)
+
+    def test_a_failed_job_carries_its_reason_beside_the_untouched_output(self, world):
+        world.runner.status, world.runner.output = 1, _DISCOVERY
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        job = world.remote.act(PHONE, world.key(), nonce).body["job"]
+        assert job["words"]["why"] == "invariant could not find a value for destination_id."
+        assert job["output"] == _DISCOVERY
+        assert world.remote.recent(PHONE)[0]["words"]["why"] == job["words"]["why"]
+
+    def test_a_running_or_successful_job_has_no_reason(self, world):
+        world.defer()
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        job = world.remote.act(PHONE, world.key(), nonce).body["job"]
+        assert job["words"]["why"] == ""
+        world.deferred[0]()
+        assert world.remote.job(PHONE, job["id"])["words"]["why"] == ""
+
+    def test_a_runner_that_raises_reads_as_its_exception(self, world):
+        def boom(argv, cwd, env):
+            raise RuntimeError("kaboom")
+
+        world.actions.runner = boom
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        job = world.remote.act(PHONE, world.key(), nonce).body["job"]
+        assert job["words"]["why"] == "Failed. RuntimeError: kaboom"
+
+
 def test_the_real_spawn_runs_the_work_in_a_thread():
     done = threading.Event()
     webactions.start_thread(done.set)
@@ -786,7 +955,7 @@ class TestOverHttp:
         assert detail["step"]["button"] == {"text": "Merge…"}
         assert [j["row"] for j in body["jobs"]] == ["K|s1"]
         assert body["jobs"][0]["words"] == {"headline": "Done in 1 s", "line": "Merge",
-                                            "tone": "ok"}
+                                            "tone": "ok", "why": ""}
         assert detail["recent"] == [{"text": "Merge: Done in 1 s",
                                      "at": body["jobs"][0]["started"]}]
 

@@ -81,7 +81,7 @@ _CONFIRM = {
 _JOB = {"id": "j1", "row": "K|t1", "argv": ["invariant", "pipeline", "test"], "kind": "run",
         "state": "done", "ok": False, "status": 2, "elapsed": 3.0, "output": "boom\n",
         "remote_control": None, "audit_error": ""}
-_JOB["words"] = panel.result_words(_JOB)
+_JOB["words"] = {**panel.result_words(_JOB), "why": "Failed, exit 2. boom"}
 
 #: A document that records what is built. Enough DOM for the page and no more.
 _PRELUDE = r"""
@@ -364,6 +364,31 @@ class TestTheConfirmSheet:
         assert result["outputOpen"] is False
         assert result["outputText"] == "Show full outputboom\n"
         assert result["focused"] == "Done"
+
+    def test_a_failed_result_says_why_above_the_closed_output(self):
+        result = _run({"/api/state": [200, _state()], "/api/confirm": [200, _CONFIRM],
+                       "/api/act": [202, {"job": _JOB}]}, r"""
+  byText(screen(), "Re-run tests…").fire("click");
+  await settle();
+  withClass(sheet(), "primary")[0].fire("click");
+  await settle();
+  const order = sheet().children.map((n) => n.className || n.tagName);
+  say({why: texts(sheet(), "why"), order: order});""")
+        assert result["why"] == ["WhyFailed, exit 2. boom"]
+        order = result["order"]
+        assert order.index("inset why") < order.index("disclosure inset")
+
+    def test_a_successful_result_has_no_why(self):
+        done = {**_JOB, "ok": True, "status": 0, "output": "ok\n"}
+        done["words"] = {**panel.result_words(done), "why": ""}
+        result = _run({"/api/state": [200, _state()], "/api/confirm": [200, _CONFIRM],
+                       "/api/act": [202, {"job": done}]}, r"""
+  byText(screen(), "Re-run tests…").fire("click");
+  await settle();
+  withClass(sheet(), "primary")[0].fire("click");
+  await settle();
+  say({why: texts(sheet(), "why"), headline: texts(sheet(), "result-title")});""")
+        assert result == {"why": [], "headline": ["Done in 3 s"]}
 
     def test_a_refused_confirm_says_why_and_offers_no_deed(self):
         refused = {**_CONFIRM, "nonce": None, "words": None, "refused": "its host is waiting"}

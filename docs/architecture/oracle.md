@@ -50,7 +50,7 @@ graph TD
         WEB["web (IDEA_023, ADR-008)"]
         PANEL["panel (IDEA_027, ADR-009)"]
         WEBPAGE[webpage]
-        WEBACT["webactions (IDEA_023 inc 2)"]
+        WEBACT["webactions (IDEA_023 inc 2; failure summary, IDEA_027 inc 5)"]
         WEBSVC["webservice (IDEA_023 inc 3)"]
         TLS["tls (IDEA_026)"]
         DEVICES[devices]
@@ -717,8 +717,8 @@ ADR-008's. The person-facing setup is the guide's
 | Module | Owns | Never does |
 |---|---|---|
 | `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, which is `panel.view`, with the device's recent jobs) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps; with a `Served`, TLS per connection in that connection's thread, and a `307` to the https name for plain HTTP), the HTTPS rules (only the certificate's name as `Host`, the `https` origin, the `Secure` cookie), the plain-HTTP warning, and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
-| `panel` | The control panel's view model (IDEA_027, ADR-009): the attention groups and their order, the summary strip's counts, the leftovers, each session's detail, and the one wording table (`WORDS`, chips, sentences, lanes and phases, `step_words`, `confirm_words`, `result_words`, `copy_line`). Pure: the `assess` document in, words out | Import `actions`, `webactions` or `hosts/`; show an engine name, a path, an argv, a pid or a host id outside a detail's "Technical details"; give a fact it does not know a phrase |
-| `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, with the sheet's words from `panel`, the action, the job with its result's words, and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
+| `panel` | The control panel's view model (IDEA_027, ADR-009): the attention groups and their order, the summary strip's counts, the leftovers, each session's detail, and the one wording table (`WORDS`, chips, sentences, lanes and phases, `step_words`, `confirm_words`, `result_words`, `why_words`, `copy_line`). Pure: the `assess` document in, words out | Import `actions`, `webactions` or `hosts/`; show an engine name, a path, an argv, a pid or a host id outside a detail's "Technical details"; give a fact it does not know a phrase |
+| `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, with the sheet's words from `panel`, the action, the job with its result's words, and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row`; the failure summary (`evidence`, `summarise`): a failed job's invariant-written line and last meaningful line, worded by `panel.why_words` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/`; name a cause the output does not state |
 | `webpage` | The HTML: the self-contained control panel with its token CSS and its script (the overview, detail and leftovers screens, the confirm and result bottom sheets, copy), `WORDS` embedded from `panel`, and the "not paired", pairing-form and message pages; the home-screen app's `<head>`, its manifest (`manifest`) and its icons (`icon`, PNGs drawn from the tokens) | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce; hold a word of its own |
 | `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
 | `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; keep the certificate due, swap a renewal into the listener, listen again over HTTPS or plain HTTP when that changes; its report, `oracle/web.json`; `web_status`, `cert_text` and their wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
@@ -850,7 +850,7 @@ the TUI's, under the TUI's rules (ADR-007 D18, ADR-008 D8–D13):
 |---|---|
 | press the button | `GET /api/confirm`: the server scans afresh, finds the row by its key, derives the step and answers `refusal`'s reason, or the `info` text, or the TUI's confirm lines and a nonce, with `words`: `panel.confirm_words`, the sheet's title, sentence, deed, the command as one shell line, the place in plain words, the exact folder, each added variable and a terminal's launch line (previewed once). The bottom sheet shows the question, the command with Copy, the rest behind "Exact folder and environment", the deed over Cancel, which is focused, and the nonce counting down; at zero the deed is disabled and "Look again" asks for a new confirm. A destructive step (`session teardown`) lists what it deletes, puts Cancel first and the command behind "Exact command". Nothing has run |
 | press the deed ("Run tests", "Merge", "Open window") | `POST /api/act` with `{row, nonce}` and nothing else. The nonce is spent; the server scans again, checks every refusal again and that the step is the one confirmed (`command_of`), reserves the row, writes the audit start line, and answers 202 with a job. A thread runs `Actions.perform` |
-| afterwards | the sheet polls `/api/job` every second until the job is done, then shows its `words` (`panel.result_words`: "Done in N s", "Failed, exit N", "Opened in a new window") and the output's last 64 KiB behind a closed "Show full output". The state loop keeps refreshing throughout, and `/api/state` carries the device's last 20 jobs, which a session's detail lists under "Recent", so a reload still shows the result |
+| afterwards | the sheet polls `/api/job` every second until the job is done, then shows its `words` (`panel.result_words`: "Done in N s", "Failed, exit N", "Opened in a new window"), for a failure a "Why" panel with `words.why`, and the output's last 64 KiB, unchanged, behind a closed "Show full output". The state loop keeps refreshing throughout, and `/api/state` carries the device's last 20 jobs, which a session's detail lists under "Recent", so a reload still shows the result |
 
 **Copy.** The detail's step and every confirm carry Copy, which puts
 `panel.copy_line` on the clipboard: `shlex.join` of the argv, its pinned
@@ -1060,7 +1060,15 @@ tokens, wording, the increment plan) is
   and `img-src 'self'`, the iOS standalone tags, and safe-area padding
   ("Who gets an answer" above). Two iOS behaviours are unverified on a
   device; [oracle-panel.md](oracle-panel.md) keeps them as open questions.
-- **Increment 5** is to come: a one-line reason for a failed action.
+- **Increment 5 has shipped**: a one-line reason for a failed action
+  (ADR-009 D9). When a job ends, `webactions.summarise` reads its kept
+  output for the line invariant's CLI writes for its own errors
+  (`invariant: <message>`) and for the last meaningful line, skipping blank
+  lines, traceback frames, progress bars and rules; `panel.why_words` words
+  them. A cause is named only from invariant's own line ("invariant could
+  not find a value for destination_id."); anything else reads "Failed, exit
+  N. <last line>". The job's dict gains only `words.why`, and the output is
+  unchanged behind "Show full output".
 - **Increments 6 and 7** give the oracle destructive powers: close a
   leftover host (IDEA_025) and the clean-up and unstick actions (IDEA_017).
   This amends ADR-007's read-only premise (ADR-009 D1). The scan, the

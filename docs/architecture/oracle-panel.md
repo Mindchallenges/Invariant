@@ -6,12 +6,12 @@ the server, transport and pairing it keeps, are in [oracle.md](oracle.md),
 "Shipped: the web page". The person-facing setup is the guide's
 [The oracle on your phone](../guide/oracle-web.md).
 
-**Status: increments 3 and 4 shipped.** The user approved the mockup on
+**Status: increments 3, 4 and 5 shipped.** The user approved the mockup on
 2026-10-23. Increments 3 to 7 build it ("Increment plan" below). Increment
-3, the plain-language panel, and increment 4, the home-screen app, are what
-the page serves now; "As built in increment 3" and "As built in increment 4"
-below record where they fill in what this page left open. Increments 5 to 7
-are not built.
+3, the plain-language panel, increment 4, the home-screen app, and increment
+5, failure reasons, are what the page serves now; "As built in increment 3",
+"As built in increment 4" and "As built in increment 5" below record where
+they fill in what this page left open. Increments 6 and 7 are not built.
 
 **Visual reference.** The approved mockup is a private claude.ai artifact of
 six 390-pixel-wide phone screens. The scratch files it was drawn from did not
@@ -40,7 +40,7 @@ graph TD
         WEB["web (view, routes; inc 4, shipped: manifest, icons)"]
         PANEL["panel (inc 3, shipped: groups, summary, wording table)"]
         WEBPAGE["webpage (inc 3, shipped: cards, detail, sheets; inc 4, shipped: manifest, icon)"]
-        WEBACT["webactions (inc 5: failure summariser; inc 6–7: destructive kinds)"]
+        WEBACT["webactions (inc 5, shipped: failure summariser; inc 6–7: destructive kinds)"]
         ACTIONS[actions]
         DASH[dashboard]
         SIGNALS["signals / recommend"]
@@ -59,7 +59,8 @@ graph TD
 
 `webactions → panel` is for the confirm's and the result's words: the
 confirm sheet's title, sentence and button come from the same table as the
-card's button. The new arrows are `web → panel`, `panel → scan` (for
+card's button, and the result's "Why" is worded by `panel.why_words` from
+what `webactions.evidence` read in the output. The new arrows are `web → panel`, `panel → scan` (for
 `row_key` and the row kinds), `panel → signals` (the signal kinds and
 `recommend`'s step kinds) and `webactions → panel`. As built, the panel
 needs nothing from `dashboard`, so the `panel → dashboard` arrow this page
@@ -500,6 +501,23 @@ The two iOS checks of ADR-009 D10 could not be made on a device in this
 increment, so both stay open questions below; the guide says what to do
 either way.
 
+## As built in increment 5
+
+Failure reasons (ADR-009 D9). Where the build decided what this page left
+open:
+
+| Question | As built |
+|---|---|
+| Where the reason is made | `webactions.evidence` reads the job's kept output (the same tail "Show full output" shows) for two facts: the last line that starts with `invariant: ` at the start of a line, which is the line the CLI writes for an error it raised, and the last meaningful line. `panel.why_words` words them, so the sentence's every word is in the panel's table. `webactions.summarise` joins the two, once, when the job ends; the job keeps it as `words.why` |
+| What counts as invariant's own line | Only `invariant: <message>` at the very start of a line, after colour codes are removed; an indented one, or another prefix such as `myinvariant:`, is the target's text. The last such line wins, and only its first line is read, so a multi-line message (a discovery's shell script) never reaches the sentence |
+| The causes the table words | A discovery that produced nothing: "invariant could not find a value for <key>." A discovery that timed out: "invariant ran out of time finding a value for <key>." Any other own line is quoted, not reworded: "invariant said: <message>" |
+| The fallback | "Failed, exit N. <last meaningful line>", or "Failed. <line>" when there is no exit status (a timeout, a command that could not start, a window that did not open, a runner that raised). Output with nothing in it reads "… It printed nothing."; output that is all noise reads "… See the full output." |
+| The last meaningful line | Not blank, not a traceback's header, frame, source line or caret line, not "During handling of the above exception…", not a progress bar (block characters, `[=====>   ]`, a trailing `[ 50%]`, `45%|`), not a rule of `=`, `-`, `_` or `*`. A line ruled on both sides, such as pytest's `=== 1 failed, 3 passed in 0.12s ===`, keeps its words. A `\r` overwrite keeps what the terminal last showed |
+| Its length | At most 160 characters of the quoted line, ending in "…" when cut |
+| Success, and a running job | `words.why` is empty, and the sheet draws no "Why" panel |
+| The sheet | The "Why" panel is an inset block under the headline, labelled from `WORDS.why`, with the sentence as text; "Show full output" stays closed under it, and the output is unchanged (the existing 64 KiB tail) |
+| The headline | Unchanged from increment 3 ("Failed, exit N", "Failed"); the mockup's "The tests did not start" would name a cause the output does not state |
+
 ## Increment plan
 
 | # | Increment | Session | Acceptance (from IDEA_027) |
@@ -508,7 +526,7 @@ either way.
 | 2 | Mockup, approved 2026-10-23 | done | This page records it |
 | 3 | Plain-language panel: `oracle/panel`, the groups, strip, wording, detail view, copy, button wording, no mid-word wrap | **shipped** (session 80e81a07) | First view fits 390 px and a count scrolls to its group; no default-view string holds a path, argv, pid, host UUID or engine state name; each is in Technical details |
 | 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | **shipped** (session 80e81a07); the two iOS checks still open | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
-| 5 | Failure reasons: the summariser and the result sheet | this session | A failed action shows one plain sentence; the full output only after "Show full output" |
+| 5 | Failure reasons: the summariser and the result sheet | **shipped** (session 80e81a07) | A failed action shows one plain sentence; the full output only after "Show full output" |
 | — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | later sessions | their own acceptance |
 | 6 | Orphan classes and close host (IDEA_025 scope v1) | later | IDEA_025's acceptance; refuses at confirm time on a gone, renamed or mismatched pid |
 | 7 | Clean-up and unstick actions (IDEA_017's list) | later | IDEA_017's acceptance; every action shows what it runs and destroys, and refuses when its precondition no longer holds |

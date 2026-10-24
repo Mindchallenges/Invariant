@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
 import test_oracle_scan
 
 from invariant.oracle import panel
@@ -602,6 +603,27 @@ class TestResultWords:
         assert panel.result_words(self.job(argv=resume, kind="terminal", ok=False,
                                            status=None))["headline"] == "Failed"
         assert panel.result_words(self.job(argv=["rm"]))["line"] == "This step"
+
+    @pytest.mark.parametrize("status, own, last, printed, why", [
+        (1, "discovery for 'destination_id' produced nothing (exit 1). The command was: x",
+         "4 simulators are booted", True,
+         "invariant could not find a value for destination_id."),
+        (2, 'discovery for "scheme" timed out; the command was: sleep 99', None, True,
+         "invariant ran out of time finding a value for scheme."),
+        (1, "the merge gates refused this session", "x", True,
+         "invariant said: the merge gates refused this session"),
+        (4, None, "error: no such table", True, "Failed, exit 4. error: no such table"),
+        (None, None, "timed out after 600s", True, "Failed. timed out after 600s"),
+        (2, None, None, False, "Failed, exit 2. It printed nothing."),
+        (None, None, None, False, "Failed. It printed nothing."),
+        (1, None, None, True, "Failed, exit 1. See the full output."),
+    ])
+    def test_why_names_a_cause_only_when_invariant_wrote_one(self, status, own, last, printed,
+                                                              why):
+        assert panel.why_words(status, own, last, printed) == why
+
+    def test_the_why_label_is_a_fixed_word(self):
+        assert panel.WORDS["why"] == "Why"
 
 
 # -- the acceptance: nothing engine-shaped on the default view ------------------------------

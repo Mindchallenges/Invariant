@@ -26,6 +26,10 @@ another device needs on top is here (ADR-008 D8–D12):
 
 The confirm and every job also carry their words from ``oracle/panel``: the
 sheet's title, sentence and deed, and the result's headline (ADR-009 D3, D6).
+A failed job's "Why" is :func:`summarise`'s: it reads the output for a line
+invariant itself wrote and for the last meaningful line, and the panel words
+them. It names a cause only from invariant's own line, and never guesses one
+(ADR-009 D9). The output itself is kept as it was, behind "Show full output".
 
 The oracle never answers a permission prompt, and neither does this: there is
 no route to one, and ``refusal`` refuses a step on a row that waits on one.
@@ -35,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -83,6 +88,12 @@ MAX_KEPT = 20
 #: Characters of a command's output kept: its tail, where the verdict is.
 MAX_OUTPUT = 65536
 
+#: Characters of a reason's quoted line; a longer one ends in "…".
+MAX_REASON = 160
+
+#: How invariant's CLI starts the line it writes for an error it raised.
+OWN_PREFIX = "invariant: "
+
 RUNNING = "running"
 DONE = "done"
 
@@ -118,6 +129,77 @@ def _tail(text: str) -> str:
     if len(text) <= MAX_OUTPUT:
         return text
     return f"[... {len(text) - MAX_OUTPUT} characters truncated ...]\n" + text[-MAX_OUTPUT:]
+
+
+# -- the failure summary (ADR-009 D9) ------------------------------------------
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_TRACEBACK = "Traceback (most recent call last):"
+_CHAINED = ("During handling of the above exception", "The above exception was the direct")
+_FRAME = re.compile(r'^\s+File "|^\s*[\^~]+\s*$')
+_PROGRESS = re.compile(
+    r"[█▉▊▋▌▍▎▏━░▒▓]{3,}"  # a bar drawn in blocks
+    r"|\[[=#>\-. ]{5,}\]"  # [=====>    ]
+    r"|\[\s*\d{1,3}%\]\s*$"  # pytest's trailing [ 50%]
+    r"|^\s*\d{1,3}%\|"  # tqdm's 45%|
+)
+_RULE = re.compile(r"^[=\-_*~]+$")
+_RULED = re.compile(r"^[=\-_*]{3,}\s*(.*?)\s*[=\-_*]{3,}$")
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """What a job's output states, for its reason. Read, never inferred."""
+
+    #: The message of the last line invariant wrote (``invariant: <message>``).
+    own: str | None
+    #: The last line that is not blank, a traceback frame, a progress bar or a rule.
+    last: str | None
+    #: Whether the output holds anything but whitespace.
+    printed: bool = True
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= MAX_REASON else text[: MAX_REASON - 1].rstrip() + "…"
+
+
+def _lines(output: str) -> list[str]:
+    """The output's lines as a terminal left them: colour gone, ``\\r`` overwrites applied."""
+    lines = []
+    for raw in output.split("\n"):
+        parts = [p for p in _ANSI.sub("", raw).split("\r") if p.strip()]
+        lines.append(parts[-1].rstrip() if parts else "")
+    return lines
+
+
+def evidence(output: str) -> Evidence:
+    """The lines of ``output`` a reason may quote. Pure."""
+    own = last = None
+    in_traceback = False
+    for line in _lines(output):
+        if line.startswith(OWN_PREFIX) and line[len(OWN_PREFIX):].strip():
+            own = line[len(OWN_PREFIX):].strip()
+        if line.startswith(_TRACEBACK):
+            in_traceback = True
+            continue
+        if in_traceback and line[:1].isspace():
+            continue
+        in_traceback = False
+        text = line.strip()
+        if (not text or _FRAME.match(line) or line.startswith(_CHAINED)
+                or _PROGRESS.search(text) or _RULE.match(text)):
+            continue
+        ruled = _RULED.match(text)
+        last = ruled[1] if ruled and ruled[1] else text
+    return Evidence(own and _clip(own), last and _clip(last), bool(output.strip()))
+
+
+def summarise(ok: bool | None, status: int | None, output: str) -> str:
+    """A finished job's one plain line of reason; nothing for one that succeeded."""
+    if ok:
+        return ""
+    found = evidence(output)
+    return panel.why_words(status, found.own, found.last, found.printed)
 
 
 # -- the nonce book ------------------------------------------------------------
@@ -244,6 +326,7 @@ class Job:
     output: str = ""
     elapsed: float | None = None
     audit_error: str = ""
+    why: str = ""
     _began: float = field(default=0.0, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -255,7 +338,7 @@ class Job:
             "status": self.status, "output": self.output, "elapsed": self.elapsed,
             "audit_error": self.audit_error,
         }
-        body["words"] = panel.result_words(body)
+        body["words"] = {**panel.result_words(body), "why": self.why}
         return body
 
 
@@ -391,6 +474,7 @@ class RemoteActions:
         with self._lock:
             job.state, job.ok, job.status = DONE, outcome.ok, outcome.status
             job.output = _tail(outcome.text)
+            job.why = summarise(outcome.ok, outcome.status, job.output)
             job.elapsed = round(self.timer() - job._began, 3)
         try:
             self.audit.record(self._entry("done", job, device))

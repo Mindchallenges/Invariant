@@ -33,12 +33,11 @@ Shipped so far, the plain-language panel ("Using the page" below):
 - The page can be added to the home screen as an app, with its own icon, and
   opens full screen without the browser's bars ("6. Add it to your home
   screen" below).
+- A failed action says why in one sentence, with the full output behind
+  "Show full output" ("Running a step" below).
 
 Still to come:
 
-- A failed action says why in one sentence, with the full output behind
-  "Show full output". Until then the result says "Failed, exit N", with the
-  output behind that toggle.
 - Later, after two fixes it depends on: closing a leftover Claude window and
   cleaning up stranded sessions and folders, each confirmed first. Each
   lists what it deletes and checks again that nothing is using it when you
@@ -305,7 +304,19 @@ the deed ("Run tests", "Merge", "Open window"); Cancel is selected when the
 sheet opens. The confirm lasts two minutes and counts down; once it expires,
 "Look again" asks the Mac afresh. The result appears in the same sheet:
 "Done in N s", or "Failed, exit N", with the command's output behind "Show
-full output". A step that resumes a session opens a Terminal window on the
+full output".
+
+**Why it failed.** A failed step adds a "Why" line above the output. It names
+a cause only when invariant itself wrote one, such as "invariant could not
+find a value for destination_id." or "invariant said: the merge gates
+refused this session — nothing has been merged". Otherwise it says "Failed,
+exit N." and the output's last meaningful line, skipping blank lines,
+traceback frames and progress bars: for a test run, usually its summary
+("1 failed, 3 passed in 0.12s"); for a crash, the exception ("ValueError:
+bad config"). A step that timed out or could not start reads "Failed." and
+what the Mac said, such as "timed out after 600s". The line never guesses
+a cause the output does not state, so when it only quotes a line, open
+"Show full output" for the rest. A step that resumes a session opens a Terminal window on the
 Mac, whether or not anyone is at it, and you can pick that session up from
 Claude Code's Remote Control on the phone. Every action is logged on the Mac
 in `~/.invariant/web/actions.log`, and `oracle status` shows the last one.
@@ -338,6 +349,8 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | The home-screen app shows "not paired" | It may not share Safari's pairing. Pair it from inside the app: run `pair` on the Mac and tap "Enter a pairing code" (step 6). If it was revoked while open, swipe it away in the app switcher and open it again to reach that page. |
 | The home-screen icon is a picture of the page or a letter, not four tiles | iOS fetched the icon without the pairing cookie, so it got nothing. The app works the same. See "What has been checked" in step 6. |
 | "not this server" (421) | Over HTTPS, the browser named something other than the Mac's `*.ts.net` name, such as its address; the page names the right URL. Over plain HTTP, it was not the Mac's tailnet address or its name. Use the link `pair` prints. |
+| A failed step's "Why" quotes a line instead of naming a cause | The output did not state a cause in a form invariant wrote, so the page quotes the output's last meaningful line rather than guess. Open "Show full output" and read upward from the end; if the step is one you can run yourself, Copy its command from the step and run it in a terminal on the Mac. |
+| "Why" says "invariant could not find a value for …" | The project's manifest discovers that value with a command of its own, and the command printed nothing or failed. Run the step in a terminal on the Mac to see the command's own message, and fix the discovery command or the condition it checks (for example, more than one simulator booted). |
 | A step shows "The server restarted and no longer knows this action's result" | The agent restarted while the step ran. What ran, and how it ended, if it got that far, is in `~/.invariant/web/actions.log`. |
 | The pairing link names the wrong port | `pair` uses the port the page reports, else the installed one. Pass `--port` to override it. |
 

@@ -124,6 +124,7 @@ WORDS: dict[str, str] = {
     "this_deletes": "This deletes",
     "cannot_undo": "This cannot be undone.",
     "exact_command": "Exact command",
+    "why": "Why",
     "show_output": "Show full output",
     "done": "Done",
     "close": "Close",
@@ -340,6 +341,26 @@ _RESULT = {
     "stopped": "{step} · stopped after {seconds} s",
     "unknown_step": "This step",
 }
+
+#: A failed job's "Why" (ADR-009 D9). ``said`` and the causes are for a line
+#: invariant itself wrote (``invariant: <message>``, the CLI's error line);
+#: the rest name no cause, only the exit and the output's last meaningful line.
+_WHY = {
+    "said": "invariant said: {message}",
+    "last": "{headline}. {line}",
+    "silent": "{headline}. It printed nothing.",
+    "unread": "{headline}. See the full output.",
+}
+
+#: invariant's own messages the table words, matched on the message after
+#: ``invariant: ``. Each pattern is one ``core/manifest`` raises; an
+#: unmatched message is quoted under ``said``, never reworded by a guess.
+_OWN_CAUSES = (
+    (re.compile(r"discovery for (['\"])(?P<key>.+?)\1 produced nothing\b"),
+     "invariant could not find a value for {key}."),
+    (re.compile(r"discovery for (['\"])(?P<key>.+?)\1 timed out\b"),
+     "invariant ran out of time finding a value for {key}."),
+)
 
 _RECENT = {
     "permission": "Claude asked for permission",
@@ -701,6 +722,27 @@ def result_words(job: Mapping[str, Any]) -> dict[str, str]:
                 else _RESULT["failed"])
     return {"headline": headline,
             "line": _RESULT["stopped"].format(step=name, seconds=seconds), "tone": "failed"}
+
+
+def why_words(status: int | None, own: str | None, last: str | None, printed: bool) -> str:
+    """A failed job's one-line reason, from what its output states (ADR-009 D9).
+
+    ``own`` is the message of the line invariant wrote (``invariant: …``), if
+    any; ``last`` the output's last meaningful line; ``printed`` whether it
+    printed anything at all. Those are ``webactions.evidence``'s. A cause is
+    named only from ``own``; anything else is the exit and ``last``.
+    """
+    if own:
+        for pattern, sentence in _OWN_CAUSES:
+            found = pattern.match(own)
+            if found:
+                return sentence.format(key=found["key"])
+        return _WHY["said"].format(message=own)
+    headline = (_RESULT["failed_exit"].format(status=status) if status is not None
+                else _RESULT["failed"])
+    if last:
+        return _WHY["last"].format(headline=headline, line=last)
+    return _WHY["unread" if printed else "silent"].format(headline=headline)
 
 
 def _recent(row: dict[str, Any], key: str, jobs: Iterable[Mapping[str, Any]]) -> list[dict]:
