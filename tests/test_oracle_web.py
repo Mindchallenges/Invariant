@@ -1568,3 +1568,172 @@ def test_run_program_takes_a_timeout(monkeypatch):
     assert seen["timeout"] == 99
     web.run_program(["true"])
     assert seen["timeout"] == web.PROGRAM_TIMEOUT
+
+
+# -- the home-screen app (IDEA_027 inc 4, ADR-009 D10) ----------------------------
+
+
+def _png(data: bytes) -> tuple[int, int, list[bytes]]:
+    """A PNG's width, height and unfiltered RGB rows, every chunk's CRC checked."""
+    import struct
+    import zlib
+
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    at, chunks = 8, []
+    while at < len(data):
+        (length,) = struct.unpack(">I", data[at:at + 4])
+        kind, body = data[at + 4:at + 8], data[at + 8:at + 8 + length]
+        (crc,) = struct.unpack(">I", data[at + 8 + length:at + 12 + length])
+        assert zlib.crc32(kind + body) == crc
+        chunks.append((kind, body))
+        at += 12 + length
+    assert chunks[0][0] == b"IHDR" and chunks[-1][0] == b"IEND"
+    width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", chunks[0][1])
+    assert (depth, colour, interlace) == (8, 2, 0)
+    raw = zlib.decompress(b"".join(body for kind, body in chunks if kind == b"IDAT"))
+    stride = 1 + 3 * width
+    assert len(raw) == stride * height
+    rows = [raw[y * stride:(y + 1) * stride] for y in range(height)]
+    assert all(row[0] == 0 for row in rows)
+    return width, height, [row[1:] for row in rows]
+
+
+def _pixel(rows: list[bytes], x: int, y: int) -> str:
+    r, g, b = rows[y][3 * x:3 * x + 3]
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+_ICON_PATHS = ["/icon-180.png", "/icon-192.png", "/icon-512.png"]
+
+
+class TestTheHomeScreenApp:
+    def test_the_manifest_is_served_to_a_paired_device(self, store):
+        token = _paired(store)
+        response = _get(_app(store), webpage.MANIFEST_PATH, token=token)
+        assert response.status == 200
+        assert response.header("content-type") == "application/manifest+json"
+        assert response.header("cache-control") == "no-store"
+        manifest = json.loads(response.body)
+        assert manifest["name"] == panel.WORDS["app_name"]
+        assert manifest["short_name"] == panel.WORDS["app_short_name"]
+        assert manifest["display"] == "standalone"
+        assert manifest["start_url"] == "/" and manifest["scope"] == "/"
+        assert manifest["background_color"] == webpage.token("bg") == "#0B0C0E"
+        assert manifest["theme_color"] == webpage.token("bg")
+        sizes = {icon["sizes"]: icon for icon in manifest["icons"]}
+        assert set(sizes) == {"192x192", "512x512"}
+        for icon in manifest["icons"]:
+            assert icon["type"] == "image/png"
+            assert icon["src"].startswith("/") and icon["src"] in webpage.ICONS
+
+    def test_the_icons_are_the_touch_icon_and_the_manifests_two(self):
+        assert webpage.ICONS == {"/icon-180.png": 180, "/icon-192.png": 192,
+                                 "/icon-512.png": 512}
+
+    @pytest.mark.parametrize("path", _ICON_PATHS)
+    def test_each_icon_is_a_png_of_its_size(self, store, path):
+        token = _paired(store)
+        response = _get(_app(store), path, token=token)
+        assert response.status == 200
+        assert response.header("content-type") == "image/png"
+        width, height, _ = _png(response.body)
+        assert width == height == webpage.ICONS[path]
+
+    @pytest.mark.parametrize("path", ["/manifest.webmanifest", *_ICON_PATHS])
+    def test_an_unpaired_device_gets_neither_manifest_nor_icon(self, store, path):
+        loads = []
+        response = _get(_app(store, loads=loads), path)
+        assert response.status == 401
+        assert b"not paired" in response.body and b"PNG" not in response.body
+        assert loads == []
+
+    def test_neither_reads_the_machine(self, store):
+        token = _paired(store)
+        loads = []
+        app = _app(store, loads=loads)
+        for path in (webpage.MANIFEST_PATH, *webpage.ICONS):
+            assert _get(app, path, token=token).status == 200
+        assert loads == []
+
+    def test_a_head_request_gets_the_headers(self, store):
+        token = _paired(store)
+        response = _app(store).handle(Request(
+            "HEAD", webpage.MANIFEST_PATH, {"host": TS4, "cookie": f"{COOKIE_NAME}={token}"}))
+        assert response.status == 200
+
+    def test_the_icon_is_the_panels_ground_with_the_strips_four_accents(self):
+        width, _, rows = _png(webpage.icon(512))
+        ground = webpage.token("bg")
+        assert _pixel(rows, 0, 0) == _pixel(rows, 511, 511) == ground
+        assert _pixel(rows, 256, 256) == ground
+        quarter, three = width * 37 // 100, width * 63 // 100
+        assert _pixel(rows, quarter, quarter) == webpage.token("accent-needs")
+        assert _pixel(rows, three, quarter) == webpage.token("accent-problem")
+        assert _pixel(rows, quarter, three) == webpage.token("accent-working")
+        assert _pixel(rows, three, three) == webpage.token("accent-idle")
+
+    def test_the_glyph_sits_inside_the_maskable_safe_zone(self):
+        width, _, rows = _png(webpage.icon(192))
+        ground = webpage.token("bg")
+        inside = 0.4 * width
+        centre = width / 2
+        for y in range(width):
+            for x in range(width):
+                if ((x + 0.5 - centre) ** 2 + (y + 0.5 - centre) ** 2) ** 0.5 > inside:
+                    assert _pixel(rows, x, y) == ground, (x, y)
+
+    def test_the_icon_is_deterministic_and_has_no_other_sizes(self):
+        assert webpage.icon(180) == webpage.icon(180)
+        with pytest.raises(ValueError):
+            webpage.icon(100)
+
+    def test_a_colour_the_tokens_do_not_declare_is_refused(self):
+        with pytest.raises(KeyError):
+            webpage.token("no-such-colour")
+
+    def test_the_page_links_the_manifest_with_credentials_and_the_touch_icon(self, store):
+        token = _paired(store)
+        body = _get(_app(store), "/", token=token).body.decode()
+        assert (f'<link rel="manifest" href="{webpage.MANIFEST_PATH}" '
+                f'crossorigin="use-credentials">') in body
+        assert (f'<link rel="apple-touch-icon" sizes="180x180" '
+                f'href="{webpage.APPLE_TOUCH_ICON}">') in body
+        assert webpage.ICONS[webpage.APPLE_TOUCH_ICON] == 180
+        assert '<meta name="apple-mobile-web-app-capable" content="yes">' in body
+        assert ('<meta name="apple-mobile-web-app-status-bar-style" '
+                'content="black-translucent">') in body
+        assert (f'<meta name="apple-mobile-web-app-title" '
+                f'content="{panel.WORDS["app_short_name"]}">') in body
+        assert f'<meta name="theme-color" content="{webpage.token("bg")}">' in body
+
+    def test_every_page_covers_the_screen_and_pads_by_the_safe_areas(self, store):
+        token = _paired(store)
+        app = _app(store)
+        for response in (_get(app, "/", token=token), _get(app, "/"), _get(app, "/pair")):
+            body = response.body.decode()
+            assert "viewport-fit=cover" in body
+            for side in ("top", "right", "bottom", "left"):
+                assert f"env(safe-area-inset-{side})" in body
+
+    def test_the_sheet_pads_by_every_side_but_the_top(self):
+        style = webpage.page("n", panel.WORDS)
+        sheet = style[style.index("#sheet {"):]
+        sheet = sheet[:sheet.index("}")]
+        for side in ("right", "bottom", "left"):
+            assert f"env(safe-area-inset-{side})" in sheet
+
+    def test_the_csp_admits_only_its_own_manifest_and_images(self, store):
+        token = _paired(store)
+        csp = _get(_app(store), "/", token=token).header("content-security-policy")
+        assert "manifest-src 'self'" in csp and "img-src 'self'" in csp
+        assert "default-src 'none'" in csp
+        assert "http" not in csp and "data:" not in csp and "*" not in csp
+
+    def test_only_the_panel_offers_the_app(self, store):
+        app = _app(store)
+        for body in (_get(app, "/").body.decode(), _get(app, "/pair").body.decode()):
+            assert 'rel="manifest"' not in body and "apple-touch-icon" not in body
+
+    def test_the_not_paired_page_links_to_the_pairing_form(self, store):
+        body = _get(_app(store), "/").body.decode()
+        assert 'href="/pair"' in body

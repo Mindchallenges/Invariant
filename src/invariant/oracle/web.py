@@ -19,7 +19,8 @@ in ADR-008. In short:
   a row's step as the TUI's confirm does, with a nonce and the sheet's words;
   ``POST /api/act`` runs it, carrying only the row key and that nonce, from
   the page's own origin (``oracle/webactions``, ADR-008 D8–D12). ``GET
-  /api/job`` is its result.
+  /api/job`` is its result. The home-screen app's manifest and icons
+  (ADR-009 D10) are served under the same token, and read nothing.
 * **A slow or greedy client is cut off**: a socket timeout per request, a cap
   on headers, and a cap on connections at once.
 * **Over HTTPS once there is a certificate** (IDEA_026, ADR-008 D19-D24).
@@ -357,9 +358,12 @@ _BASE_HEADERS = [
 
 
 def _csp(nonce: str) -> str:
+    """Only the page's own nonce-tagged script and style, and its own fetches,
+    manifest and icons (ADR-009 D10): nothing from another origin."""
     return (
         f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
-        f"connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+        f"connect-src 'self'; manifest-src 'self'; img-src 'self'; form-action 'self'; "
+        f"base-uri 'none'; frame-ancestors 'none'"
     )
 
 
@@ -378,6 +382,11 @@ def _json(status: int, body: dict[str, Any]) -> Response:
         json.dumps(body, sort_keys=True, default=str).encode("utf-8"),
         [("Content-Type", "application/json"), *_BASE_HEADERS],
     )
+
+
+def _asset(content_type: str, body: bytes) -> Response:
+    """The manifest or an icon: data-free, served only past the token."""
+    return Response(HTTPStatus.OK, body, [("Content-Type", content_type), *_BASE_HEADERS])
 
 
 def _token(headers: Mapping[str, str]) -> str | None:
@@ -509,6 +518,11 @@ class WebApp:
                          nonce)
         if target.path == "/api/state":
             return self._state(device)
+        if target.path == webpage.MANIFEST_PATH:
+            return _asset("application/manifest+json",
+                          webpage.manifest(panel.WORDS).encode("utf-8"))
+        if target.path in webpage.ICONS:
+            return _asset("image/png", webpage.icon(webpage.ICONS[target.path]))
         query = parse_qs(target.query)
         if acting and target.path == "/api/confirm":
             row = (query.get("row") or [""])[0]

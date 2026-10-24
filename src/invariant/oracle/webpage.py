@@ -35,6 +35,15 @@ nonce and nothing else; the result is polled from ``/api/job``.
 **It follows the page to HTTPS** (ADR-008 D23): a state fetch answered with a
 redirect it did not follow reloads the page.
 
+**It installs as a home-screen app** (ADR-009 D10). The panel links a web app
+manifest (:func:`manifest`) with ``crossorigin="use-credentials"``, so the
+browser fetches it with the device's cookie, and a 180-pixel touch icon; the
+manifest names 192- and 512-pixel ones. The icons are drawn here
+(:func:`icon`), PNGs written with ``zlib`` from the tokens, never fetched or
+shipped as files. ``oracle/web`` serves both, only to a paired device. Every
+page covers the whole screen (``viewport-fit=cover``) and pads by
+``env(safe-area-inset-*)``, and so does the bottom sheet.
+
 The loop, the small helpers and every screen's drawing are the ``ORACLE``
 object, which touches no page: each draw function takes the view and an
 element builder, so the suite drives all of it under ``node`` or ``jsc``.
@@ -43,7 +52,11 @@ element builder, so the suite drives all of it under ``node`` or ``jsc``.
 from __future__ import annotations
 
 import json
+import re
+import struct
+import zlib
 from collections.abc import Mapping
+from functools import cache
 from html import escape
 
 from .watcher import DEFAULT_INTERVAL, STALE_INTERVALS
@@ -70,6 +83,15 @@ _TOKENS = """
   --mono: ui-monospace, Menlo, monospace;
 }
 """
+
+
+def token(name: str) -> str:
+    """A colour token's value, as :data:`_TOKENS` declares it: the one source."""
+    found = re.search(rf"--{re.escape(name)}:\s*(#[0-9A-F]{{6}});", _TOKENS)
+    if found is None:
+        raise KeyError(name)
+    return found.group(1)
+
 
 _STYLE = _TOKENS + """
 * { box-sizing: border-box; overflow-wrap: normal; word-break: normal; }
@@ -186,7 +208,8 @@ details summary::-webkit-details-marker { display: none; }
 #scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); }
 #sheet { position: fixed; left: 0; right: 0; bottom: 0; max-height: 92vh; overflow-y: auto;
          background: var(--surface-sheet); border-radius: 24px 24px 0 0;
-         padding: 10px 16px calc(34px + env(safe-area-inset-bottom));
+         padding: 10px calc(16px + env(safe-area-inset-right))
+                  calc(34px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
          display: flex; flex-direction: column; gap: 16px; }
 .grabber { width: 36px; height: 5px; border-radius: 3px; background: var(--grabber);
            align-self: center; flex-shrink: 0; }
@@ -206,7 +229,8 @@ details summary::-webkit-details-marker { display: none; }
 .sheet-toggle summary { min-height: 44px; font-size: 14px; font-weight: 400; }
 .sheet-buttons { display: flex; flex-direction: column; gap: 10px; }
 .expiry { font-size: 13px; color: var(--text-secondary); text-align: center; }
-.link { color: var(--link); min-height: 44px; padding: 0 8px; }
+.link { color: var(--link); min-height: 44px; padding: 0 8px; display: inline-flex;
+        align-items: center; }
 .result-head { display: flex; align-items: center; gap: 12px; }
 .mark { width: 40px; height: 40px; border-radius: 20px; display: flex; align-items: center;
         justify-content: center; flex-shrink: 0; background: var(--surface-pill); }
@@ -811,13 +835,117 @@ _REFRESH_ICON = (
 )
 
 
-def _document(nonce: str, title: str, body: str, script: str = "") -> str:
+#: Where the manifest and the icons are served, and each icon's size in pixels.
+MANIFEST_PATH = "/manifest.webmanifest"
+APPLE_TOUCH_ICON = "/icon-180.png"
+ICONS = {APPLE_TOUCH_ICON: 180, "/icon-192.png": 192, "/icon-512.png": 512}
+_MANIFEST_ICONS = ("/icon-192.png", "/icon-512.png")
+
+
+def manifest(words: Mapping[str, str]) -> str:
+    """The web app manifest: the panel, standalone, on its own dark ground."""
+    return json.dumps({
+        "name": words["app_name"],
+        "short_name": words["app_short_name"],
+        "id": "/",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": token("bg"),
+        "theme_color": token("bg"),
+        "icons": [{"src": path, "sizes": f"{ICONS[path]}x{ICONS[path]}", "type": "image/png"}
+                  for path in _MANIFEST_ICONS],
+    }, ensure_ascii=False, indent=2)
+
+
+#: The glyph, in fractions of the icon's side: the summary strip's four
+#: accents as a two-by-two grid of rounded tiles, inside the central circle a
+#: maskable icon keeps (radius 0.4), on the page's ground.
+_GLYPH_MARGIN, _GLYPH_GAP, _GLYPH_RADIUS = 0.25, 0.05, 0.05
+_GLYPH_ACCENTS = (("accent-needs", "accent-problem"), ("accent-working", "accent-idle"))
+
+
+def _rgb(hex_colour: str) -> tuple[int, int, int]:
+    return tuple(int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))  # type: ignore[return-value]
+
+
+def _tile_cover(x: float, y: float, box: tuple[float, float, float, float],
+                radius: float) -> float:
+    """How much of the pixel centred on ``(x, y)`` a rounded box covers, 0 to 1.
+
+    The box's signed distance, read as a coverage over one pixel's width, so
+    the edges are smooth without supersampling.
+    """
+    left, top, right, bottom = box
+    cx, cy = (left + right) / 2, (top + bottom) / 2
+    qx = abs(x - cx) - ((right - left) / 2 - radius)
+    qy = abs(y - cy) - ((bottom - top) / 2 - radius)
+    outside = (max(qx, 0.0) ** 2 + max(qy, 0.0) ** 2) ** 0.5
+    distance = outside + min(max(qx, qy), 0.0) - radius
+    return min(max(0.5 - distance, 0.0), 1.0)
+
+
+@cache
+def icon(size: int) -> bytes:
+    """The home-screen icon as a PNG, ``size`` pixels square: one of :data:`ICONS`."""
+    if size not in ICONS.values():
+        raise ValueError(f"no {size}-pixel icon; the sizes are {sorted(ICONS.values())}")
+    ground = _rgb(token("bg"))
+    side = (1 - 2 * _GLYPH_MARGIN - _GLYPH_GAP) / 2
+    tiles = []
+    for row, names in enumerate(_GLYPH_ACCENTS):
+        for column, name in enumerate(names):
+            left = (_GLYPH_MARGIN + column * (side + _GLYPH_GAP)) * size
+            top = (_GLYPH_MARGIN + row * (side + _GLYPH_GAP)) * size
+            tiles.append(((left, top, left + side * size, top + side * size), _rgb(token(name))))
+    radius = _GLYPH_RADIUS * size
+    blank = bytes(ground) * size
+    raw = bytearray()
+    for y in range(size):
+        line = bytearray(blank)
+        for (left, top, right, bottom), colour in tiles:
+            if not top - 1 <= y <= bottom:
+                continue
+            for x in range(max(int(left) - 1, 0), min(int(right) + 2, size)):
+                cover = _tile_cover(x + 0.5, y + 0.5, (left, top, right, bottom), radius)
+                if cover:
+                    line[3 * x:3 * x + 3] = bytes(
+                        round(g + (c - g) * cover) for g, c in zip(ground, colour))
+        raw += b"\x00" + line
+    return _png(size, size, bytes(raw))
+
+
+def _png(width: int, height: int, raw: bytes) -> bytes:
+    """An 8-bit RGB PNG of ``raw``: each row its filter byte, then its pixels."""
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (struct.pack(">I", len(body)) + kind + body
+                + struct.pack(">I", zlib.crc32(kind + body)))
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def _app_head(words: Mapping[str, str]) -> str:
+    """What makes the panel a home-screen app: its manifest, icon and iOS tags."""
+    return (
+        f'<link rel="manifest" href="{MANIFEST_PATH}" crossorigin="use-credentials">'
+        f'<link rel="apple-touch-icon" sizes="180x180" href="{APPLE_TOUCH_ICON}">'
+        '<meta name="apple-mobile-web-app-capable" content="yes">'
+        '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">'
+        f'<meta name="apple-mobile-web-app-title" '
+        f'content="{escape(words["app_short_name"], quote=True)}">'
+        f'<meta name="theme-color" content="{token("bg")}">'
+    )
+
+
+def _document(nonce: str, title: str, body: str, script: str = "", head: str = "") -> str:
     tail = f'<script nonce="{nonce}">{script}</script>' if script else ""
     return (
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1, '
+        'viewport-fit=cover">'
         '<meta name="color-scheme" content="dark">'
-        f"<title>{escape(title)}</title>"
+        f"{head}<title>{escape(title)}</title>"
         f'<style nonce="{nonce}">{_STYLE}</style></head>'
         f"<body>{body}{tail}</body></html>\n"
     )
@@ -859,7 +987,7 @@ def page(nonce: str, words: Mapping[str, str], interval: float = DEFAULT_INTERVA
         .replace("__INTERVAL__", f"{interval:g}")
         .replace("__WORDS__", _script_json(dict(words)))
     )
-    return _document(nonce, words["title"], body, script)
+    return _document(nonce, words["title"], body, script, head=_app_head(words))
 
 
 def message(nonce: str, title: str, text: str) -> str:
@@ -867,13 +995,19 @@ def message(nonce: str, title: str, text: str) -> str:
 
 
 def not_paired(nonce: str) -> str:
-    """All an unpaired device ever sees: no rows, no project, no name."""
-    return message(
-        nonce,
-        "not paired",
-        "This device is not paired with the oracle. On the Mac, run "
-        "'invariant oracle web pair' and open the link it prints here.",
+    """All an unpaired device ever sees: no rows, no project, no name.
+
+    It links the pairing form, so a home-screen app, which may not share the
+    browser's cookie (ADR-009 D10), can be paired from inside itself.
+    """
+    body = (
+        "<h1>not paired</h1>"
+        "<p>This device is not paired with the oracle. On the Mac, run "
+        "'invariant oracle web pair' and open the link it prints here, or "
+        "type the code it prints into the pairing form.</p>"
+        '<p><a class="link" href="/pair">Enter a pairing code</a></p>'
     )
+    return _document(nonce, "not paired", body)
 
 
 def pair_form(nonce: str, code: str, warning: str | None = None) -> str:

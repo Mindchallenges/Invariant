@@ -13,8 +13,9 @@ increments have shipped: the page, confirm-first actions from it, and the
 page served always by a second LaunchAgent ("Shipped: the web page" below,
 ADR-008). IDEA_026 serves that page over HTTPS with Tailscale's certificate
 ("Over HTTPS" below, ADR-008 D19–D24). IDEA_027 is turning that page into a
-mobile control panel: its increment 3, the plain-language panel, has shipped
-("The control panel" below, ADR-009), and increments 4 to 7 are to come.
+mobile control panel: its increments 3, the plain-language panel, and 4, the
+home-screen app, have shipped ("The control panel" below, ADR-009), and
+increments 5 to 7 are to come.
 
 | # | Increment | Status |
 |---|---|---|
@@ -718,7 +719,7 @@ ADR-008's. The person-facing setup is the guide's
 | `web` | Which addresses to bind (`discover_addresses`, `choose_bind`), the `Host` check, the page's view of the `assess` document (`view`, which is `panel.view`, with the device's recent jobs) and its freshness fields, `WebApp` (request in, response out, no socket: the routes, the token, the `Origin` rules, the action body), `WebServer` (one `ThreadingHTTPServer` per address, with its timeout and caps; with a `Served`, TLS per connection in that connection's thread, and a `307` to the https name for plain HTTP), the HTTPS rules (only the certificate's name as `Host`, the `https` origin, the `Secure` cookie), the plain-HTTP warning, and `RecordingWeb` for tests | Bind the wildcard; read anything for an unpaired request; decide what may run; import `hosts/` or Textual |
 | `panel` | The control panel's view model (IDEA_027, ADR-009): the attention groups and their order, the summary strip's counts, the leftovers, each session's detail, and the one wording table (`WORDS`, chips, sentences, lanes and phases, `step_words`, `confirm_words`, `result_words`, `copy_line`). Pure: the `assess` document in, words out | Import `actions`, `webactions` or `hosts/`; show an engine name, a path, an argv, a pid or a host id outside a detail's "Technical details"; give a fact it does not know a phrase |
 | `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, with the sheet's words from `panel`, the action, the job with its result's words, and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/` |
-| `webpage` | The HTML: the self-contained control panel with its token CSS and its script (the overview, detail and leftovers screens, the confirm and result bottom sheets, copy), `WORDS` embedded from `panel`, and the "not paired", pairing-form and message pages | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce; hold a word of its own |
+| `webpage` | The HTML: the self-contained control panel with its token CSS and its script (the overview, detail and leftovers screens, the confirm and result bottom sheets, copy), `WORDS` embedded from `panel`, and the "not paired", pairing-form and message pages; the home-screen app's `<head>`, its manifest (`manifest`) and its icons (`icon`, PNGs drawn from the tokens) | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce; hold a word of its own |
 | `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
 | `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; keep the certificate due, swap a renewal into the listener, listen again over HTTPS or plain HTTP when that changes; its report, `oracle/web.json`; `web_status`, `cert_text` and their wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
 | `tls` | The page's certificate (IDEA_026): `issue`, Tailscale's CLI asked through stdout; `split_pem` and `cert_info`, the chain, the key, the names and the expiry, read with the standard library; `Certificates`, the kept `web/tls/oracle.pem` and when to ask again; `Served`, the certificate and context a listener serves, swapped together; `RecordingIssuer` for tests | Run `tailscale` except through its injected runner; write the key anywhere but its owner-only file; replace a good pair with one that does not load |
@@ -749,6 +750,8 @@ D22).
 | `GET /api/confirm?row=<key>` | 401 | what the confirm shows: `{row, subject, kind, lines, words, refused, nonce, expires_in}`; no `row` is a 400, a row not there a 404 |
 | `POST /api/act` (JSON or form: `row`, `nonce`) | 401 | needs a same-origin `Origin`: 202 with the job, else 403 (origin, nonce), 409 (refused, changed, busy), 503 (no read, no audit) |
 | `GET /api/job?id=<id>` | 401 | the job, to the device that started it; else 404 |
+| `GET /manifest.webmanifest` | 401 | the home-screen app's manifest, `application/manifest+json` (IDEA_027 inc 4, ADR-009 D10); reads nothing |
+| `GET /icon-180.png`, `/icon-192.png`, `/icon-512.png` | 401 | the app's icon at that size, `image/png`, drawn by `webpage.icon`; reads nothing |
 | anything else | 401 | 404, or 405 for a method that is not `GET` |
 
 The token is the `invariant_oracle` cookie (`HttpOnly; SameSite=Strict`, and
@@ -759,7 +762,30 @@ it, never leaves the origin, while the page's own form `POST` keeps its real
 `Origin`. Under `no-referrer` a browser sent that `POST` with `Origin: null`
 and the pairing form refused itself (BUG_079, ADR-008 D5). The page's
 Content-Security-Policy admits only its own nonce-tagged script and style,
-and `connect-src 'self'`.
+`connect-src 'self'`, and, for the home-screen app, `manifest-src 'self'`
+and `img-src 'self'` (ADR-009 D10).
+
+**The home-screen app** (IDEA_027 increment 4, ADR-009 D10). The panel's
+`<head>` links the manifest with `crossorigin="use-credentials"`, so the
+browser sends the device's cookie with that fetch, and `/icon-180.png` as
+the `apple-touch-icon`, and carries `apple-mobile-web-app-capable`, a
+`black-translucent` status bar, the app's title and a `theme-color`. The
+manifest (`webpage.manifest`) names the app from `panel.WORDS` ("Session
+Oracle", short name "Oracle"), opens `/` standalone within scope `/`, takes
+its background and theme colour from the `bg` token, and lists the 192- and
+512-pixel icons. The icons are PNGs `webpage.icon` writes with `zlib` from the
+tokens, the summary strip's four accents as a two-by-two grid on the page's
+ground, inside a maskable icon's safe circle; nothing is fetched or shipped
+as a file. All four routes sit behind the token like every other (ADR-008
+D4), so an unpaired device gets the "not paired" page for them too. Every
+page sets `viewport-fit=cover` and pads by `env(safe-area-inset-*)`, and the
+bottom sheet pads by the bottom and side insets. The "not paired" page links
+`/pair`, so a home-screen app that does not share the browser's cookie can be
+paired from inside itself. Whether iOS sends the cookie when it fetches the
+touch icon is not verified on a device: if it does not, the home screen shows
+a fallback icon and the app still works. Serving the icon without the token
+would amend ADR-008 D4, and is the user's decision ([oracle-panel.md](oracle-panel.md),
+"Open questions").
 
 ### What the page shows
 
@@ -1029,9 +1055,12 @@ tokens, wording, the increment plan) is
   confirm and result words, and `webpage` draws the overview, the session
   detail, the leftovers screen and the bottom sheets ("What the page shows"
   and "Actions from the page" above).
-- **Increments 4 and 5** are to come: the home-screen app (manifest, icon,
-  safe areas, under the same CSP and token) and a one-line reason for a
-  failed action.
+- **Increment 4 has shipped**: the home-screen app, a manifest and icons
+  served under the same token and a CSP that adds only `manifest-src 'self'`
+  and `img-src 'self'`, the iOS standalone tags, and safe-area padding
+  ("Who gets an answer" above). Two iOS behaviours are unverified on a
+  device; [oracle-panel.md](oracle-panel.md) keeps them as open questions.
+- **Increment 5** is to come: a one-line reason for a failed action.
 - **Increments 6 and 7** give the oracle destructive powers: close a
   leftover host (IDEA_025) and the clean-up and unstick actions (IDEA_017).
   This amends ADR-007's read-only premise (ADR-009 D1). The scan, the

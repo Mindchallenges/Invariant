@@ -96,6 +96,8 @@ GROUPS = (
 WORDS: dict[str, str] = {
     "title": "Sessions",
     "doc_title": "({count}) Sessions",
+    "app_name": "Session Oracle",
+    "app_short_name": "Oracle",
     "live": "Live · updated {age} s ago",
     "stale": "Stale · updated {age} s ago",
     "never": "Stale · not updated yet",

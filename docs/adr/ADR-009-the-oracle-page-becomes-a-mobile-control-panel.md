@@ -2,9 +2,10 @@
 
 - **Status:** Accepted, partly implemented. The user approved the mobile
   mockup on 2026-10-23. IDEA_027 builds it in increments (D14): D2–D6, D8,
-  D11 and D12 shipped with increment 3; D10 lands with increment 4, D9 with
-  increment 5, and D1's destructive actions with D7's guards in increments 6
-  and 7, after IDEA_024 and BUG_078. The design of record (screens, components,
+  D11 and D12 shipped with increment 3, and D10 with increment 4, whose two
+  iOS checks remain open (D10); D9 lands with increment 5, and D1's
+  destructive actions with D7's guards in increments 6 and 7, after IDEA_024
+  and BUG_078. The design of record (screens, components,
   tokens, wording) is [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23
 - **Supersedes:** nothing. It amends ADR-007 in one place: the oracle is no
@@ -250,6 +251,13 @@ itself or shipped in the package, and never fetched.
   paired". This is checked in increment 4 too. The "not paired" page
   therefore links to the pairing form, where a code from `oracle web pair`
   can be typed in the app itself, and the guide says so.
+- **As shipped in increment 4, both checks are still open.** The build could
+  not run them on a device. The manifest and the icons are served under the
+  token, as D4 of ADR-008 requires, and the "not paired" page links the
+  pairing form. If iOS fetches the touch icon without the cookie, the home
+  screen shows a fallback icon and the app still works; whether to serve the
+  icon and manifest without the token remains the user's decision, recorded
+  in [oracle-panel.md](../architecture/oracle-panel.md), "Open questions".
 
 ### D11 — Dark first, from system colours and system fonts, with no external assets
 

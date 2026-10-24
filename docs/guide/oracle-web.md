@@ -30,15 +30,15 @@ Shipped so far, the plain-language panel ("Using the page" below):
 - A confirm opens from the bottom of the screen. It says in one line what
   will happen, shows the command, and hides the exact folder and environment
   behind a toggle.
+- The page can be added to the home screen as an app, with its own icon, and
+  opens full screen without the browser's bars ("6. Add it to your home
+  screen" below).
 
 Still to come:
 
 - A failed action says why in one sentence, with the full output behind
   "Show full output". Until then the result says "Failed, exit N", with the
   output behind that toggle.
-- The page can be added to the home screen as an app, with its own icon. On
-  iOS it may need pairing once more from inside the app. This page will say
-  how, once that is checked.
 - Later, after two fixes it depends on: closing a leftover Claude window and
   cleaning up stranded sessions and folders, each confirmed first. Each
   lists what it deletes and checks again that nothing is using it when you
@@ -169,7 +169,7 @@ You can type the address by hand instead: open
 `https://<mac name>.<tailnet>.ts.net:7341/pair` and enter the code. Use the
 name, not the `100.x.y.z` address: the certificate names the Mac's name, so
 the address gets a certificate warning and then only a "not this server"
-page. Add the page to the phone's home screen to open it like an app.
+page. To open the page like an app, add it to the home screen (step 6).
 
 **A phone paired before HTTPS.** A cookie belongs to the name or address it
 was set on. A phone paired at the `100.x.y.z` address has no cookie for the
@@ -188,6 +188,50 @@ A revoked device's next request gets only the "not paired" page, and the
 other devices keep working. To pair it again, run `pair` again. Revoke a
 device you have lost before anything else. Without Tailscale it cannot reach
 the page anyway, but a found phone may still be signed in to your tailnet.
+
+## 6. Add it to your home screen
+
+The page installs as an app: its own icon (four coloured tiles, the colours
+of the strip's counts, on black), full screen without the browser's bars,
+dark to the edges, with nothing hidden under the notch or the home bar. It is
+the same page from the same Mac, under the same pairing, so it shows and
+does exactly what the browser tab does.
+
+On an iPhone:
+
+1. Pair the phone in Safari first (step 4), so the page opens.
+2. In Safari, on the page, tap Share, then Add to Home Screen. The name
+   offered is "Oracle"; change it if you like, and tap Add.
+3. Open it from the home screen.
+
+On Android, Chrome's menu offers Install app or Add to Home screen on the
+same page.
+
+**If the app opens on "not paired".** On iOS an app added to the home screen
+may keep its own cookies, apart from Safari's, so it may not know the
+pairing Safari has. It then shows the "not paired" page, which pairs it from
+inside the app:
+
+1. On the Mac, run `invariant oracle web pair --name phone-app` (any name;
+   it is a second device in `oracle web devices`).
+2. In the app, tap "Enter a pairing code", type the code it printed, and tap
+   "Pair this device". Do not tap the pairing link in a message: a link
+   opens in Safari, not in the app.
+
+The app then opens on the panel, and stays paired as Safari does. Revoking
+it is the same as any device (step 5).
+
+**What has been checked, and what has not.** The manifest, the icons, the
+full-screen tags, the safe-area padding and pairing from the "not paired"
+page are built and tested in invariant's suite. Two iOS behaviours have not
+yet been checked on an iPhone: whether an app added to the home screen keeps
+Safari's pairing, and whether iOS sends the pairing cookie when it fetches
+the icon. The icon and the app's manifest are served only to a paired
+device, like the page. If iOS fetches the icon without the cookie, the home
+screen shows a plain fallback icon (a picture of the page, or a letter)
+instead of the four tiles; the app still works. Serving the icon to unpaired
+devices would loosen the rule that an unpaired device gets nothing, so it is
+not done without the user's decision (ADR-009 D10).
 
 ## The Local Network permission prompt
 
@@ -291,6 +335,8 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | `web python  MISSING` | The interpreter in the plist was moved or reinstalled, for example by `uv tool upgrade`. Run `invariant oracle install --web` to point the agent at the current one. |
 | The phone times out, but the Mac says serving | Allow Local Network for Python (see above). Check that Tailscale is connected on the phone, and that the address on the phone matches the one `status` prints. |
 | The phone shows "not paired" | The device was revoked, its cookie was cleared, or it is a different browser. Pair it again. |
+| The home-screen app shows "not paired" | It may not share Safari's pairing. Pair it from inside the app: run `pair` on the Mac and tap "Enter a pairing code" (step 6). If it was revoked while open, swipe it away in the app switcher and open it again to reach that page. |
+| The home-screen icon is a picture of the page or a letter, not four tiles | iOS fetched the icon without the pairing cookie, so it got nothing. The app works the same. See "What has been checked" in step 6. |
 | "not this server" (421) | Over HTTPS, the browser named something other than the Mac's `*.ts.net` name, such as its address; the page names the right URL. Over plain HTTP, it was not the Mac's tailnet address or its name. Use the link `pair` prints. |
 | A step shows "The server restarted and no longer knows this action's result" | The agent restarted while the step ran. What ran, and how it ended, if it got that far, is in `~/.invariant/web/actions.log`. |
 | The pairing link names the wrong port | `pair` uses the port the page reports, else the installed one. Pass `--port` to override it. |

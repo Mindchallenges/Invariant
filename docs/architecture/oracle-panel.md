@@ -6,10 +6,11 @@ the server, transport and pairing it keeps, are in [oracle.md](oracle.md),
 "Shipped: the web page". The person-facing setup is the guide's
 [The oracle on your phone](../guide/oracle-web.md).
 
-**Status: increment 3 shipped.** The user approved the mockup on 2026-10-23.
-Increments 3 to 7 build it ("Increment plan" below). Increment 3, the
-plain-language panel, is what the page serves now; "As built in increment 3"
-below records where it fills in what this page left open. Increments 4 to 7
+**Status: increments 3 and 4 shipped.** The user approved the mockup on
+2026-10-23. Increments 3 to 7 build it ("Increment plan" below). Increment
+3, the plain-language panel, and increment 4, the home-screen app, are what
+the page serves now; "As built in increment 3" and "As built in increment 4"
+below record where they fill in what this page left open. Increments 5 to 7
 are not built.
 
 **Visual reference.** The approved mockup is a private claude.ai artifact of
@@ -36,9 +37,9 @@ It imports nothing that runs anything: no `actions`, no `webactions`, no
 graph TD
     CLI[cli — invariant oracle web]
     subgraph oracle["oracle/"]
-        WEB["web (view, routes: + manifest, icon in inc 4)"]
+        WEB["web (view, routes; inc 4, shipped: manifest, icons)"]
         PANEL["panel (inc 3, shipped: groups, summary, wording table)"]
-        WEBPAGE["webpage (inc 3, shipped: cards, detail, sheets; inc 4: manifest, icon)"]
+        WEBPAGE["webpage (inc 3, shipped: cards, detail, sheets; inc 4, shipped: manifest, icon)"]
         WEBACT["webactions (inc 5: failure summariser; inc 6–7: destructive kinds)"]
         ACTIONS[actions]
         DASH[dashboard]
@@ -480,6 +481,25 @@ Where the build had to decide something this page left open. Each is in
 | Freshness on the detail and leftovers screens | The freshness line stays above the back link on every screen, so a stale read is never out of sight. The title and Refresh show on the overview only |
 | Copy feedback | the sheet's Copy reads "Copied"; the detail's icon button's label becomes "Copied" |
 
+## As built in increment 4
+
+The home-screen app (ADR-009 D10). Where the build decided what this page
+left open:
+
+| Question | As built |
+|---|---|
+| The app's name | "Session Oracle", short name and home-screen title "Oracle", both in `panel.WORDS` (`app_name`, `app_short_name`) |
+| The manifest | `/manifest.webmanifest`: `display: standalone`, `id`, `start_url` and `scope` `/`, `background_color` and `theme_color` the `bg` token (`#0B0C0E`), and the 192- and 512-pixel icons. Linked from the panel only, with `crossorigin="use-credentials"` |
+| The icon | The summary strip's four accents (`accent-needs`, `accent-problem`, `accent-working`, `accent-idle`) as a two-by-two grid of rounded tiles on the `bg` ground, all of it inside the central circle of radius 0.4 a maskable icon keeps. Drawn by `webpage.icon` as an 8-bit RGB PNG with `zlib`, edges smoothed from the tiles' signed distance; deterministic, no file, no dependency. Sizes 180 (`apple-touch-icon`), 192 and 512, each at its own path |
+| The iOS tags | `apple-mobile-web-app-capable`, status bar `black-translucent` (the page draws under it and pads by the top inset), `apple-mobile-web-app-title`, and `theme-color` the `bg` token. On the panel only; the "not paired", pairing and message pages carry none of the app's head |
+| Safe areas | `viewport-fit=cover` on every page, so `env(safe-area-inset-*)` is not zero; the body pads by all four insets plus its margins, and the bottom sheet pads by the bottom inset plus 34 px and by the side insets plus 16 px |
+| The token | Unchanged (ADR-008 D4): the manifest and icon routes answer a paired device and nobody else, and read nothing from the machine |
+| Pairing inside the app | The "not paired" page links "Enter a pairing code" to `/pair`, which is inside the app's scope, so a code from `oracle web pair` can be typed in the standalone app itself |
+
+The two iOS checks of ADR-009 D10 could not be made on a device in this
+increment, so both stay open questions below; the guide says what to do
+either way.
+
 ## Increment plan
 
 | # | Increment | Session | Acceptance (from IDEA_027) |
@@ -487,7 +507,7 @@ Where the build had to decide something this page left open. Each is in
 | 1 | Plan | done | The decisions are ADR-009's |
 | 2 | Mockup, approved 2026-10-23 | done | This page records it |
 | 3 | Plain-language panel: `oracle/panel`, the groups, strip, wording, detail view, copy, button wording, no mid-word wrap | **shipped** (session 80e81a07) | First view fits 390 px and a count scrolls to its group; no default-view string holds a path, argv, pid, host UUID or engine state name; each is in Technical details |
-| 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | this session | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
+| 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | **shipped** (session 80e81a07); the two iOS checks still open | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
 | 5 | Failure reasons: the summariser and the result sheet | this session | A failed action shows one plain sentence; the full output only after "Show full output" |
 | — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | later sessions | their own acceptance |
 | 6 | Orphan classes and close host (IDEA_025 scope v1) | later | IDEA_025's acceptance; refuses at confirm time on a gone, renamed or mismatched pid |
@@ -499,11 +519,21 @@ ago" and the stale flag, and every asset inline under the nonce CSP.
 
 ## Open questions
 
-- **The icon fetch on iOS.** If iOS fetches the icon without the cookie,
-  serving the icon and manifest without a token amends ADR-008 D4 and needs
-  the user (ADR-009 D10).
+- **The icon fetch on iOS (needs the user).** Increment 4 serves the icons
+  and the manifest only to a paired device, and was not checked on an
+  iPhone. If iOS fetches the touch icon or the manifest without the cookie,
+  it gets the "not paired" page's 401: the home screen then shows a fallback
+  icon (a snapshot or a letter) and the name the page's title tags give, and
+  the app itself works. Serving those data-free routes without a token would
+  amend ADR-008 D4; that is the user's decision, not the build's
+  (ADR-009 D10). To check: pair an iPhone, Add to Home Screen from the
+  panel, and see whether the four-tile icon appears; the Mac's server logs
+  nothing per request, so the icon on the home screen is the evidence.
 - **The standalone cookie store.** Whether a home-screen install shares
-  Safari's cookie. The guide will say what to do either way.
+  Safari's cookie is not verified on a device either. Either way the app
+  works: if it opens on "not paired", its "Enter a pairing code" link pairs
+  it from inside, with a code from `oracle web pair` (the guide, "Add it to
+  your home screen").
 - **"Forget" a gone record.** Not specified by IDEA_025 or IDEA_017. Left
   out until the user asks for it.
 - **"Recent".** Settled in increment 3: the events with a recorded time are
