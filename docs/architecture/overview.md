@@ -473,6 +473,18 @@ files — plus the directory bundles whose every payload is a resource, which is
 the half that matters in practice: a touched path more often names a file
 several components inside a catalog than the catalog itself.
 
+A third table answers by exact file NAME, because some kinds carry their fact
+in no suffix at all. `Podfile` has none and `Podfile.lock`'s `.lock` says
+nothing on its own, so a change touching CocoaPods' manifest was blocked with
+both listed as unmeasured source (BUG_085). The table holds the dependency
+manifests and lockfiles this ecosystem's resolvers read before a build —
+CocoaPods and the Bundler that pins it, Carthage, SwiftPM's `Package.resolved`
+— and none of them is an input to any target. It names files and never
+directories: what the manifests RESOLVE, under `Pods/` or
+`Carthage/Checkouts/`, is vendored source `xccov` measures (BUG_041) and keeps
+answering by its own kind. `Package.swift` is a manifest too, but it is Swift,
+so it keeps the content reader's answer.
+
 Four properties keep it as narrow as the reader beside it. Compiled kinds are
 listed explicitly and tested first, so neither a later allowlist entry nor the
 directory rule can reach a kind that list names. That guarantee is exactly as
@@ -482,7 +494,7 @@ once written as though it were absolute: the C++ spellings `.hxx`, `.ipp`,
 name falls straight through to the directory rule (BUG_042). They are listed
 now. The property is maintained by keeping the table complete, not by the
 ordering alone.
-An extension absent from the allowlist answers `None`, because inverting this
+An extension or file name absent from the allowlist answers `None`, because inverting this
 into "any extension I do not recognise is inert" is precisely the silent pass
 the base `None` exists to prevent. Documentation and configuration
 suffixes are deliberately absent from it: `core/rules` already holds `.md`,

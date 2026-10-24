@@ -1666,12 +1666,6 @@ class TestCarriesExecutableCode:
     # -- BUG_085: CocoaPods manifests are not compiled either ---------------
 
     # Repro for BUG_085 — see the work-item entry.
-    # Fails while the defect is live. When the fix lands, delete the
-    # expected-failure wrapper; the assertion must then pass unchanged.
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_085 is live — delete this marker with the fix",
-    )
     @pytest.mark.parametrize(
         "relpath",
         ["Podfile", "Podfile.lock", "ios/Podfile", "ios/Podfile.lock"],
@@ -1691,6 +1685,110 @@ class TestCarriesExecutableCode:
         assert (
             self.adapter.carries_executable_code(path, Path(relpath)) is False
         )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Gemfile",
+            "Gemfile.lock",
+            "Cartfile",
+            "Cartfile.private",
+            "Cartfile.resolved",
+            "Package.resolved",
+        ],
+    )
+    def test_BUG_085_the_sibling_dependency_manifests_are_the_same_fact(
+        self, tmp_path, name
+    ):
+        """The Bundler that pins CocoaPods, Carthage, and SwiftPM's resolved
+        pins: each is read by a resolver before a build and is an input to no
+        Xcode target. Asked with an absolute path alone too, because the name
+        rule — unlike the directory rule — reads nothing above the file."""
+        path = tmp_path / "app" / name
+        path.parent.mkdir(parents=True)
+        path.write_text("pins\n", encoding="utf-8")
+        assert self.adapter.carries_executable_code(path, Path("app") / name) is False
+        assert self.adapter.carries_executable_code(path) is False
+
+    @pytest.mark.parametrize(
+        "relpath",
+        [
+            # What the manifests RESOLVE is measured; only the names relax.
+            "Pods/Alamofire/Source/Request.m",
+            "Pods/Manifest.lock",
+            "Pods/Target Support Files/Pods-App/Pods-App-dummy.m",
+            "Carthage/Checkouts/Lib/Sources/Lib.c",
+            # Exact names, not prefixes, suffixes or case-folds.
+            "podfile",
+            "Podfile.local",
+            "MyPodfile",
+            "Gemfile.rb",
+            "Fastfile",
+        ],
+    )
+    def test_BUG_085_only_the_exact_manifest_names_relax(self, tmp_path, relpath):
+        """The boundary of the fix. A name absent from the table falls through
+        to `None` like any unrecognised kind, and nothing under `Pods/` is
+        reached by it (BUG_041)."""
+        path = tmp_path / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+        assert self.adapter.carries_executable_code(path, Path(relpath)) is None
+
+    def test_BUG_085_package_swift_keeps_the_content_path(self, tmp_path):
+        """`Package.swift` is a SwiftPM manifest but it is Swift, so the reader
+        answers about its contents; the name table is never consulted for it."""
+        path = tmp_path / "Package.swift"
+        answers = []
+        for text in (
+            "protocol Named { var name: String { get } }\n",
+            'func makeName() -> String { return "App" }\n',
+        ):
+            path.write_text(text, encoding="utf-8")
+            answers.append(
+                self.adapter.carries_executable_code(path, Path("Package.swift"))
+            )
+        assert answers == [False, True]
+
+
+class TestSwiftExecutableText:
+    """`executable_text` reduces a Swift revision to what a coverage run counts.
+
+    Comments go and whitespace is normalised, so a comment-only diff compares
+    equal (BUG_026). String literals are copied VERBATIM: the content reader
+    blanks them, and a reduction that did the same would call `"a"` and `"b"`
+    the same program. Any input it cannot read to the end answers `None`,
+    because a truncated reduction compares equal too easily.
+    """
+
+    def setup_method(self):
+        self.adapter = get_adapter("swift_xcode")
+
+    def test_comments_and_layout_are_not_code(self):
+        before = "func f() {\n    return 1 // one\n}\n"
+        after = "/* doc /* nested */ still doc */\nfunc f() { return 1 }"
+        assert self.adapter.executable_text(before) == self.adapter.executable_text(
+            after
+        )
+
+    def test_string_literals_are_kept_verbatim(self):
+        a = self.adapter.executable_text('let s = "a // not a comment"')
+        b = self.adapter.executable_text('let s = "b // not a comment"')
+        assert a == 'let s = "a // not a comment"'
+        assert a != b
+
+    def test_escaped_quotes_and_multiline_literals_survive(self):
+        text = 'let s = "say \\"hi\\""\nlet m = """\n  x // y\n  """'
+        assert self.adapter.executable_text(text) == (
+            'let s = "say \\"hi\\"" let m = """ x // y """'
+        )
+
+    @pytest.mark.parametrize(
+        "source",
+        ["let a = 1 /* never closed", 'let s = "never closed', 'let m = """ open'],
+    )
+    def test_an_unterminated_construct_answers_none(self, source):
+        assert self.adapter.executable_text(source) is None
 
 
 class TestBUG041CoverageRowsAreNotSwiftOnly:

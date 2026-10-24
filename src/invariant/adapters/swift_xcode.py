@@ -294,8 +294,6 @@ class SwiftXcodeAdapter(Adapter):
         make the check pass would reproduce the exact mistake this exists to
         catch: proving a tool reachable under conditions its caller never has.
         """
-        import subprocess
-
         results: list[tuple[str, bool, str]] = []
         fallback = _newest_developer_dir()
 
@@ -447,7 +445,7 @@ class SwiftXcodeAdapter(Adapter):
 # tell", never "inert" — see ``Adapter.carries_executable_code`` for why those
 # two mistakes are not interchangeable.
 #
-# The reader above answers about a Swift file's CONTENTS. The three tables
+# The reader above answers about a Swift file's CONTENTS. The four tables
 # below answer a coarser question the same gate needs — whether the file is a
 # kind an Xcode target compiles at all — because `xccov` reports on compiled
 # Swift/ObjC/C and nothing else. A property list can never earn a row however
@@ -458,10 +456,11 @@ class SwiftXcodeAdapter(Adapter):
 #
 # Three properties keep the relaxation as narrow as the reader's:
 #
-#   - It is an ALLOWLIST. An extension absent from it answers `None`, not
-#     `False`. "Not a source kind I recognise" is a guess, and a guess in the
-#     relaxing direction passes unmeasured code in silence — the one mistake
-#     `Adapter.carries_executable_code`'s docstring forbids outright.
+#   - It is an ALLOWLIST. An extension, or an exact file name, absent from it
+#     answers `None`, not `False`. "Not a source kind I recognise" is a
+#     guess, and a guess in the relaxing direction passes unmeasured code in
+#     silence — the one mistake `Adapter.carries_executable_code`'s docstring
+#     forbids outright.
 #   - Compiled kinds are named explicitly and checked FIRST, so no future
 #     entry and no directory rule can reach one of them. `.m`, `.mm`, `.c`,
 #     `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, `.hh` are measured by `xccov` as
@@ -546,6 +545,33 @@ _RESOURCE_BUNDLE_DIR_SUFFIXES = (
     ".xcdatamodel",
 )
 
+#: Dependency-manager manifests and lockfiles, matched on the file's own EXACT
+#: name, because the kind lives in the name rather than in a suffix: `Podfile`
+#: has none and `Podfile.lock`'s `.lock` says nothing on its own (BUG_085).
+#: Each is read by a tool that resolves dependencies BEFORE a build — CocoaPods
+#: and the Bundler that pins it, Carthage, SwiftPM's resolver — and none is an
+#: input to any Xcode target, so `xccov` can never emit a row for one.
+#:
+#: What the manifests resolve is a different matter and is deliberately NOT
+#: reached: `Pods/` and `Carthage/Checkouts/` hold vendored ObjC/C/Swift that
+#: `xccov` measures (BUG_041), and only these exact names relax, never a
+#: directory. `Package.swift` is absent too — it is Swift and keeps the reader's
+#: content path, which is why this table is consulted only for non-`.swift`
+#: paths. Fastlane's `Fastfile` and its kin are Ruby automation rather than
+#: dependency manifests, and stay out until something states that fact for them.
+_DEPENDENCY_MANIFEST_NAMES = frozenset(
+    {
+        "Podfile",
+        "Podfile.lock",
+        "Gemfile",
+        "Gemfile.lock",
+        "Cartfile",
+        "Cartfile.private",
+        "Cartfile.resolved",
+        "Package.resolved",
+    }
+)
+
 
 #: One `xccov view --report` row for a file it measured:
 #: ``    <path>    <pct>% (<covered>/<total>)``. Longest suffix first, so
@@ -556,7 +582,7 @@ _COVERAGE_ROW = re.compile(
         re.escape(s) for s in sorted(_COMPILED_SUFFIXES, key=len, reverse=True)
     )
     + r"))\s+(?P<pct>\d+(?:\.\d+)?)%",
-    re.M,
+    re.MULTILINE,
 )
 
 
@@ -568,8 +594,8 @@ def _xcode_resource_kind(path: Path, relative: Path | None) -> bool | None:
     answers the second. Returning ``True`` here would let a `.swift` file skip
     that reader entirely.
 
-    The SUFFIX questions are answered from ``path``, which carries the file's
-    own kind wherever it is spelled. The ANCESTOR question is answered from
+    The SUFFIX and NAME questions are answered from ``path``, which carries
+    the file's own kind wherever it is spelled. The ANCESTOR question is answered from
     ``relative`` and from nothing else: `parts[:-1]` on an absolute path walks
     out of the project and into the machine's layout, so a checkout under a
     directory named `*.docc` would relax the coverage gate for everything
@@ -581,6 +607,8 @@ def _xcode_resource_kind(path: Path, relative: Path | None) -> bool | None:
     if suffix in _COMPILED_SUFFIXES:
         return None
     if suffix in _RESOURCE_SUFFIXES:
+        return False
+    if path.name in _DEPENDENCY_MANIFEST_NAMES:
         return False
     if relative is not None and any(
         part.lower().endswith(_RESOURCE_BUNDLE_DIR_SUFFIXES)
@@ -857,7 +885,7 @@ def _swift_carries_executable_code(source: str) -> bool | None:
     # Two versions of the file exist and this reads neither of them whole.
     # Answering from one branch would be a claim about code that may not be
     # the code that compiled.
-    if re.search(r"^\s*#(if|elseif|else)\b", text, re.M):
+    if re.search(r"^\s*#(if|elseif|else)\b", text, re.MULTILINE):
         return None
 
     # An initialised binding has no brace, so no block classifies it and the

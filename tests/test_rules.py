@@ -4495,12 +4495,6 @@ class TestFilesThatCannotHaveACoverageRow:
         assert "no executable lines to measure" in (verdict.detail or "")
 
     # Repro for BUG_085 — see the work-item entry.
-    # Fails while the defect is live. When the fix lands, delete the
-    # expected-failure wrapper; the assertion must then pass unchanged.
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_085 is live — delete this marker with the fix",
-    )
     def test_BUG_085_a_touched_podfile_and_lockfile_are_set_aside_and_named(
         self, ctx_factory
     ):
