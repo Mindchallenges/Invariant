@@ -51,7 +51,9 @@ from .signals import (
     STRANDED,
     STUCK,
     TEARDOWN_PENDING,
+    TURN_BUSY,
     WAITING,
+    WAITING_INPUT,
     YOUR_TURN,
 )
 
@@ -71,7 +73,6 @@ TONE_IDLE = "idle"
 LEFTOVERS_SHOWN = 3
 
 _SEVERITY = {HIGH: 0, MEDIUM: 1, LOW: 2, INFO: 3}
-_TURN_RUNNING = "running"
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,12 @@ _FACTS: dict[tuple[str, str], tuple[str, str, str, str]] = {
         "Waiting for your answer", TONE_NEEDS,
         "Claude asked you a question {age} ago. Answer it in Claude.",
         "Claude asked you a question. Answer it in Claude."),
+    (WAITING, WAITING_INPUT): (
+        "Waiting for you", TONE_NEEDS,
+        ("Claude is waiting for you in its window. Answer it in Claude on your Mac or "
+         "phone. This panel never answers prompts."),
+        ("Claude is waiting for you in its window. Answer it in Claude on your Mac or "
+         "phone. This panel never answers prompts.")),
     (FINISHED, "reviewed"): (
         "Finished, ready to merge", TONE_NEEDS,
         "The review checks passed. It can be merged.", ""),
@@ -499,11 +506,9 @@ def _attention(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _running(row: dict[str, Any]) -> bool:
-    host = _current_host(row)
-    if host is None or host.get("alive") is False:
-        return False
-    record = _attention(row)
-    return record.get("turn") == _TURN_RUNNING and not record.get("waiting")
+    """Whether Claude is working: the document's mid-turn answer, never the
+    attention turn on its own, which a missed Stop leaves running (BUG_087)."""
+    return row.get("turn_state") == TURN_BUSY
 
 
 def _signals(row: dict[str, Any]) -> list[dict[str, Any]]:

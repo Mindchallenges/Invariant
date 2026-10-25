@@ -25,13 +25,22 @@ from test_oracle_scan import (
     put_session,
     tree_fingerprint,
 )
-from test_oracle_signals import NOW, PROJECT, attention, host, session_row
+from test_oracle_signals import (
+    NOW,
+    PROJECT,
+    attention,
+    host,
+    recorded,
+    session_row,
+    waiting,
+)
 
 from invariant.cli import main as cli_main
 from invariant.cli.main import main
 from invariant.core.manifest import Level
 from invariant.core.rules import Evaluated, Verdict
 from invariant.oracle import gates as gates_module
+from invariant.oracle import signals as sig
 from invariant.oracle.gates import (
     GateCache,
     GateReport,
@@ -142,8 +151,46 @@ class TestEligibility:
 
     def test_a_running_turn_is_never_evaluated(self, tmp_path):
         row = idle_row(tmp_path, hosts=[host(attention(turn="running"))],
-                       last_activity=NOW - 3600)
+                       last_activity=NOW - 1800)
         assert not eligible(row, NOW)
+
+    def test_a_stale_running_turn_waits_only_for_quiet(self, tmp_path):
+        """BUG_087: a running turn quiet past the idle edge is not mid-turn."""
+        row = idle_row(tmp_path, hosts=[host(attention(turn="running"))],
+                       last_activity=NOW - 3600)
+        assert eligible(row, NOW)
+
+    def test_an_idle_record_outranks_a_running_turn(self, tmp_path):
+        idle = [recorded("idle", attention(turn="running"))]
+        assert not eligible(idle_row(tmp_path, hosts=idle, last_activity=NOW - 30), NOW)
+        assert eligible(idle_row(tmp_path, hosts=idle, last_activity=NOW - 300), NOW)
+
+    @pytest.mark.parametrize("status", ["busy", "waiting"])
+    def test_a_busy_or_waiting_record_is_never_evaluated(self, tmp_path, status):
+        row = idle_row(tmp_path, hosts=[recorded(status, attention(turn="ended"))],
+                       last_activity=NOW - 15 * 3600)
+        assert not eligible(row, NOW)
+
+    @pytest.mark.parametrize("view", [
+        recorded("busy", attention(turn="ended")),
+        recorded("waiting"),
+        recorded("idle", attention(turn="running")),
+        recorded(None, attention(turn="running")),
+        host(attention(turn="running")),
+        host(attention(turn="running", waiting=waiting("permission"))),
+        host(attention(turn="running", waiting=waiting("idle"))),
+        host(attention(turn="running"), alive=None),
+        host(attention(turn="running"), alive=False),
+        host(attention(turn="ended")),
+    ])
+    @pytest.mark.parametrize("quiet", [30.0, 1800.0, 3600.0, 15 * 3600.0])
+    def test_it_reads_the_one_mid_turn_predicate(self, tmp_path, view, quiet):
+        row = idle_row(tmp_path, hosts=[view], last_activity=NOW - quiet)
+        if sig.mid_turn(view, row.last_activity, NOW):
+            assert not eligible(row, NOW)
+        else:
+            assert eligible(row, NOW) is (
+                (view.attention or {}).get("turn") == "ended" or quiet >= 120)
 
     def test_a_running_turn_whose_host_is_gone_waits_for_quiet(self, tmp_path):
         gone = [host(attention(turn="running"), alive=False)]
@@ -234,7 +281,7 @@ class TestCadence:
         cache = GateCache(evaluate=fake)
         cache.refresh(snap(idle_row(tmp_path)), NOW, wait=2)
         running = idle_row(tmp_path, hosts=[host(attention(turn="running"))],
-                           heartbeat=NOW, last_activity=NOW - 3600)
+                           heartbeat=NOW, last_activity=NOW - 1800)
         reports = cache.refresh(snap(running), NOW, wait=2)
         assert fake.calls == ["s1"]
         report = reports[gate_key(running)]

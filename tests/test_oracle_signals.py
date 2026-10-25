@@ -425,9 +425,15 @@ class TestOrphanClasses:
     def test_recently_heard_from_is_active(self):
         assert self.cause(self.orphan(idle=600, previous="s0")) == sig.ORPHAN_ACTIVE
 
-    def test_a_running_turn_is_active_however_old_its_last_sign(self):
-        row = self.orphan(record=attention(turn="running"), previous="s0")
+    def test_a_fresh_running_turn_is_active(self):
+        row = self.orphan(record=attention(turn="running"), idle=600, previous="s0")
         assert self.cause(row) == sig.ORPHAN_ACTIVE
+
+    def test_a_running_turn_quiet_past_the_idle_edge_is_stale(self):
+        """BUG_087: with no record status, an old running turn is not mid-turn."""
+        row = self.orphan(record=attention(turn="running"), previous="s0")
+        assert self.cause(row) == sig.ORPHAN_LEFTOVER
+        assert self.cause(self.orphan(record=attention(turn="running"))) == sig.ORPHAN_UNMANAGED
 
     def test_the_idle_edge_is_a_threshold(self):
         row = self.orphan(idle=600)
@@ -437,3 +443,173 @@ class TestOrphanClasses:
         for alive, previous in ((False, None), (True, "s0"), (True, None)):
             found = classify(self.orphan(alive=alive, previous=previous), NOW)
             assert not any(s.alert for s in found)
+
+
+# -- mid-turn: one predicate for the class, the signals and the gate cache ------
+
+
+def recorded(status: str | None, record: dict | None = None, alive: bool | None = True,
+             hid: str = "h1") -> HostView:
+    """A host whose pid Claude Code's per-process record verified, with its status."""
+    view = host(record, alive=alive, hid=hid)
+    view.pid_source = "both" if record else "record"
+    view.status = status
+    return view
+
+
+class TestTurnState:
+    """BUG_087: Claude Code's own status outranks the attention turn, and an
+    attention turn quiet past ``orphan_idle_minutes`` is stale."""
+
+    @staticmethod
+    def state(view: HostView | None, idle: float | None = 15 * 3600.0,
+              thresholds: Thresholds | None = None) -> str:
+        last = None if idle is None else NOW - idle
+        return sig.turn_state(view, last, NOW, thresholds)
+
+    @pytest.mark.parametrize("turn", ["running", "ended", None])
+    def test_a_busy_record_is_mid_turn_whatever_the_attention_says(self, turn):
+        view = recorded("busy", attention(turn=turn))
+        assert self.state(view) == sig.TURN_BUSY
+        assert sig.mid_turn(view, NOW - 15 * 3600, NOW)
+
+    @pytest.mark.parametrize("idle", [60.0, 15 * 3600.0])
+    def test_an_idle_record_outranks_a_running_turn(self, idle):
+        view = recorded("idle", attention(turn="running"))
+        assert self.state(view, idle) == sig.TURN_IDLE
+        assert not sig.mid_turn(view, NOW - idle, NOW)
+
+    def test_a_waiting_record_is_waiting_on_the_person(self):
+        view = recorded("waiting", attention(turn="ended"))
+        assert self.state(view) == sig.TURN_WAITING
+        assert sig.mid_turn(view, NOW - 15 * 3600, NOW)
+
+    def test_a_waiting_record_needs_no_attention_record(self):
+        assert self.state(recorded("waiting")) == sig.TURN_WAITING
+
+    def test_an_idle_record_outranks_a_stale_permission_wait(self):
+        view = recorded("idle", attention(turn="running", waiting=waiting("permission")))
+        assert self.state(view) == sig.TURN_IDLE
+
+    @pytest.mark.parametrize("status", [None, "", "compacting", 3])
+    def test_a_missing_or_unknown_status_falls_back_to_the_attention_turn(self, status):
+        assert self.state(recorded(status, attention(turn="running")), 600) == sig.TURN_BUSY
+        assert self.state(recorded(status, attention(turn="running"))) == sig.TURN_IDLE
+
+    def test_a_status_is_not_used_unless_the_host_is_alive(self):
+        unknown = recorded("idle", attention(turn="running"), alive=None)
+        assert self.state(unknown, 600) == sig.TURN_BUSY
+
+    def test_a_fresh_running_turn_without_a_record_is_mid_turn(self):
+        assert self.state(host(attention(turn="running")), 600) == sig.TURN_BUSY
+
+    def test_a_stale_running_turn_without_a_record_is_not(self):
+        assert self.state(host(attention(turn="running")), 3600) == sig.TURN_IDLE
+
+    def test_the_stale_edge_is_orphan_idle_minutes(self):
+        view = host(attention(turn="running"))
+        assert self.state(view, 600, Thresholds(orphan_idle_minutes=5)) == sig.TURN_IDLE
+
+    def test_a_running_turn_with_no_activity_known_is_mid_turn(self):
+        assert self.state(host(attention(turn="running")), None) == sig.TURN_BUSY
+
+    @pytest.mark.parametrize("kind", ["permission", "question"])
+    def test_an_attention_prompt_without_a_record_is_waiting(self, kind):
+        view = host(attention(turn="running", waiting=waiting(kind)))
+        assert self.state(view) == sig.TURN_WAITING
+
+    def test_an_idle_prompt_is_newer_than_the_running_turn(self):
+        view = host(attention(turn="running", waiting=waiting("idle")))
+        assert self.state(view, 600) == sig.TURN_IDLE
+
+    def test_an_ended_turn_a_gone_host_or_no_host_is_not_mid_turn(self):
+        assert self.state(host(attention(turn="ended")), 60) == sig.TURN_IDLE
+        assert self.state(recorded("busy", attention(turn="running"), alive=False)) == (
+            sig.TURN_IDLE)
+        assert self.state(host(None), 60) == sig.TURN_IDLE
+        assert self.state(None) == sig.TURN_IDLE
+
+
+class TestTheClassAndTheSignalsAgree:
+    """The class and the signals read one predicate, so they cannot contradict."""
+
+    @staticmethod
+    def orphan(view: HostView, idle: float = 15 * 3600.0, previous: str | None = "s0") -> Row:
+        return Row(kind=ROW_HOST, project=PROJECT, hosts=[view],
+                   last_activity=NOW - idle, previous_session=previous)
+
+    @staticmethod
+    def cause(row: Row) -> str:
+        return only(classify(row, NOW), sig.ORPHAN_HOST).cause
+
+    def test_busy_is_active_however_old_its_last_sign(self):
+        row = self.orphan(recorded("busy", attention(turn="running", turn_since=iso(9))))
+        assert self.cause(row) == sig.ORPHAN_ACTIVE
+        assert sig.STUCK in kinds(classify(row, NOW))
+
+    def test_idle_past_the_edge_is_a_leftover_or_unmanaged_and_never_stuck(self):
+        view = recorded("idle", attention(turn="running", waiting=waiting("idle")))
+        leftover = self.orphan(view)
+        assert self.cause(leftover) == sig.ORPHAN_LEFTOVER
+        assert self.cause(self.orphan(view, previous=None)) == sig.ORPHAN_UNMANAGED
+        found = classify(leftover, NOW)
+        assert sig.STUCK not in kinds(found)
+        assert sig.YOUR_TURN in kinds(found)
+
+    def test_idle_within_the_edge_is_still_active(self):
+        row = self.orphan(recorded("idle", attention(turn="running")), idle=600)
+        assert self.cause(row) == sig.ORPHAN_ACTIVE
+
+    def test_waiting_is_active_and_raises_the_waiting_alert(self):
+        row = self.orphan(recorded("waiting", attention(turn="running")))
+        found = classify(row, NOW)
+        assert self.cause(row) == sig.ORPHAN_ACTIVE
+        wait = only(found, sig.WAITING)
+        assert (wait.alert, wait.severity, wait.cause) == (True, sig.HIGH, sig.WAITING_INPUT)
+        assert wait.key == f"{PROJECT}|host:h1|waiting|input"
+        assert sig.STUCK not in kinds(found)
+        assert sig.YOUR_TURN not in kinds(found)
+
+    def test_a_waiting_record_with_no_attention_record_still_alerts(self):
+        row = self.orphan(recorded("waiting"))
+        assert only(classify(row, NOW), sig.WAITING).cause == sig.WAITING_INPUT
+
+    def test_a_waiting_record_keeps_the_hooks_own_prompt(self):
+        record = attention(turn="running", waiting=waiting("question"))
+        wait = only(classify(self.orphan(recorded("waiting", record)), NOW), sig.WAITING)
+        assert wait.cause == "question"
+        assert "Allow Bash?" in wait.detail
+
+    def test_a_record_that_is_not_waiting_silences_a_stale_prompt(self):
+        record = attention(turn="running", waiting=waiting("permission"))
+        for status in ("idle", "busy"):
+            assert sig.WAITING not in kinds(classify(self.orphan(recorded(status, record)), NOW))
+
+    def test_busy_hides_a_stale_idle_prompt(self):
+        record = attention(turn="running", waiting=waiting("idle"))
+        row = session_row(hosts=[recorded("busy", record)], last_activity=NOW - 60)
+        assert sig.YOUR_TURN not in kinds(classify(row, NOW))
+
+    def test_a_stale_running_turn_without_a_record_is_not_stuck(self):
+        record = attention(turn="running")
+        row = session_row(hosts=[host(record)], last_activity=NOW - 61 * 60)
+        assert sig.STUCK not in kinds(classify(row, NOW))
+
+    def test_between_stuck_and_stale_a_running_turn_without_a_record_is_stuck(self):
+        record = attention(turn="running")
+        row = session_row(hosts=[host(record)], last_activity=NOW - 30 * 60)
+        assert sig.STUCK in kinds(classify(row, NOW))
+
+    def test_a_busy_session_silent_for_hours_is_stuck(self):
+        record = attention(turn="running")
+        row = session_row(hosts=[recorded("busy", record)], last_activity=NOW - 5 * 3600)
+        assert sig.STUCK in kinds(classify(row, NOW))
+
+    def test_a_session_whose_record_says_idle_is_never_stuck(self):
+        record = attention(turn="running")
+        row = session_row(hosts=[recorded("idle", record)], last_activity=NOW - 30 * 60)
+        assert sig.STUCK not in kinds(classify(row, NOW))
+
+    def test_a_session_host_known_only_by_its_record_alerts_when_waiting(self):
+        row = session_row(hosts=[recorded("waiting")])
+        assert [s.kind for s in classify(row, NOW)] == [sig.WAITING]

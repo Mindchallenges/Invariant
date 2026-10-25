@@ -114,6 +114,7 @@ graph TD
     OGATES --> MANIFEST
     OGATES --> RULES
     OGATES --> GIT
+    OGATES -- reads turn_state --> OSIG
     OSIG -. reads the GateReport shape of .-> OGATES
     CLI --> OLAUNCHD
     CLI -. imports only inside oracle tui .-> OTUI
@@ -779,10 +780,10 @@ over Tailscale (IDEA_023) is shipping in increments; see
 | `index` | `projects.json` — every registered project once, keyed by its state root; register, remove, prune | Read or write anything under a project's state root; store a clock time |
 | `attention` | `<state_root>/attention/<host-id>.json` — what one host session is waiting on, how its turn ended, its pid; the write and clear rules per event | Decide what a hook event means (the host adapter does); lock; raise into a hook (the CLI guards every call) |
 | `scan` | One read-only snapshot per registered project: live sessions with their hosts nested, orphan hosts, leaked worktrees, and one error row per project or record that cannot be read; host liveness (pid exists, and is still the host); the cache that keeps a repeat scan cheap | Write anything; name a state; import `hosts/` (host facts arrive through the injected `HostProbe`) |
-| `signals` | `classify(row, now, thresholds)`: alerts (waiting, gate blocked, stuck, finished, error) and markers, each with a stable key | Read a store, a process table or the wall clock |
+| `signals` | `classify(row, now, thresholds)`: alerts (waiting, gate blocked, stuck, finished, error) and markers, each with a stable key; `turn_state`, whether a host is mid-turn, the one answer the class, the signals, the gate cache and the panel read (BUG_087) | Read a store, a process table or the wall clock |
 | `recommend` | `recommend(row, signals)`: one next step as label, argv, cwd and kind; `assess` joins rows, signals and steps into the `oracle list --json` document; `row_label`, the one name a row is shown by | Run anything; answer a prompt |
 | `watcher` | The tick: scan, assess, the atomic `oracle/snapshot.json`, and the rising-edge de-dup ledger `oracle/alerts.json` that decides what notifies; the loop that survives a failed tick | Decide what a signal means (`signals` does); know how a notification is delivered; write under a project's state root |
-| `gates` | `GateCache`: what each idle session's pipeline owes, evaluated by the domain over an inert store, off the tick, once per fingerprint, at most two at a time, with a timeout that keeps the last answer; `GateReport`, the data `recommend` reads | Write anything; evaluate while a turn runs; persist an answer; raise an alert |
+| `gates` | `GateCache`: what each idle session's pipeline owes (idle by `signals.turn_state`), evaluated by the domain over an inert store, off the tick, once per fingerprint, at most two at a time, with a timeout that keeps the last answer; `GateReport`, the data `recommend` reads | Write anything; evaluate while a turn runs; persist an answer; raise an alert |
 | `notify` | The `Notifier` protocol and `Notification`; `OsascriptNotifier`, with the quoting injected; `RecordingNotifier` for tests | Import `hosts/`; decide what deserves a notification |
 | `launchd` | The LaunchAgent: `plist_for` (absolute interpreter, explicit `PATH`, log under the home), `LaunchdInstaller` (install, reinstall, uninstall, status, the interpreter check `doctor` runs), `RecordingLaunchctl` for tests | Run `launchctl` except through its injected runner; import the watcher |
 | `dashboard` | What `oracle tui` shows: the snapshot while it is fresh, else an in-process scan behind a banner; each row as a line with its tone; the `ALERT` / `note` / `ok` flag `oracle list` prints too | Import Textual; run anything |

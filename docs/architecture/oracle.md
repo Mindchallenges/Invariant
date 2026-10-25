@@ -100,6 +100,7 @@ graph TD
     GATES --> MANIFEST
     GATES --> RULES
     GATES --> GIT
+    GATES -- "reads turn_state (BUG_087)" --> SIGNALS
     SIGNALS -. reads the GateReport shape of .-> GATES
     CLI --> LAUNCHD
     LAUNCHD -. its plist runs oracle watch .-> WATCH
@@ -369,7 +370,11 @@ A host row also keeps the record's `launched_name` (the session name it was
 started with), `cwd`, `started` (epoch seconds) and `process_start` (the
 start token, so a later action can compare it again at the moment it acts),
 and the verified process's `tty`. The tty is what close host needs to find
-the terminal tab the host runs in ("Close host" below).
+the terminal tab the host runs in ("Close host" below). It keeps the
+record's `status` too, as written (Claude Code writes `busy`, `idle` or
+`waiting`), and only when the record joined the host: `signals.turn_state`
+decides what it means ("Mid-turn" below, BUG_087). A conflict row has no
+status, as it has no pid.
 
 **Where an orphan was started** (IDEA_027 increment 6). An orphan host row's
 view also carries `rooted_here`: whether its record's `cwd` is the project's
@@ -453,18 +458,53 @@ nothing else. Alerts come first in the list it returns.
 
 | Signal | Alert | Severity | Raised when | Key discriminator |
 |---|---|---|---|---|
-| `waiting` | yes | high; medium after 6 h | the current host's `waiting.kind` is `permission` or `question`, and the host is not known to be gone | `<kind>@<since>` |
+| `waiting` | yes | high; medium after 6 h | the current host is waiting on the person (`turn_state` `waiting`): its `waiting.kind` is `permission` or `question`, or Claude Code's own status says `waiting` (cause `input` when the hooks recorded no prompt; always high, it carries no time) | `<kind>@<since>`, or `input` |
 | `gate_blocked` | yes | medium | `blocked` is set and `turn` is `ended` (ADR-007 D8) | the sorted rule ids |
-| `stuck` | yes | medium | the host is not known to be gone, `turn` is `running`, nothing is waiting, and the last activity is older than 20 minutes | `turn_since` |
+| `stuck` | yes | medium | `turn` is `running`, the host is mid-turn and working (`turn_state` `busy`, "Mid-turn" below), and the last activity is older than 20 minutes | `turn_since` |
 | `finished` | yes | low | the session is in its reviewed stage (`cause: reviewed`), or in its working stage with a complete plan and a landed pipeline (`cause: ready`) | `reviewed` / `ready` |
 | `error` | yes | high | the last test run failed, was not read as red, and was not in the red phase (`tests`); a hook recorded `degraded` (`degraded`); the row is an error row (`scan`) | `tests:<run count>`, `degraded@<since>`, `scan` |
-| `your_turn` | no | info | `waiting.kind` is `idle` and the host is not gone | — |
+| `your_turn` | no | info | `waiting.kind` is `idle`, the host is not gone, and it is not mid-turn (`turn_state` `idle`) | — |
 | `host_gone` | no | info | the recorded pid is not alive, and neither the binding nor the record says the host ended | — |
 | `parked` | no | info | the session's binding is spent and its worktree is there | — |
 | `stranded` | no | info | the session's recorded worktree is gone | — |
 | `teardown_pending` | no | info | the session is in its landed stage | — |
 | `orphan_host` | no | info | a `host` row; its `cause` is the class: `gone`, `unknown`, `active`, `leftover`, `unmanaged` (`orphan_class`, IDEA_025) | — |
 | `leaked_worktree` | no | info | a `worktree` row | — |
+
+**Mid-turn** (BUG_087). Whether a host is mid-turn is one answer,
+`turn_state(host, last_activity, now, thresholds)`: `busy` (working),
+`waiting` (on the person) or `idle` (not mid-turn). The orphan class, the
+`waiting`, `stuck` and `your_turn` signals, the gate cache's "Never while a
+turn runs" and the panel's Working group all read it, so none can contradict
+another. `mid_turn` is "not `idle`". `assess` writes it on each row as
+`turn_state`, the field the panel reads.
+
+| Evidence, first that holds | Answer |
+|---|---|
+| no current host, or it is known to be gone | `idle` |
+| alive, and Claude Code's per-process record joined it with a `status` of `busy`, `idle` or `waiting` | that status: the record outranks the attention record |
+| the attention record waits on a `permission` or a `question` | `waiting` |
+| the attention record waits on an `idle` prompt (notified after the last prompt was submitted, so newer than the turn), or its `turn` is not `running` | `idle` |
+| a `running` turn, heard from within `orphan_idle_minutes` (60), or with no activity known | `busy` |
+| a `running` turn quiet longer than that | `idle`: stale, because a Stop that never arrived leaves `running` for ever |
+
+The record's status is used only when the host is alive by the record's own
+check, so a reused or unverified pid never speaks for the host; an unknown
+or missing status falls back to the attention record. Without a record a
+`running` turn reads `stuck` between 20 and 60 minutes of silence and then
+stops counting; with one, `busy` stays `stuck` however long, and `idle`
+never is. Six Heap hosts idle 14 to 44 hours read `orphan_host` `active`,
+five of them "idle at the prompt" and one "stuck for 880 min", because the
+Stop hook never wrote `turn-ended` for them while their records said `idle`.
+
+**Waiting on the person is never closeable.** A host whose record says
+`waiting` is `active`, and raises the existing `waiting` alert rather than a
+signal of its own: `recommend`'s first row then offers nothing to run, the
+panel puts it in Needs you with no button (ADR-009 D8), and the TUI's and
+the page's `refusal` refuses a step on it. When the hooks recorded the
+prompt, the alert keeps their kind and text; otherwise its cause is `input`
+and its discriminator `input`. A record that says `idle` or `busy` silences
+an attention prompt left behind by a missed `PostToolUse` or Stop.
 
 Only the current host's record is read; the hosts a session had before are
 history. Every signal carries `key = project|subject|kind|discriminator`, where
@@ -508,7 +548,8 @@ The close guards are ADR-009 D7's and D15's: the host is alive by Claude
 Code's record (`pid_source` `record` or `both`), with a start token and no
 `pid_conflict`; it is `rooted_here`; and no other project's live session
 claims it (`claimed_elsewhere`). A gone, active or unknown orphan is never
-offered close.
+offered close, and an active one includes a host Claude Code says is busy or
+waiting ("Mid-turn" above).
 
 **Attach only when the match is unique both ways.** `assess` calls
 `scan.mark_rivals` on each project after `mark_claims`: an orphan host row
@@ -532,8 +573,8 @@ would otherwise be told to adopt the same session. The suite parses every
 `argv` in the table with the real CLI parser.
 
 `assess(snapshots, now, thresholds, gates)` joins each row with its signals
-and its recommendation, and with the gate cache's answer for it under `gates`
-(`null` when there is none). It is the `invariant oracle list --json`
+and its recommendation, with the gate cache's answer for it under `gates`
+(`null` when there is none), and with its current host's `turn_state`. It is the `invariant oracle list --json`
 document, and the body of the watcher's snapshot. How the gate answer changes
 a recommendation is in "Shipped: the gate cache" below.
 
@@ -650,7 +691,7 @@ prints, and keeps the answer in memory.
 | Rule | How |
 |---|---|
 | **Never a write** | The domains are built on an `InertStore` over the row's state root. The manifest is the session worktree's own (the main checkout's if the worktree has none), because the rules resolve the paths they compare against the manifest's root. The rules run with `cwd` set to the worktree, so their git questions are asked there, and inside `core/git.without_optional_locks()`, so every one runs with `GIT_OPTIONAL_LOCKS=0`: a plain `git diff` cannot refresh the index stat cache and take `index.lock` under the host working there (ADR-007 D16). |
-| **Never while a turn runs** | A host mid-turn is using that worktree, and its own git commands must not meet ours. A session is evaluated when its current host's `turn` is `ended`. With no turn known, or a running turn whose host is known to be gone, it is evaluated after 2 minutes without activity. A running turn on a live host, or one whose liveness is unknown, is never evaluated. |
+| **Never while a turn runs** | A host mid-turn is using that worktree, and its own git commands must not meet ours. Mid-turn is `signals.turn_state`'s answer, the one the signals read ("Mid-turn" above): a host Claude Code says is busy or waiting, one waiting on a prompt, or a `running` turn heard from within an hour is never evaluated. A session whose host is not mid-turn is evaluated at once when its `turn` is `ended`, and otherwise after 2 minutes without activity: no turn known, a gone host, a record that says `idle`, or a `running` turn gone stale. |
 | **Only when something moved** | The fingerprint is the session's `state` and `heartbeat`, the pipeline's `state` and transition count, and the pipeline record's `st_mtime_ns`. Evidence is recorded without a transition, so the write time is what moves for a new test run or a doc read. The scan supplies all five (`PipelineView.transitions`, `written_ns`), so fingerprinting costs no extra read. |
 | **Skipped when there is nothing to ask** | A row that is not a session, has no pipeline or a terminal one, is stranded, or whose worktree (else root) is not a directory. |
 | **Bounded** | Each evaluation runs in a daemon thread, at most 2 at once across every project, with a 10-second timeout. A worker that timed out keeps its slot until it really ends, so a hung `git` cannot multiply threads. A result later than the timeout is dropped. |

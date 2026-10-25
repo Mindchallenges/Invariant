@@ -566,7 +566,10 @@ class HostProcessRecord:
 
     ``started`` is epoch seconds (the record's ``startedAt`` is
     milliseconds). ``start`` is the record's ``procStart`` as a
-    :func:`process_start_token`, the guard against a reused pid.
+    :func:`process_start_token`, the guard against a reused pid. ``status``
+    is Claude Code's own word for what the process is doing (``busy``,
+    ``idle``, ``waiting`` as seen so far), passed on as written: the oracle
+    decides what it means (BUG_087).
     """
 
     session_id: str
@@ -575,6 +578,7 @@ class HostProcessRecord:
     cwd: str | None = None
     started: float | None = None
     start: str | None = None
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -649,7 +653,7 @@ def _record(path: Path, platform: str) -> HostProcessRecord | None:
         return None
     started = body.get("startedAt")
     started_ok = isinstance(started, (int, float)) and not isinstance(started, bool)
-    name, cwd = body.get("name"), body.get("cwd")
+    name, cwd, status = body.get("name"), body.get("cwd"), body.get("status")
     return HostProcessRecord(
         session_id=session_id,
         pid=pid,
@@ -657,6 +661,7 @@ def _record(path: Path, platform: str) -> HostProcessRecord | None:
         cwd=cwd if isinstance(cwd, str) else None,
         started=started / 1000.0 if started_ok else None,
         start=process_start_token(body.get("procStart")),
+        status=status if isinstance(status, str) else None,
     )
 
 

@@ -31,6 +31,7 @@ from .scan import (
     STAGE_LANDED,
     STAGE_REVIEWED,
     STAGE_WORKING,
+    HostView,
     Row,
 )
 
@@ -56,6 +57,17 @@ ORPHAN_UNMANAGED = "unmanaged"
 ORPHAN_ACTIVE = "active"
 ORPHAN_UNKNOWN = "unknown"
 
+#: Whether a host is mid-turn (:func:`turn_state`): working, paused on the
+#: person, or not mid-turn. The words are Claude Code's own ``status`` values,
+#: the evidence that outranks the attention ``turn`` when there is one.
+TURN_BUSY = "busy"
+TURN_WAITING = "waiting"
+TURN_IDLE = "idle"
+
+#: The ``waiting`` signal's cause when only the host's own status says it is
+#: waiting on the person, with no prompt the hooks recorded (BUG_087).
+WAITING_INPUT = "input"
+
 HIGH = "high"
 MEDIUM = "medium"
 LOW = "low"
@@ -67,6 +79,7 @@ _ASKING = ("permission", "question")
 _IDLE = "idle"
 _TURN_RUNNING = "running"
 _TURN_ENDED = "ended"
+_STATUSES = (TURN_BUSY, TURN_WAITING, TURN_IDLE)
 
 
 @dataclass(frozen=True)
@@ -81,7 +94,9 @@ class Thresholds:
     stuck_minutes: float = 20.0
     stale_wait_hours: float = 6.0
     #: An orphan host heard from more recently than this is ``active``, and
-    #: nothing is offered to close it.
+    #: nothing is offered to close it. It is also how long a ``running``
+    #: attention turn counts as mid-turn without the host's own status
+    #: (:func:`turn_state`, BUG_087).
     orphan_idle_minutes: float = 60.0
 
 
@@ -135,14 +150,60 @@ def classify(row: Row, now: float, thresholds: Thresholds | None = None) -> list
     return found
 
 
+def turn_state(
+    host: HostView | None, last_activity: float | None, now: float,
+    thresholds: Thresholds | None = None,
+) -> str:
+    """Whether ``host`` is mid-turn: :data:`TURN_BUSY`, :data:`TURN_WAITING` on
+    the person, or :data:`TURN_IDLE`. The one answer the orphan class, the
+    ``waiting`` / ``stuck`` / ``your_turn`` signals, the gate cache and the
+    panel's "working" all read, so none of them can contradict another
+    (BUG_087).
+
+    1. A host known to be gone is not mid-turn: that is ``host_gone``'s.
+    2. Claude Code's own ``status``, from the per-process record the scan
+       joined, outranks the attention record while the host is alive by the
+       record's check: ``busy``, ``waiting`` and ``idle`` mean what they say.
+       Without that check (liveness unknown) the record is not used.
+    3. Without one, the attention record: a permission prompt or a question
+       is waiting; an idle prompt was notified after the last prompt was
+       submitted, so the turn is over; a ``running`` turn is mid-turn only
+       while the host was heard from within ``orphan_idle_minutes``, because
+       a missed Stop leaves it ``running`` for ever. No activity known is no
+       proof of staleness, so such a turn still counts.
+    """
+    thresholds = thresholds or Thresholds()
+    if host is None or host.alive is False:
+        return TURN_IDLE
+    if host.alive is True and host.status in _STATUSES:
+        return host.status
+    record = host.attention if isinstance(host.attention, dict) else {}
+    waiting = record.get("waiting") if isinstance(record.get("waiting"), dict) else {}
+    if waiting.get("kind") in _ASKING:
+        return TURN_WAITING
+    if waiting.get("kind") == _IDLE or record.get("turn") != _TURN_RUNNING:
+        return TURN_IDLE
+    stale = (last_activity is not None
+             and now - last_activity >= thresholds.orphan_idle_minutes * 60)
+    return TURN_IDLE if stale else TURN_BUSY
+
+
+def mid_turn(
+    host: HostView | None, last_activity: float | None, now: float,
+    thresholds: Thresholds | None = None,
+) -> bool:
+    """Whether ``host`` is mid-turn, working or waiting on the person."""
+    return turn_state(host, last_activity, now, thresholds) != TURN_IDLE
+
+
 def orphan_class(row: Row, now: float, thresholds: Thresholds) -> str:
     """Which of IDEA_025's classes an orphan host row is in.
 
     * ``gone`` — its process is known to be gone;
     * ``unknown`` — no pid could be asked (none recorded, or its sources
       disagree), or nothing says when it was last active;
-    * ``active`` — alive, and heard from within ``orphan_idle_minutes`` or
-      mid-turn;
+    * ``active`` — alive, and mid-turn (:func:`turn_state`: working, or
+      waiting on the person) or heard from within ``orphan_idle_minutes``;
     * ``leftover`` — alive and idle, and the session it was bound to ended;
     * ``unmanaged`` — alive and idle, and never bound to a session here.
     """
@@ -152,24 +213,28 @@ def orphan_class(row: Row, now: float, thresholds: Thresholds) -> str:
         return ORPHAN_GONE
     if alive is None or row.last_activity is None:
         return ORPHAN_UNKNOWN
-    record = host.attention or {}
-    if (record.get("turn") == _TURN_RUNNING
+    if (mid_turn(host, row.last_activity, now, thresholds)
             or now - row.last_activity < thresholds.orphan_idle_minutes * 60):
         return ORPHAN_ACTIVE
     return ORPHAN_LEFTOVER if row.previous_session else ORPHAN_UNMANAGED
 
 
 def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:
-    """What the current host's attention record says, read against its liveness."""
+    """What the current host's records say, read against its liveness.
+
+    Whether it waits, works or sits idle is :func:`turn_state`'s answer, the
+    one the orphan class reads too; the rest is the attention record's.
+    """
     host = row.current_host
-    record = host.attention if host else None
-    if not record:
+    if host is None:
         return
+    state = turn_state(host, row.last_activity, now, thresholds)
+    record = host.attention or {}
     gone = host.alive is False
     waiting = record.get("waiting") if isinstance(record.get("waiting"), dict) else None
     wait_kind = waiting.get("kind") if waiting else None
 
-    if not gone and wait_kind in _ASKING:
+    if state == TURN_WAITING and wait_kind in _ASKING:
         since = waiting.get("since")
         age = _age(since, now)
         stale = age is not None and age > thresholds.stale_wait_hours * 3600
@@ -178,8 +243,13 @@ def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:
         if age is not None:
             detail += f" ({_minutes(age)})"
         add(WAITING, MEDIUM if stale else HIGH, True, detail, f"{wait_kind}@{since}", wait_kind)
-    elif not gone and wait_kind == _IDLE:
+    elif state == TURN_WAITING:
+        add(WAITING, HIGH, True, "waiting on you: Claude's own status says so",
+            WAITING_INPUT, WAITING_INPUT)
+    elif state == TURN_IDLE and not gone and wait_kind == _IDLE:
         add(YOUR_TURN, INFO, False, "idle at the prompt: your turn")
+    if not record:
+        return
 
     blocked = record.get("blocked")
     if isinstance(blocked, dict) and record.get("turn") == _TURN_ENDED:
@@ -193,9 +263,8 @@ def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:
 
     idle = None if row.last_activity is None else now - row.last_activity
     if (
-        not gone
+        state == TURN_BUSY
         and record.get("turn") == _TURN_RUNNING
-        and waiting is None
         and idle is not None
         and idle > thresholds.stuck_minutes * 60
     ):

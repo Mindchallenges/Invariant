@@ -65,7 +65,7 @@ CASES = [
     pytest.param(
         session_row(
             hosts=[host(attention(turn="running", turn_since=iso(9999)))],
-            last_activity=NOW - 3600,
+            last_activity=NOW - 1800,
         ),
         rec.RUN, ("invariant", "context", "--id", "s1"), WT, {},
         id="stuck",
@@ -380,11 +380,34 @@ class TestCloseHost:
             pytest.param(leftover(claimed="beta"), id="a-live-session-elsewhere-holds-it"),
             pytest.param(leftover(idle=300), id="recently-active"),
             pytest.param(leftover(alive=False), id="gone"),
+            pytest.param(leftover(status="busy"), id="its-record-says-busy"),
+            pytest.param(leftover(status="waiting"), id="its-record-says-waiting"),
         ],
     )
     def test_no_close_unless_every_guard_holds(self, row):
         advice = advise(row)
         assert advice is None or "close-host" not in advice.argv
+
+    @pytest.mark.parametrize("previous", ["s0", None])
+    def test_a_stale_running_turn_its_record_calls_idle_is_closed(self, previous):
+        """BUG_087: Claude Code's idle status outranks the attention turn."""
+        row = leftover(previous=previous, idle=15 * 3600, status="idle",
+                       attention=attention(turn="running", turn_since=iso(15 * 3600)))
+        assert advise(row).argv == CLOSE
+
+    def test_a_waiting_host_is_told_to_answer_it_and_offered_nothing_to_run(self):
+        advice = advise(leftover(status="waiting"))
+        assert advice.kind == rec.INFO
+        assert advice.argv == ()
+        assert "answer it" in advice.label
+
+    def test_assess_names_each_rows_turn_state(self):
+        rows = assessed(
+            leftover(status="busy"), leftover(status="waiting", host_session_id="h8"),
+            leftover(status="idle", host_session_id="h9"),
+            session_row(hosts=[]),
+        )
+        assert [r["turn_state"] for r in rows] == ["busy", "waiting", "idle", "idle"]
 
     def test_assess_marks_a_host_a_live_session_elsewhere_holds(self):
         orphan = leftover()

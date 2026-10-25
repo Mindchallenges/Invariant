@@ -66,6 +66,7 @@ class Rec:
     cwd: str | None = None
     started: float | None = None
     start: str | None = START
+    status: str | None = None
 
 
 @dataclass
@@ -152,6 +153,21 @@ class TestAHostKnownOnlyByItsRecord:
         assert host.process_start == START
         assert host.tty == "ttys004"
 
+    def test_the_records_status_is_carried_on_the_host(self, project):
+        """BUG_087: Claude Code's own busy / idle / waiting, for the mid-turn read."""
+        probe = RecordProbe([Rec("h-quiet", LIVE, status="waiting"),
+                             Rec("h-bound", OTHER_LIVE, status="busy")],
+                            transcripts(**{"h-quiet": NOW - HOUR}))
+        snapshot = scan(probe)
+        assert rows_of(snapshot, ROW_HOST)["h-quiet"].hosts[0].status == "waiting"
+        assert rows_of(snapshot, ROW_SESSION)["s1"].hosts[0].status == "busy"
+        assert rows_of(snapshot, ROW_HOST)["h-quiet"].to_dict()["hosts"][0]["status"] == (
+            "waiting")
+
+    def test_a_host_with_no_record_has_no_status(self, project):
+        probe = RecordProbe([], transcripts(**{"h-quiet": NOW - HOUR}))
+        assert rows_of(scan(probe), ROW_HOST)["h-quiet"].hosts[0].status is None
+
     def test_the_bound_host_of_a_session_gets_its_pid_too(self, project):
         probe = RecordProbe([Rec("h-bound", OTHER_LIVE)])
         row = rows_of(scan(probe), ROW_SESSION)["s1"]
@@ -216,9 +232,10 @@ class TestTwoSourcesForOnePid:
 
     def test_disagreeing_sources_are_shown_and_neither_is_picked(self, project):
         put_attention(project, "h-bound", pid=DEAD, turn="running")
-        probe = RecordProbe([Rec("h-bound", LIVE)])
+        probe = RecordProbe([Rec("h-bound", LIVE, status="idle")])
         row = rows_of(scan(probe), ROW_SESSION)["s1"]
         host = row.hosts[0]
+        assert host.status is None
         assert host.pid is None
         assert host.alive is None
         assert host.pid_source == "conflict"
@@ -478,7 +495,7 @@ class TestTheRecords:
         [record] = self.probe(tmp_path).host_processes()
         assert record == launch.HostProcessRecord(
             session_id="h-one", pid=52001, name="quiet-one", cwd="/w/alpha",
-            started=1_760_000_000.0, start="2026-10-05T09:00:00",
+            started=1_760_000_000.0, start="2026-10-05T09:00:00", status="idle",
         )
 
     def test_the_key_files_are_never_opened(self, tmp_path, monkeypatch):
@@ -499,10 +516,10 @@ class TestTheRecords:
     def test_optional_fields_that_are_missing_or_odd_are_none(self, tmp_path):
         write_record(tmp_path, 52002, {"pid": 52002, "sessionId": "h-two", "name": 5,
                                        "startedAt": "soon", "procStart": "whenever",
-                                       "cwd": None})
+                                       "cwd": None, "status": 5})
         [record] = self.probe(tmp_path).host_processes()
-        assert (record.name, record.cwd, record.started, record.start) == (
-            None, None, None, None)
+        assert (record.name, record.cwd, record.started, record.start, record.status) == (
+            None, None, None, None, None)
 
     @pytest.mark.parametrize("body", [
         "{not json",

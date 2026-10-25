@@ -365,6 +365,18 @@ one and a row of unknown liveness are offered nothing, and the panel says
 "Its process ids disagree" on a conflict row rather than "process id not
 recorded".
 
+*Amended 2026-10-25 (BUG_087)*: "active" and "idle" are read from one
+mid-turn answer, `signals.turn_state`, which the signals and the gate cache
+share. When Claude Code's per-process record verified the host, its
+`status` outranks the attention turn: `busy` is active, `idle` lets the host
+become leftover or unmanaged once it has been quiet past
+`orphan_idle_minutes`, and `waiting` is never closeable: the row is active
+and raises the existing `waiting` alert, so the panel shows it under Needs
+you as waiting, with no button. Without a record status, a `running`
+attention turn counts as mid-turn only while the host was heard from within
+`orphan_idle_minutes`, because a missed Stop left six idle hosts `active`
+for up to 44 hours. The guards above are unchanged.
+
 The confirm is D7's destructive sheet. Under "This ends" it names the
 project, the Claude session id (its first 8 characters), the pid and the
 idle time (true since BUG_078); the sentence is "Ends Claude in this window,

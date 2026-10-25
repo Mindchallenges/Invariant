@@ -18,8 +18,10 @@ Four rules keep it from costing a project anything:
   stat cache and take ``index.lock`` in a worktree a host is working in.
 * **Never while a turn runs.** The rules shell out to git in the session's
   worktree; a host mid-turn is using that worktree, and its own git commands
-  must not meet ours. A session is evaluated when its turn has ended, or, with
-  no turn known (or its host gone), after two quiet minutes.
+  must not meet ours. Mid-turn is :func:`~invariant.oracle.signals.turn_state`'s
+  answer, the one the signals read (BUG_087). A session whose host is not
+  mid-turn is evaluated at once when its turn has ended, else after two quiet
+  minutes.
 * **Only when something moved.** The fingerprint is the session's state and
   heartbeat, the pipeline's state and transition count, and the record's write
   time. An idle session is evaluated once per fingerprint, not once per tick.
@@ -50,6 +52,7 @@ from ..core.store import InertStore
 from ..domains.pipeline import PipelineDomain
 from ..domains.session import SessionDomain
 from .scan import ROW_SESSION, ProjectSnapshot, Row
+from .signals import Thresholds, mid_turn
 
 #: Seconds one evaluation may take before its result is given up on.
 GATE_TIMEOUT_SECONDS = 10.0
@@ -60,7 +63,6 @@ MAX_CONCURRENT = 2
 #: With no turn known, a session this quiet is idle.
 IDLE_SECONDS = 120.0
 
-_TURN_RUNNING = "running"
 _TURN_ENDED = "ended"
 
 GateKey = tuple[str, str]
@@ -138,18 +140,20 @@ def _workdir(row: Row) -> Path | None:
     return path if path.is_dir() else None
 
 
-def eligible(row: Row, now: float, idle_seconds: float = IDLE_SECONDS) -> bool:
+def eligible(
+    row: Row, now: float, idle_seconds: float = IDLE_SECONDS,
+    thresholds: Thresholds | None = None,
+) -> bool:
     """Whether ``row`` may be evaluated now: a running pipeline, idle, on disk."""
     if row.kind != ROW_SESSION or row.pipeline is None or row.pipeline.terminal:
         return False
     if _workdir(row) is None:
         return False
     host = row.current_host
-    record = host.attention if host and isinstance(host.attention, dict) else {}
-    turn = record.get("turn")
-    if turn == _TURN_RUNNING and host.alive is not False:
+    if mid_turn(host, row.last_activity, now, thresholds):
         return False
-    if turn == _TURN_ENDED:
+    record = host.attention if host and isinstance(host.attention, dict) else {}
+    if record.get("turn") == _TURN_ENDED:
         return True
     return row.last_activity is None or now - row.last_activity >= idle_seconds
 

@@ -343,9 +343,9 @@ with "…". A button that acts is named for the deed.
 
 | Group | Heading | Tile label | Who is in it |
 |---|---|---|---|
-| needs | Needs you | Need you | `waiting` (permission, question); `finished` (reviewed, ready) |
+| needs | Needs you | Need you | `waiting` (permission, question, input); `finished` (reviewed, ready) |
 | problems | Problems | Problems | `error` (tests, degraded, scan); `gate_blocked`; `stuck`; `host_gone`; `stranded` |
-| working | Working | Working | the current host's turn is `running`, nothing above |
+| working | Working | Working | the row's `turn_state` is `busy` (the current host is mid-turn and working, `signals.turn_state`, BUG_087), nothing above |
 | idle | Idle | (no tile) | every other live session: `your_turn`, `parked`, `teardown_pending`, no signal |
 | leftovers | Leftovers | Leftovers | `orphan_host` and `leaked_worktree` rows with no alert |
 
@@ -355,6 +355,7 @@ with "…". A button that acts is named for the deed.
 |---|---|---|---|
 | `waiting`, permission | Waiting for your permission | needs | Claude asked for permission N min ago. Answer it in Claude on your Mac or phone. This panel never answers prompts. |
 | `waiting`, question | Waiting for your answer | needs | Claude asked you a question N min ago. Answer it in Claude. |
+| `waiting`, input (only Claude Code's own status says it waits, BUG_087) | Waiting for you | needs | Claude is waiting for you in its window. Answer it in Claude on your Mac or phone. This panel never answers prompts. |
 | `finished`, reviewed | Finished, ready to merge | needs | The review checks passed. It can be merged. |
 | `finished`, ready | Finished, ready for review | needs | Its plan is complete and its lane has landed. It is ready for the review checks. |
 | `error`, tests | N tests failing (else Tests failing) | problem | The last test run had N failures. |
@@ -364,7 +365,7 @@ with "…". A button that acts is named for the deed.
 | `error`, scan | Cannot read this project | problem | invariant cannot read this project's settings. |
 | `host_gone` | Paused | idle | Its Claude window closed without saying so, N ago, so nothing is happening until you resume it. |
 | `stranded` | Its folder is gone | problem | The session's folder no longer exists. |
-| turn `running` | Claude is working | working | Claude is working on it; active N min ago. |
+| `turn_state` `busy` | Claude is working | working | Claude is working on it; active N min ago. |
 | `your_turn` | Waiting for your next message | idle | Claude finished its turn and is waiting for you. |
 | `parked` | Paused | idle | No Claude window is working on it. Resume it to go on. |
 | `teardown_pending` | Merged, ready to clean up | idle | It is merged. Its folder and branch can be removed. |
@@ -535,7 +536,9 @@ build decided what this page left open:
 
 | Question | As built |
 |---|---|
-| Where the class is made | `signals.orphan_class`, the `orphan_host` marker's `cause`: `gone` (its process is gone), `unknown` (no pid that can be asked, a conflict, or no activity known), `active` (alive and heard from within an hour, `Thresholds.orphan_idle_minutes`, or mid-turn), `leftover` (alive, idle, its session ended), `unmanaged` (alive, idle, never bound here). None alerts |
+| Where the class is made | `signals.orphan_class`, the `orphan_host` marker's `cause`: `gone` (its process is gone), `unknown` (no pid that can be asked, a conflict, or no activity known), `active` (alive and heard from within an hour, `Thresholds.orphan_idle_minutes`, or mid-turn by `signals.turn_state`: working, or waiting on the person), `leftover` (alive, idle, its session ended), `unmanaged` (alive, idle, never bound here). None alerts |
+| What mid-turn means (BUG_087) | `signals.turn_state`, the one answer the class, the `waiting`, `stuck` and `your_turn` signals, the gate cache and the Working group read. When Claude Code's per-process record verified the host (alive), its `status` outranks the attention record: `busy` is working, `idle` is not mid-turn, `waiting` is waiting on the person. Without it, a permission prompt or a question is waiting, an idle prompt ends the turn, and a `running` turn counts only while the host was heard from within `orphan_idle_minutes`: a missed Stop leaves it `running` for ever, and six idle windows read "Active, no session" for up to 44 hours |
+| A window Claude says is waiting | Never closeable: it is `active`, and it raises the existing `waiting` alert (cause `input` when the hooks recorded no prompt), so it sits in Needs you as "Waiting for you" with no button, never on the leftovers screen, and `recommend` offers nothing to run (ADR-009 D8) |
 | Who is offered Close | A `leftover` or `unmanaged` row that is alive, whose pid is the per-process record's (`pid_source` `record` or `both`) with a start token and no `pid_conflict`, whose record `cwd` is this project's root, a folder under it or one of its worktrees (`rooted_here`), and that no live session in another registered project lists (`claimed_elsewhere`, BUG_040). `recommend` makes the close its step; an unmanaged host is offered Attach instead only when the match is unique both ways: the project has exactly one session it could take, and no other live orphan host here could take that session (`adopt_rivals`). Six windows that all list one session are each offered Close |
 | The pill | On the leftovers screen, by the row: the step's button ("Close…" or "Attach…") when the page may act, 36 px visible and 44 px to tap; it opens the confirm sheet over the leftovers screen, and Cancel returns there |
 | The sheet | The destructive sheet, with "This ends" for its red panel: "Claude in <project> · window <first 8>" and "Process <pid> · idle <age>" (the age only when the last activity is known), "Checked just now" with its two lines, Cancel first, "Close window" in red, and the command behind "Exact command". The sentence carries the `claude --resume` note IDEA_025 asks for |

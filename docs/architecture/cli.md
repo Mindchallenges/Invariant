@@ -854,7 +854,9 @@ invariant oracle list [--project NAME] [--json]
     "severity", "alert", "detail", "key", "cause"}], "recommendation":
     {"label", "argv", "cwd", "kind", "env", "detail"} | null, "gates":
     {"pipeline_state", "owed": [{"rule_id", "level", "message", "blocks",
-    "to", "fix"}], "stale", "timed_out", "error"} | null}]}]}.
+    "to", "fix"}], "stale", "timed_out", "error"} | null, "turn_state":
+    "busy" | "waiting" | "idle"}]}]}. turn_state is whether the row's current
+    host is mid-turn (oracle.md, "Mid-turn").
 
 invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify] [--json]
     Every --interval seconds: scan every registered project, write the

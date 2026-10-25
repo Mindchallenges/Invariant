@@ -107,6 +107,10 @@ class HostProcess(Protocol):
     cwd: str | None
     started: float | None
     start: str | None
+    #: The host's own word for what it is doing, as written; ``None`` when
+    #: the record carries none. :func:`~invariant.oracle.signals.turn_state`
+    #: decides what it means (BUG_087).
+    status: str | None
 
 
 class ProcessFacts(Protocol):
@@ -322,6 +326,11 @@ class HostView:
     #: a folder under it or one of its worktrees; ``None`` without a ``cwd``.
     #: The evidence that ties the host to this project (ADR-009 D7, BUG_040).
     rooted_here: bool | None = None
+    #: The per-process record's ``status`` (Claude Code: ``busy``, ``idle``,
+    #: ``waiting``), when the record joined this host; ``None`` otherwise.
+    #: Fresher than the attention ``turn``, which a missed Stop leaves
+    #: ``running`` for ever (BUG_087).
+    status: str | None = None
 
 
 @dataclass
@@ -706,6 +715,7 @@ class _ProjectReader:
         view.pid_source = "both" if pid is not None else "record"
         view.launched_name, view.cwd = process.name, process.cwd
         view.started, view.process_start = process.started, process.start
+        view.status = process.status
 
     def _attention_of(self, host_id: str) -> tuple[dict[str, Any] | None, float | None]:
         try:

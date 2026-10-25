@@ -61,6 +61,7 @@ from .signals import (
     Signal,
     Thresholds,
     classify,
+    turn_state,
 )
 
 if TYPE_CHECKING:
@@ -295,7 +296,9 @@ def assess(
 
     What ``oracle list --json`` prints, and what the watcher writes as its
     snapshot. ``gates`` is the gate cache's answers by ``(project, session)``;
-    each row carries its own under ``gates``, or ``null``.
+    each row carries its own under ``gates``, or ``null``. ``turn_state`` is
+    whether the row's current host is mid-turn (:func:`turn_state`), the
+    answer the panel's "working" reads so it cannot disagree with the signals.
     """
     gates = gates or {}
     mark_claims(snapshots)
@@ -312,6 +315,7 @@ def assess(
             body["signals"] = [s.to_dict() for s in signals]
             body["recommendation"] = advice.to_dict() if advice else None
             body["gates"] = report.to_dict() if report else None
+            body["turn_state"] = turn_state(row.current_host, row.last_activity, now, thresholds)
             rows.append(body)
         projects.append(
             {

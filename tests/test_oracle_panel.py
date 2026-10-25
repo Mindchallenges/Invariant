@@ -55,7 +55,8 @@ def host(host_id="2abd173c-1111-2222-3333-444455556666", pid=4242, alive=True,
 def session(sid="s1", name="suggestion-band-height-s1", signals=(), recommendation=None,
             hosts=(), pipeline=None, state="isolated", stage="working", project="K",
             last_activity=None, worktree="/r/.claude/worktrees/p-wt-s1",
-            branch="session/s1", heartbeat=None, plan_touched=None, host_ended=False):
+            branch="session/s1", heartbeat=None, plan_touched=None, host_ended=False,
+            turn_state=None):
     return {
         "kind": "session", "project": project, "project_name": "Heap", "root": "/r",
         "session_id": sid, "name": name, "state": state, "stage": stage,
@@ -65,6 +66,7 @@ def session(sid="s1", name="suggestion-band-height-s1", signals=(), recommendati
         "hosts": list(hosts), "last_activity": last_activity, "path": None, "error": None,
         "adoptable": [], "previous_session": None,
         "signals": list(signals), "recommendation": recommendation, "gates": None,
+        "turn_state": turn_state,
     }
 
 
@@ -122,7 +124,7 @@ class TestGroups:
             session("k", signals=[sig("stuck", severity="medium")]),
             session("h", signals=[sig("host_gone", alert=False, severity="info")]),
             session("x", signals=[sig("stranded", alert=False, severity="info")]),
-            session("r", hosts=[host(attention={"turn": "running"})]),
+            session("r", hosts=[host(attention={"turn": "running"})], turn_state="busy"),
             session("y", signals=[sig("your_turn", alert=False, severity="info")]),
             session("p", signals=[sig("parked", alert=False, severity="info")]),
             session("d", signals=[sig("teardown_pending", alert=False, severity="info")]),
@@ -141,15 +143,36 @@ class TestGroups:
 
     def test_a_problem_outranks_a_running_turn(self):
         row = session("t", signals=[sig("error", "tests")], pipeline=pipeline(failed=77),
-                      hosts=[host(attention={"turn": "running"})])
+                      hosts=[host(attention={"turn": "running"})], turn_state="busy")
         shown = panel.view(doc(row))
         assert [g["id"] for g in shown["groups"]] == ["problems"]
         texts = [c["text"] for c in cards(shown, "problems")[0]["chips"]]
         assert texts == ["77 tests failing", "Claude is working"]
 
     def test_a_gone_host_is_not_working(self):
-        row = session("t", hosts=[host(alive=False, attention={"turn": "running"})])
+        row = session("t", hosts=[host(alive=False, attention={"turn": "running"})],
+                      turn_state="idle")
         assert [g["id"] for g in panel.view(doc(row))["groups"]] == ["idle"]
+
+    @pytest.mark.parametrize("state", ["idle", "waiting", None])
+    def test_working_is_the_documents_turn_state_not_the_attention_turn(self, state):
+        """BUG_087: a stale running turn the predicate calls idle is not working."""
+        row = session("r", hosts=[host(attention={"turn": "running"})], turn_state=state)
+        shown = panel.view(doc(row))
+        assert [g["id"] for g in shown["groups"]] == ["idle"]
+        assert "Claude is working" not in [c["text"] for c in cards(shown, "idle")[0]["chips"]]
+
+    def test_a_host_only_its_own_status_says_is_waiting_needs_you(self):
+        row = orphan(signals=[sig("waiting", "input")])
+        row["turn_state"] = "waiting"
+        shown = panel.view(doc(row))
+        assert [g["id"] for g in shown["groups"]] == ["needs"]
+        card = cards(shown, "needs")[0]
+        assert [c["text"] for c in card["chips"]] == ["Waiting for you"]
+        assert card["button"] is None and card["tap"] is True
+        going = shown["details"][card["row"]]["going_on"][0]
+        assert going == ("Claude is waiting for you in its window. Answer it in Claude "
+                         "on your Mac or phone. This panel never answers prompts.")
 
     def test_an_orphan_host_that_alerts_stays_in_its_group(self):
         row = orphan(signals=[sig("waiting", "question")])
@@ -212,7 +235,7 @@ class TestGroups:
 
     def test_full_cards_for_needs_and_problems_compact_for_the_rest(self):
         rows = [session("t", signals=[sig("error", "tests")]),
-                session("r", hosts=[host(attention={"turn": "running"})]),
+                session("r", hosts=[host(attention={"turn": "running"})], turn_state="busy"),
                 session("n")]
         shown = panel.view(doc(*rows))
         assert {g["id"]: g["compact"] for g in shown["groups"]} == {
@@ -269,7 +292,7 @@ class TestCards:
         assert [c["tone"] for c in card["chips"]] == ["problem", "idle"]
 
     def test_a_compact_card_reads_phase_and_last_activity(self):
-        row = session("r", hosts=[host(attention={"turn": "running"})],
+        row = session("r", hosts=[host(attention={"turn": "running"})], turn_state="busy",
                       pipeline=pipeline("tdd", "red"), last_activity=NOW - 70)
         card = cards(panel.view(doc(row)), "working")[0]
         assert card["line"] == "Writing tests · active 1 min ago"
@@ -453,7 +476,7 @@ class TestDetail:
                     last_activity=NOW - 1800),
             session("h", signals=[sig("host_gone", alert=False)]),
             session("x", signals=[sig("stranded", alert=False)]),
-            session("r", hosts=[host(attention={"turn": "running"})],
+            session("r", hosts=[host(attention={"turn": "running"})], turn_state="busy",
                     last_activity=NOW - 300),
             session("d", signals=[sig("teardown_pending", alert=False)]),
             session("e", signals=[sig("error", "degraded")]),

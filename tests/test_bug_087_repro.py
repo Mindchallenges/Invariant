@@ -82,7 +82,6 @@ def fake_ps(monkeypatch):
     monkeypatch.setattr(launch.subprocess, "run", run)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_087 is live — delete this line with the fix")
 def test_BUG_087_a_long_idle_host_with_a_stale_running_turn_is_offered_close(tmp_path, fake_ps):
     alpha = make_project(tmp_path, "alpha")
     # The session this host was bound to has ended: the host is a leftover.

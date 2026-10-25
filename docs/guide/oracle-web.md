@@ -266,9 +266,9 @@ leftovers. Tap a count to jump to its group. A count of 0 still shows.
 
 | Group | What is in it |
 |---|---|
-| Needs you | A Claude window waiting for your permission or your answer, and finished sessions ready for review or to merge |
+| Needs you | A Claude window waiting for your permission or your answer ("Waiting for you" when only Claude's own status says it is waiting), and finished sessions ready for review or to merge |
 | Problems | Failing tests, a check that refused a step, no progress for a while, a broken hook, a Claude window that closed without saying so, a session whose folder is gone, a project that cannot be read |
-| Working | Claude is working on it, and nothing above holds |
+| Working | Claude is working on it, and nothing above holds. A turn that has gone quiet for an hour, or that Claude itself says is over, is not working |
 | Idle | Every other live session: waiting for your next message, paused, merged and ready to clean up |
 
 A card in Needs you or Problems shows its project, how long the condition
@@ -291,7 +291,8 @@ folders that need nothing from you. The tile or the card at the bottom of
 the list opens them. The first three of each kind show, then "Show N more".
 Each Claude window says what it is: "Still open on the Mac" (its session
 ended and it has been idle an hour or more), "Open, never had a session",
-"Active, no session" (used in the last hour, or mid-turn), "Already closed ·
+"Active, no session" (used in the last hour, or mid-turn by Claude's own
+status), "Already closed ·
 record only", "Process id not recorded", or "Its process ids disagree". A
 window that can safely be closed has a "Close…" button. A window gets
 "Attach…" instead only when it is the one open window the project's one
@@ -383,7 +384,7 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | Closing a window says "Claude ended; macOS has not allowed the oracle to control Terminal" | Claude has ended, but macOS did not let the page's agent control Terminal, so the tab stays open; close it by hand this once. The first close from the agent asks for the Automation permission on the Mac, and nobody may have been there to answer (the page waits 30 seconds), or it was refused (error -1743). On the Mac, open System Settings > Privacy & Security > Automation, find the app that runs the oracle (the Python the agent runs, or the terminal you started `oracle web` from), and turn on Terminal under it. If it is not listed, close a window from the page while you are at the Mac and answer the prompt. |
 | Closing a window says "nothing was done: …" | Something changed between the confirm and the button: the window closed, its process is another one now, or a session started using it. Nothing was signalled. Refresh the page; the Leftovers screen shows what is there now. |
 | "Claude did not exit; nothing else was done" | Claude was asked to end and was still running 10 seconds later. The page never forces it. Look at the window on the Mac: it may be busy with a turn. |
-| A leftover window has no "Close…" | It was used in the last hour, its process id is not known or two sources disagree on it, it was started outside this project, or another project's session lists it. These are left alone on purpose. |
+| A leftover window has no "Close…" | It was used in the last hour, Claude says it is working or waiting for you, its process id is not known or two sources disagree on it, it was started outside this project, or another project's session lists it. These are left alone on purpose. A window waiting for you is in Needs you, not the Leftovers. |
 
 ## Remove it
 
