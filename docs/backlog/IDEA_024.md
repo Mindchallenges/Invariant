@@ -2,9 +2,21 @@
 id: IDEA_024
 type: idea
 title: Session Oracle knows every live host's pid from Claude Code's records
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: Shipped in 32b104a
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: Implemented in 32b104a
+  forced: false
+- from: in_progress
+  to: done
+  reason: Shipped in 32b104a
+  forced: false
 priority: high
 effort: S
 tier: '2'
