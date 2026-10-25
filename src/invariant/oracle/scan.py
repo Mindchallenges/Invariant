@@ -34,7 +34,7 @@ package imports nothing from ``hosts/`` (ADR-007 D11).
 **Cheap on a second pass.** :class:`ScanCache` keeps the git-backed answers
 (worktree lists, transcript roots) and the process-name checks for a short
 time, so a watcher calling this every few seconds re-reads only small JSON
-files and directory listings.
+files, directory listings and the tails of the transcripts that changed.
 """
 
 from __future__ import annotations
@@ -85,7 +85,12 @@ class TranscriptIndex(Protocol):
     """A host's transcripts for one project."""
 
     def activity(self) -> dict[str, float]:
-        """Host session id to the transcript's last write, as an epoch."""
+        """Host session id to its last conversational turn, as an epoch.
+
+        The host decides what a turn is and what to answer when it finds none
+        (Claude Code: the newest timestamped user or assistant entry, else the
+        file's modification time).
+        """
         ...
 
 
@@ -146,11 +151,12 @@ class ScanCache:
         return self._cached("worktrees", str(root), lambda: git.worktrees(root))
 
     def transcript_activity(self, root: Path) -> dict[str, float]:
-        """Host id to last transcript write, for the project at ``root``.
+        """Host id to its last transcript turn, for the project at ``root``.
 
         The transcript source is built once per ``ttl``, because building it
-        asks git for the project's worktrees; listing it again is only a
-        directory read. No probe, or one that fails, answers nothing.
+        asks git for the project's worktrees; asking it again is a directory
+        read plus a tail read of each transcript that changed since. No probe,
+        or one that fails, answers nothing.
         """
         if self.probe is None:
             return {}

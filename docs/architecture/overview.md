@@ -879,7 +879,9 @@ host. It is a different relationship: `claude_code` *drives* the host through
 hooks and installed assets, while this one *reads back* what the host already
 wrote down — its per-project JSONL transcripts. A reader has no business in a
 module about hook payload schemas, and the split keeps a change to one from
-touching the other.
+touching the other. Besides the cost samples, it reads a transcript's newest
+turn from the file's tail (`last_turn`, BUG_078), which the oracle's probe
+takes as a host's last activity ([oracle.md](oracle.md), "Last activity").
 
 `claude_code_launch` is the third module for the same host, and the third
 relationship: `claude_code` drives a running host, the telemetry reader reads

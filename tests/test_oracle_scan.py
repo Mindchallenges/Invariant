@@ -35,6 +35,7 @@ from invariant.core.store import JsonStore
 from invariant.domains.pipeline import Pipeline
 from invariant.domains.session import Session
 from invariant.hosts import claude_code_launch as launch
+from invariant.hosts import claude_code_telemetry as telemetry
 from invariant.hosts.claude_code_telemetry import ClaudeCodeTranscripts
 from invariant.oracle import scan as scan_module
 from invariant.oracle.home import oracle_home
@@ -579,16 +580,48 @@ class TestPidExists:
 
 
 class TestClaudeCodeProbe:
-    def test_transcript_activity_is_each_transcripts_mtime(self, tmp_path):
+    @staticmethod
+    def _transcript(tmp_path, name, lines, mtime):
         home = tmp_path / "claude"
         origin = tmp_path / "proj"
-        origin.mkdir()
+        origin.mkdir(exist_ok=True)
         project = home / "projects" / str(origin.resolve()).replace("/", "-")
-        project.mkdir(parents=True)
-        (project / "h1.jsonl").write_text("{}\n", "utf-8")
-        os.utime(project / "h1.jsonl", (1000.0, 1000.0))
-        activity = ClaudeCodeTranscripts(origin=origin.resolve(), home=home).activity()
-        assert activity == {"h1": 1000.0}
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / name
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines), "utf-8")
+        os.utime(path, (mtime, mtime))
+        return ClaudeCodeTranscripts(origin=origin.resolve(), home=home), path
+
+    def test_transcript_activity_is_each_transcripts_last_turn(self, tmp_path):
+        turn = {"type": "assistant", "timestamp": "1970-01-01T00:16:40Z",
+                "message": {"content": "hi"}}
+        source, _ = self._transcript(
+            tmp_path, "h1.jsonl", [turn, {"type": "cost-state"}], mtime=5000.0
+        )
+        assert source.activity() == {"h1": 1000.0}
+
+    def test_transcript_activity_falls_back_to_the_mtime_without_a_turn(self, tmp_path):
+        source, _ = self._transcript(tmp_path, "h1.jsonl", [{}], mtime=1000.0)
+        assert source.activity() == {"h1": 1000.0}
+
+    def test_an_unchanged_transcript_is_not_read_again(self, tmp_path, monkeypatch):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:16:40Z"}
+        source, path = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=5000.0)
+        reads: list[Path] = []
+        real = telemetry.last_turn
+
+        def counting(where, *args, **kwargs):
+            reads.append(where)
+            return real(where, *args, **kwargs)
+
+        monkeypatch.setattr(telemetry, "last_turn", counting)
+        assert source.activity() == source.activity() == {"h1": 1000.0}
+        assert len(reads) == 1
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "user", "timestamp": "1970-01-01T00:33:20Z"}) + "\n")
+        os.utime(path, (5000.0, 5000.0))
+        assert source.activity() == {"h1": 2000.0}
+        assert len(reads) == 2
 
     def test_a_transcript_that_vanishes_is_skipped(self, tmp_path, monkeypatch):
         ghost = tmp_path / "ghost.jsonl"

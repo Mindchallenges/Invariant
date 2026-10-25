@@ -17,8 +17,11 @@ from pathlib import Path
 import pytest
 
 from invariant.core.stats import SampleSource, Usage, fold
+from invariant.hosts import claude_code_telemetry as telemetry
 from invariant.hosts.claude_code_telemetry import (
     ClaudeCodeTranscripts,
+    TranscriptTurn,
+    last_turn,
     read_transcript,
 )
 
@@ -590,3 +593,217 @@ class TestEndToEnd:
 
         source = ClaudeCodeTranscripts()
         assert list(source.samples(SourceRef("hs-gone", "w"))) == []
+
+
+# -- the newest turn, read from the tail (BUG_078; IDEA_029 reuses it) ---------
+
+T_USER = "2026-10-15T09:00:00.000Z"
+T_ASSISTANT = "2026-10-15T09:00:05.000Z"
+EPOCH_ASSISTANT = 1792054805.0
+
+
+def turn(kind, timestamp, content, **extra):
+    record = {"type": kind, "timestamp": timestamp, "message": {"role": kind, "content": content}}
+    record.update(extra)
+    return record
+
+
+def bookkeeping():
+    """What a real transcript gains after its last turn: none of it is a turn."""
+    return [
+        {"type": "last-prompt", "lastPrompt": "hello"},
+        {"type": "cost-state", "totalCostUSD": 0.0},
+        {"type": "bridge-session", "url": "x"},
+        {"type": "system", "timestamp": "2026-10-20T00:00:00Z", "content": "compacted"},
+        {"type": "attachment", "timestamp": "2026-10-20T00:00:01Z", "attachment": {}},
+    ]
+
+
+def conversation():
+    return [
+        turn("user", T_USER, "hello"),
+        turn("assistant", T_ASSISTANT, [{"type": "thinking", "thinking": "hm"},
+                                        {"type": "text", "text": "hi"},
+                                        {"type": "text", "text": "there"}]),
+        *bookkeeping(),
+    ]
+
+
+class TestTheLastTurn:
+    def test_it_is_the_newest_user_or_assistant_line_with_a_timestamp(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", conversation())
+        found = last_turn(path)
+        assert found == TranscriptTurn(
+            role="assistant",
+            timestamp=EPOCH_ASSISTANT,
+            text="hi\n\nthere",
+            truncated=False,
+            sidechain=False,
+        )
+
+    @pytest.mark.parametrize("block_size", [1, 2, 7, 64, 100, 1 << 16])
+    def test_blocks_that_split_a_line_read_the_same(self, tmp_path, block_size):
+        path = write_jsonl(tmp_path / "h.jsonl", conversation())
+        assert last_turn(path, block_size=block_size) == last_turn(path)
+
+    def test_the_first_line_of_the_file_is_read_too(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "only")])
+        found = last_turn(path, block_size=5)
+        assert (found.role, found.text) == ("user", "only")
+
+    def test_a_string_content_is_the_text(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "plain prompt")])
+        assert last_turn(path).text == "plain prompt"
+
+    def test_a_huge_final_turn_is_found_and_its_text_capped(self, tmp_path):
+        big = "x" * 300_000
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "a"),
+                                                   turn("assistant", T_ASSISTANT, big)])
+        found = last_turn(path, block_size=4096, cap=100)
+        assert found.role == "assistant"
+        assert found.text == "x" * 100
+        assert found.truncated is True
+
+    def test_a_huge_final_line_over_the_budget_hides_the_turn_before_it(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "a"),
+                                                   {"type": "system", "blob": "y" * 50_000}])
+        assert last_turn(path, block_size=1024, budget=10_000) is None
+        assert last_turn(path, block_size=1024, budget=100_000).role == "user"
+
+    def test_the_read_budget_bounds_how_far_back_it_looks(self, tmp_path):
+        filler = [{"type": "progress", "n": i} for i in range(200)]
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "a"), *filler])
+        size = path.stat().st_size
+        assert last_turn(path, block_size=256, budget=size // 2) is None
+        assert last_turn(path, block_size=256, budget=size).role == "user"
+
+    def test_the_budget_is_never_exceeded(self, tmp_path, monkeypatch):
+        filler = [{"type": "progress", "n": i} for i in range(200)]
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "a"), *filler])
+        reads: list[int] = []
+        real_open = Path.open
+
+        class Counting:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.handle.close()
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def read(self, size=-1):
+                data = self.handle.read(size)
+                reads.append(len(data))
+                return data
+
+        monkeypatch.setattr(Path, "open", lambda self, *a, **k: Counting(real_open(self, *a, **k)))
+        assert last_turn(path, block_size=300, budget=1000) is None
+        assert sum(reads) == 1000
+
+    def test_a_file_with_no_turns_has_none(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", bookkeeping())
+        assert last_turn(path) is None
+
+    def test_an_empty_file_has_none(self, tmp_path):
+        path = tmp_path / "h.jsonl"
+        path.write_bytes(b"")
+        assert last_turn(path) is None
+
+    def test_a_missing_file_has_none(self, tmp_path):
+        assert last_turn(tmp_path / "gone.jsonl") is None
+
+    def test_a_partial_last_line_is_skipped_not_guessed(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "earlier")])
+        with path.open("a", encoding="utf-8") as handle:
+            # A complete-looking turn the writer has not yet terminated.
+            handle.write(json.dumps(turn("assistant", T_ASSISTANT, "in flight")))
+        assert last_turn(path).text == "earlier"
+
+    def test_a_file_that_is_one_unterminated_line_has_none(self, tmp_path):
+        path = tmp_path / "h.jsonl"
+        path.write_text(json.dumps(turn("user", T_USER, "x")), "utf-8")
+        assert last_turn(path, block_size=8) is None
+
+    def test_an_unparseable_last_line_is_skipped(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "earlier"),
+                                                   '{"type": "assistant", "timest'])
+        assert last_turn(path).text == "earlier"
+
+    def test_a_non_utf8_tail_is_skipped(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "earlier")])
+        with path.open("ab") as handle:
+            handle.write(b"\xff\xfe\x80 not json\n")
+        assert last_turn(path).text == "earlier"
+
+    def test_a_turn_with_stray_bytes_in_its_text_still_reads(self, tmp_path):
+        path = tmp_path / "h.jsonl"
+        line = json.dumps(turn("assistant", T_ASSISTANT, "PLACEHOLDER")).encode()
+        path.write_bytes(line.replace(b"PLACEHOLDER", b"ok \xff") + b"\n")
+        found = last_turn(path)
+        assert found.timestamp == EPOCH_ASSISTANT
+        assert found.text.startswith("ok ")
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            turn("assistant", None, "no time"),
+            turn("assistant", "not a time", "bad time"),
+            turn("assistant", "", "empty time"),
+            [1, 2],
+            "null",
+        ],
+    )
+    def test_lines_that_are_not_timestamped_turns_are_skipped(self, tmp_path, line):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("user", T_USER, "earlier"), line])
+        assert last_turn(path).text == "earlier"
+
+    def test_a_turn_without_a_message_has_no_text(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [{"type": "assistant", "timestamp": T_ASSISTANT}])
+        found = last_turn(path)
+        assert (found.role, found.text, found.truncated) == ("assistant", "", False)
+
+    def test_a_tool_result_alone_is_a_turn_with_no_text(self, tmp_path):
+        result = [{"type": "tool_result", "tool_use_id": "t1", "content": "done"}]
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("assistant", T_USER, "earlier"),
+                                                   turn("user", T_ASSISTANT, result)])
+        found = last_turn(path)
+        assert (found.role, found.timestamp, found.text) == ("user", EPOCH_ASSISTANT, "")
+
+    def test_a_sidechain_line_is_a_turn(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [
+            turn("user", T_USER, "earlier"),
+            turn("assistant", T_ASSISTANT, "subagent", isSidechain=True),
+        ])
+        found = last_turn(path)
+        assert (found.text, found.sidechain) == ("subagent", True)
+
+    def test_accept_narrows_to_the_newest_entry_with_text(self, tmp_path):
+        result = [{"type": "tool_result", "tool_use_id": "t1", "content": "done"}]
+        path = write_jsonl(tmp_path / "h.jsonl", [
+            turn("assistant", T_USER, [{"type": "text", "text": "said this"}]),
+            turn("user", T_ASSISTANT, result),
+            *bookkeeping(),
+        ])
+        found = last_turn(path, accept=lambda t: bool(t.text))
+        assert (found.role, found.text) == ("assistant", "said this")
+        assert last_turn(path, accept=lambda t: False) is None
+
+    def test_odd_content_blocks_are_ignored(self, tmp_path):
+        content = ["bare", {"type": "text"}, {"type": "text", "text": 5},
+                   {"type": "text", "text": "kept"}]
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("assistant", T_ASSISTANT, content)])
+        assert last_turn(path).text == "kept"
+
+    def test_content_of_another_shape_has_no_text(self, tmp_path):
+        path = write_jsonl(tmp_path / "h.jsonl", [turn("assistant", T_ASSISTANT, 42)])
+        assert last_turn(path).text == ""
+
+    def test_the_defaults_are_bounded(self):
+        assert 0 < telemetry.TAIL_BLOCK_BYTES <= telemetry.TAIL_BUDGET_BYTES
+        assert telemetry.TAIL_BUDGET_BYTES <= 16 << 20
+        assert telemetry.TURN_TEXT_CAP > 0

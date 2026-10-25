@@ -109,10 +109,6 @@ def world(tmp_path):
     return entry, probe
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_078 is live — delete this marker with the fix",
-)
 def test_BUG_078_last_activity_is_the_last_turn_not_the_transcript_mtime(world):
     entry, probe = world
     snapshot = scan_project(entry, clock=lambda: NOW, cache=ScanCache(probe=probe))

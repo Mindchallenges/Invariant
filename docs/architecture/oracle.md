@@ -315,10 +315,33 @@ therefore "not alive", and a host that died without `SessionEnd` stops reading
 as waiting. No pid recorded means liveness is unknown (`null`), which no
 signal treats as gone.
 
-**Last activity** is the latest of the host transcripts' modification times,
-the attention records' modification times, the session's `heartbeat` and its
+**Last activity** is the latest of the host transcripts' last turns, the
+attention records' modification times, the session's `heartbeat` and its
 `plan_touched`. The times are read, never stored, so the "no stored clock
 time" rule is untouched.
+
+A transcript's last turn is the `timestamp` of its newest `user` or
+`assistant` entry, not the file's modification time (BUG_078). Claude Code
+keeps appending bookkeeping lines (`last-prompt`, `cost-state`,
+`bridge-session`, `system`, `attachment`) to a conversation that has gone
+quiet, so the mtime moved while the host did nothing: an orphan idle for ten
+days read as active minutes ago, never left the 24-hour window, and `stuck`
+was judged against a clock that kept being reset. A `user` entry that only
+carries a tool result counts as a turn, because a tool finishing is the host
+working, and that is what `stuck` asks during a running turn. A subagent's
+(`isSidechain`) entry counts too.
+
+The read is `hosts/claude_code_telemetry.last_turn`, behind the probe's
+`activity()`. It reads the transcript backwards from its end in 32 KiB
+blocks, joins a line split across blocks, and stops at the first turn. It
+skips the bytes after the last newline (a line still being written) and any
+line that does not parse, and reads at most 2 MiB. **The mtime is the
+fallback**, used only when no turn is found within that budget: a transcript
+with no turn yet, or one whose tail is a single line longer than 2 MiB. A
+file is only written after its last turn, so the fallback errs towards
+"active", as the old formula always did. The reader also returns the turn's
+role and its text (capped at 4000 characters), and takes a predicate, so
+IDEA_029 can ask it for the newest entry with text.
 
 **Host facts are injected** (ADR-007 D11). Which transcripts belong to a
 project and whether a pid is `claude` are Claude Code knowledge. The scan
@@ -330,7 +353,9 @@ and a live pid counts as the host.
 **Cheap on the next pass.** `ScanCache` keeps the git-backed answers — each
 project's worktree list and its transcript source, whose construction asks git
 for the project's worktrees — and the process-name checks for 60 seconds. A
-repeat scan re-reads only small JSON files and directory listings. Measured:
+repeat scan re-reads only small JSON files, directory listings and the tails of
+the transcripts that changed: the source remembers each transcript's last turn
+against its size and mtime. Measured:
 the suite's three projects and five sessions scan in about 0.1 s cold and
 0.04 s warm, and this machine's two real projects in 0.11 s and 0.29 s each.
 
