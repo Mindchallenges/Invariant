@@ -232,8 +232,9 @@ window" or why it was not seen alive.
 
 As built in increment 6, a Claude window's row carries its pill when its
 step is one the panel runs: "Close…" for a host every close guard lets go,
-"Attach…" for an unmanaged one a session here could take. A row with
-nothing to run has no pill, and the folders have none until increment 7.
+"Attach…" for an unmanaged one that is the only live window the one
+session here without a window could take. A row with nothing to run has no
+pill, and the folders have none until increment 7.
 
 ## Components
 
@@ -535,12 +536,13 @@ build decided what this page left open:
 | Question | As built |
 |---|---|
 | Where the class is made | `signals.orphan_class`, the `orphan_host` marker's `cause`: `gone` (its process is gone), `unknown` (no pid that can be asked, a conflict, or no activity known), `active` (alive and heard from within an hour, `Thresholds.orphan_idle_minutes`, or mid-turn), `leftover` (alive, idle, its session ended), `unmanaged` (alive, idle, never bound here). None alerts |
-| Who is offered Close | A `leftover` or `unmanaged` row that is alive, whose pid is the per-process record's (`pid_source` `record` or `both`) with a start token and no `pid_conflict`, whose record `cwd` is this project's root, a folder under it or one of its worktrees (`rooted_here`), and that no live session in another registered project lists (`claimed_elsewhere`, BUG_040). `recommend` makes the close its step; an unmanaged host that one session here could take is offered Attach first |
+| Who is offered Close | A `leftover` or `unmanaged` row that is alive, whose pid is the per-process record's (`pid_source` `record` or `both`) with a start token and no `pid_conflict`, whose record `cwd` is this project's root, a folder under it or one of its worktrees (`rooted_here`), and that no live session in another registered project lists (`claimed_elsewhere`, BUG_040). `recommend` makes the close its step; an unmanaged host is offered Attach instead only when the match is unique both ways: the project has exactly one session it could take, and no other live orphan host here could take that session (`adopt_rivals`). Six windows that all list one session are each offered Close |
 | The pill | On the leftovers screen, by the row: the step's button ("Close…" or "Attach…") when the page may act, 36 px visible and 44 px to tap; it opens the confirm sheet over the leftovers screen, and Cancel returns there |
 | The sheet | The destructive sheet, with "This ends" for its red panel: "Claude in <project> · window <first 8>" and "Process <pid> · idle <age>" (the age only when the last activity is known), "Checked just now" with its two lines, Cancel first, "Close window" in red, and the command behind "Exact command". The sentence carries the `claude --resume` note IDEA_025 asks for |
 | What runs | `invariant oracle close-host <host> --pid N --start TOKEN [--tty ttysNNN]`, a `run` step in the project root. It checks every fact again, sends one SIGTERM, waits up to 10 s, never sends SIGKILL, and closes the tab only once Claude has gone (oracle.md, "Close host") |
 | The result | A refusal is the "Why" panel ("invariant said: nothing was done: process 41001 has already exited"). A close that ran shows "What happened", the command's last line: "Claude ended, and its Terminal tab closed.", "… its Terminal window closed.", "Claude ended; the window was left open because …", or the Automation sentence. The job's `words` gain `outcome` (`panel.outcome_words`), empty for every other step |
 | A conflict row | "Its process ids disagree" on the leftovers screen, and "process ids disagree: attention 3 (gone), record 4 (alive)" under Technical details, instead of "process id not recorded" |
+| Close beside Attach (a known gap) | Not offered. A row has one step, the one `recommend` derives, and the confirm and the action are keyed by the row alone (ADR-008 D9), so a window offered "Attach…" cannot also reach "Close…" from the panel. A second action per row needs the route of its own that "More actions" waits for: a step selector bound into the nonce, re-derived on the server, and a second pill on the leftovers row. Until then the unique-attach rule keeps Attach rare, and a window that is attached can be closed through its session. Asked for 2026-10-25; left for increment 7 |
 
 ## Increment plan
 

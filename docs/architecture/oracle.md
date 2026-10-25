@@ -489,7 +489,7 @@ table that holds wins.
 | error row | info | none: what stops the read | — |
 | leaked worktree | info | none: inspect it, remove it with git if spent | — |
 | orphan host, `leftover` and every close guard holds | run | `invariant oracle close-host <host> --pid N --start TOKEN [--tty ttysNNN]` | project root |
-| orphan host, alive, exactly one adoptable session | run | `invariant session adopt <host> --id <session>` | project root |
+| orphan host, alive, exactly one adoptable session, and no other live orphan host here could take it (`adopt_rivals` 0) | run | `invariant session adopt <host> --id <session>` | project root |
 | orphan host, `unmanaged` and every close guard holds | run | `invariant oracle close-host …`, as above | project root |
 | orphan host, otherwise | info | none: start or resume a session from that host | — |
 | failed tests | run | `invariant pipeline test`, with `INVARIANT_SESSION_ID` | worktree, else root |
@@ -509,6 +509,20 @@ Code's record (`pid_source` `record` or `both`), with a start token and no
 `pid_conflict`; it is `rooted_here`; and no other project's live session
 claims it (`claimed_elsewhere`). A gone, active or unknown orphan is never
 offered close.
+
+**Attach only when the match is unique both ways.** `assess` calls
+`scan.mark_rivals` on each project after `mark_claims`: an orphan host row
+with exactly one adoptable session gets `adopt_rivals`, the number of the
+project's other orphan hosts known alive (`alive` true) that list the same
+session. Adopt is the step only when the host is alive, has exactly one
+adoptable session, and has no rivals. Six idle hosts each told to adopt the
+one session a project has were offered something none of them could take,
+and it hid their Close: now each host that every close guard lets go is
+offered Close, and one that fails a guard is offered nothing to run. A gone
+host, or one whose liveness is unknown, is nobody's rival. The close guards
+themselves are unchanged. A row carries one step; offering Close beside
+Attach waits for the panel's second action ([oracle-panel.md](oracle-panel.md),
+"As built in increment 6").
 
 `pipeline gates` and `pipeline test` take no `--id`, so the session is pinned
 through `INVARIANT_SESSION_ID`, the explicit route session resolution already

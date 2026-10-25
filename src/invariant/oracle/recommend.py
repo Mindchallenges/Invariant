@@ -42,6 +42,7 @@ from .scan import (
     ProjectSnapshot,
     Row,
     mark_claims,
+    mark_rivals,
 )
 from .signals import (
     ERROR,
@@ -201,22 +202,25 @@ def _close(row: Row, host: HostView) -> Recommendation:
 
 
 def _for_orphan(row: Row, cause: str = "") -> Recommendation:
-    """Close a leftover; adopt a running host into the only session it could mean.
+    """Close a leftover; attach a running host only where the match is unique.
 
     A leftover, whose session has ended, is closed when every guard holds
-    (IDEA_025). An unmanaged host that one session here could take is
-    offered that session first, and closed otherwise. Adopt is offered only
+    (IDEA_025). Any other host is offered attach only when the match is
+    unique both ways: it is known to be running, the project has exactly one
+    session it could take, and no other live orphan host here could take
+    that session (``adopt_rivals``). Six idle hosts all told to adopt one
+    session is an offer none of them can take, and it hid their Close.
+    Otherwise a host every close guard lets go is offered Close. Adopt waits
     for a host known to be running: one heard from only through its
-    transcript may be long gone, and a project that just tore several
-    sessions down has several such hosts, each of which would be told to
-    adopt the same session.
+    transcript may be long gone.
     """
     host = row.hosts[0] if row.hosts else None
     host_id = host.host_session_id if host else ""
     closeable = _closeable(row, host, cause)
     if closeable and cause == ORPHAN_LEFTOVER:
         return _close(row, host)
-    if host is not None and host.alive is True and len(row.adoptable) == 1:
+    if (host is not None and host.alive is True and len(row.adoptable) == 1
+            and row.adopt_rivals == 0):
         target = row.adoptable[0]
         return Recommendation(
             f"bind it to {target}, the one session here with no live host",
@@ -295,6 +299,8 @@ def assess(
     """
     gates = gates or {}
     mark_claims(snapshots)
+    for snapshot in snapshots:
+        mark_rivals(snapshot)
     projects = []
     for snapshot in snapshots:
         rows = []

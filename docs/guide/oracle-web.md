@@ -293,8 +293,10 @@ Each Claude window says what it is: "Still open on the Mac" (its session
 ended and it has been idle an hour or more), "Open, never had a session",
 "Active, no session" (used in the last hour, or mid-turn), "Already closed ·
 record only", "Process id not recorded", or "Its process ids disagree". A
-window that can safely be closed has a "Close…" button; one that a session
-here could take has "Attach…". Removing left-over folders comes later.
+window that can safely be closed has a "Close…" button. A window gets
+"Attach…" instead only when it is the one open window the project's one
+session without a window could take; when several windows could all take
+that session, each gets "Close…". Removing left-over folders comes later.
 
 **Closing a leftover Claude window.** "Close…" opens a red sheet: "Close this
 Claude window?", and "Ends Claude in this window, then closes the Terminal

@@ -382,6 +382,10 @@ class Row:
     #: row may be BUG_040's misattributed host, so nothing destructive is
     #: offered on it.
     claimed_elsewhere: str | None = None
+    #: On a ``host`` row: how many OTHER live orphan hosts of the same project
+    #: could take its one adoptable session (:func:`mark_rivals`). Attach is
+    #: offered only when there are none, so the match is unique both ways.
+    adopt_rivals: int = 0
 
     @property
     def current_host(self) -> HostView | None:
@@ -821,6 +825,27 @@ def mark_claims(snapshots: Iterable[ProjectSnapshot]) -> None:
         for row in snapshot.rows:
             if row.kind == ROW_HOST and row.hosts:
                 row.claimed_elsewhere = owners.get(row.hosts[0].host_session_id)
+
+
+def mark_rivals(snapshot: ProjectSnapshot) -> None:
+    """Count, on each orphan host row, the other live orphans after its session.
+
+    A host row lists the project's adoptable sessions; a session two live
+    orphan hosts both list cannot be attached to both. Each row with exactly
+    one adoptable session gets ``adopt_rivals``: how many other host rows of
+    this project are known alive (``alive is True``) and list that session
+    too. A host that is gone, or whose liveness is unknown, competes for
+    nothing.
+    """
+    live = [
+        row for row in snapshot.rows
+        if row.kind == ROW_HOST and row.hosts and row.hosts[0].alive is True
+    ]
+    for row in snapshot.rows:
+        if row.kind != ROW_HOST or len(row.adoptable) != 1:
+            continue
+        target = row.adoptable[0]
+        row.adopt_rivals = sum(1 for other in live if other is not row and target in other.adoptable)
 
 
 def _latest(values: Iterable[float | None]) -> float | None:

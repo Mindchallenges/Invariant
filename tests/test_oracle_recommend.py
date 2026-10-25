@@ -398,3 +398,104 @@ class TestCloseHost:
         [row] = document["projects"][0]["rows"]
         assert row["claimed_elsewhere"] == "beta"
         assert "close-host" not in (row["recommendation"] or {}).get("argv", [])
+
+
+# -- attach only when the match is unique both ways (IDEA_027 inc 6 follow-up) ---------
+
+
+def contender(hid: str, pid: int, **fields) -> Row:
+    """An unmanaged host every close guard lets go, that session s4 could take."""
+    return leftover(previous=None, adoptable=["s4"], host_session_id=hid, pid=pid, **fields)
+
+
+def assessed(*rows: Row) -> list[dict]:
+    snapshot = ProjectSnapshot(project=ProjectEntry(PROJECT, ROOT, "alpha", "manual"),
+                               rows=list(rows), scanned_at=NOW)
+    return assess([snapshot], NOW)["projects"][0]["rows"]
+
+
+def argv_of(row: dict) -> tuple[str, ...]:
+    return tuple((row["recommendation"] or {}).get("argv") or ())
+
+
+class TestAttachIsUnique:
+    def test_six_hosts_competing_for_one_session_are_each_offered_close(self):
+        rows = assessed(*(contender(f"h{n}", 41000 + n) for n in range(6)))
+        for n, row in enumerate(rows):
+            assert row["adopt_rivals"] == 5
+            assert argv_of(row)[:4] == ("invariant", "oracle", "close-host", f"h{n}")
+            assert argv_of(row)[5] == str(41000 + n)
+
+    def test_one_host_with_one_session_is_offered_attach(self):
+        [row] = assessed(contender("h1", 41001))
+        assert row["adopt_rivals"] == 0
+        assert argv_of(row) == ("invariant", "session", "adopt", "h1", "--id", "s4")
+
+    def test_a_gone_or_unknown_host_is_no_rival(self):
+        gone = contender("h2", 41002, alive=False)
+        unknown = contender("h3", 41003, alive=None)
+        live, *_ = assessed(contender("h1", 41001), gone, unknown)
+        assert live["adopt_rivals"] == 0
+        assert argv_of(live)[:3] == ("invariant", "session", "adopt")
+
+    def test_a_host_in_another_project_is_no_rival(self):
+        other = contender("h9", 41009)
+        other.project, other.project_name, other.root = "/state/beta", "beta", "/repo/beta"
+        alpha = ProjectSnapshot(project=ProjectEntry(PROJECT, ROOT, "alpha", "manual"),
+                                rows=[contender("h1", 41001)])
+        beta = ProjectSnapshot(project=ProjectEntry("/state/beta", "/repo/beta", "beta",
+                                                    "manual"), rows=[other])
+        document = assess([alpha, beta], NOW)
+        [row] = document["projects"][0]["rows"]
+        assert argv_of(row)[:3] == ("invariant", "session", "adopt")
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            pytest.param({"rooted_here": False}, id="started-in-another-project"),
+            pytest.param({"pid_source": "attention"}, id="pid-from-the-attention-record"),
+            pytest.param({"process_start": None}, id="no-start-token"),
+        ],
+    )
+    def test_competing_hosts_that_fail_a_close_guard_get_neither(self, fields):
+        for row in assessed(*(contender(f"h{n}", 41000 + n, **fields) for n in range(6))):
+            assert row["recommendation"]["kind"] == rec.INFO
+            assert argv_of(row) == ()
+
+    def test_competing_hosts_a_live_session_elsewhere_holds_get_neither(self):
+        hids = [f"h{n}" for n in range(6)]
+        holder = session_row(project="/state/beta", project_name="beta", session_id="b1",
+                             hosts=[host(None, hid=hid) for hid in hids])
+        alpha = ProjectSnapshot(project=ProjectEntry(PROJECT, ROOT, "alpha", "manual"),
+                                rows=[contender(hid, 41000 + n) for n, hid in enumerate(hids)])
+        beta = ProjectSnapshot(project=ProjectEntry("/state/beta", "/repo/beta", "beta",
+                                                    "manual"), rows=[holder])
+        for row in assess([alpha, beta], NOW)["projects"][0]["rows"]:
+            assert row["claimed_elsewhere"] == "beta"
+            assert argv_of(row) == ()
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            pytest.param({"alive": False}, id="gone"),
+            pytest.param({"alive": None, "pid": None, "pid_source": "conflict",
+                          "pid_conflict": [{"source": "record", "pid": 1, "alive": True}]},
+                         id="pid-conflict"),
+        ],
+    )
+    def test_a_lone_host_that_is_not_known_alive_gets_neither(self, fields):
+        pid = fields.pop("pid", 41001)
+        [row] = assessed(contender("h1", pid, **fields))
+        assert argv_of(row) == ()
+
+    def test_a_rival_turns_attach_into_close(self):
+        assert advise(contender("h7", 41001)).argv[:3] == ("invariant", "session", "adopt")
+        rivalled = contender("h7", 41001)
+        rivalled.adopt_rivals = 1
+        assert advise(rivalled).argv == CLOSE
+
+    def test_a_rivalled_host_no_guard_lets_close_is_offered_nothing_to_run(self):
+        row = contender("h7", 41001, rooted_here=False)
+        row.adopt_rivals = 2
+        advice = advise(row)
+        assert advice.kind == rec.INFO and advice.argv == ()

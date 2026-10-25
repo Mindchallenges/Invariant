@@ -353,8 +353,14 @@ Claude Code's per-process record (`pid_source` `record` or `both`) with a
 start token; no other source disputes it (no `pid_conflict`); its record's
 `cwd` is this project's root, a folder under it or one of its worktrees, so
 the evidence ties it to this project; and no live session in any registered
-project lists it, the BUG_040 case (D7). An unmanaged host one session here
-could adopt is offered Attach first. A conflict row, a gone row, an active
+project lists it, the BUG_040 case (D7). An unmanaged host is offered
+Attach instead only when the match is unique both ways: it is the only live
+orphan host in the project that the project's one adoptable session could
+take, and that session is the only one it could take (*amended 2026-10-25*:
+six idle hosts were each offered Attach into one session, which none of them
+could take, and it hid their Close). A row carries one step, so a host
+offered Attach does not also show Close; that waits for the panel's second
+action. A conflict row, a gone row, an active
 one and a row of unknown liveness are offered nothing, and the panel says
 "Its process ids disagree" on a conflict row rather than "process id not
 recorded".
