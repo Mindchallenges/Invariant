@@ -86,6 +86,32 @@ nothing in the library assumes a language, a layout, or a default branch.
 | **Work items** | Ideas and bugs — including that a bug cannot reach `fixed` without passing through `reproduced` |
 | **Memory** | A knowledge store with a *generated* index, schema validation, and dead-link detection |
 
+## The Session Oracle
+
+Run sessions in several repositories at once and nothing tells you which one
+is waiting on you. The oracle is a machine-wide view of every session in every
+invariant project on the machine: what state each is in, the next command it
+recommends, and a macOS notification when a session needs you (a permission
+prompt, a question, a blocked gate, a stuck turn, a finished branch, a failing
+test).
+
+```bash
+invariant oracle list                 # every session, every project, plain install
+invariant oracle install              # a LaunchAgent that keeps the watcher running
+invariant oracle tui                  # the dashboard (the [oracle] extra adds Textual)
+invariant oracle install --web        # the same panel on your phone, over Tailscale only
+```
+
+The phone page is a control panel: it leads with what needs you, and every
+step it offers shows the exact command and runs only after you confirm it.
+Its Leftovers screen lists Claude Code windows that outlived their session
+and can close one properly: Claude is asked to exit, never killed, and the
+Terminal tab goes only when nothing but a shell is left in it. A window that
+is working, waiting for you, used in the last hour, or not identified beyond
+doubt is never offered. The oracle never answers a permission prompt.
+
+Setup, pairing and troubleshooting: [The oracle on your phone](docs/guide/oracle-web.md).
+
 ## Configuration
 
 One file, `.claude/invariant.yaml`. Everything has a default; a usable manifest
@@ -186,6 +212,7 @@ back that quietly does nothing is worse than one never offered.
 - [Installation](docs/guide/installation.md) · [Quickstart](docs/guide/quickstart.md)
 - [Daily workflow](docs/guide/workflow.md) — sessions, pipelines, deliverable plans, resuming
 - [The agents](docs/guide/agents.md) · [Configuration](docs/guide/configuration.md)
+- [The oracle on your phone](docs/guide/oracle-web.md) — the Session Oracle's panel, pairing, closing leftover windows
 - [Work items and memory](docs/guide/backlog-and-memory.md)
 - [Troubleshooting](docs/guide/troubleshooting.md) · [Extending it](docs/guide/extending.md) · [Uninstall](docs/guide/uninstall.md)
 
@@ -195,9 +222,12 @@ back that quietly does nothing is worse than one never offered.
 - [`state_model.md`](docs/architecture/state_model.md) — the machines and the storage layout
 - [`manifest.md`](docs/architecture/manifest.md) — full schema and the adapter interface
 - [`cli.md`](docs/architecture/cli.md) — the complete command surface
+- [`oracle.md`](docs/architecture/oracle.md) · [`oracle-panel.md`](docs/architecture/oracle-panel.md) — the Session Oracle: scan, signals, host liveness, closing a host, the phone panel
 
 **Decisions** — `docs/adr/`; ADR-001 is why scripted state, with every design
-decision and the alternative that was rejected.
+decision and the alternative that was rejected. ADR-007 to ADR-009 cover the
+oracle: read-only by default, Tailscale only, and the phone page as a
+confirm-first control panel.
 
 Render it all as one site with `uv run --group docs sphinx-build -b html docs docs/_build/html`.
 
@@ -209,6 +239,16 @@ uv sync --group dev
 uv run pytest
 uv tool install --editable .     # the clone becomes the installed tool
 ```
+
+The suite never touches the machine it runs on: `tests/conftest.py` points
+`INVARIANT_HOME` at a temporary directory, refuses `osascript`, `launchctl`
+and `tailscale` by any route (a test marked `real_osascript` may evaluate a
+script with no effect; nothing admits `launchctl`), and refuses any `os.kill`
+or `os.killpg` signal but 0 to a process the test did not spawn. A test that
+needs one of them goes through the seam the code already has: a recording
+launchd installer, or `_oracle_host_seams` for signals and Terminal. Run the
+suite from a shell, not from inside a handed-off Claude window: if
+`INVARIANT_HANDOFF` is set, use `env -u INVARIANT_HANDOFF uv run pytest`.
 
 The library dogfoods what it ships: its own repository carries a manifest, and
 its architecture docs are subject to the docs-first gate it enforces on others.

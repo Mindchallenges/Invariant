@@ -203,3 +203,22 @@ sees it, and the next increment continues there. Mark finished deliverables
 `invariant memory check` lists the problems; `invariant memory index`
 regenerates the index from the directory. A project with its own memory
 convention sets `memory.managed: false`.
+
+## The Session Oracle
+
+### A leftover Claude window has no "Close…", or closing it left the tab open
+
+A window is offered Close only when it is idle (not working, not waiting for
+you, not used in the last hour), Claude Code's own record names its process
+and nobody disputes it, it was started in this project, and no live session in
+any project lists it. Anything less is left alone on purpose. If Claude ended but the tab
+stayed open, macOS has not yet allowed the oracle to control Terminal; allow
+it under System Settings > Privacy & Security > Automation. The full table of
+messages is in [The oracle on your phone, Troubleshooting](oracle-web.md#troubleshooting).
+
+### The phone page will not load, or says "not paired"
+
+Pairing, Tailscale, certificates and the Local Network prompt each have a row
+in the same [Troubleshooting](oracle-web.md#troubleshooting) table, and
+`invariant oracle status` says whether the agents are loaded and the snapshot
+is fresh.

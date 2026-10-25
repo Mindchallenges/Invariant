@@ -178,6 +178,17 @@ Network, under the Python interpreter (or terminal app) that serves the page.
 found, for a test on the Mac itself; loopback needs no permission. The
 decisions behind the listener and the pairing are in ADR-008.
 
+**Closing a leftover window asks for Automation permission.** The page's
+Leftovers screen can close a Claude Code window that outlived its session:
+Claude is asked to exit (one SIGTERM, never a kill), then the Terminal tab is
+closed if only a shell is left in it. The first close makes macOS ask whether
+the app that runs the oracle may control Terminal. Allow it on the Mac; if
+nobody answers, Claude still exits and the tab stays open for you to close by
+hand. You can change it later in System Settings > Privacy & Security >
+Automation. The same step is `invariant oracle close-host` on the command
+line; the decision is ADR-009 D15, and the checks it makes before signalling
+are in [the oracle's architecture page](../architecture/oracle.md).
+
 ## Working on invariant itself
 
 ```bash
