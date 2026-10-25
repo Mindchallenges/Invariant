@@ -46,6 +46,7 @@ from .signals import (
     INFO,
     LOW,
     MEDIUM,
+    ORPHAN_HOST,
     PARKED,
     STRANDED,
     STUCK,
@@ -122,6 +123,9 @@ WORDS: dict[str, str] = {
     "expired": "This confirm expired.",
     "look_again": "Look again",
     "this_deletes": "This deletes",
+    "this_ends": "This ends",
+    "checked_now": "Checked just now",
+    "outcome": "What happened",
     "cannot_undo": "This cannot be undone.",
     "exact_command": "Exact command",
     "why": "Why",
@@ -259,6 +263,9 @@ class StepWords:
     sentence: str
     run: str
     destructive: bool = False
+    #: The step ends a process rather than deleting files: its red panel is
+    #: "This ends", and its result says what happened (close host).
+    ends: bool = False
 
     @property
     def name(self) -> str:
@@ -307,6 +314,11 @@ _STEPS = {
     "doctor": StepWords(
         "Check setup…", "Run invariant's setup check?",
         "Checks this project's hooks and settings. Nothing is changed.", "Run check"),
+    "close": StepWords(
+        "Close…", "Close this Claude window?",
+        "Ends Claude in this window, then closes the Terminal tab. You can reopen the "
+        "conversation later with claude --resume.", "Close window",
+        destructive=True, ends=True),
 }
 
 #: ``invariant <words>``: the command's leading words, and its table entry.
@@ -320,6 +332,7 @@ _COMMANDS = (
     (("session", "reap", "--dry-run"), "reap"),
     (("session", "adopt"), "adopt"),
     (("doctor",), "doctor"),
+    (("oracle", "close-host"), "close"),
 )
 
 _PLACE = {
@@ -330,7 +343,16 @@ _PLACE = {
 _DELETES = {
     "folder": "The session folder {name}",
     "branch": "The branch {name}",
+    "claude": "Claude in {project} · window {id}",
+    "process": "Process {pid}",
+    "process_idle": "Process {pid} · idle {age}",
 }
+
+#: What a close's "Checked just now" says it verified, and that it will again.
+_CHECKED_CLOSE = (
+    "No invariant session is using this Claude window",
+    "Checked again the moment you press {deed}",
+)
 
 _RESULT = {
     "running": "Running…",
@@ -378,8 +400,13 @@ _TECHNICAL = {
     "lane": " · lane {methodology}:{phase}",
     "host": "Host {id} · process id {pid}",
     "host_no_pid": "Host {id} · process id not recorded",
+    "host_conflict": "Host {id} · process ids disagree: {pids}",
+    "candidate": "{source} {pid} ({liveness})",
     "error": "Error: {error}",
 }
+
+#: A disputed pid's liveness, as the TUI words it.
+_LIVENESS = {True: "alive", False: "gone", None: "unknown"}
 
 _LEFTOVER = {
     "title": "Leftovers",
@@ -399,6 +426,9 @@ _LEFTOVER = {
     "alive": "Still open on the Mac",
     "gone": "Already closed · record only",
     "unknown": "Process id not recorded",
+    "conflict": "Its process ids disagree",
+    "unmanaged": "Open, never had a session",
+    "active": "Active, no session",
     "window": "{state} · window {id}",
     "folder_title": "{project} · {name}",
     "branch": "On branch {branch}",
@@ -783,7 +813,14 @@ def _technical(row: dict[str, Any]) -> dict[str, Any]:
                                              phase=pipe.get("state"))
         lines.append(line)
     for host in row.get("hosts") or []:
-        pid = host.get("pid")
+        pid, conflict = host.get("pid"), host.get("pid_conflict") or []
+        if conflict:
+            pids = ", ".join(_TECHNICAL["candidate"].format(
+                source=c.get("source"), pid=c.get("pid"), liveness=_LIVENESS.get(c.get("alive")))
+                for c in conflict)
+            lines.append(_TECHNICAL["host_conflict"].format(id=host.get("host_session_id"),
+                                                            pids=pids))
+            continue
         template = _TECHNICAL["host"] if pid else _TECHNICAL["host_no_pid"]
         lines.append(template.format(id=host.get("host_session_id"), pid=pid))
     if row.get("error"):
@@ -815,17 +852,35 @@ def _plural(n: int, one: str, many: str) -> str:
     return _LEFTOVER[one] if n == 1 else _LEFTOVER[many].format(n=n)
 
 
-def _host_leftover(row: dict[str, Any], project: str, now: float) -> dict[str, str]:
+def _orphan_class(row: dict[str, Any]) -> str:
+    return next((s.get("cause") or "" for s in _signals(row) if s.get("kind") == ORPHAN_HOST),
+                "")
+
+
+def _host_state(row: dict[str, Any], host: dict[str, Any]) -> str:
+    """The leftover's state, by its class where the class says more than liveness."""
+    if host.get("pid_conflict"):
+        return _LEFTOVER["conflict"]
+    cause = _orphan_class(row)
+    if cause in ("unmanaged", "active"):
+        return _LEFTOVER[cause]
+    alive = host.get("alive")
+    return _LEFTOVER["alive" if alive is True else "gone" if alive is False else "unknown"]
+
+
+def _host_leftover(row: dict[str, Any], project: str, now: float,
+                   acting: bool) -> dict[str, Any]:
     host = _current_host(row) or {}
     last = row.get("last_activity")
     if isinstance(last, (int, float)) and now - last >= 60:
         title = _LEFTOVER["host_title"].format(project=project, age=age_text(now - last))
     else:
         title = _LEFTOVER["host_title_now"].format(project=project)
-    alive = host.get("alive")
-    state = _LEFTOVER["alive" if alive is True else "gone" if alive is False else "unknown"]
     window = str(host.get("host_session_id") or "")[:8]
-    return {"title": title, "line": _LEFTOVER["window"].format(state=state, id=window)}
+    words = _runnable(row)
+    return {"row": row_key(row), "title": title,
+            "line": _LEFTOVER["window"].format(state=_host_state(row, host), id=window),
+            "button": {"text": words.button} if acting and words else None}
 
 
 def _folder_leftover(row: dict[str, Any], project: str) -> dict[str, str]:
@@ -838,7 +893,7 @@ def _folder_leftover(row: dict[str, Any], project: str) -> dict[str, str]:
     }
 
 
-def _section(section_id: str, heading: str, rows: list[dict[str, str]]) -> dict[str, Any]:
+def _section(section_id: str, heading: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     hidden = len(rows) - LEFTOVERS_SHOWN
     return {
         "id": section_id, "heading": heading, "count": len(rows),
@@ -847,7 +902,7 @@ def _section(section_id: str, heading: str, rows: list[dict[str, str]]) -> dict[
     }
 
 
-def _leftovers(hosts: list[dict[str, str]], folders: list[dict[str, str]]):
+def _leftovers(hosts: list[dict[str, Any]], folders: list[dict[str, str]]):
     screen = {
         "title": _LEFTOVER["title"],
         "intro": _LEFTOVER["intro"],
@@ -882,7 +937,7 @@ def view(document: Mapping[str, Any], acting: bool = False,
     placed: dict[str, list[tuple[int, float, int, dict[str, Any]]]] = {
         g.id: [] for g in GROUPS}
     details: dict[str, dict[str, Any]] = {}
-    hosts: list[dict[str, str]] = []
+    hosts: list[dict[str, Any]] = []
     folders: list[dict[str, str]] = []
     position = 0
     for project in document.get("projects", []):
@@ -891,7 +946,7 @@ def view(document: Mapping[str, Any], acting: bool = False,
             group = group_of(row)
             if group == LEFTOVERS:
                 if row.get("kind") == ROW_HOST:
-                    hosts.append(_host_leftover(row, name, now))
+                    hosts.append(_host_leftover(row, name, now, acting))
                 else:
                     folders.append(_folder_leftover(row, name))
                 continue
@@ -941,7 +996,7 @@ def _place(row: Mapping[str, Any], project: str, cwd: str | None) -> str:
 
 def confirm_words(row: Mapping[str, Any], project: str, argv: Iterable[str], kind: str,
                   cwd: str | None, env: Mapping[str, str] | None,
-                  launch: str | None) -> dict[str, Any] | None:
+                  launch: str | None, now: float | None = None) -> dict[str, Any] | None:
     """What the confirm sheet says for a step, or ``None`` for one the table lacks.
 
     The command line and the place lead; the exact folder, each added variable
@@ -953,8 +1008,12 @@ def confirm_words(row: Mapping[str, Any], project: str, argv: Iterable[str], kin
     if words is None:
         return None
     sentence = words.sentence.format(project=project)
-    deletes = []
-    if words.destructive:
+    deletes: list[str] = []
+    checked: list[str] = []
+    if words.ends:
+        deletes = _ends(row, project, now)
+        checked = [line.format(deed=words.run) for line in _CHECKED_CLOSE]
+    elif words.destructive:
         sentence = f"{sentence} {WORDS['cannot_undo']}"
         if row.get("worktree"):
             folder = os.path.basename(str(row["worktree"]).rstrip("/"))
@@ -971,5 +1030,35 @@ def confirm_words(row: Mapping[str, Any], project: str, argv: Iterable[str], kin
         "env": [f"{name}={value}" for name, value in sorted((env or {}).items())],
         "launch": launch if kind == TERMINAL else None,
         "destructive": words.destructive,
+        "deletes_heading": WORDS["this_ends" if words.ends else "this_deletes"],
         "deletes": deletes,
+        "checked": checked,
     }
+
+
+def _ends(row: Mapping[str, Any], project: str, now: float | None) -> list[str]:
+    """What a close ends: the window, by project and id, and its process and idle time."""
+    host = _current_host(dict(row)) or {}
+    window = str(host.get("host_session_id") or "")[:8]
+    lines = [_DELETES["claude"].format(project=project, id=window)]
+    last = row.get("last_activity")
+    if isinstance(last, (int, float)) and now is not None and now - last >= 60:
+        lines.append(_DELETES["process_idle"].format(pid=host.get("pid"),
+                                                     age=age_text(now - last)))
+    else:
+        lines.append(_DELETES["process"].format(pid=host.get("pid")))
+    return lines
+
+
+def outcome_words(argv: Iterable[str], ok: bool | None, last: str | None) -> str:
+    """What a finished close did, in the line the command wrote last; else nothing.
+
+    Only a step that reports its outcome (close host) has one, and only when
+    it succeeded: its last line is the sentence ``oracle/closehost`` prints,
+    such as "Claude ended, and its Terminal tab closed." A failure says why
+    under "Why" instead (:func:`why_words`).
+    """
+    words = step_words(argv)
+    if not ok or words is None or not words.ends or not last:
+        return ""
+    return last

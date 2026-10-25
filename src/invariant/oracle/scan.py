@@ -318,6 +318,10 @@ class HostView:
     #: The terminal the verified host runs on, from ``ps`` (``None`` without
     #: one, or when the pid came from the attention record alone).
     tty: str | None = None
+    #: On an orphan row: whether the record's ``cwd`` is this project's root,
+    #: a folder under it or one of its worktrees; ``None`` without a ``cwd``.
+    #: The evidence that ties the host to this project (ADR-009 D7, BUG_040).
+    rooted_here: bool | None = None
 
 
 @dataclass
@@ -373,6 +377,11 @@ class Row:
     adoptable: list[str] = field(default_factory=list)
     #: On a ``host`` row: the ended session it was last bound to, if any.
     previous_session: str | None = None
+    #: On a ``host`` row: the project whose live session lists this host,
+    #: when another registered project's does (:func:`mark_claims`). Such a
+    #: row may be BUG_040's misattributed host, so nothing destructive is
+    #: offered on it.
+    claimed_elsewhere: str | None = None
 
     @property
     def current_host(self) -> HostView | None:
@@ -726,11 +735,15 @@ class _ProjectReader:
             if not s.is_stranded and (not s.host_session_id or s.host_ended)
         ]
         candidates = set(self.store.list_ids(ATTENTION_DIR)) | set(self._transcripts)
+        homes: list[Path] | None = None
         rows = []
         for host_id in sorted(candidates - claimed):
             view = self._host(host_id, current=True)
             if view.attention and view.attention.get("ended"):
                 continue
+            if view.cwd:
+                homes = homes if homes is not None else self._homes(records)
+                view.rooted_here = _inside(view.cwd, homes)
             last = _latest([view.attention_written, view.transcript_written])
             recent = last is not None and self.now - last <= ORPHAN_WINDOW_SECONDS
             if not (view.alive or recent):
@@ -745,6 +758,16 @@ class _ProjectReader:
                 )
             )
         return rows
+
+    def _homes(self, records: list[Session]) -> list[Path]:
+        """Where a host of this project may have been started: the root, the
+        worktrees git lists, and the worktree every session recorded."""
+        paths = [self.root] + [Path(s.worktree) for s in records if s.worktree]
+        try:
+            listed = [Path(w.path) for w in self.cache.worktrees(self.root)]
+        except Exception:  # noqa: BLE001 - the root and the records still answer
+            listed = []
+        return [Path(_resolved(str(p))) for p in paths + listed]
 
     # -- worktrees ---------------------------------------------------------
 
@@ -770,6 +793,34 @@ def _hosts_of(session: Session) -> list[str]:
         if host_id and isinstance(host_id, str) and host_id not in seen:
             seen.append(host_id)
     return seen
+
+
+def _inside(path: str, homes: list[Path]) -> bool:
+    """Whether ``path`` is one of ``homes`` or under one, by whole components."""
+    target = Path(_resolved(path))
+    return any(target == home or home in target.parents for home in homes)
+
+
+def mark_claims(snapshots: Iterable[ProjectSnapshot]) -> None:
+    """Name, on each orphan host row, the project whose live session lists it.
+
+    A project's own live sessions never leave an orphan, so a host a live
+    session lists is one another project attributed to it: a host started in
+    one repository that works on another's session (BUG_040). Such a row is
+    never offered anything destructive (ADR-009 D7). Each scan reads one
+    project, so this joins them once they are all read.
+    """
+    snapshots = list(snapshots)
+    owners: dict[str, str] = {}
+    for snapshot in snapshots:
+        for row in snapshot.rows:
+            if row.kind == ROW_SESSION:
+                for host in row.hosts:
+                    owners.setdefault(host.host_session_id, row.project_name or row.project)
+    for snapshot in snapshots:
+        for row in snapshot.rows:
+            if row.kind == ROW_HOST and row.hosts:
+                row.claimed_elsewhere = owners.get(row.hosts[0].host_session_id)
 
 
 def _latest(values: Iterable[float | None]) -> float | None:

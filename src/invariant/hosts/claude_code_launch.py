@@ -801,6 +801,132 @@ class DetachedCloser:
         )
 
 
+#: The process name macOS's Terminal.app runs as, the last component of its
+#: ``ps -o comm=`` path.
+TERMINAL_APP = "Terminal"
+
+#: Seconds an ``osascript`` to Terminal may take. The first one from a
+#: launchd agent can raise macOS's Automation prompt, which blocks it until
+#: somebody answers at the Mac.
+OSASCRIPT_TIMEOUT_SECONDS = 30
+
+#: A terminal's name as ``ps -o tty=`` prints it: ``ttys004``.
+_TTY_NAME = re.compile(r"tty[a-z]*[0-9]+")
+
+#: Closes the Terminal tab on the tty given as its one argument, when only a
+#: shell is left in it (IDEA_027 increment 6). The tty arrives through
+#: ``on run argv``, never as text in the script. A Terminal that is not
+#: running is left so: naming it in a ``tell`` would start it. A tab that is
+#: its window's only tab closes with the window; one tab of several is
+#: closed alone, which Terminal may refuse.
+TERMINAL_TAB_SCRIPT = """on run argv
+	set target to item 1 of argv
+	if application "Terminal" is not running then return "not_running"
+	set shells to {"login", "sh", "-sh", "zsh", "-zsh", "bash", "-bash", "fish", "-fish"}
+	tell application "Terminal"
+		repeat with w in windows
+			set n to count of tabs of w
+			repeat with t in tabs of w
+				if tty of t is target then
+					set procs to processes of t
+					set others to false
+					repeat with p in procs
+						if shells does not contain (p as text) then set others to true
+					end repeat
+					if busy of t or others then
+						set AppleScript's text item delimiters to ","
+						return "busy " & (procs as text)
+					end if
+					if n is 1 then
+						close w
+						return "closed_window"
+					end if
+					try
+						close t
+					on error message
+						return "tab_not_closable " & message
+					end try
+					return "closed_tab"
+				end if
+			end repeat
+		end repeat
+	end tell
+	return "no_tab"
+end run"""
+
+
+def runs_in_terminal_app(pid: int, lookup=parent_process,
+                         max_hops: int = HOST_PID_MAX_HOPS) -> bool | None:
+    """Whether ``pid`` runs under macOS's Terminal.app, by its parent chain.
+
+    Claude in a Terminal tab runs under the tab's shell, ``login`` and
+    Terminal itself. ``True`` when an ancestor is Terminal; ``False`` when the
+    chain ends (at launchd, or a process that is its own parent) without
+    one; ``None`` when ``ps`` cannot say, the chain is cut short, or it is
+    longer than ``max_hops``. Asked before Claude is ended, while the chain
+    still exists.
+    """
+    current = pid
+    for _ in range(max_hops):
+        row = lookup(current)
+        if row is None:
+            return None
+        ppid, name = row
+        if name.strip().rsplit("/", 1)[-1] == TERMINAL_APP:
+            return True
+        if ppid <= 0 or ppid == current:
+            return False
+        current = ppid
+    return None
+
+
+class TerminalTabCloser:
+    """Closes the Terminal tab a leftover Claude ran in, once Claude has ended.
+
+    ``osascript`` gets :data:`TERMINAL_TAB_SCRIPT` as one argument and the
+    tty as another (``on run argv``), with no shell between, and runs without
+    ``HOST_MARKERS``. :meth:`close` answers ``(code, detail)``: what the
+    script said (``closed_tab``, ``closed_window``, ``busy``, ``no_tab``,
+    ``not_running``, ``tab_not_closable``), or ``not_allowed`` when macOS's
+    Automation permission refused it (error -1743) or a prompt for it went
+    unanswered, or ``failed``. ``run`` is ``subprocess.run``; the suite
+    replaces the whole closer, and the ``osascript`` guard is the backstop.
+    """
+
+    def __init__(self, run=subprocess.run) -> None:
+        self.run = run
+
+    def close(self, tty: str) -> tuple[str, str]:
+        if not isinstance(tty, str) or not _TTY_NAME.fullmatch(tty):
+            return "no_tab", ""
+        try:
+            proc = self.run(
+                ["osascript", "-e", TERMINAL_TAB_SCRIPT, f"/dev/{tty}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=OSASCRIPT_TIMEOUT_SECONDS,
+                env=without_host_markers(dict(os.environ)),
+            )
+        except subprocess.TimeoutExpired:
+            return "not_allowed", (
+                f"osascript waited {OSASCRIPT_TIMEOUT_SECONDS} s; a permission prompt may be "
+                "waiting on the Mac"
+            )
+        except OSError as exc:
+            return "failed", str(exc)
+        said = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            error = (proc.stderr or said).strip()
+            if "-1743" in error or "Not authori" in error:
+                return "not_allowed", error
+            return "failed", error or f"osascript exited {proc.returncode}"
+        if not said:
+            return "failed", "osascript said nothing"
+        code, _, detail = said.partition(" ")
+        return code, detail.strip()
+
+
 def carries_successor_flags(command: str, name: str) -> bool:
     """Whether a ``ps -o command=`` line is a ``claude`` named ``name`` with Remote Control.
 

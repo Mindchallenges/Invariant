@@ -35,13 +35,15 @@ Shipped so far, the plain-language panel ("Using the page" below):
   screen" below).
 - A failed action says why in one sentence, with the full output behind
   "Show full output" ("Running a step" below).
+- A leftover Claude window can be closed from the Leftovers screen, with
+  its Terminal tab, after a confirm that names it ("Closing a leftover Claude
+  window" below).
 
 Still to come:
 
-- Later, after two fixes it depends on: closing a leftover Claude window and
-  cleaning up stranded sessions and folders, each confirmed first. Each
-  lists what it deletes and checks again that nothing is using it when you
-  press the button.
+- Cleaning up stranded sessions and left-over folders, each confirmed first.
+  Each lists what it deletes and checks again that nothing is using it when
+  you press the button.
 
 The page still never answers a permission prompt. The design is in
 [the control panel's design page](../architecture/oracle-panel.md). This
@@ -287,7 +289,36 @@ phone's back gesture, returns to where you were in the list.
 **Leftovers** are the Claude windows with no session and the left-over
 folders that need nothing from you. The tile or the card at the bottom of
 the list opens them. The first three of each kind show, then "Show N more".
-For now they are listed only; closing and removing them comes later.
+Each Claude window says what it is: "Still open on the Mac" (its session
+ended and it has been idle an hour or more), "Open, never had a session",
+"Active, no session" (used in the last hour, or mid-turn), "Already closed ·
+record only", "Process id not recorded", or "Its process ids disagree". A
+window that can safely be closed has a "Close…" button; one that a session
+here could take has "Attach…". Removing left-over folders comes later.
+
+**Closing a leftover Claude window.** "Close…" opens a red sheet: "Close this
+Claude window?", and "Ends Claude in this window, then closes the Terminal
+tab." Under "This ends" it names the project, the window (the first 8
+characters of its Claude session id), the process id and how long it has
+been idle. "Checked just now" says no invariant session uses the window, and
+that this is checked again when you press the button. The exact command is
+behind "Exact command". Cancel is first; the red "Close window" acts. You can
+reopen the conversation later with `claude --resume` on the Mac.
+
+When you press it, the Mac checks everything again: the process is still
+that Claude window (same process, same start, same terminal) and no session
+uses it. If anything changed, nothing is done and the sheet says why. Then
+it asks Claude to end and waits up to 10 seconds. It never forces Claude: if
+Claude does not exit, the sheet says "Claude did not exit; nothing else was
+done", and the window stays. Once Claude has ended, the Terminal tab it ran
+in is closed when only its shell is left there, with the window when that
+was its only tab. Under "What happened" the sheet says how it ended:
+"Claude ended, and its Terminal tab closed.", or "Claude ended; the window
+was left open because …" (something else runs in the tab, no Terminal tab
+matched, or the window is not Terminal's: Remote Control, VS Code, iTerm).
+Only a window offered "Close…" can be closed: one whose process id is
+unknown or disputed, one used in the last hour, and one another project's
+session may be using are left alone.
 
 **Running a step.** The button opens a sheet from the bottom. It asks the
 question ("Re-run the tests?"), says in one sentence what happens and what
@@ -347,6 +378,10 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | "Why" says "invariant could not find a value for …" | The project's manifest discovers that value with a command of its own, and the command printed nothing or failed. Run the step in a terminal on the Mac to see the command's own message, and fix the discovery command or the condition it checks (for example, more than one simulator booted). |
 | A step shows "The server restarted and no longer knows this action's result" | The agent restarted while the step ran. What ran, and how it ended, if it got that far, is in `~/.invariant/web/actions.log`. |
 | The pairing link names the wrong port | `pair` uses the port the page reports, else the installed one. Pass `--port` to override it. |
+| Closing a window says "Claude ended; macOS has not allowed the oracle to control Terminal" | Claude has ended, but macOS did not let the page's agent control Terminal, so the tab stays open; close it by hand this once. The first close from the agent asks for the Automation permission on the Mac, and nobody may have been there to answer (the page waits 30 seconds), or it was refused (error -1743). On the Mac, open System Settings > Privacy & Security > Automation, find the app that runs the oracle (the Python the agent runs, or the terminal you started `oracle web` from), and turn on Terminal under it. If it is not listed, close a window from the page while you are at the Mac and answer the prompt. |
+| Closing a window says "nothing was done: …" | Something changed between the confirm and the button: the window closed, its process is another one now, or a session started using it. Nothing was signalled. Refresh the page; the Leftovers screen shows what is there now. |
+| "Claude did not exit; nothing else was done" | Claude was asked to end and was still running 10 seconds later. The page never forces it. Look at the window on the Mac: it may be busy with a turn. |
+| A leftover window has no "Close…" | It was used in the last hour, its process id is not known or two sources disagree on it, it was started outside this project, or another project's session lists it. These are left alone on purpose. |
 
 ## Remove it
 

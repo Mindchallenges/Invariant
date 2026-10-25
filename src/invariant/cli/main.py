@@ -2857,6 +2857,56 @@ def _oracle_actions():
     )
 
 
+def _real_oracle_host_seams():
+    from ..hosts import claude_code_launch as launch
+    from ..oracle.closehost import HostSeams, send_sigterm
+    from ..oracle.scan import pid_exists
+
+    probe = launch.ClaudeCodeProbe()
+    return HostSeams(
+        records=probe.host_processes,
+        facts=probe.process_facts,
+        alive=pid_exists,
+        terminate=send_sigterm,
+        in_terminal=launch.runs_in_terminal_app,
+        close_tab=launch.TerminalTabCloser().close,
+    )
+
+
+def _oracle_host_seams():
+    """What ``oracle close-host`` reads and does to a real Claude process.
+
+    Claude Code's per-process records and ``ps`` through its probe, ``kill
+    0``, SIGTERM, the parent chain that says whether Terminal owns the window,
+    and the AppleScript that closes its tab. A seam, like ``_handoff_closer``:
+    the suite replaces it everywhere, so no test signals a process or runs
+    ``osascript`` (IDEA_027 increment 6).
+    """
+    return _real_oracle_host_seams()
+
+
+def cmd_oracle_close_host(args) -> int:
+    """End a leftover Claude window, then close its Terminal tab, after checking again.
+
+    The panel's "Close…" runs this (ADR-009 D15). Every fact the confirm
+    showed is checked again here, and a live session listing the host in any
+    registered project refuses it. One SIGTERM, a wait, never a SIGKILL; the
+    tab is closed only once Claude has gone and only its shell is left.
+    """
+    from ..oracle.closehost import CloseRequest, binding_refusal, close_host
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    def bound() -> str | None:
+        snapshots = scan_all(_project_index(), cache=_oracle_cache())
+        return binding_refusal(assess(snapshots, time.time()), args.host_id)
+
+    request = CloseRequest(args.host_id, args.pid, args.start, args.tty)
+    lines = close_host(request, _oracle_host_seams(), bound)
+    payload = {"host_id": args.host_id, "pid": args.pid, "tty": args.tty, "lines": lines}
+    return emit(args, payload, "\n".join(lines))
+
+
 def cmd_oracle_tui(args) -> int:
     """The live dashboard. Needs the ``invariant[oracle]`` extra (Textual).
 
@@ -4222,6 +4272,18 @@ def build_parser() -> argparse.ArgumentParser:
         "tui", help="the live dashboard; every action is confirmed first (needs invariant[oracle])"
     )
     q.set_defaults(func=cmd_oracle_tui)
+    q = oracle.add_parser(
+        "close-host",
+        help="end a leftover Claude window, then close its Terminal tab; checks every fact "
+             "again first",
+    )
+    q.add_argument("host_id", help="the Claude session id of the window")
+    q.add_argument("--pid", type=int, required=True, help="its process id, as confirmed")
+    q.add_argument("--start", required=True,
+                   help="its process start token, as confirmed; a reused pid differs")
+    q.add_argument("--tty", default=None,
+                   help="the terminal it runs on, as confirmed (ttysNNN); omit for none")
+    q.set_defaults(func=cmd_oracle_close_host)
     q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
     q.set_defaults(func=cmd_oracle_notify_test)
     q = oracle.add_parser(

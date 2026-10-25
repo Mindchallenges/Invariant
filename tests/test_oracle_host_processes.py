@@ -39,6 +39,7 @@ from invariant.cli import main as cli_main
 from invariant.cli.main import main
 from invariant.hosts import claude_code_launch as launch
 from invariant.oracle import dashboard
+from invariant.oracle import scan as scan_module
 from invariant.oracle.home import oracle_home
 from invariant.oracle.index import ProjectIndex
 from invariant.oracle.recommend import assess
@@ -255,6 +256,52 @@ class TestSeveralRecordsForOneHost:
         assert host.pid_source == "conflict"
         assert [c["pid"] for c in host.pid_conflict] == [LIVE, OTHER_LIVE]
 
+
+
+class TestWhereTheOrphanWasStarted:
+    """``rooted_here``: the evidence that ties an orphan to this project (ADR-009 D7).
+
+    A host is offered close only when its record's working directory is the
+    project's root, a folder under it, or one of its worktrees. A host started
+    in another repository may be BUG_040's misattributed row.
+    """
+
+    def rooted(self, project, cwd):
+        probe = RecordProbe([Rec("h-x", LIVE, cwd=cwd)], transcripts(**{"h-x": NOW - HOUR}))
+        return rows_of(scan(probe), ROW_HOST)["h-x"].hosts[0].rooted_here
+
+    def test_the_root_itself(self, project):
+        assert self.rooted(project, str(project.root)) is True
+
+    def test_a_folder_under_the_root(self, project):
+        assert self.rooted(project, str(project.root / ".claude" / "worktrees" / "x")) is True
+
+    def test_a_worktree_of_the_project_outside_its_root(self, project):
+        path = world_kit.add_worktree(project, "wt1")
+        assert self.rooted(project, str(path)) is True
+
+    def test_another_directory(self, project, tmp_path):
+        assert self.rooted(project, str(tmp_path / "elsewhere")) is False
+
+    def test_a_sibling_whose_name_extends_the_root(self, project):
+        assert self.rooted(project, str(project.root) + "-other") is False
+
+    def test_no_recorded_cwd_says_nothing(self, project):
+        assert self.rooted(project, None) is None
+
+    def test_a_worktree_list_that_fails_falls_back_to_the_root(self, project, monkeypatch):
+        def broken(self, root):
+            raise RuntimeError("git went away")
+
+        monkeypatch.setattr(ScanCache, "worktrees", broken)
+        probe = RecordProbe([Rec("h-x", LIVE, cwd=str(project.root))],
+                            transcripts(**{"h-x": NOW - HOUR}))
+        cache = ScanCache(probe=probe, pid_alive=alive_pids)
+        reader = scan_module._ProjectReader(ProjectIndex(oracle_home()).list()[0], NOW, cache)
+        reader._transcripts = {"h-x": NOW - HOUR}
+        reader._processes = cache.host_processes()
+        [row] = reader._orphans([], [])
+        assert row.hosts[0].rooted_here is True
 
 # -- the fallback ---------------------------------------------------------------------
 
@@ -568,3 +615,113 @@ class TestProcessFacts:
     def test_the_probe_asks_through_its_seam(self):
         probe = launch.ClaudeCodeProbe(facts_of=lambda pid: f"facts-{pid}")
         assert probe.process_facts(9) == "facts-9"
+
+
+# -- closing a leftover's Terminal tab (IDEA_027 increment 6) -------------------------
+
+TERMINAL = "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"
+
+
+class TestWhichAppOwnsTheWindow:
+    def chain(self, table):
+        return lambda pid: table.get(pid)
+
+    def test_claude_under_login_under_terminal(self):
+        table = {500: (400, "claude"), 400: (300, "-zsh"), 300: (200, "login"),
+                 200: (1, TERMINAL)}
+        assert launch.runs_in_terminal_app(500, self.chain(table)) is True
+
+    def test_claude_under_another_app(self):
+        iterm = "/Applications/iTerm.app/Contents/MacOS/iTerm2"
+        table = {500: (400, "claude"), 400: (300, "-zsh"), 300: (1, iterm), 1: (0, "launchd")}
+        assert launch.runs_in_terminal_app(500, self.chain(table)) is False
+
+    def test_a_chain_ps_cannot_read_is_unknown(self):
+        assert launch.runs_in_terminal_app(500, self.chain({})) is None
+
+    def test_a_chain_cut_short_is_unknown(self):
+        table = {500: (400, "claude")}
+        assert launch.runs_in_terminal_app(500, self.chain(table)) is None
+
+    def test_a_chain_longer_than_the_bound_is_unknown(self):
+        table = {n: (n - 1, "sh") for n in range(2, 100)}
+        assert launch.runs_in_terminal_app(99, self.chain(table)) is None
+
+    def test_a_chain_that_loops_is_not_terminal(self):
+        assert launch.runs_in_terminal_app(5, self.chain({5: (5, "sh")})) is False
+
+
+class FakeOsascript:
+    """Stands in for ``osascript``: records the argv, answers as told."""
+
+    def __init__(self, status=0, out="", err="", raises=None):
+        self.status, self.out, self.err, self.raises = status, out, err, raises
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs))
+        if self.raises is not None:
+            raise self.raises
+        return subprocess.CompletedProcess(argv, self.status, self.out, self.err)
+
+
+class TestTheTerminalTabCloser:
+    def close(self, fake, tty="ttys004"):
+        return launch.TerminalTabCloser(run=fake).close(tty)
+
+    def test_the_tty_is_an_argument_never_part_of_the_script(self):
+        fake = FakeOsascript(out="closed_tab\n")
+        assert self.close(fake) == ("closed_tab", "")
+        [(argv, kwargs)] = fake.calls
+        assert argv[:2] == ["osascript", "-e"]
+        assert argv[2] == launch.TERMINAL_TAB_SCRIPT
+        assert argv[3:] == ["/dev/ttys004"]
+        assert "ttys004" not in argv[2]
+        assert "on run argv" in argv[2]
+        assert kwargs["timeout"] == launch.OSASCRIPT_TIMEOUT_SECONDS
+        assert not any(k in kwargs["env"] for k in launch.HOST_MARKERS)
+
+    def test_the_script_never_starts_terminal_and_checks_what_is_left(self):
+        script = launch.TERMINAL_TAB_SCRIPT
+        assert 'application "Terminal" is not running' in script
+        assert "busy of" in script and "processes of" in script
+        assert "close w" in script
+
+    @pytest.mark.parametrize(("out", "result"), [
+        ("closed_window\n", ("closed_window", "")),
+        ("busy login,-zsh,vim\n", ("busy", "login,-zsh,vim")),
+        ("no_tab\n", ("no_tab", "")),
+        ("not_running\n", ("not_running", "")),
+        ("tab_not_closable it would not\n", ("tab_not_closable", "it would not")),
+        ("", ("failed", "osascript said nothing")),
+    ])
+    def test_its_answers(self, out, result):
+        assert self.close(FakeOsascript(out=out)) == result
+
+    @pytest.mark.parametrize("err", [
+        "execution error: Not authorized to send Apple events to Terminal. (-1743)",
+        "Not authorised to send Apple events",
+    ])
+    def test_automation_not_allowed(self, err):
+        assert self.close(FakeOsascript(status=1, err=err))[0] == "not_allowed"
+
+    def test_another_failure(self):
+        assert self.close(FakeOsascript(status=1, err="boom")) == ("failed", "boom")
+
+    def test_a_prompt_nobody_answers(self):
+        fake = FakeOsascript(raises=subprocess.TimeoutExpired("osascript", 30))
+        code, detail = self.close(fake)
+        assert code == "not_allowed"
+        assert "permission prompt" in detail
+
+    def test_no_osascript(self):
+        assert self.close(FakeOsascript(raises=FileNotFoundError("osascript")))[0] == "failed"
+
+    @pytest.mark.parametrize("tty", ["../ttys004", "ttys004; rm", "", "/dev/ttys004"])
+    def test_a_tty_that_is_not_a_terminal_name_is_never_passed(self, tty):
+        fake = FakeOsascript(out="closed_tab\n")
+        assert self.close(fake, tty)[0] == "no_tab"
+        assert fake.calls == []
+
+    def test_the_default_runner_is_subprocess_run(self):
+        assert launch.TerminalTabCloser().run is subprocess.run

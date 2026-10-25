@@ -6,12 +6,13 @@ the server, transport and pairing it keeps, are in [oracle.md](oracle.md),
 "Shipped: the web page". The person-facing setup is the guide's
 [The oracle on your phone](../guide/oracle-web.md).
 
-**Status: increments 3, 4 and 5 shipped.** The user approved the mockup on
+**Status: increments 3 to 6 shipped.** The user approved the mockup on
 2026-10-23. Increments 3 to 7 build it ("Increment plan" below). Increment
-3, the plain-language panel, increment 4, the home-screen app, and increment
-5, failure reasons, are what the page serves now; "As built in increment 3",
-"As built in increment 4" and "As built in increment 5" below record where
-they fill in what this page left open. Increments 6 and 7 are not built.
+3, the plain-language panel, increment 4, the home-screen app, increment 5,
+failure reasons, and increment 6, orphan classes and close host, are what
+the page serves now; "As built in increment 3" to "As built in increment 6"
+below record where they fill in what this page left open. Increment 7 is not
+built.
 
 **Visual reference.** The approved mockup is a private claude.ai artifact of
 six 390-pixel-wide phone screens. The scratch files it was drawn from did not
@@ -40,11 +41,11 @@ graph TD
         WEB["web (view, routes; inc 4, shipped: manifest, icons)"]
         PANEL["panel (inc 3, shipped: groups, summary, wording table)"]
         WEBPAGE["webpage (inc 3, shipped: cards, detail, sheets; inc 4, shipped: manifest, icon)"]
-        WEBACT["webactions (inc 5, shipped: failure summariser; inc 6–7: destructive kinds)"]
+        WEBACT["webactions (inc 5, shipped: failure summariser; inc 6, shipped: close's outcome)"]
         ACTIONS[actions]
         DASH[dashboard]
-        SIGNALS["signals / recommend"]
-        SCAN["scan (inc 6: orphan classes)"]
+        SIGNALS["signals / recommend (inc 6, shipped: orphan classes, close host)"]
+        SCAN["scan (inc 6, shipped: rooted_here, claimed_elsewhere)"]
     end
     CLI --> WEB
     WEB --> PANEL
@@ -85,6 +86,8 @@ stateDiagram-v2
     Confirm --> Detail: Cancel
     Destructive --> Detail: Cancel
     Result --> Detail: Done
+    Destructive --> Leftovers: Cancel (a close from the leftovers, inc 6)
+    Result --> Leftovers: Done (a close from the leftovers, inc 6)
     Detail --> Overview: back
     Leftovers --> Overview: back
 ```
@@ -227,8 +230,10 @@ window" or why it was not seen alive.
 4. A note card: "Close and Remove always ask first, show what goes, and
    check again that nothing is using it the moment you confirm."
 
-Until increment 6, the rows have no buttons, and the screen lists the
-orphan hosts and leaked worktrees the view folds today.
+As built in increment 6, a Claude window's row carries its pill when its
+step is one the panel runs: "Close…" for a host every close guard lets go,
+"Attach…" for an unmanaged one a session here could take. A row with
+nothing to run has no pill, and the folders have none until increment 7.
 
 ## Components
 
@@ -394,12 +399,13 @@ these (ADR-009 D3).
 | `session resume --id` (terminal) | Resume… | Resume in a new Claude window? | Opens Terminal on your Mac and starts Claude in this session's folder. You can pick it up from Remote Control on your phone. | Open window |
 | `session resume --id --force` (terminal) | Resume… | Take over in a new Claude window? | Its last Claude window closed without saying so. Opens Terminal on your Mac and starts Claude there to take over. | Open window |
 | `session adopt <host> --id` | Attach… | Attach this window to its session? | Binds the open Claude window to the one session here that has none. | Attach |
+| `oracle close-host <host> --pid --start [--tty]` | Close… | Close this Claude window? | Ends Claude in this window, then closes the Terminal tab. You can reopen the conversation later with claude --resume. (Destructive sheet: "This ends" lists the window and its process.) | Close window |
 | `doctor` | Check setup… | Run invariant's setup check? | Checks this project's hooks and settings. Nothing is changed. | Run check |
 | `info` step, or waiting | (no button) | — | — | — |
 
-Increments 6 and 7 add rows here for close host, kill a leaked process,
-abandon a session, remove an orphaned worktree, and nudge or re-dispatch a
-stuck agent, each with its "This deletes" lines.
+Increment 6 added close host. Increment 7 adds rows here for kill a leaked
+process, abandon a session, remove an orphaned worktree, and nudge or
+re-dispatch a stuck agent, each with its "This deletes" lines.
 
 ### Fixed strings
 
@@ -412,12 +418,13 @@ stuck agent, each with its "This deletes" lines.
 | Detail sections | What is going on · Suggested next step · More actions · Recent · Technical details |
 | Confirm | Command · Copy · Exact folder and environment · Runs as you on the Mac, without the marks of any Claude window. · Cancel · This confirm expires in M:SS · This confirm expired. Look again |
 | Destructive confirm | This deletes · Checked just now · No Claude window is using this session · Checked again the moment you press <deed> · Exact command · This cannot be undone. |
-| Result | Why · Show full output · Done · stopped after N s · Done in N s |
+| Close host confirm (inc 6) | This ends · Claude in <project> · window <first 8> · Process <pid> · idle <age> · Checked just now · No invariant session is using this Claude window · Checked again the moment you press Close window |
+| Result | Why · What happened · Show full output · Done · stopped after N s · Done in N s |
 | Failure fallback | Failed, exit N. <last meaningful line> |
 | Leftovers | Things that outlived their session. None of them needs you; tidy them when you like. · Claude windows with no session · Left-over folders · Show N more · Close… · Remove… |
-| Leftover classes (inc 6) | leftover host: Still open on the Mac · unmanaged: Open, never had a session · recently active unmanaged: Active, no session · gone: Already closed · record only |
+| Leftover classes (inc 6) | leftover host: Still open on the Mac · unmanaged: Open, never had a session · recently active (leftover or unmanaged): Active, no session · gone: Already closed · record only · unknown: Process id not recorded (no pid), Still open on the Mac (alive, no activity known) · process ids disagree: Its process ids disagree |
 | Back | Sessions |
-| Technical details | Session <id> · state <state> · lane <methodology>:<phase>; Host <id> · process id <pid> / process id not recorded |
+| Technical details | Session <id> · state <state> · lane <methodology>:<phase>; Host <id> · process id <pid> / process id not recorded / process ids disagree: <source> <pid> (<alive, gone or unknown>), … |
 
 ### Times
 
@@ -520,6 +527,21 @@ open:
 | The sheet | The "Why" panel is an inset block under the headline, labelled from `WORDS.why`, with the sentence as text; "Show full output" stays closed under it, and the output is unchanged (the existing 64 KiB tail) |
 | The headline | Unchanged from increment 3 ("Failed, exit N", "Failed"); the mockup's "The tests did not start" would name a cause the output does not state |
 
+## As built in increment 6
+
+Orphan classes and close host (IDEA_025 scope v1, ADR-009 D15). Where the
+build decided what this page left open:
+
+| Question | As built |
+|---|---|
+| Where the class is made | `signals.orphan_class`, the `orphan_host` marker's `cause`: `gone` (its process is gone), `unknown` (no pid that can be asked, a conflict, or no activity known), `active` (alive and heard from within an hour, `Thresholds.orphan_idle_minutes`, or mid-turn), `leftover` (alive, idle, its session ended), `unmanaged` (alive, idle, never bound here). None alerts |
+| Who is offered Close | A `leftover` or `unmanaged` row that is alive, whose pid is the per-process record's (`pid_source` `record` or `both`) with a start token and no `pid_conflict`, whose record `cwd` is this project's root, a folder under it or one of its worktrees (`rooted_here`), and that no live session in another registered project lists (`claimed_elsewhere`, BUG_040). `recommend` makes the close its step; an unmanaged host that one session here could take is offered Attach first |
+| The pill | On the leftovers screen, by the row: the step's button ("Close…" or "Attach…") when the page may act, 36 px visible and 44 px to tap; it opens the confirm sheet over the leftovers screen, and Cancel returns there |
+| The sheet | The destructive sheet, with "This ends" for its red panel: "Claude in <project> · window <first 8>" and "Process <pid> · idle <age>" (the age only when the last activity is known), "Checked just now" with its two lines, Cancel first, "Close window" in red, and the command behind "Exact command". The sentence carries the `claude --resume` note IDEA_025 asks for |
+| What runs | `invariant oracle close-host <host> --pid N --start TOKEN [--tty ttysNNN]`, a `run` step in the project root. It checks every fact again, sends one SIGTERM, waits up to 10 s, never sends SIGKILL, and closes the tab only once Claude has gone (oracle.md, "Close host") |
+| The result | A refusal is the "Why" panel ("invariant said: nothing was done: process 41001 has already exited"). A close that ran shows "What happened", the command's last line: "Claude ended, and its Terminal tab closed.", "… its Terminal window closed.", "Claude ended; the window was left open because …", or the Automation sentence. The job's `words` gain `outcome` (`panel.outcome_words`), empty for every other step |
+| A conflict row | "Its process ids disagree" on the leftovers screen, and "process ids disagree: attention 3 (gone), record 4 (alive)" under Technical details, instead of "process id not recorded" |
+
 ## Increment plan
 
 | # | Increment | Session | Acceptance (from IDEA_027) |
@@ -530,7 +552,7 @@ open:
 | 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | **shipped** (session 80e81a07); both iOS checks verified on an iPhone 2026-10-25 | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
 | 5 | Failure reasons: the summariser and the result sheet | **shipped** (session 80e81a07) | A failed action shows one plain sentence; the full output only after "Show full output" |
 | — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | **shipped** (BUG_078; IDEA_024 in session 53d33984) | their own acceptance |
-| 6 | Orphan classes and close host (IDEA_025 scope v1) | later | IDEA_025's acceptance; refuses at confirm time on a gone, renamed or mismatched pid |
+| 6 | Orphan classes and close host (IDEA_025 scope v1): the classes, the Close… pill, the destructive sheet, `oracle close-host` | **shipped** (session d7dfd77d) | IDEA_025's acceptance; refuses at confirm time on a gone, renamed or mismatched pid. IDEA_025's one summary line per project in `oracle list` and the TUI is not built (the web page's leftovers card and screen are its summary there) |
 | 7 | Clean-up and unstick actions (IDEA_017's list) | later | IDEA_017's acceptance; every action shows what it runs and destroys, and refuses when its precondition no longer holds |
 
 Every increment keeps: Tailscale only, a paired device token, every action

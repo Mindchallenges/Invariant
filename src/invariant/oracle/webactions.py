@@ -29,7 +29,9 @@ sheet's title, sentence and deed, and the result's headline (ADR-009 D3, D6).
 A failed job's "Why" is :func:`summarise`'s: it reads the output for a line
 invariant itself wrote and for the last meaningful line, and the panel words
 them. It names a cause only from invariant's own line, and never guesses one
-(ADR-009 D9). The output itself is kept as it was, behind "Show full output".
+(ADR-009 D9). A close that succeeded also says what happened, from the last
+line its command wrote (``panel.outcome_words``, ADR-009 D15). The output
+itself is kept as it was, behind "Show full output".
 
 The oracle never answers a permission prompt, and neither does this: there is
 no route to one, and ``refusal`` refuses a step on a row that waits on one.
@@ -327,6 +329,8 @@ class Job:
     elapsed: float | None = None
     audit_error: str = ""
     why: str = ""
+    #: What a successful close did, from its last line (ADR-009 D15).
+    outcome: str = ""
     _began: float = field(default=0.0, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -338,7 +342,7 @@ class Job:
             "status": self.status, "output": self.output, "elapsed": self.elapsed,
             "audit_error": self.audit_error,
         }
-        body["words"] = {**panel.result_words(body), "why": self.why}
+        body["words"] = {**panel.result_words(body), "why": self.why, "outcome": self.outcome}
         return body
 
 
@@ -402,7 +406,7 @@ class RemoteActions:
         launch = self.actions.launch_line(step)
         lines = confirm_lines(step, launch)
         words = panel.confirm_words(row, row.get("project_name") or "", step.argv, step.kind,
-                                    step.cwd, step.env, launch)
+                                    step.cwd, step.env, launch, now=self.clock())
         if step.kind == TERMINAL:
             name, _ = terminal_request(step)
             lines.append(
@@ -475,6 +479,7 @@ class RemoteActions:
             job.state, job.ok, job.status = DONE, outcome.ok, outcome.status
             job.output = _tail(outcome.text)
             job.why = summarise(outcome.ok, outcome.status, job.output)
+            job.outcome = panel.outcome_words(job.argv, outcome.ok, evidence(job.output).last)
             job.elapsed = round(self.timer() - job._began, 3)
         try:
             self.audit.record(self._entry("done", job, device))

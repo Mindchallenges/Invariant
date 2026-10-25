@@ -198,6 +198,12 @@ replaces it for every test.
 along with the host, does nothing over Remote Control, and needs the window to
 be the one the host runs in, which nothing here knows.
 
+*Note (2026-10-25):* ADR-009 D15 departs from this rejection for one other
+case only, a confirmed close of a leftover host from the oracle, where the
+person asked for that window to be gone, its tty is known, and the tab is
+closed only once Claude has exited and nothing but its shell is left. The
+handoff closer is unchanged.
+
 ## Consequences
 
 - A host process is started by this library for the first time. It is macOS

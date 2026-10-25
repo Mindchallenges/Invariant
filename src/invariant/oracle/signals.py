@@ -48,6 +48,14 @@ HOST_GONE = "host_gone"
 YOUR_TURN = "your_turn"
 TEARDOWN_PENDING = "teardown_pending"
 
+#: An orphan host's class, its ``orphan_host`` marker's cause (IDEA_025,
+#: IDEA_027 increment 6). None of them alerts.
+ORPHAN_GONE = "gone"
+ORPHAN_LEFTOVER = "leftover"
+ORPHAN_UNMANAGED = "unmanaged"
+ORPHAN_ACTIVE = "active"
+ORPHAN_UNKNOWN = "unknown"
+
 HIGH = "high"
 MEDIUM = "medium"
 LOW = "low"
@@ -72,6 +80,9 @@ class Thresholds:
 
     stuck_minutes: float = 20.0
     stale_wait_hours: float = 6.0
+    #: An orphan host heard from more recently than this is ``active``, and
+    #: nothing is offered to close it.
+    orphan_idle_minutes: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -85,7 +96,8 @@ class Signal:
     key: str
     #: Which flavour of ``kind``: ``permission`` or ``question`` for waiting,
     #: ``reviewed`` or ``ready`` for finished, ``tests``, ``degraded`` or
-    #: ``scan`` for error. What the recommender branches on.
+    #: ``scan`` for error, the orphan class for an orphan host
+    #: (:func:`orphan_class`). What the recommender branches on.
     cause: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -114,11 +126,37 @@ def classify(row: Row, now: float, thresholds: Thresholds | None = None) -> list
             _session_signals(row, add)
         elif row.kind == ROW_HOST:
             previous = f", last bound to {row.previous_session}" if row.previous_session else ""
+            cause = orphan_class(row, now, thresholds)
             add(ORPHAN_HOST, INFO, False,
-                f"a host session with no live invariant session{previous}")
+                f"{cause}: a host session with no live invariant session{previous}",
+                cause=cause)
 
     found.sort(key=lambda s: not s.alert)
     return found
+
+
+def orphan_class(row: Row, now: float, thresholds: Thresholds) -> str:
+    """Which of IDEA_025's classes an orphan host row is in.
+
+    * ``gone`` — its process is known to be gone;
+    * ``unknown`` — no pid could be asked (none recorded, or its sources
+      disagree), or nothing says when it was last active;
+    * ``active`` — alive, and heard from within ``orphan_idle_minutes`` or
+      mid-turn;
+    * ``leftover`` — alive and idle, and the session it was bound to ended;
+    * ``unmanaged`` — alive and idle, and never bound to a session here.
+    """
+    host = row.hosts[0] if row.hosts else None
+    alive = host.alive if host else None
+    if alive is False:
+        return ORPHAN_GONE
+    if alive is None or row.last_activity is None:
+        return ORPHAN_UNKNOWN
+    record = host.attention or {}
+    if (record.get("turn") == _TURN_RUNNING
+            or now - row.last_activity < thresholds.orphan_idle_minutes * 60):
+        return ORPHAN_ACTIVE
+    return ORPHAN_LEFTOVER if row.previous_session else ORPHAN_UNMANAGED
 
 
 def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:

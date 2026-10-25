@@ -13,9 +13,10 @@ increments have shipped: the page, confirm-first actions from it, and the
 page served always by a second LaunchAgent ("Shipped: the web page" below,
 ADR-008). IDEA_026 serves that page over HTTPS with Tailscale's certificate
 ("Over HTTPS" below, ADR-008 D19–D24). IDEA_027 is turning that page into a
-mobile control panel: its increments 3, the plain-language panel, and 4, the
-home-screen app, have shipped ("The control panel" below, ADR-009), and
-increments 5 to 7 are to come.
+mobile control panel: its increments 3, the plain-language panel, 4, the
+home-screen app, 5, failure reasons, and 6, orphan classes and close host,
+have shipped ("The control panel" below, ADR-009), and increment 7 is to
+come.
 
 | # | Increment | Status |
 |---|---|---|
@@ -54,6 +55,7 @@ graph TD
         WEBSVC["webservice (IDEA_023 inc 3)"]
         TLS["tls (IDEA_026)"]
         DEVICES[devices]
+        CLOSEHOST["closehost (IDEA_027 inc 6)"]
     end
 
     subgraph core["core/"]
@@ -142,6 +144,9 @@ graph TD
     TLS --> WEB
     TLS --> HOME
     WEB -. serves the Served of .-> TLS
+    CLI --> CLOSEHOST
+    CLOSEHOST --> SCAN
+    CLI -. injects the record reader, ps, SIGTERM and the Terminal tab closer from .-> HOST
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -359,8 +364,19 @@ adopt. The TUI says `pids disagree: attention 3 (gone), record 4 (alive)`.
 A host row also keeps the record's `launched_name` (the session name it was
 started with), `cwd`, `started` (epoch seconds) and `process_start` (the
 start token, so a later action can compare it again at the moment it acts),
-and the verified process's `tty`. The tty is what a close action needs to find
-the terminal tab the host runs in; nothing reads it yet.
+and the verified process's `tty`. The tty is what close host needs to find
+the terminal tab the host runs in ("Close host" below).
+
+**Where an orphan was started** (IDEA_027 increment 6). An orphan host row's
+view also carries `rooted_here`: whether its record's `cwd` is the project's
+root, a folder under it, or one of its worktrees (the ones git lists and the
+ones its session records name), compared by whole path components after
+resolving; `null` without a `cwd`. And once every project is read,
+`scan.mark_claims` names on each orphan row the project whose live session
+lists the same host, as `claimed_elsewhere`: a project's own live sessions
+never leave an orphan, so such a host is one another project attributed to
+it, BUG_040's case. `assess` calls it first. Both are evidence close host
+needs, and neither changes a signal.
 
 **When the records are not used.** They are Claude Code internals, not a
 contract, so the reader (`claude_code_launch.read_host_processes`) is strict:
@@ -441,7 +457,7 @@ nothing else. Alerts come first in the list it returns.
 | `parked` | no | info | the session's binding is spent and its worktree is there | — |
 | `stranded` | no | info | the session's recorded worktree is gone | — |
 | `teardown_pending` | no | info | the session is in its landed stage | — |
-| `orphan_host` | no | info | a `host` row | — |
+| `orphan_host` | no | info | a `host` row; its `cause` is the class: `gone`, `unknown`, `active`, `leftover`, `unmanaged` (`orphan_class`, IDEA_025) | — |
 | `leaked_worktree` | no | info | a `worktree` row | — |
 
 Only the current host's record is read; the hosts a session had before are
@@ -466,7 +482,9 @@ table that holds wins.
 | `waiting` | info | none: answer it in its own terminal. The oracle never answers a prompt | — |
 | error row | info | none: what stops the read | — |
 | leaked worktree | info | none: inspect it, remove it with git if spent | — |
+| orphan host, `leftover` and every close guard holds | run | `invariant oracle close-host <host> --pid N --start TOKEN [--tty ttysNNN]` | project root |
 | orphan host, alive, exactly one adoptable session | run | `invariant session adopt <host> --id <session>` | project root |
+| orphan host, `unmanaged` and every close guard holds | run | `invariant oracle close-host …`, as above | project root |
 | orphan host, otherwise | info | none: start or resume a session from that host | — |
 | failed tests | run | `invariant pipeline test`, with `INVARIANT_SESSION_ID` | worktree, else root |
 | `gate_blocked` | run | `invariant pipeline gates`, with `INVARIANT_SESSION_ID` | worktree, else root |
@@ -479,6 +497,12 @@ table that holds wins.
 | `host_gone` | terminal | `invariant session resume --id <session> --force` | its origin, else root |
 | `error`, degraded | run | `invariant doctor` | project root |
 | `your_turn` | info | none | — |
+
+The close guards are ADR-009 D7's and D15's: the host is alive by Claude
+Code's record (`pid_source` `record` or `both`), with a start token and no
+`pid_conflict`; it is `rooted_here`; and no other project's live session
+claims it (`claimed_elsewhere`). A gone, active or unknown orphan is never
+offered close.
 
 `pipeline gates` and `pipeline test` take no `--id`, so the session is pinned
 through `INVARIANT_SESSION_ID`, the explicit route session resolution already
@@ -1157,18 +1181,107 @@ tokens, wording, the increment plan) is
   not find a value for destination_id."); anything else reads "Failed, exit
   N. <last line>". The job's dict gains only `words.why`, and the output is
   unchanged behind "Show full output".
-- **Increments 6 and 7** give the oracle destructive powers: close a
-  leftover host (IDEA_025) and the clean-up and unstick actions (IDEA_017).
-  This amends ADR-007's read-only premise (ADR-009 D1). The scan, the
-  watcher and the gate cache stay read-only. Each destructive action is
-  confirmed, re-checks its precondition at confirm time, runs as an
-  `invariant` command with no refusal override, and is never offered on a
-  row BUG_040 (below) may have misattributed. Both facts they waited for
-  have shipped: BUG_078 (true last activity) and IDEA_024 (every live host's
-  pid, its start token and its terminal, "Host liveness" above).
+- **Increment 6 has shipped**: orphan classes and close host (IDEA_025,
+  ADR-009 D15), the oracle's first destructive power. This amends ADR-007's
+  read-only premise (ADR-009 D1): the scan, the watcher and the gate cache
+  stay read-only, and only a confirmed `invariant oracle close-host` signals
+  anything ("Close host" below).
+- **Increment 7** adds the clean-up and unstick actions (IDEA_017). Each
+  destructive action is confirmed, re-checks its precondition at confirm
+  time, runs as an `invariant` command with no refusal override, and is
+  never offered on a row BUG_040 (below) may have misattributed. Both facts
+  they waited for have shipped: BUG_078 (true last activity) and IDEA_024
+  (every live host's pid, its start token and its terminal, "Host liveness"
+  above).
 
 This section and the graph in "Where it sits" are updated as each increment
 ships.
+
+### Close host (IDEA_027 increment 6)
+
+The leftovers screen's "Close…" runs `invariant oracle close-host <host-id>
+--pid N --start TOKEN [--tty ttysNNN]`, the recommendation of a closeable
+orphan, as a `run` step in the project root: the server derives it from a
+fresh scan for the confirm and again for the action, like every step, and
+the client sends only the row key and the nonce. The decisions are ADR-009
+D15's; the words are [oracle-panel.md](oracle-panel.md)'s.
+
+| Module | Owns | Never does |
+|---|---|---|
+| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, the SIGTERM and the wait, the tab), `binding_refusal`, `send_sigterm`, and the outcome lines | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
+| `hosts/claude_code_launch` | `runs_in_terminal_app` (Terminal.app in the parent chain), `TerminalTabCloser` and `TERMINAL_TAB_SCRIPT` | Interpolate the tty into the script; start Terminal; decide whether to close |
+
+```mermaid
+sequenceDiagram
+    participant Page as Phone (leftovers)
+    participant Srv as webactions
+    participant Cmd as oracle close-host
+    participant Seams as HostSeams (the CLI injects Claude Code's)
+    Page->>Srv: GET /api/confirm?row=K|host:ID
+    Srv-->>Page: destructive sheet: This ends, Checked just now, nonce
+    Page->>Srv: POST /api/act {row, nonce}
+    Srv->>Srv: fresh scan, same step? (else 409, nothing runs)
+    Srv->>Cmd: run argv in the project root
+    Cmd->>Seams: record for pid: same session id, same start?
+    Cmd->>Seams: kill 0; ps: claude, same start, same tty?
+    Cmd->>Cmd: fresh scan of every project: no live session lists it?
+    Note over Cmd: any mismatch: "nothing was done: …", exit 1
+    Cmd->>Seams: Terminal.app in the parent chain?
+    Cmd->>Seams: SIGTERM once; poll kill 0 up to 10 s
+    Note over Cmd: still alive: "Claude did not exit … nothing else was done", exit 1
+    Cmd->>Seams: osascript with /dev/TTY as its argument: close the tab if only its shell is left
+    Cmd-->>Srv: last line: what happened, exit 0
+    Srv-->>Page: result sheet: What happened, or Why
+```
+
+| Check, at the moment it runs | Refusal (nothing is signalled) |
+|---|---|
+| `--pid` is a positive number, the host id a plain name | a process id must be a positive number / is not a host id |
+| Claude Code's per-process records can be read, and one has this pid | the records cannot be read / no record of process N any more |
+| that record's `sessionId` is the host id, its `procStart` the `--start` | now belongs to another Claude session / a newer process than the one confirmed |
+| `kill 0` finds the pid | process N has already exited |
+| `ps` describes it, as `claude`, started at `--start`, on `--tty` (or on none when no `--tty`) | cannot describe / not Claude any more / started at another time / runs on another terminal |
+| no live session in any registered project lists the host (a fresh `scan_all` and `assess`) | a live invariant session uses this Claude window now (<project>, session <id>) |
+
+**Ending Claude.** One SIGTERM, then `kill 0` every 0.25 s for up to 10 s.
+A pid that is gone before the signal counts as ended. No SIGKILL, ever: a
+Claude still running after the wait is the failure "Claude did not exit
+within 10 s of being asked to; nothing else was done", and its window is not
+touched.
+
+**Closing the tab.** Only once Claude has exited, only with a tty, and only
+when the parent chain read before the signal shows Terminal.app (Claude
+under the tab's shell, under `login`, under Terminal). `osascript` runs
+`TERMINAL_TAB_SCRIPT` with `/dev/<tty>` as its argument, without the host
+markers, and with a 30-second timeout. The script returns at once when
+Terminal is not running, so it never starts it. It finds the tab whose
+`tty` is the argument; a tab that is `busy`, or whose `processes` hold
+anything but a login shell, is left; the only tab of a window closes with
+the window; one tab of several is closed alone, which Terminal may refuse.
+
+| Answer | The last line |
+|---|---|
+| `closed_tab` / `closed_window` | Claude ended, and its Terminal tab closed. / … window closed. |
+| no tty | Claude ended; the window was left open because it has no terminal (it runs over Remote Control or inside an editor). |
+| not Terminal / cannot tell | … because it does not run in Terminal (another app, such as VS Code or iTerm, owns it). / … because invariant could not tell which app owns it. |
+| `busy <processes>` | … because something else is running in its tab (<processes>). |
+| `no_tab` / `not_running` | … because no Terminal tab is on <tty>. |
+| `tab_not_closable` | … because Terminal would not close one tab of several from a script (<error>). |
+| `not_allowed` (error -1743, "Not authorized", or a prompt nobody answered in 30 s) | Claude ended; macOS has not allowed the oracle to control Terminal, so the window was left open. Allow it in System Settings > Privacy & Security > Automation … |
+| anything else | … because Terminal could not be asked (<error>). |
+
+**The seams.** The CLI reaches every host fact and effect through
+`_oracle_host_seams`, a `HostSeams` of Claude Code's: `ClaudeCodeProbe`'s
+`host_processes` and `process_facts`, `scan.pid_exists`,
+`closehost.send_sigterm`, `runs_in_terminal_app` and
+`TerminalTabCloser().close`. The binding check reads through
+`_oracle_cache`. The suite replaces `_oracle_host_seams` for every test with
+seams that know no process, so the command refuses before it signals
+anything. Beside the `osascript` guard, the `conftest.py` guard refuses
+`os.kill` and `os.killpg` with any signal but 0 unless the pid is a child
+the test itself spawned through `subprocess.Popen`, and raises
+`RefusedProgram`. The one test that sends a real SIGTERM sends it to a
+`python -c "sleep"` child of its own.
 
 ## Known gap: a host rooted in another repository (BUG_040)
 
@@ -1177,5 +1290,8 @@ transcript to the project directory it was started in. A host started in one
 repository that works on a session of another therefore has its attention
 record and transcript in the wrong project: it shows up there as an orphan
 `host` row, and the session it serves shows no host. This is documented, not
-fixed; BUG_040 owns it.
+fixed; BUG_040 owns it. Close host is never offered on such a row: a host
+another project's live session lists is marked `claimed_elsewhere`, one whose
+record `cwd` is not in the project is not `rooted_here`, and `oracle
+close-host` refuses a host any live session lists at the moment it runs.
 

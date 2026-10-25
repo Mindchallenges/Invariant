@@ -384,3 +384,56 @@ class TestKeys:
     def test_the_default_thresholds(self):
         assert Thresholds() == Thresholds(stuck_minutes=20.0, stale_wait_hours=6.0)
         assert timedelta(minutes=Thresholds().stuck_minutes).seconds == 1200
+
+
+class TestOrphanClasses:
+    """IDEA_025's classes, as the orphan marker's cause (IDEA_027 increment 6).
+
+    gone (no process), leftover (alive, its session ended, idle), unmanaged
+    (alive, never bound here, idle), active (alive and recently heard from, or
+    mid-turn), and unknown (no pid that can be asked, or no activity known).
+    """
+
+    @staticmethod
+    def cause(row: Row, thresholds: Thresholds | None = None) -> str:
+        return only(classify(row, NOW, thresholds), sig.ORPHAN_HOST).cause
+
+    @staticmethod
+    def orphan(alive: bool | None = True, idle: float | None = 2 * 3600.0,
+               record: dict | None = None, previous: str | None = None) -> Row:
+        return Row(kind=ROW_HOST, project=PROJECT, hosts=[host(record, alive=alive, hid="h7")],
+                   last_activity=None if idle is None else NOW - idle,
+                   previous_session=previous)
+
+    def test_no_process_is_gone(self):
+        assert self.cause(self.orphan(alive=False)) == sig.ORPHAN_GONE
+
+    def test_no_pid_to_ask_is_unknown(self):
+        assert self.cause(self.orphan(alive=None)) == sig.ORPHAN_UNKNOWN
+
+    def test_alive_with_no_activity_known_is_unknown(self):
+        assert self.cause(self.orphan(idle=None)) == sig.ORPHAN_UNKNOWN
+
+    def test_idle_and_bound_to_an_ended_session_is_a_leftover(self):
+        row = self.orphan(previous="s0")
+        assert self.cause(row) == sig.ORPHAN_LEFTOVER
+        assert "leftover" in only(classify(row, NOW), sig.ORPHAN_HOST).detail
+
+    def test_idle_and_never_bound_is_unmanaged(self):
+        assert self.cause(self.orphan()) == sig.ORPHAN_UNMANAGED
+
+    def test_recently_heard_from_is_active(self):
+        assert self.cause(self.orphan(idle=600, previous="s0")) == sig.ORPHAN_ACTIVE
+
+    def test_a_running_turn_is_active_however_old_its_last_sign(self):
+        row = self.orphan(record=attention(turn="running"), previous="s0")
+        assert self.cause(row) == sig.ORPHAN_ACTIVE
+
+    def test_the_idle_edge_is_a_threshold(self):
+        row = self.orphan(idle=600)
+        assert self.cause(row, Thresholds(orphan_idle_minutes=5)) == sig.ORPHAN_UNMANAGED
+
+    def test_no_class_raises_an_alert(self):
+        for alive, previous in ((False, None), (True, "s0"), (True, None)):
+            found = classify(self.orphan(alive=alive, previous=previous), NOW)
+            assert not any(s.alert for s in found)

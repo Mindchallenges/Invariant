@@ -40,6 +40,7 @@ graph TD
         OWSVC[webservice]
         OTLS["tls (IDEA_026)"]
         ODEV[devices]
+        OCLOSE["closehost (IDEA_027 inc 6)"]
     end
 
     subgraph core["core/ — host-agnostic engine"]
@@ -153,6 +154,9 @@ graph TD
     OWSVC --> OTLS
     OTLS --> OWEB
     OTLS --> OHOME
+    CLI --> OCLOSE
+    OCLOSE --> OSCAN
+    CLI -. injects the record reader, ps, SIGTERM and the Terminal tab closer from .-> CCLAUNCH
     CCLAUNCH --> CCTEL
     OATTN --> STORE
     OINDEX --> STORE
@@ -325,6 +329,16 @@ to `OACT` (`CLI -. injects without_host_markers and the handoff launcher .->
 CCLAUNCH`), the probe's shape a third time. A terminal step reuses the
 `session handoff` launch, its launcher seam and its successor watch, and no
 `oracle → hosts` arrow appears (ADR-007 D18).
+
+`OCLOSE` is `oracle close-host`, the oracle's first destructive power
+(IDEA_027 increment 6, ADR-009 D1, D15): the step a closeable leftover host
+recommends, run like any other through `OACT`. `CLI --> OCLOSE` is the
+subcommand; `OCLOSE --> OSCAN` is the process shapes it checks and the
+session row kind its binding check reads from a fresh `scan_all` and
+`assess`. Every host fact and effect it needs, Claude Code's per-process
+records and `ps`, the signal, which app owns the window and the AppleScript
+that closes the tab, arrives as `HostSeams` (`CLI -. injects the record reader, ps, SIGTERM and the
+Terminal tab closer from .-> CCLAUNCH`), the probe's shape once more, so still no `oracle → hosts` arrow.
 
 `OWEB` is the oracle's web page (IDEA_023, ADR-008), the first network
 listener in the library. `CLI --> OWEB` serves it in the foreground. The
@@ -780,6 +794,7 @@ over Tailscale (IDEA_023) is shipping in increments; see
 | `devices` | `web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Store a token or code in the clear; let a device in when the file cannot be read |
 | `webservice` | The loop behind `oracle web --wait`: wait for the tailnet, bind and follow it, keep the certificate due and swap a renewal in; its report `oracle/web.json`, and the status and doctor wording | Bind outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
 | `tls` | The page's certificate from Tailscale's CLI, through stdout; the kept `web/tls/oracle.pem`, owner-only; when it is due; the certificate and context a listener serves, swapped together | Run `tailscale` except through its injected runner; replace a good pair with one that does not load |
+| `closehost` | `oracle close-host` (IDEA_027 increment 6, ADR-009 D15): every fact of a leftover host checked again at the moment it runs, one SIGTERM and a bounded wait, then its Terminal tab closed when only its shell is left; `HostSeams`, the record reader, `ps`, `kill 0`, the signal and the tab closer, all injected | Import `hosts/`; send SIGKILL, or any signal to a group; close a tab before Claude has exited |
 
 ### `adapters/`
 
@@ -977,6 +992,15 @@ too, before scheduling, so a missing or foreign pid is reported instead of
 being left to fail silently. `CLAUDE_PID` is read as `HOST_PID_ENV`, a constant
 of its own: the same spelling is in `HOST_MARKERS`, but there it is a value the
 successor must not inherit, and here it is the process to end.
+
+The oracle's close of a leftover host (ADR-009 D15) reuses this module's
+process primitives, `process_facts` and `is_claude_process_name`, for its own
+check at the moment it acts, and adds two of its own: `runs_in_terminal_app`,
+which walks the parent chain for Terminal.app, and `TerminalTabCloser`, which
+runs `TERMINAL_TAB_SCRIPT` through `osascript` with the tty as the script's
+argument, never as its text. Unlike `DetachedCloser` it does close a
+Terminal tab, and only once Claude has exited and only a login shell is left
+in it; ADR-005 D7's rejection stands for the handoff closer.
 
 The telemetry reader is also the library's only dependency on another program's **undocumented**
 format, and that shapes the code: every field access tolerates absence, an

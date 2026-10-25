@@ -219,12 +219,16 @@ details summary::-webkit-details-marker { display: none; }
 .inset { background: var(--surface-inset); border-radius: 14px; padding: 12px 14px;
          display: flex; flex-direction: column; gap: 10px; }
 .inset.deletes { background: var(--tile-problem); color: var(--accent-problem); }
+.inset.checked, .inset.outcome { color: var(--text-tertiary); }
 .inset-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .command-text { font-size: 15px; }
 .pill { min-height: 44px; min-width: 44px; display: flex; align-items: center;
         justify-content: center; }
 .pill span { height: 32px; padding: 0 10px; border-radius: 8px; background: var(--surface-pill);
              font-size: 13px; font-weight: 600; display: flex; align-items: center; }
+.pill.row-pill { flex-shrink: 0; margin-left: auto; }
+.pill.row-pill span { height: 36px; padding: 0 14px; border-radius: 10px; font-size: 15px;
+                      color: var(--text); }
 .sheet-toggle { border-top: 1px solid var(--border); padding-top: 4px; }
 .sheet-toggle summary { min-height: 44px; font-size: 14px; font-weight: 400; }
 .sheet-buttons { display: flex; flex-direction: column; gap: 10px; }
@@ -466,7 +470,10 @@ const ORACLE = (function () {
       const rows = (all ? section.rows : section.rows.slice(0, section.shown)).map((row) =>
         h("div", {cls: "list-row"}, [h("span", {cls: "row-text"}, [
           h("span", {cls: "row-title", text: row.title}),
-          h("span", {cls: "row-line", text: row.line})])]));
+          h("span", {cls: "row-line", text: row.line})]),
+          row.button ? h("button", {cls: "pill row-pill",
+                                    on: {click: () => on.confirm(row.row)}},
+                         [h("span", {text: row.button.text})]) : null]));
       if (section.more && !all) {
         rows.push(h("button", {cls: "more", on: {click: () => on.more(section.id)}},
                     [h("span", {text: section.more}), icon(h, "down", 18)]));
@@ -524,8 +531,13 @@ const ORACLE = (function () {
     if (w.destructive) {
       if (w.deletes.length) {
         nodes.push(h("div", {cls: "inset deletes"}, [
-          h("span", {cls: "label", text: WORDS.this_deletes}),
+          h("span", {cls: "label", text: w.deletes_heading || WORDS.this_deletes}),
           ...w.deletes.map((line) => h("div", {text: line}))]));
+      }
+      if (w.checked && w.checked.length) {
+        nodes.push(h("div", {cls: "inset checked"}, [
+          h("span", {cls: "label", text: WORDS.checked_now}),
+          ...w.checked.map((line) => h("div", {text: line}))]));
       }
       nodes.push(h("details", {cls: "sheet-toggle"}, [
         h("summary", {text: WORDS.exact_command}),
@@ -562,6 +574,11 @@ const ORACLE = (function () {
     if (w.why) {
       nodes.push(h("div", {cls: "inset why"}, [h("span", {cls: "label", text: WORDS.why}),
                                                 h("p", {cls: "sentence", text: w.why})]));
+    }
+    if (w.outcome) {
+      nodes.push(h("div", {cls: "inset outcome"}, [
+        h("span", {cls: "label", text: WORDS.outcome}),
+        h("p", {cls: "sentence", text: w.outcome})]));
     }
     if (job.output) {
       nodes.push(disclosure(h, ui, on, "output:" + job.id, WORDS.show_output,

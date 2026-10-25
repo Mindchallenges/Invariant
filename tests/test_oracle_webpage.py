@@ -470,3 +470,74 @@ class TestTheMarkup:
                      ".pill { min-height: 44px; min-width: 44px;",
                      ".tile { border-radius: 14px; padding: 10px 8px; min-height: 44px;"):
             assert rule in style, rule
+
+
+# -- close host (IDEA_027 increment 6, ADR-009 D15) ----------------------------------------
+
+_HOST = "27885f4e-1111-2222-3333-444455556666"
+_CLOSE_ARGV = ["invariant", "oracle", "close-host", _HOST, "--pid", "41001",
+               "--start", "2026-10-20T09:00:00", "--tty", "ttys004"]
+_LEFTOVER = {
+    "kind": "host", "project": "K", "project_name": "Heap", "root": "/r",
+    "last_activity": NOW - 2 * 86400, "previous_session": "s0",
+    "hosts": [{"host_session_id": _HOST, "current": True, "alive": True, "pid": 41001,
+               "pid_source": "record", "tty": "ttys004"}],
+    "signals": [{"kind": "orphan_host", "cause": "leftover", "alert": False,
+                 "severity": "info"}],
+    "recommendation": {"label": "close it", "kind": "run", "argv": _CLOSE_ARGV, "cwd": "/r",
+                       "env": {}},
+}
+_CLOSE_CONFIRM = {
+    "row": f"K|host:{_HOST}", "nonce": "N2", "refused": None, "kind": "run", "lines": [],
+    "subject": "", "expires_in": 120,
+    "words": panel.confirm_words(_LEFTOVER, "Heap", _CLOSE_ARGV, "run", "/r", {}, launch=None,
+                                 now=NOW),
+}
+_CLOSE_JOB = {"id": "j2", "row": f"K|host:{_HOST}", "argv": _CLOSE_ARGV, "kind": "run",
+              "state": "done", "ok": True, "status": 0, "elapsed": 4.0,
+              "output": "Claude ended, and its Terminal tab closed.\n",
+              "remote_control": None, "audit_error": ""}
+_CLOSE_JOB["words"] = {**panel.result_words(_CLOSE_JOB), "why": "",
+                       "outcome": "Claude ended, and its Terminal tab closed."}
+
+
+class TestCloseFromTheLeftovers:
+    def test_the_pill_opens_the_destructive_sheet_and_the_result_says_what_happened(self):
+        result = _run({"/api/state": [200, _state([_LEFTOVER])],
+                       "/api/confirm": [200, _CLOSE_CONFIRM],
+                       "/api/act": [202, {"job": _CLOSE_JOB}]}, r"""
+  withClass(screen(), "tile-leftovers")[0].fire("click", {preventDefault() {}});
+  const pill = withClass(screen(), "pill")[0];
+  const pillText = pill.textContent;
+  pill.fire("click");
+  await settle();
+  const sheetShown = {
+    title: texts(sheet(), "sheet-title"),
+    ends: texts(sheet(), "deletes"),
+    checked: texts(sheet(), "checked"),
+    buttons: withClass(sheet(), "sheet").map((n) => n.textContent),
+    focused: focused.textContent,
+  };
+  withClass(sheet(), "destructive")[0].fire("click");
+  await settle();
+  say({pill: pillText, sheet: sheetShown, outcome: texts(sheet(), "outcome"),
+       why: texts(sheet(), "why"), posted: posted});""")
+        assert result["pill"] == "Close…"
+        shown = result["sheet"]
+        assert shown["title"] == ["Close this Claude window?"]
+        assert shown["ends"] == [("This endsClaude in Heap · window 27885f4eProcess 41001 · "
+                                  "idle 2 days")]
+        assert shown["checked"] == [("Checked just nowNo invariant session is using this "
+                                     "Claude windowChecked again the moment you press Close "
+                                     "window")]
+        assert shown["buttons"] == ["Cancel", "Close window"]
+        assert shown["focused"] == "Cancel"
+        assert result["outcome"] == ["What happenedClaude ended, and its Terminal tab closed."]
+        assert result["why"] == []
+        assert result["posted"] == [{"row": f"K|host:{_HOST}", "nonce": "N2"}]
+
+    def test_a_read_only_page_draws_no_pill(self):
+        result = _run({"/api/state": [200, _state([_LEFTOVER], acting=False)]}, r"""
+  withClass(screen(), "tile-leftovers")[0].fire("click", {preventDefault() {}});
+  say({pills: withClass(screen(), "pill").length});""")
+        assert result == {"pills": 0}

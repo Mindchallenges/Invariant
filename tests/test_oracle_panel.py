@@ -548,7 +548,9 @@ class TestConfirmWords:
             "env": ["INVARIANT_SESSION_ID=4b7b00c1"],
             "launch": None,
             "destructive": False,
+            "deletes_heading": "This deletes",
             "deletes": [],
+            "checked": [],
         }
 
     def test_the_main_checkout_and_elsewhere(self):
@@ -727,3 +729,137 @@ class TestTheEdges:
                                     ("invariant", "session", "teardown", "--id", "s1"),
                                     "run", "/r", {}, launch=None)
         assert words["deletes"] == []
+
+
+# -- close host (IDEA_027 increment 6, ADR-009 D15) ----------------------------------------
+
+HOST_ID = "27885f4e-1111-2222-3333-444455556666"
+CLOSE = ["invariant", "oracle", "close-host", HOST_ID, "--pid", "41001",
+         "--start", "2026-10-20T09:00:00", "--tty", "ttys004"]
+
+
+def leftover_row(cause="leftover", alive=True, pid=41001, recommendation="close",
+                 conflict=(), idle=2 * 86400):
+    row = orphan(HOST_ID, alive=alive, last_activity=NOW - idle,
+                 signals=[sig("orphan_host", cause=cause, alert=False, severity="info")])
+    view = row["hosts"][0]
+    view.update(pid=pid, pid_source="conflict" if conflict else "record",
+                pid_conflict=list(conflict), tty="ttys004")
+    if recommendation == "close":
+        row["recommendation"] = step(CLOSE, cwd="/r")
+    elif recommendation == "adopt":
+        row["recommendation"] = step(["invariant", "session", "adopt", HOST_ID, "--id", "s4"],
+                                     cwd="/r")
+    return row
+
+
+def host_rows(*rows, acting=True):
+    return panel.view(doc(*rows), acting=acting)["leftovers"]["sections"][0]["rows"]
+
+
+class TestCloseHostWords:
+    def test_the_step(self):
+        words = panel.step_words(CLOSE)
+        assert words.button == "Close…"
+        assert words.title == "Close this Claude window?"
+        assert words.run == "Close window"
+        assert words.destructive is True
+
+    def test_the_confirm_says_what_ends_and_what_was_checked(self):
+        words = panel.confirm_words(leftover_row(), "Heap", CLOSE, "run", "/r", {},
+                                    launch=None, now=NOW)
+        assert words["title"] == "Close this Claude window?"
+        assert words["sentence"].startswith(
+            "Ends Claude in this window, then closes the Terminal tab.")
+        assert "claude --resume" in words["sentence"]
+        assert words["button"] == "Close window"
+        assert words["destructive"] is True
+        assert words["deletes_heading"] == "This ends"
+        assert words["deletes"] == [
+            "Claude in Heap · window 27885f4e",
+            "Process 41001 · idle 2 days",
+        ]
+        assert words["checked"] == [
+            "No invariant session is using this Claude window",
+            "Checked again the moment you press Close window",
+        ]
+        assert words["command"] == " ".join(CLOSE)
+        assert words["place"] == "In Heap › main checkout"
+
+    def test_an_idle_time_not_known_is_left_out(self):
+        row = leftover_row()
+        row["last_activity"] = None
+        words = panel.confirm_words(row, "Heap", CLOSE, "run", "/r", {}, launch=None, now=NOW)
+        assert words["deletes"][1] == "Process 41001"
+
+    def test_the_clean_up_keeps_its_own_heading_and_checks_nothing_yet(self):
+        words = panel.confirm_words(session("s1"), "Heap",
+                                    ("invariant", "session", "teardown", "--id", "s1"),
+                                    "run", "/r", {}, launch=None)
+        assert words["deletes_heading"] == "This deletes"
+        assert words["checked"] == []
+
+    def test_only_a_close_reports_its_outcome(self):
+        assert panel.outcome_words(CLOSE, True, "Claude ended, and its Terminal tab "
+                                   "closed.") == "Claude ended, and its Terminal tab closed."
+        assert panel.outcome_words(CLOSE, False, "x") == ""
+        assert panel.outcome_words(["invariant", "pipeline", "test"], True, "ok") == ""
+        assert panel.outcome_words(CLOSE, True, None) == ""
+
+    def test_the_fixed_words(self):
+        assert panel.WORDS["this_ends"] == "This ends"
+        assert panel.WORDS["checked_now"] == "Checked just now"
+        assert panel.WORDS["outcome"] == "What happened"
+
+
+class TestLeftoverClasses:
+    @pytest.mark.parametrize(("cause", "alive", "line"), [
+        ("leftover", True, "Still open on the Mac"),
+        ("unmanaged", True, "Open, never had a session"),
+        ("active", True, "Active, no session"),
+        ("gone", False, "Already closed · record only"),
+        ("unknown", None, "Process id not recorded"),
+        ("unknown", True, "Still open on the Mac"),
+    ])
+    def test_each_class_has_its_line(self, cause, alive, line):
+        [row] = host_rows(leftover_row(cause, alive=alive, recommendation=None))
+        assert row["line"] == f"{line} · window 27885f4e"
+
+    def test_a_conflict_says_its_process_ids_disagree(self):
+        conflict = [{"source": "attention", "pid": 3, "alive": False},
+                    {"source": "record", "pid": 4, "alive": True}]
+        [row] = host_rows(leftover_row("unknown", alive=None, pid=None, conflict=conflict,
+                                       recommendation=None))
+        assert row["line"] == "Its process ids disagree · window 27885f4e"
+        assert row["button"] is None
+
+    def test_a_closable_row_has_a_close_pill_by_its_key(self):
+        [row] = host_rows(leftover_row())
+        assert row["button"] == {"text": "Close…"}
+        assert row["row"] == f"K|host:{HOST_ID}"
+
+    def test_an_adoptable_row_has_an_attach_pill(self):
+        [row] = host_rows(leftover_row("unmanaged", recommendation="adopt"))
+        assert row["button"] == {"text": "Attach…"}
+
+    def test_a_read_only_page_has_no_pill(self):
+        [row] = host_rows(leftover_row(), acting=False)
+        assert row["button"] is None
+
+    def test_an_info_step_has_no_pill(self):
+        row = leftover_row(recommendation=None)
+        row["recommendation"] = step([], kind="info")
+        assert host_rows(row)[0]["button"] is None
+
+
+class TestTechnicalConflict:
+    def test_a_conflict_row_says_which_pids_disagree(self):
+        conflict = [{"source": "attention", "pid": 3, "alive": False},
+                    {"source": "record", "pid": 4, "alive": True}]
+        row = session("s1", hosts=[host(HOST_ID, pid=None, alive=None)],
+                      signals=[sig("waiting", "permission")])
+        row["hosts"][0].update(pid_source="conflict", pid_conflict=conflict)
+        lines = panel.view(doc(row))["details"]["K|s1"]["technical"]["lines"]
+        assert (f"Host {HOST_ID} · process ids disagree: attention 3 (gone), "
+                "record 4 (alive)") in lines
+        assert not any("not recorded" in line for line in lines)

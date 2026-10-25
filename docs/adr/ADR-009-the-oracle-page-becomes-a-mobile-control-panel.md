@@ -3,9 +3,10 @@
 - **Status:** Accepted, partly implemented. The user approved the mobile
   mockup on 2026-10-23. IDEA_027 builds it in increments (D14): D2–D6, D8,
   D11 and D12 shipped with increment 3, D10 with increment 4 (its two iOS
-  checks remain open), and D9 with increment 5. D1's destructive actions
-  with D7's guards land in increments 6 and 7; the two facts they waited
-  for, BUG_078 and IDEA_024, have shipped.
+  checks were verified on 2026-10-25), and D9 with increment 5. Increment 6
+  shipped D1's first destructive action, close host, with D7's guards and
+  D15. Increment 7's clean-up actions remain; the two facts they waited for,
+  BUG_078 and IDEA_024, have shipped.
   The design of record (screens, components, tokens, wording) is
   [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23
@@ -315,7 +316,7 @@ IDEA_027's increments 1 (the plan) and 2 (the mockup) are done. The rest:
 | 3 | Plain-language panel: groups, strip, wording table, detail view, copy, button wording, no mid-word wrap (D2–D6, D8, D11, D12) | nothing |
 | 4 | Home-screen app: manifest, icon, standalone, safe areas, the two iOS checks (D10) | 3 |
 | 5 | Failure reasons: the summariser and the result sheet (D9) | 3 |
-| 6 | Orphan classes and close host (IDEA_025 scope v1, D7) | IDEA_024, BUG_078 (both shipped) |
+| 6 | Orphan classes and close host (IDEA_025 scope v1, D7, D15), **shipped** | IDEA_024, BUG_078 (both shipped) |
 | 7 | Clean-up and unstick actions (IDEA_017's list, D7) | 6 |
 
 Increments 3 to 5 change only the view, the page and a summariser, and run
@@ -324,6 +325,102 @@ must be true first. IDEA_024 gives every live host its pid, so close host
 has a target and "process id not recorded" goes. BUG_078 makes "idle 2
 days" a fact rather than a transcript's modification time. A destructive
 action decided on a false idle time is the failure D7 exists to prevent.
+
+### D15 — Close host ends Claude and then closes its Terminal tab (increment 6)
+
+*Added 2026-10-25 with increment 6. The user approved the mockup's Leftovers
+screen, with its "Close…" pills and destructive confirm, and then said: "My
+aim from what I said is to be able to close the Claude Code session and its
+terminal window properly from Oracle."*
+
+**This departs from ADR-005 D7's rejection of closing the Terminal window
+through AppleScript, for one case only: a confirmed oracle close of a
+leftover host.** D7 rejected it for the handoff closer, where the host ends
+itself 20 seconds after launching its successor: closing the window there
+would end the shell the person may still use, it does nothing over Remote
+Control, and nothing knew which window the host ran in. A leftover close is
+different on each count. The person asked for that window to be gone, on a
+confirm that names it; the host's terminal is now known, from `ps` and
+Claude Code's per-process record (IDEA_024); and the tab is closed only when
+nothing but its shell is left, so no shell with anything in it is ended. A
+window over Remote Control, in an editor or in another terminal app is left
+open and the result says so. The handoff closer is unchanged: it still
+signals the process and never touches a window.
+
+Who is offered Close: an orphan host of IDEA_025's leftover or unmanaged
+class, and only when all of these hold. It is alive; its pid comes from
+Claude Code's per-process record (`pid_source` `record` or `both`) with a
+start token; no other source disputes it (no `pid_conflict`); its record's
+`cwd` is this project's root, a folder under it or one of its worktrees, so
+the evidence ties it to this project; and no live session in any registered
+project lists it, the BUG_040 case (D7). An unmanaged host one session here
+could adopt is offered Attach first. A conflict row, a gone row, an active
+one and a row of unknown liveness are offered nothing, and the panel says
+"Its process ids disagree" on a conflict row rather than "process id not
+recorded".
+
+The confirm is D7's destructive sheet. Under "This ends" it names the
+project, the Claude session id (its first 8 characters), the pid and the
+idle time (true since BUG_078); the sentence is "Ends Claude in this window,
+then closes the Terminal tab", with the `claude --resume` note; "Checked just
+now" says no invariant session uses the window and that it is checked again
+on Close window; the exact command sits behind its toggle, and the nonce
+counts down.
+
+The action is a new subcommand the `run` kind calls with its argv as data:
+`invariant oracle close-host <host-id> --pid N --start TOKEN [--tty
+ttysNNN]`. At the moment it runs it checks everything again and refuses with
+a plain reason, having signalled nothing: Claude Code's record for the pid
+must still exist, name this host session and carry this start; `kill 0`
+must find the pid; `ps` must say it is `claude`, started at this start, on
+this tty; and a fresh scan must find no live session listing the host. The
+server re-derives the step from a fresh scan before it runs anything, as for
+every action (D1), so an orphan that became active since the confirm is
+refused there.
+
+Ending Claude is one SIGTERM, then a wait of up to 10 seconds for the exit.
+It never escalates to SIGKILL: a Claude that does not exit is reported as
+"Claude did not exit; nothing else was done", and the window is left. Only
+once Claude has gone, and only when its parent chain shows Terminal.app,
+does an AppleScript find the tab whose tty is `/dev/<tty>`. The tty is the
+script's argument (`on run argv`), never text in it. The tab is closed when
+it is not busy and only a login shell is left in it, with its window when it
+was the only tab; a busy tab, no matching tab, or a Terminal that is not
+running is left as it is ("Claude ended; the window was left open because
+…"). The script never names Terminal in a `tell` unless it is running, so it
+cannot start it. The handoff closer's kill-time `ps -p` check is reused as
+its primitives (`process_facts`, `is_claude_process_name`), not the detached
+closer itself, because a close waits for the exit and reports it.
+
+macOS asks for Automation permission the first time a process controls
+Terminal. From the web agent under launchd that is a prompt on the Mac, or
+error -1743; either reads "Claude ended; macOS has not allowed the oracle to
+control Terminal", with where to grant it (System Settings > Privacy &
+Security > Automation), and the `osascript` is bounded by a 30-second timeout
+so an unanswered prompt cannot hold the job.
+
+The result sheet is increment 5's: a refusal is "Why: invariant said: nothing
+was done: …", and a close that ran says what happened under "What happened",
+from the last line the command wrote.
+
+Every host fact and effect is a seam (`oracle/closehost.HostSeams`): the
+record reader, `ps`, `kill 0`, the signal, the parent chain and the
+AppleScript runner. The oracle imports nothing from `hosts/`; the CLI's
+`_oracle_host_seams` joins Claude Code's. The suite replaces it everywhere,
+and a `conftest.py` guard refuses `os.kill` and `os.killpg` with any signal
+but 0 unless the pid is a child the test spawned, beside the `osascript`
+guard.
+
+*Rejected:* closing the window whatever runs in it. It would end a shell, or
+a command in it, that nothing asked to end. *Rejected:* SIGKILL after the
+grace. A Claude that will not exit on SIGTERM may be writing; forcing it is a
+decision the person makes at the Mac. *Rejected:* a separate action kind
+that runs the close in the server. The subcommand keeps the close on the
+same path as every other action, with its refusals in one place (D7).
+
+Out of scope here: the leftover folders' "Remove…" (increment 7), IDEA_029's
+last message, and IDEA_017's actions. IDEA_025's one summary line per
+project in `oracle list` and the TUI is not built in this increment.
 
 ## Alternatives rejected
 

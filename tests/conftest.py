@@ -432,8 +432,86 @@ def _no_real_osascript(request, monkeypatch):
                    "with no effect" if "osascript" in hit else "")
             )
         real_init(self, args, *rest, **kwargs)
+        _SPAWNED.add(self.pid)
 
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded)
+
+
+#: The pids of the processes the running test started itself. Only these may
+#: be sent a signal; see ``_no_real_signal``.
+_SPAWNED: set[int] = set()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_signal(monkeypatch):
+    """No test signals a process it did not start itself (IDEA_027 increment 6).
+
+    ``oracle close-host`` sends SIGTERM to a Claude process, and this suite
+    runs inside one. Every route to a real signal is a seam the suite replaces
+    (``_oracle_host_seams``, ``_handoff_closer``); this is the backstop:
+    ``os.kill`` and ``os.killpg`` refuse any signal but 0, which only asks
+    whether a pid exists, unless the pid is a child this test spawned through
+    ``subprocess.Popen``. It raises :class:`RefusedProgram`, so a broad
+    ``except`` cannot hide it.
+    """
+    real_kill, real_killpg = os.kill, os.killpg
+
+    def kill(pid, sig):
+        if sig == 0 or pid in _SPAWNED:
+            return real_kill(pid, sig)
+        raise RefusedProgram(
+            f"a test sent signal {sig} to process {pid} (kill), which it did not spawn; "
+            "replace the seam"
+        )
+
+    def killpg(pgid, sig):
+        if sig == 0:
+            return real_killpg(pgid, sig)
+        raise RefusedProgram(f"a test sent signal {sig} to process group {pgid} (killpg)")
+
+    _SPAWNED.clear()
+    monkeypatch.setattr(os, "kill", kill)
+    monkeypatch.setattr(os, "killpg", killpg)
+    yield
+    _SPAWNED.clear()
+
+
+class InertHostSeams:
+    """Host seams for ``oracle close-host`` that know no process and signal nothing."""
+
+    def __init__(self) -> None:
+        self.signalled: list[int] = []
+        self.tabs: list[str] = []
+
+    def build(self):
+        from invariant.oracle.closehost import HostSeams
+
+        return HostSeams(
+            records=list,
+            facts=lambda pid: None,
+            alive=lambda pid: False,
+            terminate=self.signalled.append,
+            in_terminal=lambda pid: None,
+            close_tab=lambda tty: self.tabs.append(tty) or ("no_tab", ""),
+            sleep=lambda seconds: None,
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_close_host(monkeypatch):
+    """No test reaches the real seams behind ``oracle close-host``.
+
+    The command re-reads Claude Code's per-process records, asks ``ps``,
+    sends SIGTERM and runs ``osascript`` against Terminal, all through one
+    seam, ``_oracle_host_seams``. It is replaced here by seams that know no
+    process, so the command refuses before it signals anything; a test about
+    the command passes fakes of its own.
+    """
+    inert = InertHostSeams()
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_host_seams", inert.build, raising=False
+    )
+    return inert
 
 
 def _loopback(address) -> bool:

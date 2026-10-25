@@ -33,12 +33,24 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, ProjectSnapshot, Row
+from .scan import (
+    ROW_ERROR,
+    ROW_HOST,
+    ROW_SESSION,
+    ROW_WORKTREE,
+    HostView,
+    ProjectSnapshot,
+    Row,
+    mark_claims,
+)
 from .signals import (
     ERROR,
     FINISHED,
     GATE_BLOCKED,
     HOST_GONE,
+    ORPHAN_HOST,
+    ORPHAN_LEFTOVER,
+    ORPHAN_UNMANAGED,
     PARKED,
     STRANDED,
     STUCK,
@@ -105,7 +117,8 @@ def recommend(
             f"no session owns {row.path}; inspect it, then remove it with git if it is spent"
         )
     if row.kind == ROW_HOST:
-        return _for_orphan(row)
+        cause = next((s.cause for s in by_kind.get(ORPHAN_HOST, [])), "")
+        return _for_orphan(row, cause)
     return _with_gates(_for_session(row, has), has(GATE_BLOCKED), gates)
 
 
@@ -148,15 +161,61 @@ def _owed_detail(gates: GateReport) -> str:
     return detail
 
 
-def _for_orphan(row: Row) -> Recommendation:
-    """Adopt only a host known to be running, into the only session it could mean.
+#: Where a pid must come from for a host to be closed: Claude Code's own
+#: per-process record, which carries the start token checked again at close.
+_VERIFIED = ("record", "both")
 
-    A host heard from only through its transcript may be long gone, and a
-    project that just tore several sessions down has several such hosts: each
-    would be told to adopt the same session.
+
+def _closeable(row: Row, host: HostView | None, cause: str) -> bool:
+    """Whether every guard for closing ``host`` holds (ADR-009 D7, D15).
+
+    A leftover or unmanaged host that is idle, whose pid Claude Code's record
+    names with a start token and no other source disputes, that was started
+    in this project, and that no live session anywhere lists.
+    """
+    return (
+        host is not None
+        and cause in (ORPHAN_LEFTOVER, ORPHAN_UNMANAGED)
+        and host.alive is True
+        and host.pid_source in _VERIFIED
+        and not host.pid_conflict
+        and isinstance(host.pid, int) and host.pid > 0
+        and bool(host.process_start)
+        and host.rooted_here is True
+        and not row.claimed_elsewhere
+    )
+
+
+def close_argv(host: HostView) -> tuple[str, ...]:
+    """``invariant oracle close-host``, with every fact it checks again."""
+    argv = (CLI, "oracle", "close-host", host.host_session_id,
+            "--pid", str(host.pid), "--start", str(host.process_start))
+    return argv + (("--tty", host.tty) if host.tty else ())
+
+
+def _close(row: Row, host: HostView) -> Recommendation:
+    return Recommendation(
+        "close this leftover Claude window, then its Terminal tab",
+        close_argv(host), row.root, RUN,
+    )
+
+
+def _for_orphan(row: Row, cause: str = "") -> Recommendation:
+    """Close a leftover; adopt a running host into the only session it could mean.
+
+    A leftover, whose session has ended, is closed when every guard holds
+    (IDEA_025). An unmanaged host that one session here could take is
+    offered that session first, and closed otherwise. Adopt is offered only
+    for a host known to be running: one heard from only through its
+    transcript may be long gone, and a project that just tore several
+    sessions down has several such hosts, each of which would be told to
+    adopt the same session.
     """
     host = row.hosts[0] if row.hosts else None
     host_id = host.host_session_id if host else ""
+    closeable = _closeable(row, host, cause)
+    if closeable and cause == ORPHAN_LEFTOVER:
+        return _close(row, host)
     if host is not None and host.alive is True and len(row.adoptable) == 1:
         target = row.adoptable[0]
         return Recommendation(
@@ -165,6 +224,8 @@ def _for_orphan(row: Row) -> Recommendation:
             row.root,
             RUN,
         )
+    if closeable:
+        return _close(row, host)
     return Recommendation("start or resume a session from that host's own terminal")
 
 
@@ -233,6 +294,7 @@ def assess(
     each row carries its own under ``gates``, or ``null``.
     """
     gates = gates or {}
+    mark_claims(snapshots)
     projects = []
     for snapshot in snapshots:
         rows = []

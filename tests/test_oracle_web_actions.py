@@ -955,7 +955,7 @@ class TestOverHttp:
         assert detail["step"]["button"] == {"text": "Merge…"}
         assert [j["row"] for j in body["jobs"]] == ["K|s1"]
         assert body["jobs"][0]["words"] == {"headline": "Done in 1 s", "line": "Merge",
-                                            "tone": "ok", "why": ""}
+                                            "tone": "ok", "why": "", "outcome": ""}
         assert detail["recent"] == [{"text": "Merge: Done in 1 s",
                                      "at": body["jobs"][0]["started"]}]
 
@@ -1317,3 +1317,54 @@ def test_BUG_079_the_pages_own_post_is_accepted_with_the_origin_a_browser_derive
             f"the page's own action, Referrer-Policy {policy!r}, fetch mode {mode!r} -> "
             f"Origin {origin!r}, was refused: HTTP {response.status} {response.body!r}")
         assert world.runner.calls[0][0] == MERGE
+
+
+# -- close host from the page (IDEA_027 increment 6, ADR-009 D15) -------------------------
+
+CLOSE_HOST = ("invariant", "oracle", "close-host", "27885f4e-1111", "--pid", "41001",
+              "--start", "2026-10-20T09:00:00", "--tty", "ttys004")
+
+
+def _leftover(cwd, idle=7200.0):
+    row = _row(argv=CLOSE_HOST, cwd=str(cwd))
+    row.update(kind="host", session_id=None, name=None, state=None, stage=None,
+               last_activity=1_792_640_000.0 - idle,
+               hosts=[{"host_session_id": "27885f4e-1111", "pid": 41001, "alive": True}])
+    return row
+
+
+class TestCloseHostFromThePage:
+    def test_the_confirm_shows_the_window_the_pid_and_its_idle_time(self, world):
+        world.document = _doc(_leftover(world.cwd))
+        body = world.remote.confirm(PHONE, world.key()).body
+        words = body["words"]
+        assert body["nonce"]
+        assert words["destructive"] is True
+        assert words["deletes"] == ["Claude in p · window 27885f4e",
+                                    "Process 41001 · idle 2 h"]
+        assert words["checked"][0] == "No invariant session is using this Claude window"
+
+    def test_a_close_that_ran_says_what_happened(self, world):
+        world.document = _doc(_leftover(world.cwd))
+        world.runner.output = ("checked: process 41001 is Claude\n"
+                               "Claude ended, and its Terminal tab closed.\n")
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        job = world.remote.act(PHONE, world.key(), nonce).body["job"]
+        assert job["words"]["outcome"] == "Claude ended, and its Terminal tab closed."
+        assert job["words"]["why"] == ""
+        assert world.runner.calls[0][0] == CLOSE_HOST
+
+    def test_a_close_that_was_refused_says_why_and_nothing_happened(self, world):
+        world.document = _doc(_leftover(world.cwd))
+        world.runner.status = 1
+        world.runner.output = "invariant: nothing was done: process 41001 has already exited\n"
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        job = world.remote.act(PHONE, world.key(), nonce).body["job"]
+        assert job["words"]["why"] == ("invariant said: nothing was done: process 41001 has "
+                                       "already exited")
+        assert job["words"]["outcome"] == ""
+
+    def test_any_other_step_reports_no_outcome(self, world):
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        job = world.remote.act(PHONE, world.key(), nonce).body["job"]
+        assert job["words"]["outcome"] == ""

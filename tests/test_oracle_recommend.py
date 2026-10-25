@@ -308,3 +308,93 @@ class TestGateDetail:
             assert before["signals"] == after["signals"]
             assert before["gates"] is None
             assert after["gates"]["owed"][0]["rule_id"] == "test.all_pass"
+
+
+# -- close host (IDEA_027 increment 6, ADR-009 D15) -------------------------------------
+
+START = "2026-10-20T09:00:00"
+
+
+def leftover(previous: str | None = "s0", adoptable=(), claimed: str | None = None,
+             idle: float = 2 * 3600.0, **host_fields) -> Row:
+    """An orphan host every guard lets close: alive by its record, idle, rooted here."""
+    view = host(None, hid="h7")
+    fields = {"pid": 41001, "pid_source": "record", "process_start": START,
+              "tty": "ttys004", "cwd": ROOT, "rooted_here": True}
+    fields.update(host_fields)
+    for name, value in fields.items():
+        setattr(view, name, value)
+    return Row(kind=ROW_HOST, project=PROJECT, project_name="alpha", root=ROOT, hosts=[view],
+               last_activity=NOW - idle, previous_session=previous,
+               adoptable=list(adoptable), claimed_elsewhere=claimed)
+
+
+CLOSE = ("invariant", "oracle", "close-host", "h7", "--pid", "41001", "--start", START,
+         "--tty", "ttys004")
+
+
+class TestCloseHost:
+    def test_a_leftover_is_recommended_close_with_every_fact_to_check_again(self):
+        advice = advise(leftover())
+        assert advice.kind == rec.RUN
+        assert advice.argv == CLOSE
+        assert advice.cwd == ROOT
+        assert advice.env == {}
+
+    def test_the_close_command_parses_with_the_real_cli(self):
+        parsed = build_parser().parse_args(list(CLOSE[1:]))
+        assert callable(parsed.func)
+        assert (parsed.host_id, parsed.pid, parsed.start, parsed.tty) == (
+            "h7", 41001, START, "ttys004")
+
+    def test_a_host_with_no_terminal_closes_without_a_tty(self):
+        advice = advise(leftover(tty=None))
+        assert advice.argv == CLOSE[:-2]
+        build_parser().parse_args(list(advice.argv[1:]))
+
+    def test_a_pid_both_sources_name_closes(self):
+        assert advise(leftover(pid_source="both")).argv == CLOSE
+
+    def test_close_comes_before_adopt_on_a_leftover(self):
+        assert advise(leftover(adoptable=["s4"])).argv == CLOSE
+
+    def test_an_unmanaged_host_closes_when_nothing_could_adopt_it(self):
+        assert advise(leftover(previous=None)).argv == CLOSE
+
+    def test_an_unmanaged_host_with_one_session_to_join_is_offered_adopt(self):
+        advice = advise(leftover(previous=None, adoptable=["s4"]))
+        assert advice.argv == ("invariant", "session", "adopt", "h7", "--id", "s4")
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param(leftover(pid_source="attention"), id="pid-from-the-attention-record"),
+            pytest.param(leftover(pid_source="conflict", pid=None, alive=None,
+                                  pid_conflict=[{"source": "record", "pid": 1, "alive": True}]),
+                         id="pid-conflict"),
+            pytest.param(leftover(pid_conflict=[{"source": "record", "pid": 1, "alive": True}]),
+                         id="a-listed-conflict"),
+            pytest.param(leftover(process_start=None), id="no-start-token"),
+            pytest.param(leftover(rooted_here=False), id="started-in-another-project"),
+            pytest.param(leftover(rooted_here=None), id="no-recorded-cwd"),
+            pytest.param(leftover(claimed="beta"), id="a-live-session-elsewhere-holds-it"),
+            pytest.param(leftover(idle=300), id="recently-active"),
+            pytest.param(leftover(alive=False), id="gone"),
+        ],
+    )
+    def test_no_close_unless_every_guard_holds(self, row):
+        advice = advise(row)
+        assert advice is None or "close-host" not in advice.argv
+
+    def test_assess_marks_a_host_a_live_session_elsewhere_holds(self):
+        orphan = leftover()
+        holder = session_row(project="/state/beta", project_name="beta", session_id="b1",
+                             hosts=[host(None, hid="h7")])
+        alpha = ProjectSnapshot(project=ProjectEntry(PROJECT, ROOT, "alpha", "manual"),
+                                rows=[orphan])
+        beta = ProjectSnapshot(project=ProjectEntry("/state/beta", "/repo/beta", "beta",
+                                                    "manual"), rows=[holder])
+        document = assess([alpha, beta], NOW)
+        [row] = document["projects"][0]["rows"]
+        assert row["claimed_elsewhere"] == "beta"
+        assert "close-host" not in (row["recommendation"] or {}).get("argv", [])

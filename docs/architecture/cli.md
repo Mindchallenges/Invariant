@@ -894,6 +894,25 @@ invariant oracle tui
     row waiting on one is refused, and so is any argv that is not an
     invariant command. Exit 0 when quit.
 
+invariant oracle close-host HOST_ID --pid N --start TOKEN [--tty TTY] [--json]
+    End a leftover Claude window, then close its Terminal tab (IDEA_027
+    increment 6, ADR-009 D15). The step the panel's "Close…" runs; the oracle
+    recommends it with every fact filled in. It first checks all of them
+    again: Claude Code's per-process record for N exists, names HOST_ID and
+    carries TOKEN; kill 0 finds N; ps says N is claude, started at TOKEN, on
+    TTY (on no terminal when --tty is omitted); and no live session in any
+    registered project lists HOST_ID. Any mismatch exits 1 with "nothing was
+    done: <why>", and nothing is signalled. Then one SIGTERM, and a wait of up
+    to 10 s for N to exit; it never sends SIGKILL, and a Claude still running
+    exits 1 with "Claude did not exit … nothing else was done". Once Claude
+    has gone, and only when Terminal.app owns the window, the tab on TTY is
+    closed if nothing but its login shell is left (with its window when it was
+    the only tab); otherwise the window is left and the last line says why.
+    The last line is always the outcome; exit 0 once Claude has ended. The
+    first close from the launchd agent may raise macOS's Automation prompt for
+    Terminal; refused or unanswered (30 s), it says so and how to allow it.
+    JSON: {"host_id", "pid", "tty", "lines"}.
+
 invariant oracle notify-test [--json]
     Post one notification through the seam the watcher uses, to check that
     notifications reach you. A delivery failure exits 1 with the reason.
