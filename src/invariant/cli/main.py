@@ -2769,6 +2769,9 @@ def cmd_oracle_list(args) -> int:
             lines.append("  nothing live")
         for row in rows:
             lines.extend(_oracle_row_lines(row))
+    source = next((p.get("host_processes") for p in document["projects"]), None)
+    if source and not source.get("used"):
+        lines.append(f"host process records: {source.get('detail')}")
     text = "\n".join(lines) or f"  no projects registered in {index.home}"
     return emit(args, document, text)
 

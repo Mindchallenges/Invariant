@@ -529,7 +529,7 @@ open:
 | 3 | Plain-language panel: `oracle/panel`, the groups, strip, wording, detail view, copy, button wording, no mid-word wrap | **shipped** (session 80e81a07) | First view fits 390 px and a count scrolls to its group; no default-view string holds a path, argv, pid, host UUID or engine state name; each is in Technical details |
 | 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | **shipped** (session 80e81a07); both iOS checks verified on an iPhone 2026-10-25 | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
 | 5 | Failure reasons: the summariser and the result sheet | **shipped** (session 80e81a07) | A failed action shows one plain sentence; the full output only after "Show full output" |
-| — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | later sessions | their own acceptance |
+| — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | **shipped** (BUG_078; IDEA_024 in session 53d33984) | their own acceptance |
 | 6 | Orphan classes and close host (IDEA_025 scope v1) | later | IDEA_025's acceptance; refuses at confirm time on a gone, renamed or mismatched pid |
 | 7 | Clean-up and unstick actions (IDEA_017's list) | later | IDEA_017's acceptance; every action shows what it runs and destroys, and refuses when its precondition no longer holds |
 

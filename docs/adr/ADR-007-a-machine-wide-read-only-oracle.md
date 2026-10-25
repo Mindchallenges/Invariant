@@ -224,6 +224,12 @@ The pid-existence half of liveness (`os.kill(pid, 0)`) is not host knowledge
 and stays in the oracle, so a scan with no probe still tells a dead pid from a
 live one.
 
+IDEA_024 (2026-10-25) extends the probe, not the rule: `host_processes()`
+reads Claude Code's per-process records and `process_facts(pid)` asks `ps`
+for a pid's name, start and terminal, both implemented in
+`hosts/claude_code_launch`. The scan only joins them, and reads a probe
+without them, or one whose read raises, as a source not used.
+
 ### D12 — Where a session is in its life is derived from its machine, never named
 
 The signals need to know that a session awaits a merge, has merged, or is

@@ -308,12 +308,73 @@ A pipeline is read the same way: `landed` is terminal and not the abandon
 state, and the red phase is the machine's `red_phase` (else `red`, the rule's
 own fallback).
 
-**Host liveness.** A host is alive when its recorded pid exists (`os.kill(pid,
-0)`, every scan) and the process is still the host (a process-name check, kept
+**Host liveness.** A host is alive when its pid exists (`os.kill(pid, 0)`,
+every scan) and the process is still the host (a process-name check, kept
 for 60 seconds and dropped the moment the pid is seen dead). A reused pid is
 therefore "not alive", and a host that died without `SessionEnd` stops reading
-as waiting. No pid recorded means liveness is unknown (`null`), which no
-signal treats as gone.
+as waiting. No pid known means liveness is unknown (`null`), which no signal
+treats as gone.
+
+**Where the pid comes from** (IDEA_024). Two sources name a host's pid: its
+attention record, written by the hooks, and Claude Code's per-process record,
+`<claude home>/sessions/<pid>.json`, which every running Claude Code process
+keeps whatever hooks it ran. The scan joins the second to the hosts it already
+knows by host session id (the record's `sessionId`), so a host that never
+wrote an attention record still has a pid. The join adds no host: a project's
+hosts are still its attention records and its transcripts, so attribution
+stays transcript-based, and the record's `cwd` is shown, not used to place a
+host.
+
+A recorded pid gets one check more than an attention pid. One `ps -o
+tty=,lstart=,comm=` (`ClaudeCodeProbe.process_facts`) answers the name, the
+process's start and its terminal; when the record's `procStart` and the
+process table both give a start, they must be equal, because a reused pid can
+be another `claude`. A start either side cannot read (another locale's
+spelling, a missing field) is not compared. The facts are kept for 60 seconds
+and dropped when the pid is seen dead, as the name check is. A live pid `ps`
+cannot describe is unknown, not gone.
+
+```mermaid
+flowchart TD
+    A["host id"] --> R{"per-process records for it?"}
+    R -- "none" --> P{"attention pid?"}
+    P -- "no" --> U["pid null, alive null"]
+    P -- "yes" --> AP["pid_source attention: kill 0 + name check"]
+    R -- "two or more alive" --> C["pid_source conflict: pid null, alive null, every candidate listed"]
+    R -- "one alive, or the newest dead one" --> J{"attention pid differs?"}
+    J -- "yes" --> C
+    J -- "no attention pid" --> RP["pid_source record"]
+    J -- "same pid" --> BP["pid_source both"]
+    RP --> CHK["kill 0 + one ps: claude, same start; tty kept"]
+    BP --> CHK
+```
+
+**The oracle never picks one silently.** When both sources name a pid and the
+pids differ, or two records for one host are both alive, the row carries
+`pid_source: conflict` and `pid_conflict`, each candidate with its own
+liveness, and `pid` and `alive` stay `null`. Unknown liveness is what no
+signal reads as gone, so a conflict never raises `host_gone` and never offers
+adopt. The TUI says `pids disagree: attention 3 (gone), record 4 (alive)`.
+
+A host row also keeps the record's `launched_name` (the session name it was
+started with), `cwd`, `started` (epoch seconds) and `process_start` (the
+start token, so a later action can compare it again at the moment it acts),
+and the verified process's `tty`. The tty is what a close action needs to find
+the terminal tab the host runs in; nothing reads it yet.
+
+**When the records are not used.** They are Claude Code internals, not a
+contract, so the reader (`claude_code_launch.read_host_processes`) is strict:
+only `<digits>.json` is opened (the `<pid>.<hash>.key` files beside them never
+are), a record must be a JSON object of at most 64 KiB whose `pid` is the
+positive integer the file is named after, with a non-empty `sessionId`, and a
+`pidDomain` other than this platform is skipped. Optional fields of the wrong
+type read as `null`. A missing directory, or files of which none parse, raise,
+and so does a probe that cannot read them; the scan then uses no record, every
+host's pid is the attention record's or `null` as before, and each project of
+the document says so under `host_processes`: `{used, records, detail}`. `oracle
+list` prints `host process records: not used: <why>` under its table. An empty
+directory is a source with nothing running. The records are read once per 60
+seconds, like the other cached answers.
 
 **Last activity** is the latest of the host transcripts' last turns, the
 attention records' modification times, the session's `heartbeat` and its
@@ -345,10 +406,14 @@ IDEA_029 can ask it for the newest entry with text.
 
 **Host facts are injected** (ADR-007 D11). Which transcripts belong to a
 project and whether a pid is `claude` are Claude Code knowledge. The scan
-defines `HostProbe` (`transcripts(root)`, `is_host_process(pid)`), the CLI
-injects `hosts/claude_code_launch.ClaudeCodeProbe`, and the oracle imports
-nothing from `hosts/`. Without a probe the scan still runs: no transcripts,
-and a live pid counts as the host.
+defines `HostProbe` (`transcripts(root)`, `is_host_process(pid)`, and, since
+IDEA_024, `host_processes()` and `process_facts(pid)`), the CLI injects
+`hosts/claude_code_launch.ClaudeCodeProbe`, and the oracle imports nothing
+from `hosts/`. The start token in a record and in `process_facts` is the
+host's own spelling, compared for equality and never parsed by the oracle.
+Without a probe the scan still runs: no transcripts, no records, and a live
+pid counts as the host. A probe without the two newer methods is a probe whose
+records are not used.
 
 **Cheap on the next pass.** `ScanCache` keeps the git-backed answers — each
 project's worktree list and its transcript source, whose construction asks git
@@ -690,8 +755,8 @@ leaked worktrees and the error rows.
 |---|---|
 | project | the project's name (blank on a nested host line) |
 | session | `row_label`, the name `oracle list` and the notifications use |
-| stage / lane | a session's stage and its pipeline, as `working · tdd:green`; `orphan host`, `leaked worktree`, `unreadable`; a nested host's `current host` or `earlier host` |
-| status | `ALERT`, `note` or `ok`; a nested host's liveness and what it waits on |
+| stage / lane | a session's stage and its pipeline, as `working · tdd:green`; `orphan host · alive, pid N` (its liveness as the status column words it), `leaked worktree`, `unreadable`; a nested host's `current host` or `earlier host` |
+| status | `ALERT`, `note` or `ok`; a nested host's liveness, its pid (or the pids its sources disagree on) and what it waits on |
 | signals | each signal and its detail: a high alert red, any other alert amber, a marker dim |
 | next | the recommended command, or the step's label when there is nothing to run |
 
@@ -1098,8 +1163,9 @@ tokens, wording, the increment plan) is
   watcher and the gate cache stay read-only. Each destructive action is
   confirmed, re-checks its precondition at confirm time, runs as an
   `invariant` command with no refusal override, and is never offered on a
-  row BUG_040 (below) may have misattributed. They wait for IDEA_024 (every
-  live host's pid) and BUG_078 (true last activity).
+  row BUG_040 (below) may have misattributed. Both facts they waited for
+  have shipped: BUG_078 (true last activity) and IDEA_024 (every live host's
+  pid, its start token and its terminal, "Host liveness" above).
 
 This section and the graph in "Where it sits" are updated as each increment
 ships.

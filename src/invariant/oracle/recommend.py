@@ -250,6 +250,7 @@ def assess(
                 "project": snapshot.project.to_dict(),
                 "scanned_at": snapshot.scanned_at,
                 "elapsed": snapshot.elapsed,
+                "host_processes": dict(snapshot.host_processes),
                 "rows": rows,
             }
         )

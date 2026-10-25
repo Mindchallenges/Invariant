@@ -81,7 +81,9 @@ Without one the handoff fails, and the launching host is never signalled.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -95,7 +97,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..core.errors import InvariantError
-from .claude_code_telemetry import ClaudeCodeTranscripts
+from .claude_code_telemetry import ClaudeCodeTranscripts, claude_home
 
 #: The binary looked up on PATH. Resolved, never assumed: a bare ``claude`` in
 #: the typed line would be resolved by whatever PATH the NEW window's login
@@ -518,24 +520,189 @@ def process_name(pid: int) -> str | None:
     return name if proc.returncode == 0 and name else None
 
 
+#: The ``ps -o lstart`` spelling of a process's start, which Claude Code's
+#: per-process record repeats as ``procStart``. Parsed in the C locale's
+#: names; a start in any other spelling is not compared at all.
+LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
+
+#: A per-process record larger than this is not a record this module knows.
+#: The real ones are well under a kilobyte.
+MAX_RECORD_BYTES = 64 * 1024
+
+_LSTART = re.compile(r"^(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$")
+
+
+def process_start_token(text) -> str | None:
+    """A process start in one spelling, ``YYYY-MM-DDTHH:MM:SS``, or ``None``.
+
+    The record's ``procStart`` and ``ps -o lstart`` both print the start as
+    ``Sun Oct  5 09:00:00 2026``, padded differently. Both sides go through
+    this, so the oracle compares two equal-or-not tokens and never parses a
+    date. A spelling this does not read, such as another locale's, is
+    ``None``: not comparable, rather than different.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        parsed = time.strptime(" ".join(text.split()), LSTART_FORMAT)
+    except ValueError:
+        return None
+    # A wall-clock reading in the machine's own zone, as both sides print it.
+    # It is a token for equality, never a time this library reckons with.
+    return time.strftime("%Y-%m-%dT%H:%M:%S", parsed)
+
+
+@dataclass(frozen=True)
+class HostProcessRecord:
+    """One of Claude Code's per-process records, the fields the oracle reads.
+
+    ``started`` is epoch seconds (the record's ``startedAt`` is
+    milliseconds). ``start`` is the record's ``procStart`` as a
+    :func:`process_start_token`, the guard against a reused pid.
+    """
+
+    session_id: str
+    pid: int
+    name: str | None = None
+    cwd: str | None = None
+    started: float | None = None
+    start: str | None = None
+
+
+@dataclass(frozen=True)
+class ProcessFacts:
+    """What one ``ps`` says about a live pid: is it ``claude``, when it
+    started, and the terminal it runs on (``None`` when it has none)."""
+
+    is_host: bool
+    start: str | None = None
+    tty: str | None = None
+
+
+def process_facts(pid: int) -> ProcessFacts | None:
+    """``ps -o tty=,lstart=,comm=`` for ``pid``, or ``None`` when it cannot say.
+
+    One process-table read answers all three questions. ``comm`` is last
+    because it may hold spaces (a full path), and ``lstart`` is a fixed five
+    words; a line whose start does not read still answers the name and tty.
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "tty=,lstart=,comm=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    line = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not line:
+        return None
+    tty, _, rest = line.partition(" ")
+    rest = rest.strip()
+    match = _LSTART.match(rest)
+    start, name = (process_start_token(match.group(1)), match.group(2)) if match else (None, rest)
+    return ProcessFacts(
+        is_host=is_claude_process_name(name),
+        start=start,
+        tty=None if tty in ("?", "??") else tty,
+    )
+
+
+def _record(path: Path, platform: str) -> HostProcessRecord | None:
+    """One ``<pid>.json``, or ``None`` when it is not in the shape known here.
+
+    Required: a JSON object whose ``pid`` is the positive integer the file is
+    named after, and a non-empty ``sessionId``. A ``pidDomain`` other than
+    this platform names a pid in another process namespace, which this
+    machine's ``kill`` would misread. Everything else is optional and read
+    only when it has the expected type.
+    """
+    try:
+        if path.stat().st_size > MAX_RECORD_BYTES:
+            return None
+        body = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    pid = body.get("pid")
+    session_id = body.get("sessionId")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or str(pid) != path.stem:
+        return None
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    domain = body.get("pidDomain")
+    if domain is not None and domain != platform:
+        return None
+    started = body.get("startedAt")
+    started_ok = isinstance(started, (int, float)) and not isinstance(started, bool)
+    name, cwd = body.get("name"), body.get("cwd")
+    return HostProcessRecord(
+        session_id=session_id,
+        pid=pid,
+        name=name if isinstance(name, str) else None,
+        cwd=cwd if isinstance(cwd, str) else None,
+        started=started / 1000.0 if started_ok else None,
+        start=process_start_token(body.get("procStart")),
+    )
+
+
+def read_host_processes(home: Path, platform: str) -> list[HostProcessRecord]:
+    """Every well-formed per-process record under ``<home>/sessions``.
+
+    These are Claude Code internals, not a contract, so the reader is strict
+    about shape and loud about being unusable: no directory raises
+    ``FileNotFoundError``, and files of which none parse raise ``ValueError``.
+    The caller reads either as "source not used", never as "host gone". An
+    empty directory is a source with nothing running. Only ``<digits>.json``
+    is opened: the ``<pid>.<hash>.key`` files beside them are never read.
+    """
+    directory = home / "sessions"
+    if not directory.is_dir():
+        raise FileNotFoundError("no sessions directory in the Claude Code home")
+    candidates = [
+        p for p in sorted(directory.glob("*.json")) if p.stem.isdigit() and p.is_file()
+    ]
+    records = [r for r in (_record(p, platform) for p in candidates) if r is not None]
+    if candidates and not records:
+        raise ValueError(
+            f"{len(candidates)} per-process records, none in the expected shape"
+        )
+    return records
+
+
 class ClaudeCodeProbe:
     """What the oracle needs to know about Claude Code, and nothing else.
 
-    The oracle's scan defines the shape it reads — a project's transcripts and
-    whether a live pid is still the host — and the CLI injects this. It
-    imports nothing from ``oracle/``, so no ``hosts -> oracle`` arrow exists
-    (ADR-007 D6, D11): the host answers questions, the layer above asks them.
+    The oracle's scan defines the shape it reads — a project's transcripts,
+    whether a live pid is still the host, the per-process records and what
+    ``ps`` says about a recorded pid — and the CLI injects this. It imports
+    nothing from ``oracle/``, so no ``hosts -> oracle`` arrow exists (ADR-007
+    D6, D11): the host answers questions, the layer above asks them.
     """
 
-    def __init__(self, home: Path | None = None, name_of=None) -> None:
+    def __init__(
+        self, home: Path | None = None, name_of=None, facts_of=None, platform=None
+    ) -> None:
         self.home = home
         self.name_of = name_of if name_of is not None else process_name
+        self.facts_of = facts_of if facts_of is not None else process_facts
+        self.platform = platform if platform is not None else host_platform
 
     def transcripts(self, root: Path) -> ClaudeCodeTranscripts:
         return ClaudeCodeTranscripts(origin=Path(root), home=self.home)
 
     def is_host_process(self, pid: int) -> bool:
         return is_claude_process_name(self.name_of(pid))
+
+    def host_processes(self) -> list[HostProcessRecord]:
+        home = self.home if self.home is not None else claude_home()
+        return read_host_processes(Path(home), self.platform())
+
+    def process_facts(self, pid: int) -> ProcessFacts | None:
+        return self.facts_of(pid)
 
 
 #: How far up the parent chain :func:`find_host_pid` looks. A hook is the

@@ -174,7 +174,8 @@ def next_text(advice: dict[str, Any] | None) -> str:
 def stage_text(row: dict[str, Any]) -> str:
     kind = row.get("kind")
     if kind == ROW_HOST:
-        return "orphan host"
+        hosts = row.get("hosts") or []
+        return f"orphan host · {host_liveness(hosts[0])}" if hosts else "orphan host"
     if kind == ROW_WORKTREE:
         return "leaked worktree"
     if kind == ROW_ERROR:
@@ -186,9 +187,26 @@ def stage_text(row: dict[str, Any]) -> str:
     return stage
 
 
+def _alive_word(alive: bool | None) -> str:
+    return "alive" if alive is True else "gone" if alive is False else "unknown"
+
+
+def host_liveness(host: dict[str, Any]) -> str:
+    """A host's liveness and its pid, or the pids its sources disagree on."""
+    conflict = host.get("pid_conflict") or []
+    if conflict:
+        named = ", ".join(
+            f"{c.get('source')} {c.get('pid')} ({_alive_word(c.get('alive'))})" for c in conflict
+        )
+        return f"pids disagree: {named}"
+    alive, pid = host.get("alive"), host.get("pid")
+    if alive is None:
+        return "pid unknown" if pid is None else f"unknown, pid {pid}"
+    return _alive_word(alive) + (f", pid {pid}" if pid is not None else "")
+
+
 def host_status(host: dict[str, Any]) -> str:
-    alive = host.get("alive")
-    said = "alive" if alive is True else "gone" if alive is False else "pid unknown"
+    said = host_liveness(host)
     waiting = (host.get("attention") or {}).get("waiting")
     if waiting:
         said += f", waiting: {waiting.get('kind')}"

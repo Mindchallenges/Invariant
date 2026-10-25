@@ -1635,6 +1635,18 @@ record with no pid has unknown liveness, which no signal reads as gone. The
 scan reads the record through an `InertStore` and never writes it (see
 [oracle.md](oracle.md)).
 
+**A second source for the pid** (IDEA_024). Claude Code keeps its own
+per-process record, `<claude home>/sessions/<pid>.json`, for every running
+process. It is Claude Code's state, not this library's: the oracle reads it,
+never writes it, stores nothing from it, and opens only the `<digits>.json`
+files, never the `.key` files beside them. A host with no attention pid takes
+the record's, which is checked as above plus one more test, the record's
+process start against the live process's, against a reused pid. When the two
+sources name different pids the row says so and its liveness is unknown. A
+missing or unexpected record format leaves this section's rules exactly as
+they are, and the scan reports the source as not used ([oracle.md](oracle.md),
+"Host liveness").
+
 **Two surfaces of "blocked".** The Stop hook records the closeout's blocking
 rule ids, and a gated CLI command (`pipeline advance`, `session transition`,
 `review`, `merge`) records the rules that refused it. A clean Stop clears only

@@ -94,8 +94,36 @@ class TranscriptIndex(Protocol):
         ...
 
 
+class HostProcess(Protocol):
+    """One running host process, as the host's own per-process record says.
+
+    ``start`` is an opaque token the host also gives :class:`ProcessFacts`,
+    so the two are compared for equality and never parsed here.
+    """
+
+    session_id: str
+    pid: int
+    name: str | None
+    cwd: str | None
+    started: float | None
+    start: str | None
+
+
+class ProcessFacts(Protocol):
+    """What the process table says about a live pid."""
+
+    is_host: bool
+    start: str | None
+    tty: str | None
+
+
 class HostProbe(Protocol):
-    """What the agent host knows that the oracle does not."""
+    """What the agent host knows that the oracle does not.
+
+    ``host_processes`` and ``process_facts`` are optional (IDEA_024): a probe
+    without them, like one whose read raises, leaves liveness to the
+    attention record's pid, as before the records were read.
+    """
 
     def transcripts(self, root: Path) -> TranscriptIndex:
         """The transcripts of the project rooted at ``root``."""
@@ -103,6 +131,15 @@ class HostProbe(Protocol):
 
     def is_host_process(self, pid: int) -> bool:
         """Whether the live process ``pid`` is the agent host."""
+        ...
+
+    def host_processes(self) -> Iterable[HostProcess]:
+        """Every running host's per-process record. Raises when the source
+        cannot be used (missing, unreadable, an unexpected shape)."""
+        ...
+
+    def process_facts(self, pid: int) -> ProcessFacts | None:
+        """``pid``'s name check, start token and terminal, or ``None``."""
         ...
 
 
@@ -136,6 +173,8 @@ class ScanCache:
         self.monotonic = monotonic
         self.pid_alive = pid_alive
         self._entries: dict[tuple[str, Any], tuple[float, Any]] = {}
+        #: Whether the last :meth:`host_processes` read was used, and why not.
+        self.host_process_status: dict[str, Any] = _source_status(False, 0, "not read yet")
 
     def _cached(self, kind: str, key: Any, compute: Callable[[], Any]) -> Any:
         now = self.monotonic()
@@ -187,6 +226,64 @@ class ScanCache:
         except Exception:  # noqa: BLE001 - an unanswerable check is unknown, not dead
             return None
 
+    def host_processes(self) -> dict[str, list[HostProcess]]:
+        """The host's per-process records by host session id, read once per ``ttl``.
+
+        :attr:`host_process_status` says whether the source was used. A probe
+        without the read, or a read that raises, is "not used", and the scan
+        then behaves exactly as it did before the records existed.
+        """
+        by_host, status = self._cached("processes", None, self._read_host_processes)
+        self.host_process_status = status
+        return by_host
+
+    def _read_host_processes(self) -> tuple[dict[str, list[HostProcess]], dict[str, Any]]:
+        read = getattr(self.probe, "host_processes", None)
+        if read is None:
+            reason = "no host probe" if self.probe is None else "the host probe does not read them"
+            return {}, _source_status(False, 0, f"not used: {reason}")
+        by_host: dict[str, list[HostProcess]] = {}
+        try:
+            records = list(read())
+            for record in records:
+                by_host.setdefault(record.session_id, []).append(record)
+        except Exception as exc:  # noqa: BLE001 - an undocumented format must cost only itself
+            return {}, _source_status(False, 0, f"not used: {_describe(exc)}")
+        return by_host, _source_status(
+            True, len(records), f"{len(records)} per-process records read"
+        )
+
+    def process_alive(self, pid: int | None, start: str | None) -> tuple[bool | None, str | None]:
+        """Whether a recorded pid is still that host, and its terminal.
+
+        :meth:`host_alive`'s two checks, plus one: when the record and the
+        process table both give a start, they must be equal, because a pid is
+        reused after its process exits and a reused pid can be another
+        ``claude``. A start either side cannot give is not compared. The
+        facts are kept for ``ttl`` and dropped when the pid is seen dead, as
+        the name check is. A live pid ``ps`` cannot describe is unknown.
+        """
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            return None, None
+        if not self.pid_alive(pid):
+            self._entries.pop(("facts", pid), None)
+            self._entries.pop(("host", pid), None)
+            return False, None
+        ask = getattr(self.probe, "process_facts", None)
+        if ask is None:
+            return self.host_alive(pid), None
+        try:
+            facts = self._cached("facts", pid, lambda: ask(pid))
+        except Exception:  # noqa: BLE001 - an unanswerable check is unknown, not dead
+            return None, None
+        if facts is None:
+            return None, None
+        if not facts.is_host:
+            return False, None
+        if start and facts.start and start != facts.start:
+            return False, None
+        return True, facts.tty
+
 
 @dataclass
 class HostView:
@@ -196,12 +293,31 @@ class HostView:
     #: The session's live binding (always true on an orphan row); false for
     #: the hosts a session had before it.
     current: bool = True
+    #: The host's pid, when its sources name one, or agree on one.
     pid: int | None = None
-    #: ``None`` when no pid is recorded, so liveness could not be asked.
+    #: ``None`` when no pid is known, or the sources disagree, so liveness
+    #: could not be asked.
     alive: bool | None = None
     attention: dict[str, Any] | None = None
     attention_written: float | None = None
     transcript_written: float | None = None
+    #: Where ``pid`` came from: ``attention``, ``record`` (Claude Code's
+    #: per-process record), ``both`` when they agree, ``conflict`` when they
+    #: do not; ``None`` with no pid at all (IDEA_024).
+    pid_source: str | None = None
+    #: On a conflict, every pid named, ``{source, pid, alive}`` each. The
+    #: oracle never picks one silently.
+    pid_conflict: list[dict[str, Any]] = field(default_factory=list)
+    #: From the per-process record: the name the host was launched with, its
+    #: working directory, when it started (epoch), and its start token, which
+    #: a later check compares again against a reused pid.
+    launched_name: str | None = None
+    cwd: str | None = None
+    started: float | None = None
+    process_start: str | None = None
+    #: The terminal the verified host runs on, from ``ps`` (``None`` without
+    #: one, or when the pid came from the attention record alone).
+    tty: str | None = None
 
 
 @dataclass
@@ -304,6 +420,9 @@ class ProjectSnapshot:
     rows: list[Row] = field(default_factory=list)
     scanned_at: float = 0.0
     elapsed: float = 0.0
+    #: Whether the host's per-process records were used for this read:
+    #: ``{used, records, detail}``.
+    host_processes: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -311,6 +430,7 @@ class ProjectSnapshot:
             "rows": [r.to_dict() for r in self.rows],
             "scanned_at": self.scanned_at,
             "elapsed": self.elapsed,
+            "host_processes": dict(self.host_processes),
         }
 
 
@@ -380,6 +500,7 @@ def scan_project(
     snapshot = ProjectSnapshot(project=entry, scanned_at=now)
     try:
         snapshot.rows = _ProjectReader(entry, now, cache).rows()
+        snapshot.host_processes = dict(cache.host_process_status)
     except Exception as exc:  # noqa: BLE001 - one broken project must not hide the rest
         snapshot.rows = [
             Row(
@@ -431,6 +552,7 @@ class _ProjectReader:
         self.attention = AttentionStore(self.store)
         self.stages = session_stages(self.sessions.machine)
         self._transcripts: dict[str, float] = {}
+        self._processes: dict[str, list[HostProcess]] = {}
 
     def _row(self, kind: str, **fields: Any) -> Row:
         return Row(
@@ -445,6 +567,7 @@ class _ProjectReader:
         records, errors = self._records()
         live = [s for s in records if self.stages.get(s.state, STAGE_EARLY) != STAGE_ENDED]
         self._transcripts = self.cache.transcript_activity(self.root)
+        self._processes = self.cache.host_processes()
         session_rows = [self._session_row(s) for s in live]
         return session_rows + self._orphans(records, live) + self._leaked(live) + errors
 
@@ -528,15 +651,48 @@ class _ProjectReader:
     def _host(self, host_id: str, current: bool) -> HostView:
         record, written = self._attention_of(host_id)
         pid = record.get("pid") if record else None
-        return HostView(
+        pid = pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+        view = HostView(
             host_session_id=host_id,
             current=current,
-            pid=pid if isinstance(pid, int) else None,
-            alive=self.cache.host_alive(pid),
             attention=record,
             attention_written=written,
             transcript_written=self._transcripts.get(host_id),
         )
+        self._liveness(view, pid, self._processes.get(host_id, []))
+        return view
+
+    def _liveness(self, view: HostView, pid: int | None, records: list[HostProcess]) -> None:
+        """Join the attention record's pid with the per-process records.
+
+        One source names the pid, or both agree on it: that pid, and its
+        liveness, the record's check being the stronger one when there is a
+        record. They disagree, or two records are both alive: no pid and
+        unknown liveness, with every candidate listed (IDEA_024).
+        """
+        found = [(r, *self.cache.process_alive(r.pid, r.start)) for r in records]
+        live = [f for f in found if f[1] is True]
+        if len(live) > 1:
+            view.pid_source = "conflict"
+            view.pid_conflict = [_candidate("record", r.pid, a) for r, a, _ in live]
+            return
+        chosen = live[0] if live else max(found, key=lambda f: f[0].started or 0.0, default=None)
+        if chosen is None:
+            if pid is not None:
+                view.pid, view.alive, view.pid_source = pid, self.cache.host_alive(pid), "attention"
+            return
+        process, alive, tty = chosen
+        if pid is not None and pid != process.pid:
+            view.pid_source = "conflict"
+            view.pid_conflict = [
+                _candidate("attention", pid, self.cache.host_alive(pid)),
+                _candidate("record", process.pid, alive),
+            ]
+            return
+        view.pid, view.alive, view.tty = process.pid, alive, tty
+        view.pid_source = "both" if pid is not None else "record"
+        view.launched_name, view.cwd = process.name, process.cwd
+        view.started, view.process_start = process.started, process.start
 
     def _attention_of(self, host_id: str) -> tuple[dict[str, Any] | None, float | None]:
         try:
@@ -644,3 +800,11 @@ def _resolved(path: str) -> str:
 
 def _describe(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
+
+
+def _source_status(used: bool, records: int, detail: str) -> dict[str, Any]:
+    return {"used": used, "records": records, "detail": detail}
+
+
+def _candidate(source: str, pid: int, alive: bool | None) -> dict[str, Any]:
+    return {"source": source, "pid": pid, "alive": alive}

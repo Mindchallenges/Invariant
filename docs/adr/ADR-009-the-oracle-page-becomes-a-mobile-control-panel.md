@@ -4,7 +4,8 @@
   mockup on 2026-10-23. IDEA_027 builds it in increments (D14): D2–D6, D8,
   D11 and D12 shipped with increment 3, D10 with increment 4 (its two iOS
   checks remain open), and D9 with increment 5. D1's destructive actions
-  with D7's guards land in increments 6 and 7, after IDEA_024 and BUG_078.
+  with D7's guards land in increments 6 and 7; the two facts they waited
+  for, BUG_078 and IDEA_024, have shipped.
   The design of record (screens, components, tokens, wording) is
   [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23
@@ -202,7 +203,10 @@ action, never after it:
   it to this project's root.
 - **Needs every live pid.** Close host and the process kill target a pid, so
   they wait for IDEA_024. Without it, most leftovers read "process id not
-  recorded" and offer nothing destructive.
+  recorded" and offer nothing destructive. IDEA_024 has shipped: a host row
+  carries its pid, the record's start token to compare again at kill time,
+  its terminal (`tty`), and `pid_source`; a `conflict` row has no pid and is
+  offered nothing destructive.
 
 ### D8 — A row waiting on a permission prompt has no run button
 
@@ -311,7 +315,7 @@ IDEA_027's increments 1 (the plan) and 2 (the mockup) are done. The rest:
 | 3 | Plain-language panel: groups, strip, wording table, detail view, copy, button wording, no mid-word wrap (D2–D6, D8, D11, D12) | nothing |
 | 4 | Home-screen app: manifest, icon, standalone, safe areas, the two iOS checks (D10) | 3 |
 | 5 | Failure reasons: the summariser and the result sheet (D9) | 3 |
-| 6 | Orphan classes and close host (IDEA_025 scope v1, D7) | IDEA_024, BUG_078 |
+| 6 | Orphan classes and close host (IDEA_025 scope v1, D7) | IDEA_024, BUG_078 (both shipped) |
 | 7 | Clean-up and unstick actions (IDEA_017's list, D7) | 6 |
 
 Increments 3 to 5 change only the view, the page and a summariser, and run
