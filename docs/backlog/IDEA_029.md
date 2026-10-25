@@ -55,7 +55,7 @@ shows the exact command and the full prepared prompt before anything runs
 read-only. The oracle imports nothing from `hosts/`: the transcript read
 goes through the `HostProbe` seam (ADR-007 D11), not into `oracle/`.
 
-**New exposure, so ADR-009 needs an amendment (a new D15).** Transcript
+**New exposure, so ADR-009 needs an amendment (a new D17).** Transcript
 text on a phone is content the oracle has never served. The decision must
 settle that:
 
@@ -101,9 +101,11 @@ settle that:
   under the nonce CSP.
 * `oracle/actions` / `oracle/webactions`: three new hand-off kinds on the
   `terminal` launch path, each building its prepared prompt.
-* ADR-009 D15; oracle.md, oracle-panel.md and the oracle-web guide updated.
+* ADR-009 D17; oracle.md, oracle-panel.md and the oracle-web guide updated.
 
-**Depends on:** BUG_078 lands first or together, since its fix is the same
+**Depends on:** IDEA_030 (the shared "open a new Claude window" launcher;
+the hand-off reuses it and fills in only the prompt, added 2026-10-26).
+BUG_078 lands first or together, since its fix is the same
 transcript tail read. IDEA_024 (every live host's pid) and BUG_040 (a
 misattributed cross-root host) gate the hand-off: a row whose project is
 wrong must never be offered a hand-off under that project.
@@ -116,7 +118,7 @@ IDEA_013 (push, which could later carry the same excerpt).
 
 * Transcript text may hold secrets or personal data the user typed. Paired
   devices and the cap limit exposure; whether to redact anything (for
-  example through the privacy patterns) is for D15 to settle.
+  example through the privacy patterns) is for D17 to settle.
 * The transcript JSONL format is Claude Code internals. The read must
   tolerate an unknown or partial last line and fall back to no excerpt,
   never to a wrong one.
