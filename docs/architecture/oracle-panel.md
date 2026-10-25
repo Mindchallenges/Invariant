@@ -498,8 +498,10 @@ left open:
 | Pairing inside the app | The "not paired" page links "Enter a pairing code" to `/pair`, which is inside the app's scope, so a code from `oracle web pair` can be typed in the standalone app itself |
 
 The two iOS checks of ADR-009 D10 could not be made on a device in this
-increment, so both stay open questions below; the guide says what to do
-either way.
+increment. The user made both on an iPhone on 2026-10-25: the four-tile icon
+appeared on the home screen (iOS sends the cookie for the touch icon), and
+the home-screen app opened without asking to pair again (it shares Safari's
+pairing). The token rule stands unchanged.
 
 ## As built in increment 5
 
@@ -525,7 +527,7 @@ open:
 | 1 | Plan | done | The decisions are ADR-009's |
 | 2 | Mockup, approved 2026-10-23 | done | This page records it |
 | 3 | Plain-language panel: `oracle/panel`, the groups, strip, wording, detail view, copy, button wording, no mid-word wrap | **shipped** (session 80e81a07) | First view fits 390 px and a count scrolls to its group; no default-view string holds a path, argv, pid, host UUID or engine state name; each is in Technical details |
-| 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | **shipped** (session 80e81a07); the two iOS checks still open | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
+| 4 | Home-screen app: manifest, icon, standalone, safe areas; the two iOS checks of ADR-009 D10 | **shipped** (session 80e81a07); both iOS checks verified on an iPhone 2026-10-25 | Opens standalone with its icon and respects safe areas; still refuses an unpaired device; loads nothing from another origin |
 | 5 | Failure reasons: the summariser and the result sheet | **shipped** (session 80e81a07) | A failed action shows one plain sentence; the full output only after "Show full output" |
 | — | IDEA_024 (every live host's pid) and BUG_078 (true last activity) | later sessions | their own acceptance |
 | 6 | Orphan classes and close host (IDEA_025 scope v1) | later | IDEA_025's acceptance; refuses at confirm time on a gone, renamed or mismatched pid |
@@ -537,21 +539,11 @@ ago" and the stale flag, and every asset inline under the nonce CSP.
 
 ## Open questions
 
-- **The icon fetch on iOS (needs the user).** Increment 4 serves the icons
-  and the manifest only to a paired device, and was not checked on an
-  iPhone. If iOS fetches the touch icon or the manifest without the cookie,
-  it gets the "not paired" page's 401: the home screen then shows a fallback
-  icon (a snapshot or a letter) and the name the page's title tags give, and
-  the app itself works. Serving those data-free routes without a token would
-  amend ADR-008 D4; that is the user's decision, not the build's
-  (ADR-009 D10). To check: pair an iPhone, Add to Home Screen from the
-  panel, and see whether the four-tile icon appears; the Mac's server logs
-  nothing per request, so the icon on the home screen is the evidence.
-- **The standalone cookie store.** Whether a home-screen install shares
-  Safari's cookie is not verified on a device either. Either way the app
-  works: if it opens on "not paired", its "Enter a pairing code" link pairs
-  it from inside, with a code from `oracle web pair` (the guide, "Add it to
-  your home screen").
+- **Settled 2026-10-25: the two iOS checks.** On an iPhone the four-tile icon
+  appeared on the home screen and the home-screen app kept Safari's pairing,
+  so the icon and manifest stay behind the token (ADR-008 D4) and no
+  amendment is needed. The "Enter a pairing code" link stays as the way in
+  for a device whose app does not share its browser's cookie.
 - **"Forget" a gone record.** Not specified by IDEA_025 or IDEA_017. Left
   out until the user asks for it.
 - **"Recent".** Settled in increment 3: the events with a recorded time are

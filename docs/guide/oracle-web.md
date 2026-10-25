@@ -206,10 +206,10 @@ On an iPhone:
 On Android, Chrome's menu offers Install app or Add to Home screen on the
 same page.
 
-**If the app opens on "not paired".** On iOS an app added to the home screen
-may keep its own cookies, apart from Safari's, so it may not know the
-pairing Safari has. It then shows the "not paired" page, which pairs it from
-inside the app:
+**If the app opens on "not paired".** On an iPhone the app added to the home
+screen kept Safari's pairing when this was checked, so it opens on the panel
+straight away. If yours does open on "not paired" (another browser or
+device, or a pairing that was revoked), pair it from inside the app:
 
 1. On the Mac, run `invariant oracle web pair --name phone-app` (any name;
    it is a second device in `oracle web devices`).
@@ -220,17 +220,11 @@ inside the app:
 The app then opens on the panel, and stays paired as Safari does. Revoking
 it is the same as any device (step 5).
 
-**What has been checked, and what has not.** The manifest, the icons, the
-full-screen tags, the safe-area padding and pairing from the "not paired"
-page are built and tested in invariant's suite. Two iOS behaviours have not
-yet been checked on an iPhone: whether an app added to the home screen keeps
-Safari's pairing, and whether iOS sends the pairing cookie when it fetches
-the icon. The icon and the app's manifest are served only to a paired
-device, like the page. If iOS fetches the icon without the cookie, the home
-screen shows a plain fallback icon (a picture of the page, or a letter)
-instead of the four tiles; the app still works. Serving the icon to unpaired
-devices would loosen the rule that an unpaired device gets nothing, so it is
-not done without the user's decision (ADR-009 D10).
+**What has been checked.** On an iPhone (2026-10-25) the panel added to the home
+screen showed its four-tile icon and opened without asking to pair again.
+The manifest, the icons, the full-screen tags, the safe-area padding and
+pairing from the "not paired" page are also tested in invariant's suite. The
+icon and the manifest are served only to a paired device, like the page.
 
 ## The Local Network permission prompt
 
@@ -347,7 +341,7 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | The phone times out, but the Mac says serving | Allow Local Network for Python (see above). Check that Tailscale is connected on the phone, and that the address on the phone matches the one `status` prints. |
 | The phone shows "not paired" | The device was revoked, its cookie was cleared, or it is a different browser. Pair it again. |
 | The home-screen app shows "not paired" | It may not share Safari's pairing. Pair it from inside the app: run `pair` on the Mac and tap "Enter a pairing code" (step 6). If it was revoked while open, swipe it away in the app switcher and open it again to reach that page. |
-| The home-screen icon is a picture of the page or a letter, not four tiles | iOS fetched the icon without the pairing cookie, so it got nothing. The app works the same. See "What has been checked" in step 6. |
+| The home-screen icon is a picture of the page or a letter, not four tiles | The device was not paired in that browser when you added it, so the icon request got nothing. Pair in the browser first, then remove the icon and add it again. The app works the same either way. |
 | "not this server" (421) | Over HTTPS, the browser named something other than the Mac's `*.ts.net` name, such as its address; the page names the right URL. Over plain HTTP, it was not the Mac's tailnet address or its name. Use the link `pair` prints. |
 | A failed step's "Why" quotes a line instead of naming a cause | The output did not state a cause in a form invariant wrote, so the page quotes the output's last meaningful line rather than guess. Open "Show full output" and read upward from the end; if the step is one you can run yourself, Copy its command from the step and run it in a terminal on the Mac. |
 | "Why" says "invariant could not find a value for …" | The project's manifest discovers that value with a command of its own, and the command printed nothing or failed. Run the step in a terminal on the Mac to see the command's own message, and fix the discovery command or the condition it checks (for example, more than one simulator booted). |

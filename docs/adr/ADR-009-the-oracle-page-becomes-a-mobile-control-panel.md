@@ -259,7 +259,13 @@ itself or shipped in the package, and never fetched.
   paired". This is checked in increment 4 too. The "not paired" page
   therefore links to the pairing form, where a code from `oracle web pair`
   can be typed in the app itself, and the guide says so.
-- **As shipped in increment 4, both checks are still open.** The build could
+- **Verified on an iPhone (2026-10-25).** The user added the panel to the home
+  screen: the four-tile icon appeared, so iOS sends the pairing cookie when
+  it fetches the touch icon, and the home-screen app opened on the panel
+  without asking to pair again, so it shares Safari's pairing. ADR-008 D4
+  needs no amendment. The paragraph below is the record as shipped, before
+  the check.
+- **As shipped in increment 4, both checks were still open.** The build could
   not run them on a device. The manifest and the icons are served under the
   token, as D4 of ADR-008 requires, and the "not paired" page links the
   pairing form. If iOS fetches the touch icon without the cookie, the home

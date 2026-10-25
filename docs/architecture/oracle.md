@@ -781,11 +781,9 @@ D4), so an unpaired device gets the "not paired" page for them too. Every
 page sets `viewport-fit=cover` and pads by `env(safe-area-inset-*)`, and the
 bottom sheet pads by the bottom and side insets. The "not paired" page links
 `/pair`, so a home-screen app that does not share the browser's cookie can be
-paired from inside itself. Whether iOS sends the cookie when it fetches the
-touch icon is not verified on a device: if it does not, the home screen shows
-a fallback icon and the app still works. Serving the icon without the token
-would amend ADR-008 D4, and is the user's decision ([oracle-panel.md](oracle-panel.md),
-"Open questions").
+paired from inside itself. On an iPhone (2026-10-25) iOS sent the
+cookie when it fetched the touch icon, and the home-screen app kept Safari's
+pairing, so the token rule needs no exception ([oracle-panel.md](oracle-panel.md)).
 
 ### What the page shows
 
@@ -1058,8 +1056,8 @@ tokens, wording, the increment plan) is
 - **Increment 4 has shipped**: the home-screen app, a manifest and icons
   served under the same token and a CSP that adds only `manifest-src 'self'`
   and `img-src 'self'`, the iOS standalone tags, and safe-area padding
-  ("Who gets an answer" above). Two iOS behaviours are unverified on a
-  device; [oracle-panel.md](oracle-panel.md) keeps them as open questions.
+  ("Who gets an answer" above). Both iOS behaviours D10 named were
+  verified on an iPhone on 2026-10-25 ([oracle-panel.md](oracle-panel.md)).
 - **Increment 5 has shipped**: a one-line reason for a failed action
   (ADR-009 D9). When a job ends, `webactions.summarise` reads its kept
   output for the line invariant's CLI writes for its own errors
