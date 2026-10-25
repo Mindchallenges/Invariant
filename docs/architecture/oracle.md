@@ -334,7 +334,11 @@ A recorded pid gets one check more than an attention pid. One `ps -o
 tty=,lstart=,comm=` (`ClaudeCodeProbe.process_facts`) answers the name, the
 process's start and its terminal; when the record's `procStart` and the
 process table both give a start, they must be equal, because a reused pid can
-be another `claude`. A start either side cannot read (another locale's
+be another `claude`. Claude Code writes `procStart` in UTC and `ps` prints
+`lstart` in local time, so `ps` runs with `TZ=UTC` (the rest of its
+environment unchanged) and both sides spell one instant the same way; neither
+is converted between zones (BUG_086: compared across zones, every live host
+on a machine outside UTC read as a reused pid). A start either side cannot read (another locale's
 spelling, a missing field) is not compared. The facts are kept for 60 seconds
 and dropped when the pid is seen dead, as the name check is. A live pid `ps`
 cannot describe is unknown, not gone.
@@ -350,7 +354,7 @@ flowchart TD
     J -- "yes" --> C
     J -- "no attention pid" --> RP["pid_source record"]
     J -- "same pid" --> BP["pid_source both"]
-    RP --> CHK["kill 0 + one ps: claude, same start; tty kept"]
+    RP --> CHK["kill 0 + one ps (TZ=UTC): claude, same start; tty kept"]
     BP --> CHK
 ```
 
@@ -425,8 +429,10 @@ project and whether a pid is `claude` are Claude Code knowledge. The scan
 defines `HostProbe` (`transcripts(root)`, `is_host_process(pid)`, and, since
 IDEA_024, `host_processes()` and `process_facts(pid)`), the CLI injects
 `hosts/claude_code_launch.ClaudeCodeProbe`, and the oracle imports nothing
-from `hosts/`. The start token in a record and in `process_facts` is the
-host's own spelling, compared for equality and never parsed by the oracle.
+from `hosts/`. The start token in a record and in `process_facts` is one
+UTC spelling, `YYYY-MM-DDTHH:MM:SS`: `procStart` is UTC as Claude Code writes
+it, and `process_facts` runs `ps` with `TZ=UTC`. The oracle compares the two
+for equality and never parses them.
 Without a probe the scan still runs: no transcripts, no records, and a live
 pid counts as the host. A probe without the two newer methods is a probe whose
 records are not used.

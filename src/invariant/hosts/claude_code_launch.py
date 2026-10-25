@@ -521,9 +521,15 @@ def process_name(pid: int) -> str | None:
 
 
 #: The ``ps -o lstart`` spelling of a process's start, which Claude Code's
-#: per-process record repeats as ``procStart``. Parsed in the C locale's
-#: names; a start in any other spelling is not compared at all.
+#: per-process record repeats as ``procStart``, in UTC. Parsed in the C
+#: locale's names; a start in any other spelling is not compared at all.
 LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
+
+#: The zone ``ps`` prints ``lstart`` in for :func:`process_facts`. Claude
+#: Code writes ``procStart`` in UTC while ``ps`` prints the machine's local
+#: time (BUG_086), so ``ps`` is run with ``TZ=UTC`` and both sides spell one
+#: instant one way. Neither side is ever converted between zones.
+PS_ZONE = "UTC"
 
 #: A per-process record larger than this is not a record this module knows.
 #: The real ones are well under a kilobyte.
@@ -536,10 +542,12 @@ def process_start_token(text) -> str | None:
     """A process start in one spelling, ``YYYY-MM-DDTHH:MM:SS``, or ``None``.
 
     The record's ``procStart`` and ``ps -o lstart`` both print the start as
-    ``Sun Oct  5 09:00:00 2026``, padded differently. Both sides go through
-    this, so the oracle compares two equal-or-not tokens and never parses a
-    date. A spelling this does not read, such as another locale's, is
-    ``None``: not comparable, rather than different.
+    ``Sun Oct  5 09:00:00 2026``, padded differently, and both in UTC: the
+    record is written so, and :func:`process_facts` runs ``ps`` with
+    ``TZ=UTC``. Both sides go through this, so the oracle compares two
+    equal-or-not tokens and never parses a date. A spelling this does not
+    read, such as another locale's, is ``None``: not comparable, rather than
+    different.
     """
     if not isinstance(text, str) or not text.strip():
         return None
@@ -547,8 +555,8 @@ def process_start_token(text) -> str | None:
         parsed = time.strptime(" ".join(text.split()), LSTART_FORMAT)
     except ValueError:
         return None
-    # A wall-clock reading in the machine's own zone, as both sides print it.
-    # It is a token for equality, never a time this library reckons with.
+    # A UTC wall-clock reading, as both sides print it. It is a token for
+    # equality, never a time this library reckons with.
     return time.strftime("%Y-%m-%dT%H:%M:%S", parsed)
 
 
@@ -585,6 +593,8 @@ def process_facts(pid: int) -> ProcessFacts | None:
     One process-table read answers all three questions. ``comm`` is last
     because it may hold spaces (a full path), and ``lstart`` is a fixed five
     words; a line whose start does not read still answers the name and tty.
+    ``ps`` runs in this process's environment with ``TZ`` set to
+    :data:`PS_ZONE`, so its start is spelled as the record's ``procStart``.
     """
     try:
         proc = subprocess.run(
@@ -593,6 +603,7 @@ def process_facts(pid: int) -> ProcessFacts | None:
             text=True,
             timeout=5,
             check=False,
+            env={**os.environ, "TZ": PS_ZONE},
         )
     except (OSError, subprocess.SubprocessError):
         return None

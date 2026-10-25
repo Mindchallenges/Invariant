@@ -16,9 +16,11 @@ test's own pid.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -611,6 +613,34 @@ class TestProcessFacts:
         assert facts is not None
         assert facts.is_host is False
         assert facts.start is not None
+
+    def test_ps_runs_in_utc_and_otherwise_in_this_environment(self, monkeypatch):
+        envs = []
+
+        def run(argv, **kwargs):
+            envs.append(kwargs.get("env"))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setenv("TZ", "Etc/GMT-2")
+        monkeypatch.setenv("BUG_086_KEPT", "yes")
+        monkeypatch.setattr(launch.subprocess, "run", run)
+        launch.process_facts(1)
+        assert envs == [{**os.environ, "TZ": "UTC"}]
+        assert envs[0]["BUG_086_KEPT"] == "yes"
+
+    def test_the_real_ps_spells_the_start_in_utc_in_a_non_utc_zone(self, monkeypatch):
+        # This process started moments ago. Read in UTC, its start is before
+        # now; read in local time at UTC+2 it would be two hours ahead.
+        monkeypatch.setenv("TZ", "Etc/GMT-2")
+        time.tzset()
+        try:
+            facts = launch.process_facts(os.getpid())
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+        assert facts is not None and facts.start is not None
+        started = calendar.timegm(time.strptime(facts.start, "%Y-%m-%dT%H:%M:%S"))
+        assert time.time() - 24 * 3600 < started <= time.time() + 1
 
     def test_the_probe_asks_through_its_seam(self):
         probe = launch.ClaudeCodeProbe(facts_of=lambda pid: f"facts-{pid}")

@@ -1,22 +1,21 @@
 """Repro for BUG_086 — see the work-item entry (docs/backlog/BUG_086.md).
 
-Fails while the defect is live. When the fix lands, delete the
-expected-failure wrappers; the assertions must then pass unchanged.
-
 Claude Code writes a per-process record's ``procStart`` in UTC, while
-``ps -o lstart=`` prints the start in the machine's local zone. Observed on a
-Mac at UTC+2, every running pid's record read exactly two hours earlier
-than ``ps`` did, to the second -- the same instant in two zones.
+``ps -o lstart=`` prints the start in the zone its ``TZ`` names, else the
+machine's local zone. Observed on a Mac at UTC+2, every running pid's record
+read exactly two hours earlier than a plain ``ps`` did, to the second -- the
+same instant in two zones. The fix runs ``ps`` with ``TZ=UTC``.
 
-The test runs in a fixed non-UTC zone (``Etc/GMT-2``, which is UTC+2 all
-year), writes a synthetic record under ``tmp_path`` (never the real
-``~/.claude``), and plays ``ps`` with a stand-in for ``subprocess.run`` that
-prints that instant in local time. The record and ``ps`` go through the real
-``ClaudeCodeProbe`` (``read_host_processes``, ``process_facts``,
+The tests run in a fixed non-UTC zone (``Etc/GMT-2``, which is UTC+2 all
+year), write a synthetic record under ``tmp_path`` (never the real
+``~/.claude``), and play ``ps`` with a stand-in for ``subprocess.run`` that
+prints one instant as the real ``ps`` would: in UTC when its environment's
+``TZ`` is ``UTC``, else in local time. The record and ``ps`` go through the
+real ``ClaudeCodeProbe`` (``read_host_processes``, ``process_facts``,
 ``process_start_token``); nothing else of the host is real. No process is
 signalled: close host's ``terminate`` is a fake.
 
-Symptom asserted, in two tests (docs/architecture/oracle.md):
+Asserted (docs/architecture/oracle.md):
 
 1. "Host liveness": a running host whose record and process table describe
    the same process reads ``alive: true``, its pid verified -- not
@@ -24,9 +23,8 @@ Symptom asserted, in two tests (docs/architecture/oracle.md):
 2. "Close host": the check "``ps`` describes it, as ``claude``, started at
    ``--start``" passes for that same process, so close-host does not refuse
    with "started at another time".
-
-Explicitly NOT asserted: how the start is normalised (``TZ=UTC`` for ``ps``,
-or parsing both sides to an epoch) -- the entry's suspected cause.
+3. The guard still bites: a process on the same pid that started at another
+   instant reads not alive, and close-host refuses it, in the same zone.
 """
 
 from __future__ import annotations
@@ -41,6 +39,7 @@ import pytest
 from test_oracle_closehost import FakeHost
 from test_oracle_scan import HOUR, NOW, FakeProbe, make_project, put_session, rows_of
 
+from invariant.core.errors import InvariantError
 from invariant.hosts import claude_code_launch as launch
 from invariant.oracle.closehost import CloseRequest, close_host
 from invariant.oracle.home import oracle_home
@@ -53,6 +52,9 @@ TTY = "ttys004"
 #: The same instant, as each side spells it on a UTC+2 machine.
 RECORD_PROC_START_UTC = "Tue Oct 20 07:00:00 2026"
 PS_LSTART_LOCAL = "Tue Oct 20 09:00:00 2026"
+#: A different instant on the same pid (a reused pid), an hour later.
+NEWER_START_UTC = "Tue Oct 20 08:00:00 2026"
+NEWER_START_LOCAL = "Tue Oct 20 10:00:00 2026"
 
 
 @pytest.fixture
@@ -85,9 +87,13 @@ def claude_home(tmp_path):
     return home
 
 
-@pytest.fixture
-def ps_in_local_time(monkeypatch):
-    """``ps -o tty=,lstart=,comm= -p PID``, printing the start in local time."""
+def play_ps(monkeypatch, utc_spelling, local_spelling):
+    """Stand in for ``ps -o tty=,lstart=,comm= -p PID`` as the real one behaves.
+
+    The real ``ps`` prints ``lstart`` in the zone its environment's ``TZ``
+    names, else the machine's local zone (here UTC+2): one instant, given
+    here in both spellings.
+    """
     asked = []
     real_run = subprocess.run
 
@@ -97,11 +103,26 @@ def ps_in_local_time(monkeypatch):
         asked.append(list(argv))
         assert argv[:3] == ["ps", "-o", "tty=,lstart=,comm="], argv
         assert argv[-1] == str(PID), argv
+        env = kwargs.get("env")
+        zone = (os.environ if env is None else env).get("TZ")
+        start = utc_spelling if zone == "UTC" else local_spelling
         return subprocess.CompletedProcess(
-            argv, 0, stdout=f"{TTY}  {PS_LSTART_LOCAL}     /usr/local/bin/claude\n", stderr="")
+            argv, 0, stdout=f"{TTY}  {start}     /usr/local/bin/claude\n", stderr="")
 
     monkeypatch.setattr(launch.subprocess, "run", fake_run)
     return asked
+
+
+@pytest.fixture
+def ps_in_local_time(monkeypatch):
+    """``ps`` for the process the record describes, started at its ``procStart``."""
+    return play_ps(monkeypatch, RECORD_PROC_START_UTC, PS_LSTART_LOCAL)
+
+
+@pytest.fixture
+def ps_of_a_newer_process(monkeypatch):
+    """``ps`` for a process on the same pid that started an hour after the record's."""
+    return play_ps(monkeypatch, NEWER_START_UTC, NEWER_START_LOCAL)
 
 
 @pytest.fixture
@@ -123,7 +144,6 @@ class RealRecordsProbe(FakeProbe):
         return self.real.process_facts(pid)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_086 is live — delete this line with the fix")
 def test_BUG_086_a_live_host_reads_alive_when_procStart_is_UTC_and_ps_is_local(
         tmp_path, utc_plus_two, real_probe, ps_in_local_time):
     alpha = make_project(tmp_path, "alpha")
@@ -144,7 +164,6 @@ def test_BUG_086_a_live_host_reads_alive_when_procStart_is_UTC_and_ps_is_local(
     assert host.tty == TTY
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_086 is live — delete this line with the fix")
 def test_BUG_086_close_host_start_recheck_accepts_the_same_process(
         utc_plus_two, real_probe, ps_in_local_time):
     [record] = real_probe.host_processes()
@@ -158,3 +177,37 @@ def test_BUG_086_close_host_start_recheck_accepts_the_same_process(
 
     assert fake.signalled == [PID]
     assert lines[0].startswith(f"checked just now: process {PID} is Claude")
+
+
+# -- the guard still bites: a genuinely different start, in the same non-UTC zone ------
+
+
+def test_BUG_086_a_reused_pid_with_another_start_still_reads_not_alive(
+        tmp_path, utc_plus_two, real_probe, ps_of_a_newer_process):
+    alpha = make_project(tmp_path, "alpha")
+    put_session(alpha, id="s1", name="one-s1", state="working", origin=str(alpha.root),
+                host_session_id="h-bound", heartbeat=NOW - 60)
+    probe = RealRecordsProbe(real_probe, {"alpha": {HOST: NOW - 3 * HOUR}})
+    cache = ScanCache(probe=probe, pid_alive=lambda pid: pid == PID)
+
+    [snapshot] = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=cache)
+
+    host = rows_of(snapshot, ROW_HOST)[HOST].hosts[0]
+    assert ps_of_a_newer_process, "ps was never asked: the start check did not run"
+    assert (host.pid, host.pid_source) == (PID, "record")
+    assert host.alive is False
+
+
+def test_BUG_086_close_host_refuses_a_process_that_started_at_another_time(
+        utc_plus_two, real_probe, ps_of_a_newer_process):
+    [record] = real_probe.host_processes()
+    fake = FakeHost()
+    seams = dataclasses.replace(fake.seams(), records=real_probe.host_processes,
+                                facts=real_probe.process_facts)
+    request = CloseRequest(host_id=HOST, pid=PID, start=record.start, tty=TTY)
+
+    with pytest.raises(InvariantError, match="started at another time"):
+        close_host(request, seams, lambda: None)
+
+    assert ps_of_a_newer_process
+    assert fake.signalled == []
