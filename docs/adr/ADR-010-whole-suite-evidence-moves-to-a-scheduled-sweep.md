@@ -5,7 +5,11 @@
   sweep records are a committed store (D9), and the pre-merge full-run
   allowlist ships in v1 (D8). IDEA_032 builds it in three increments (see
   "Increments"). Increment 2 delivers D1, D2, D3 (all but item 5), D5, D8 and
-  the run-seam extraction; increment 3 (D4, D6, D7, D9) is not started.
+  the run-seam extraction. Increment 3 delivers D4, D7 and D9 (`core/sweep`,
+  `domains/sweep`, `invariant sweep run|status|show`, `paths.sweeps`,
+  `failing_test_ids`); D6 (`sweep.fresh`), D3 item 5, the `doctor` row, the
+  last sweep's figure in the advisory verdict and the agents' `--selector`
+  guidance follow.
 - **Date:** 2026-10-26
 - **Supersedes:** nothing. Generalises the per-file advisory/held split
   IDEA_028 introduced for `methodology.gates.coverage_advisory_paths`, adds a
@@ -353,7 +357,9 @@ gives.
   record on the branch, 1 for the first), `ran_on` (bare date), `branch`,
   `head` and `previous` (full hashes; `previous` null on a first sweep),
   `command` (the manifest key that ran, `coverage` or `test`, never the
-  resolved command), `executed`, `failed`, `failing` (ids, or null where the
+  resolved command), `executed`, `failed`, `passed` (added in
+  implementation: an adapter that counts nothing reports `failed` null for a
+  green run and a red one alike), `failing` (ids, or null where the
   adapter cannot read them), `flaky`, `files` (`{project-relative path: pct}`),
   `floor`, `hazards` (ids), `filed` (`[{key, item}]`), `still_broken`
   (`[{key, item, status}]`) and `recovered` (keys).

@@ -211,6 +211,12 @@ class Context:
         return WorkItemDomain(self.manifest)
 
     @property
+    def sweeps(self):
+        from ..domains.sweep import SweepDomain
+
+        return SweepDomain(self.manifest, self.store)
+
+    @property
     def memory(self):
         from ..domains.memorystore import MemoryStore
 
@@ -2650,6 +2656,103 @@ def cmd_stats_check(args) -> int:
     return EXIT_OK if report.clean else 1
 
 
+# -- sweep -------------------------------------------------------------
+
+
+def _sweep_lines(report) -> list[str]:
+    """The text form of one sweep: what ran, what is new, what was filed."""
+    rec = report.record
+    executed = rec.executed if rec.executed is not None else "?"
+    failed = rec.failed if rec.failed is not None else "?"
+    lines = [
+        f"sweep {rec.seq} on {rec.branch} at {rec.head[:12]} ({rec.ran_on}), "
+        + f"commands.{rec.command}: {executed} executed, {failed} failing"
+    ]
+    if report.dry_run:
+        lines.append("dry run: nothing written, filed or committed")
+    if report.baseline:
+        lines.append(
+            "first sweep on this branch: a baseline only, nothing filed "
+            f"({len(report.current)} finding(s) recorded)"
+        )
+        lines += [f"  {key}" for key in report.current]
+    for entry in report.filed:
+        verb = f"filed {entry['item']}" if entry["item"] else "would file"
+        lines.append(f"  {verb}  {entry['key']}  {entry['title']}")
+    for entry in report.still_broken:
+        held = f" ({entry['item']}, {entry['status']})" if entry["item"] else ""
+        flag = "  REGRESSION: its item says fixed" if entry.get("regression") else ""
+        lines.append(f"  still broken  {entry['key']}{held}{flag}")
+    lines += [f"  recovered  {key}" for key in report.recovered]
+    lines += [f"  below the floor, no previous figure  {key}" for key in report.unbaselined]
+    if report.over_cap:
+        lines.append("  more new reds than the re-run cap: filed as one suite:red")
+    if report.outside_project:
+        lines.append(f"  {report.outside_project} coverage row(s) outside the project dropped")
+    lines += [f"  note: {note}" for note in report.notes]
+    if report.privacy:
+        lines.append("NOT committed: the privacy scan found personal data")
+        lines += [f"  {finding}" for finding in report.privacy]
+    elif report.committed:
+        lines.append(f"committed {report.record_path} as {str(report.commit)[:12]}")
+    elif not report.dry_run:
+        lines.append(f"NOT committed: {report.commit_error}")
+    return lines
+
+
+def cmd_sweep_run(args) -> int:
+    ctx = Context()
+    report = ctx.sweeps.run(dry_run=args.dry_run)
+    emit(args, report.to_dict(), "\n".join(_sweep_lines(report)))
+    if report.dry_run or report.committed:
+        return EXIT_OK
+    return 1
+
+
+def cmd_sweep_status(args) -> int:
+    ctx = Context()
+    status = ctx.sweeps.status(branch=args.branch)
+    last = status["last"]
+    if last is None:
+        text = f"no sweep recorded on {status['branch'] or 'a detached HEAD'}"
+    else:
+        text = (
+            f"last sweep: {last['seq']} on {last['branch']} at {last['head'][:12]}, "
+            f"{status['age_days']} day(s) ago ({last['ran_on']})"
+        )
+    if status["cadence_days"] is None:
+        text += "\nno sweep cadence configured"
+    else:
+        text += (
+            f"\ncadence {status['cadence_days']} day(s) + {status['grace_days']} "
+            f"grace: {'OVERDUE' if status['overdue'] else 'current'}"
+        )
+    return emit(args, status, text)
+
+
+def cmd_sweep_show(args) -> int:
+    ctx = Context()
+    record = ctx.sweeps.show(args.record, branch=args.branch)
+    if record.failing is None:
+        failing = "unreadable"
+    else:
+        failing = ", ".join(record.failing) or "none"
+    outcome = "green" if record.passed else "red"
+    lines = [
+        f"sweep {record.seq} on {record.branch} at {record.head} ({record.ran_on})",
+        f"  previous: {record.previous or '(none: a baseline)'}",
+        f"  commands.{record.command}: {record.executed} executed, "
+        + f"{record.failed} failing, {outcome}",
+        f"  failing: {failing}",
+        f"  flaky: {', '.join(record.flaky) or 'none'}",
+        f"  files measured: {len(record.files)} (floor {record.floor:g}%)",
+        f"  filed: {', '.join(f['key'] + ' ' + str(f['item']) for f in record.filed) or 'none'}",
+        f"  still broken: {', '.join(s['key'] for s in record.still_broken) or 'none'}",
+        f"  recovered: {', '.join(record.recovered) or 'none'}",
+    ]
+    return emit(args, record.to_dict(), "\n".join(lines))
+
+
 # -- rules, checks, privacy -------------------------------------------
 
 
@@ -4430,6 +4533,29 @@ def build_parser() -> argparse.ArgumentParser:
     stats.add_parser(
         "check", help="staleness, unpriced models, and records that are the only copy"
     ).set_defaults(func=cmd_stats_check)
+
+    # sweep (ADR-010)
+    sweep = sub.add_parser(
+        "sweep", help="the whole suite on a cadence, and what it files"
+    ).add_subparsers(dest="sub", required=True)
+    q = sweep.add_parser(
+        "run",
+        help="run the whole suite once from the main checkout, file what is new, "
+        "and commit the record",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run and diff, but write no record, file nothing and commit nothing",
+    )
+    q.set_defaults(func=cmd_sweep_run)
+    q = sweep.add_parser("status", help="the last sweep, its age and the cadence")
+    q.add_argument("--branch", help="whose sweeps (default: the checked-out branch)")
+    q.set_defaults(func=cmd_sweep_status)
+    q = sweep.add_parser("show", help="one sweep record, the latest by default")
+    q.add_argument("record", nargs="?", help="a seq, a record file name, or a head prefix")
+    q.add_argument("--branch", help="whose sweeps (default: the checked-out branch)")
+    q.set_defaults(func=cmd_sweep_show)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

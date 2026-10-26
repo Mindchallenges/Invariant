@@ -386,3 +386,72 @@ def commits_ahead(cwd: Path, branch: str, upstream: str) -> int | None:
 
 def last_commit_message(cwd: Path) -> str:
     return _run(["log", "-1", "--format=%B"], cwd)[1]
+
+
+def _status_lines(cwd: Path, args: list[str]) -> list[str] | None:
+    """``git status --porcelain`` lines, unstripped: the first column is data."""
+    code, out = _run_bytes(["status", "--porcelain", *args], cwd)
+    if code != 0:
+        return None
+    return [line for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
+
+
+def tracked_changes(cwd: Path) -> list[str] | None:
+    """Tracked paths whose working tree or index differs from ``HEAD``.
+
+    Untracked files are not counted: a staged new file is (it is in the index),
+    a file nobody has added is not. ``None`` when git cannot answer, which a
+    caller deciding whether a tree is clean must read as "not known to be".
+    """
+    lines = _status_lines(cwd, ["--untracked-files=no"])
+    return None if lines is None else [line[3:] for line in lines]
+
+
+def status_paths(cwd: Path, pathspec: str) -> set[str] | None:
+    """Every ``git status`` line under ``pathspec``, untracked files included.
+
+    Lines rather than bare paths, so a file that was untracked before and is
+    still untracked after an edit compares equal, while a tracked file that
+    became modified does not. ``None`` when git cannot answer.
+    """
+    lines = _status_lines(cwd, ["--untracked-files=all", "--", pathspec])
+    return None if lines is None else set(lines)
+
+
+def tree_paths(cwd: Path, ref: str, directory: str) -> list[str] | None:
+    """The file paths committed under ``directory`` at ``ref``.
+
+    Read from the commit, never from the working tree, so an uncommitted file
+    is not in the answer. An absent directory is an empty list; ``None`` means
+    the ref could not be read.
+    """
+    if not ref or ref.startswith("-"):
+        return None
+    code, _, _ = _run(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd)
+    if code != 0:
+        return None
+    prefix = directory.strip("/")
+    code, out, _ = _run(
+        ["ls-tree", "-r", "--name-only", "--full-tree", ref, "--", f"{prefix}/"], cwd
+    )
+    if code != 0:
+        return None
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def commit_only(cwd: Path, paths: list[str], message: str) -> tuple[bool, str]:
+    """Commit exactly ``paths`` and nothing else that may be staged. A WRITE.
+
+    The one write in this module, named as one (ADR-010 D9): the sweep commits
+    its own record and the items it filed. The paths are added first, because
+    ``--only`` refuses a path git does not yet track; ``--only`` then commits
+    those paths alone, leaving anything else in the index where it was. It
+    never pushes. Returns ``(committed, git's own output)``.
+    """
+    if not paths:
+        return False, "nothing to commit"
+    code, out, err = _run(["add", "--", *paths], cwd)
+    if code != 0:
+        return False, err or out
+    code, out, err = _run(["commit", "--only", "-m", message, "--", *paths], cwd)
+    return code == 0, (out if code == 0 else (err or out))

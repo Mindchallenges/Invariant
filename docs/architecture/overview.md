@@ -54,14 +54,16 @@ graph TD
         STATS[stats]
         GIT[git]
         PLAN[plan]
+        CSWEEP["sweep (ADR-010)"]
     end
 
-    subgraph domains["domains/ — the five state domains"]
+    subgraph domains["domains/ — the six state domains"]
         SESSION[session]
         PIPELINE[pipeline]
         WORKITEM[workitem]
         MEMDOMAIN[memorystore]
         STATSDOMAIN[stats]
+        SWEEPD["sweep (ADR-010)"]
     end
 
     subgraph adapters["adapters/ — ecosystem knowledge"]
@@ -87,6 +89,7 @@ graph TD
     CLI --> WORKITEM
     CLI --> MEMDOMAIN
     CLI --> STATSDOMAIN
+    CLI --> SWEEPD
     CLI --> RULES
     CLI --> MANIFEST
     CLI --> PLAN
@@ -190,6 +193,15 @@ graph TD
     SESSION --> PLAN
     SESSION --> PRIVACY
     PIPELINE --> STATS
+    SWEEPD -- the run-and-read seam --> PIPELINE
+    SWEEPD -- list and new --> WORKITEM
+    SWEEPD --> CSWEEP
+    SWEEPD --> STORE
+    SWEEPD --> GIT
+    SWEEPD --> PRIVACY
+    SWEEPD -- sweep_below_floor --> RULES
+    SWEEPD --> adapters
+    CSWEEP --> GIT
     CCTEL -- implements SampleSource --> STATS
 
     FSM --> METH
@@ -399,6 +411,27 @@ the one function every transition passes through. `MANIFEST → PRIVACY` carries
 exactly one name — `DEFAULT_PATTERNS`, the single authoritative default
 pattern set — so the manifest's default and a bare `PrivacyScanner()` cannot
 drift apart (AUD-15).
+
+`SWEEPD` and `CSWEEP` are the sweep (IDEA_032 increment 3, ADR-010 D4, D9):
+the whole suite run once on a cadence from the main checkout, its findings
+filed and its own record committed. The split is the `stats` one. `core/sweep`
+is the arithmetic — the record type, the diff against the last sweep, the
+settling of new reds by their isolated re-runs, the dedup and the age — pure
+apart from reading committed records through `git` (`CSWEEP --> GIT`, `git
+ls-tree` and `git show` on a ref), so `core/rules` can ask about the last sweep
+in increment 4 without importing a domain. `domains/sweep` owns the effects,
+and every arrow out of it reuses an owner rather than forking one.
+`SWEEPD --> PIPELINE` is the run-and-read seam increment 2 extracted
+(`run_command`, `measure_coverage`, `joined_selectors`), so a sweep spawns and
+reads the suite exactly as `pipeline coverage` does, refusals included;
+`SWEEPD --> WORKITEM` is `list` for the dedup read and `new` for filing;
+`SWEEPD --> RULES` is one name, `sweep_below_floor`, the floor's own
+`non_source`, `coverage_exclude` and baseline-ratchet policy, so a sweep and a
+change cannot disagree about which file is held. `SWEEPD --> PRIVACY` scans
+the record, the commit message and the filed items before the commit, and
+`SWEEPD --> STORE` is one lock under the state root that keeps two sweeps from
+filing at once. `SWEEPD --> GIT` carries the preconditions (main checkout, a
+branch, no tracked change) and the module's one write, `commit_only`.
 
 `WORKITEM --> GIT` is the newest arrow into `git` and carries one call,
 `resolve_commit`. A ruled closure (`item transition --ruling --evidence`)
@@ -668,9 +701,9 @@ other at load: under a cadence every file is already advisory, so a
 scoped red is a real red; what moves to the sweep is only the claim that the
 WHOLE suite is green. `sweep.no_full_run` reports a full run made on a change
 anyway, exactly at the CLI and, through the adapter's `test_scope_of`, at the
-hook. The sweep itself, `core/sweep` and `domains/sweep`, is IDEA_032's third
-increment; until it lands, a cadence moves the evidence and nothing yet holds
-it.
+hook. What holds the evidence is `invariant sweep run` (`core/sweep`,
+`domains/sweep`): a held file under the floor at a sweep, and not under it at
+the last one, is filed as a drop, judged by the floor's own policy.
 
 `SESSION → PLAN` is the newest arrow into `core/`, and it is drawn for the
 reason `SESSION → STATS` is. The deliverable set a session owes is *stored* on
@@ -764,9 +797,10 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
-| `git` | Read-only queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, and the commit a revision names | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing |
+| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, and the commit a revision names — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
+| `sweep` | The sweep record (version 1) and its file name; reading committed records from a git ref; the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
 
@@ -782,6 +816,15 @@ advance it. They are the only place where "what a session is" is encoded.
   run-and-read seam — `run_command`, `child_env`, `measure_coverage`,
   `joined_selectors` — module-level, so the sweep (ADR-010) spawns and reads
   the suite exactly as a recorded run does.
+- **`sweep`** — the whole suite on a cadence (ADR-010). Not an FSM, like
+  `stats`. Refuses outside the main checkout, on a detached HEAD or with a
+  tracked change; runs the suite once through `pipeline`'s seam; re-runs each
+  new red alone (red again is a new red, green alone is flaky, beyond 20 one
+  `suite:red`); files each new finding through `workitem` with `sweep_key` and
+  `sweep_range`, never a key an open item holds; writes one record under
+  `paths.sweeps`, scans it, and commits it with the items it filed, under a
+  lock, never pushing. The first sweep on a branch is a baseline and files
+  nothing; `--dry-run` writes nothing.
 - **`workitem`** — ideas and bugs, their statuses, and the transitions between
   them, including a ruled transition whose rows record who ruled and on which
   commit; and what `item new` may set — an explicit id it checks is unspent,
@@ -1163,6 +1206,9 @@ actually happened.
     reports/                paths.reports — the rendered, committed telemetry
                             report. Scrubbed: session names and bare dates,
                             never a host identifier (ADR-002 D7)
+    sweeps/                 paths.sweeps — one committed JSON record per
+                            sweep, `<date>-<12 hex>.json`: hashes, a bare
+                            date, relative paths, a command key (ADR-010 D9)
 ```
 
 One directory lives outside every project, and it is per USER rather than
@@ -1203,3 +1249,9 @@ in the manifest rather than assumed: the raw records stay in the private state
 root and the *rendering* of them is committed, so what leaves the machine is
 decided by a renderer that can be read rather than by a directory somebody
 remembered to gitignore.
+
+The sweep store (`paths.sweeps`) is the second, and the first the engine
+commits itself: a sweep's record is derived from a run, carries nothing but
+hashes, a bare date, relative paths and a command key, is scanned by the
+project's own privacy scanner, and is committed with the items it filed so
+that every clone reads the same baseline (ADR-010 D9).

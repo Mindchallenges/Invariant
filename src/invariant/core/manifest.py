@@ -134,6 +134,11 @@ DEFAULTS: dict[str, Any] = {
         # needs a writable location adds a key instead of widening a list. The
         # second exception is always easier to justify than the first.
         "reports": "docs/reports",
+        # Where `invariant sweep run` commits one record per sweep (ADR-010
+        # D9). Declared for the same reason as `reports`: the sweep writes it
+        # from the main checkout, and a declared store is writable and exempt
+        # from session isolation by construction.
+        "sweeps": "docs/sweeps",
     },
     "commands": {
         "build": None,

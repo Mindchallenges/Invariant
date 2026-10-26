@@ -136,7 +136,7 @@ class Adapter:
         """
         return None
 
-    def read_run(self, stdout: str, stderr: str, code: int, bundle=None) -> "TestResult":
+    def read_run(self, stdout: str, stderr: str, code: int, bundle=None) -> TestResult:
         """The run's outcome, preferring the structured record over the text.
 
         The exit status still decides ``passed``, because a build that failed
@@ -233,6 +233,21 @@ class Adapter:
         the template itself, and anything else is doubt.
         """
         return "full" if not list(extra_tokens) else None
+
+    def failing_test_ids(self, stdout: str, stderr: str, bundle=None) -> list[str] | None:
+        """Which tests a run failed, each named so ``commands.test_one`` can re-run it.
+
+        Asked by the sweep (ADR-010 D5), which re-runs each new red alone and
+        files it under this identity, so an identity must be a selector the
+        ecosystem's scoped command accepts, not a display name. ``bundle`` is
+        the run's result bundle, where the ecosystem writes one.
+
+        ``None`` is "cannot read identities here", and the sweep then files one
+        ``suite:red`` key for the run instead of a key per test. An empty list
+        is "this output names no failing test", which a red run turns into the
+        same ``suite:red``. The base answer knows no runner: ``None``.
+        """
+        return None
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         """Narrow a changed-file list to this ecosystem's source files."""

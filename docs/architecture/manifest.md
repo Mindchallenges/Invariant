@@ -21,6 +21,7 @@ paths:
   memory: .claude/memory
   memory_index: MEMORY.md
   reports: docs/reports        # where `stats report --write` puts its artifact
+  sweeps: docs/sweeps          # where `sweep run` commits one record per sweep
 
 commands:                      # adapters supply defaults; these override
   build: null
@@ -191,8 +192,10 @@ making the floor advisory cannot drift. `sweep.no_full_run` (`warn` in
 `standard` and `loose`, `block` in `strict`) reports a full run made on a
 change anyway, at `pipeline test` and `pipeline coverage` without a selector
 and at the hook on a shell call; a change touching a held path owes one, and
-is not reported. The sweep that holds the gates, its records and the
-freshness rule are IDEA_032's increment 3.
+is not reported. `invariant sweep run` holds the gates: it runs the whole
+suite on the cadence and files what is new (cli.md, "Sweep"); its records are
+committed under `paths.sweeps`. The freshness rule, `sweep.fresh`, is still to
+come.
 
 ### Levels, and where each one can be delivered
 
@@ -276,7 +279,7 @@ back through the host and is not observable to this library at all.
 
 ### Declared stores are writable stores
 
-`items.path`, `paths.memory` and `paths.reports` are not merely locations —
+`items.path`, `paths.memory`, `paths.reports` and `paths.sweeps` are not merely locations —
 declaring one is what makes the CLI's write-scope invariant cover it, and what
 exempts it from session isolation. `cli.md` states the invariant as "the state
 root and the stores the manifest declares" (ADR-002 D4) rather than as a list,
@@ -286,7 +289,8 @@ an exception there.
 The consequence to be aware of: `paths.reports` defaults to `docs/reports`, so
 a project that already keeps hand-written prose at that path would find it
 exempt from isolation. Point the key somewhere else if so — the exemption
-follows the declaration, which is the whole point.
+follows the declaration, which is the whole point. `paths.sweeps` defaults to
+`docs/sweeps` on the same terms.
 
 ### A declared path means the same thing however it is spelled
 
@@ -899,6 +903,7 @@ class Adapter:
     def carries_executable_code(self, path: Path) -> bool | None: ...
     def expected_failures_are_strict(self, root: Path, selectors) -> bool | None: ...
     def test_scope_of(self, extra_tokens) -> str | None: ...
+    def failing_test_ids(self, stdout: str, stderr: str, bundle) -> list[str] | None: ...
     def hazards(self) -> list[Hazard]: ...
 ```
 
@@ -911,6 +916,14 @@ anything else. Python reads pytest's narrowing arguments (a positional, `-k`,
 `-m`, `--lf`, `--ff`, `--deselect`) and its known non-narrowing options;
 Swift reads `-only-testing:` and doubts `-skip-testing:`; node claims nothing
 past the bare script (ADR-010 D5).
+
+`failing_test_ids` is asked by `sweep run`: which tests failed, each named as
+a selector `commands.test_one` takes back, so a new red can be re-run alone
+and filed under that identity. Python reads pytest's short summary (`FAILED`
+and `ERROR` lines); Swift reads the result bundle's failed test cases, else
+the console's failed case lines, as `<bundle>/<Class>/<method>`; node and
+generic answer `None`, and the sweep files one `suite:red` for a red run
+instead of guessing at identities (ADR-010 D5).
 
 `expected_failures_are_strict` is asked only by the red-phase recorder, about
 a run that exited clean with expected failures counted (`TestResult.

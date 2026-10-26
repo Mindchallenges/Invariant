@@ -84,6 +84,21 @@ class PythonAdapter(Adapter):
             after_unknown = "=" not in token
         return None if doubt else "full"
 
+    def failing_test_ids(self, stdout: str, stderr: str, bundle=None) -> list[str]:
+        """pytest's short test summary: ``FAILED <nodeid>`` and ``ERROR <nodeid>``.
+
+        pytest prints the summary by default, one line per failing or erroring
+        node id, with `` - <message>`` after it when there is one. A node id is
+        exactly what ``pytest {selector}`` takes back. An ``ERROR`` line naming
+        only a file is a collection error, and the file is its selector. Only
+        lines OPENING with the word count, so ``-v``'s ``<nodeid> FAILED``
+        progress lines are not read twice. Order kept, duplicates dropped.
+        """
+        found: dict[str, None] = {}
+        for match in _SUMMARY_LINE.finditer(f"{stdout}\n{stderr}"):
+            found.setdefault(match.group("nodeid").strip(), None)
+        return list(found)
+
     def measured_scope(self, root: Path) -> list[Path] | None:
         """``[tool.coverage.run] source``, resolved to directories.
 
@@ -172,14 +187,18 @@ class PythonAdapter(Adapter):
         xfailed = _first_int(r"(\d+) xfailed", combined)
         xpassed = _first_int(r"(\d+) xpassed", combined)
         note = ""
-        if code == 5 or re.search(r"collected 0 items", combined):
+        # An expected failure and an unexpected pass both ran their body.
+        total = (passed or 0) + (failed or 0) + (xfailed or 0) + (xpassed or 0) or None
+        if code == 5 or re.search(r"collected 0 items|no tests ran", combined):
             note = "zero tests were collected — the selector matched nothing"
+            # Zero is what pytest reported, not a count this parser missed:
+            # every reader that refuses a run that executed nothing asks
+            # `total == 0`, and `None` ("cannot count") slipped past them.
+            total = total or 0
         return TestResult(
             passed=code == 0,
             exit_code=code,
-            # An expected failure and an unexpected pass both ran their body.
-            total=(passed or 0) + (failed or 0) + (xfailed or 0) + (xpassed or 0)
-            or None,
+            total=total,
             failed=failed,
             expected_failures=xfailed,
             hazards=live,
@@ -266,6 +285,13 @@ class PythonAdapter(Adapter):
             out[match.group("file")] = float(match.group("pct"))
         return out
 
+
+#: One line of pytest's short test summary, its node id up to the message.
+#: ``ERROR collecting <path>`` is the heading of a collection error's report,
+#: not a summary line; its summary line names the path on its own.
+_SUMMARY_LINE = re.compile(
+    r"^(?:FAILED|ERROR) (?!collecting )(?P<nodeid>\S.*?)(?: - .*)?$", re.MULTILINE
+)
 
 #: Options that select a subset of the collected tests.
 _PYTEST_NARROWING = frozenset({"-k", "-m", "--lf", "--last-failed", "--ff", "--deselect"})

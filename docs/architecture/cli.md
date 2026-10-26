@@ -33,7 +33,8 @@ Nothing reaches the engine another way.
   is "not applicable here" (BUG_027). Both are now route-specific.
 - No command ever writes to the repository outside the state root and **the
   stores the manifest declares** (`items.path`, `paths.memory`,
-  `paths.reports`).
+  `paths.reports`, `paths.sweeps`). One command commits what it wrote there:
+  `sweep run`, its own record and the items it filed, and nothing else.
 
   This was once a flat list of three exceptions. ADR-002 D4 generalised it
   rather than adding a fourth, and the reason is worth stating: an enumeration
@@ -755,6 +756,48 @@ Two properties of the output are not stylistic:
 
 Deliberately absent: any gate that regenerates the report at teardown.
 Teardown is the step that must never acquire new ways to refuse.
+
+## Sweep
+
+The whole suite on a cadence (IDEA_032, ADR-010 D4, D9). A scheduler, CI or a
+person runs it; the engine judges the evidence it leaves, not what started it.
+
+```
+invariant sweep run [--dry-run]
+    Refused before anything runs outside the main checkout, on a detached
+    HEAD, or with a tracked change (untracked files do not count), with
+    items.backend 'none', or with a coverage_baseline that cannot be read.
+    One run of commands.coverage when coverage.meets_floor is scheduled,
+    else commands.test, through the seam `pipeline coverage` uses: a run
+    that executed nothing, or measured no rows, records and files nothing.
+    Failing tests are read through the adapter's failing_test_ids. Against
+    the last COMMITTED record on this branch (read from git, never the
+    working tree): each new red is re-run alone through commands.test_one,
+    red again files test:<id>, green alone files flaky:<id>, and more than
+    20 new reds files one suite:red instead; a held file under the floor
+    that was not under it last time files floor:<path>, judged by the
+    floor's own non_source, coverage_exclude and baseline policy. Each is a
+    bug carrying sweep_key and sweep_range (<last head>..<this head>), and a
+    key an OPEN item holds (fixed and verified count) is reported as still
+    broken instead, a fixed one flagged as a regression. Recovered keys are
+    reported, never closed. The first sweep on a branch is a baseline and
+    files nothing. Then the record is written to paths.sweeps, scanned with
+    the project's privacy patterns together with the commit message and the
+    filed items, and committed with `git commit --only` over exactly those
+    paths. Never pushed. A privacy finding or a failed commit leaves them in
+    the working tree and exits 1. A lock under the state root refuses a
+    second concurrent sweep (exit 3).
+
+    --dry-run runs and diffs, and writes no record, files nothing and
+    commits nothing; it says what it would file.
+
+invariant sweep status [--branch <b>]
+    The last sweep on the branch, its age in days, and the cadence and grace
+    it is held to. The freshness RULE is increment 4 (`sweep.fresh`).
+
+invariant sweep show [<seq> | <record file name> | <head prefix>] [--branch <b>]
+    One record, the latest by default.
+```
 
 ## Rules and gates
 

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from invariant.cli.main import main, report_verdicts, worth_reporting
 from invariant.core.manifest import Level
@@ -3110,3 +3111,106 @@ class TestBUG_067_DashFWrittenByTheSameCommand:
         assert "reads the message from stdin, which a hook cannot see" in block
         assert "same command" not in block.lower()
         assert self.try_lines(block) == ["write the message inline with -m '<message>'"]
+
+
+class TestSweepCommands:
+    """`invariant sweep run | status | show` (IDEA_032 increment 3, ADR-010 D4)."""
+
+    GREEN = "printf '3 passed in 0.1s\\nsrc/a.py   10   1   90%%\\n'"
+
+    def configure(self, root, coverage=None):
+        manifest = {
+            "version": 1,
+            "project": {"name": "demo", "ecosystems": ["python"]},
+            "commands": {
+                "test": "printf '3 passed in 0.1s\\n'",
+                "test_one": "printf '1 failed in 0.1s\\n'; exit 1; true {selector}",
+                "coverage": coverage or self.GREEN,
+            },
+            "items": {"backend": "markdown", "path": "docs/backlog"},
+            "methodology": {
+                "gates": {
+                    "coverage_min": 85,
+                    "schedule": {
+                        "cadence_days": 7,
+                        "gates": ["coverage.meets_floor", "test.all_pass"],
+                    },
+                }
+            },
+        }
+        path = root / ".claude" / "invariant.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "manifest"], cwd=root, check=True)
+
+    def test_run_records_a_baseline_and_says_so(self, project, capsys):
+        self.configure(project)
+        assert run("sweep", "run") == 0
+        text = out(capsys)
+        assert "baseline" in text
+        assert "committed" in text
+
+    def test_run_json_carries_the_record(self, project, capsys):
+        self.configure(project)
+        assert run("sweep", "run", "--json") == 0
+        doc = payload(capsys)
+        assert doc["record"]["seq"] == 1
+        assert doc["record"]["files"] == {"src/a.py": 90.0}
+        assert doc["baseline"] is True and doc["committed"] is True
+
+    def test_dry_run_commits_nothing(self, project, capsys):
+        self.configure(project)
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=project, capture_output=True, text=True, check=True
+        ).stdout
+        assert run("sweep", "run", "--dry-run") == 0
+        assert "dry run" in out(capsys)
+        after = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=project, capture_output=True, text=True, check=True
+        ).stdout
+        assert after == head
+
+    def test_a_second_run_files_a_new_red(self, project, capsys):
+        self.configure(project)
+        assert run("sweep", "run") == 0
+        red = "printf 'FAILED tests/t.py::test_x\\n1 failed, 2 passed\\nsrc/a.py   10   1   90%%\\n'; exit 1"
+        self.configure(project, coverage=red)
+        assert run("sweep", "run") == 0
+        text = out(capsys)
+        assert "filed BUG_001" in text
+        assert "test:tests/t.py::test_x" in text
+
+    def test_a_privacy_finding_exits_one(self, project, capsys):
+        leak = "printf 'FAILED tests/t.py::test_someone@corp.test\\n1 failed\\nsrc/a.py   10   1   90%%\\n'; exit 1"
+        self.configure(project, coverage=leak)
+        assert run("sweep", "run") == 1
+        assert "NOT committed" in out(capsys)
+
+    def test_run_from_a_tracked_change_is_a_usage_error(self, project, capsys):
+        self.configure(project)
+        (project / "app.py").write_text("print(2)\n", encoding="utf-8")
+        assert run("sweep", "run") == 2
+        assert "app.py" in capsys.readouterr().err
+
+    def test_status_before_and_after(self, project, capsys):
+        self.configure(project)
+        assert run("sweep", "status") == 0
+        assert "no sweep recorded" in out(capsys)
+        run("sweep", "run")
+        capsys.readouterr()
+        assert run("sweep", "status", "--json") == 0
+        doc = payload(capsys)
+        assert doc["last"]["seq"] == 1 and doc["age_days"] == 0
+        assert run("sweep", "status") == 0
+        assert "0 day(s) ago" in out(capsys)
+
+    def test_show_prints_one_record(self, project, capsys):
+        self.configure(project)
+        run("sweep", "run")
+        capsys.readouterr()
+        assert run("sweep", "show", "1", "--json") == 0
+        assert payload(capsys)["seq"] == 1
+        assert run("sweep", "show") == 0
+        assert "sweep 1" in out(capsys)
+        assert run("sweep", "show", "7") == 2

@@ -179,6 +179,11 @@ class TestPythonAdapter:
         result = self.adapter.parse_test_output("collected 0 items", "", 0)
         assert result.passed and not result.trustworthy
         assert "matched nothing" in result.note
+        assert result.total == 0
+
+    def test_no_tests_ran_is_zero_executed_not_uncounted(self):
+        result = self.adapter.parse_test_output("no tests ran in 0.01s", "", 5)
+        assert result.total == 0 and not result.trustworthy
 
     def test_collection_error_hazard(self):
         result = self.adapter.parse_test_output("ERROR collecting tests/x.py", "", 1)
@@ -1975,3 +1980,156 @@ class TestResultBundleCounts:
         )
         counts = self.adapter(monkeypatch).result_bundle_counts(self.bundle(tmp_path))
         assert counts["total"] == 3 and counts["device"] is None
+
+
+class TestFailingTestIds:
+    """Which tests failed, by an identity the scoped command can re-run (ADR-010 D5).
+
+    The sweep re-runs each new red on its own and files it under that
+    identity, so the answer must be a selector `commands.test_one` accepts.
+    ``None`` is "cannot read identities here": the sweep then files one
+    `suite:red` key instead of guessing.
+    """
+
+    def test_generic_and_node_cannot_say(self):
+        assert get_adapter("generic").failing_test_ids("FAILED x", "", None) is None
+        assert get_adapter("node").failing_test_ids("FAIL src/a.test.ts", "", None) is None
+
+    def test_python_reads_the_short_summary(self):
+        out = (
+            "FAILED tests/test_a.py::TestX::test_y - AssertionError: no\n"
+            "FAILED tests/test_a.py::test_p[a b]\n"
+            "ERROR tests/test_b.py::test_fixture - RuntimeError\n"
+            "ERROR tests/test_c.py\n"
+            "FAILED tests/test_a.py::TestX::test_y - AssertionError: no\n"
+            "2 failed, 1 error in 0.3s\n"
+        )
+        assert get_adapter("python").failing_test_ids(out, "", None) == [
+            "tests/test_a.py::TestX::test_y",
+            "tests/test_a.py::test_p[a b]",
+            "tests/test_b.py::test_fixture",
+            "tests/test_c.py",
+        ]
+
+    def test_python_does_not_read_a_collection_error_heading_as_a_test(self):
+        out = "ERROR collecting tests/test_c.py\nERROR tests/test_c.py\n"
+        assert get_adapter("python").failing_test_ids(out, "", None) == ["tests/test_c.py"]
+
+    def test_python_with_no_summary_lines_names_nothing(self):
+        assert get_adapter("python").failing_test_ids("1 failed in 0.1s", "", None) == []
+
+    def test_python_ignores_a_line_that_only_mentions_failed(self):
+        out = "tests/test_a.py::test_y FAILED  [ 50%]\n"
+        assert get_adapter("python").failing_test_ids(out, "", None) == []
+
+    def test_swift_reads_the_console_case_lines(self):
+        out = (
+            "Test Case '-[AppTests.ThingTests testA]' failed (0.010 seconds).\n"
+            "Test Case '-[AppTests.ThingTests testB]' passed (0.010 seconds).\n"
+            "Test case 'OtherTests.testC()' failed on 'My Mac' (0.001 seconds)\n"
+            "Test Case '-[AppTests.ThingTests testA]' failed (0.010 seconds).\n"
+        )
+        assert get_adapter("swift").failing_test_ids(out, "", None) == [
+            "AppTests/ThingTests/testA",
+            "OtherTests/testC",
+        ]
+
+    def test_swift_with_no_case_lines_cannot_say(self):
+        assert get_adapter("swift").failing_test_ids("** TEST FAILED **", "", None) is None
+
+    def test_swift_prefers_the_result_bundle(self, tmp_path, monkeypatch):
+        import subprocess
+
+        import invariant.adapters.swift_xcode as swift
+
+        tree = {
+            "testNodes": [
+                {
+                    "nodeType": "Test Plan",
+                    "name": "App",
+                    "children": [
+                        {
+                            "nodeType": "Unit test bundle",
+                            "name": "AppTests",
+                            "children": [
+                                {
+                                    "nodeType": "Test Suite",
+                                    "name": "ThingTests",
+                                    "children": [
+                                        {
+                                            "nodeType": "Test Case",
+                                            "name": "testA()",
+                                            "nodeIdentifier": "ThingTests/testA()",
+                                            "result": "Failed",
+                                        },
+                                        {
+                                            "nodeType": "Test Case",
+                                            "name": "testB()",
+                                            "nodeIdentifier": "ThingTests/testB()",
+                                            "result": "Passed",
+                                        },
+                                        {
+                                            "nodeType": "Test Case",
+                                            "name": "testC()",
+                                            "result": "Failed",
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        class Completed:
+            returncode, stderr = 0, ""
+            stdout = __import__("json").dumps(tree)
+
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            return Completed()
+
+        monkeypatch.setattr(subprocess, "run", run)
+        monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+        monkeypatch.setattr(swift, "_newest_developer_dir", lambda: None)
+        bundle = tmp_path / "run.xcresult"
+        bundle.mkdir()
+        ids = get_adapter("swift").failing_test_ids("", "", bundle)
+        assert ids == ["AppTests/ThingTests/testA", "AppTests/ThingTests/testC"]
+        assert seen[0][:5] == ["xcrun", "xcresulttool", "get", "test-results", "tests"]
+
+    def test_swift_falls_back_to_the_console_when_the_bundle_cannot_be_read(
+        self, tmp_path, monkeypatch
+    ):
+        import subprocess
+
+        import invariant.adapters.swift_xcode as swift
+
+        def run(argv, **kwargs):
+            raise OSError("no xcrun")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        monkeypatch.setattr(swift, "_newest_developer_dir", lambda: None)
+        bundle = tmp_path / "run.xcresult"
+        bundle.mkdir()
+        out = "Test Case '-[AppTests.ThingTests testA]' failed (0.010 seconds).\n"
+        assert get_adapter("swift").failing_test_ids(out, "", bundle) == [
+            "AppTests/ThingTests/testA"
+        ]
+
+    def test_swift_bundle_json_of_the_wrong_shape_falls_back(self, tmp_path, monkeypatch):
+        import subprocess
+
+        import invariant.adapters.swift_xcode as swift
+
+        class Completed:
+            returncode, stderr, stdout = 0, "", "[1, 2]"
+
+        monkeypatch.setattr(subprocess, "run", lambda argv, **kw: Completed())
+        monkeypatch.setattr(swift, "_newest_developer_dir", lambda: None)
+        bundle = tmp_path / "run.xcresult"
+        bundle.mkdir()
+        assert get_adapter("swift").failing_test_ids("", "", bundle) is None

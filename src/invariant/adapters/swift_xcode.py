@@ -28,6 +28,7 @@ def _tool_is_reachable(tool: str, developer_dir) -> bool:
             ["xcrun", "--find", tool],
             capture_output=True,
             text=True,
+            check=False,
             timeout=30,
             env=env,
         )
@@ -344,9 +345,11 @@ class SwiftXcodeAdapter(Adapter):
                     (
                         f"xcode: {tool} reachable",
                         True,
-                        f"NOT via xcrun — falling back to {fallback}. "
-                        f"xcode-select points somewhere without it; export "
-                        f"DEVELOPER_DIR to make every caller agree.",
+                        (
+                            f"NOT via xcrun — falling back to {fallback}. "
+                            "xcode-select points somewhere without it; export "
+                            "DEVELOPER_DIR to make every caller agree."
+                        ),
                     )
                 )
                 continue
@@ -354,8 +357,10 @@ class SwiftXcodeAdapter(Adapter):
                 (
                     f"xcode: {tool} reachable",
                     False,
-                    "not found via xcrun and no installed Xcode has it; "
-                    "counts and coverage will be unavailable or scraped",
+                    (
+                        "not found via xcrun and no installed Xcode has it; "
+                        "counts and coverage will be unavailable or scraped"
+                    ),
                 )
             )
         return results
@@ -371,48 +376,7 @@ class SwiftXcodeAdapter(Adapter):
         — on a machine whose ``xcode-select`` points at CommandLineTools it is
         not, without DEVELOPER_DIR.
         """
-        import json
-        import subprocess
-
-        if not path or not Path(path).exists():
-            return None
-
-        argv = [
-            "xcrun", "xcresulttool", "get", "test-results", "summary",
-            "--path", str(path),
-        ]
-
-        # `xcrun` resolves tools through `xcode-select`, and a machine whose
-        # xcode-select points at CommandLineTools cannot find xcresulttool at
-        # all. That is not hypothetical: it is the state of the machine this
-        # was written on, and it made this whole reader inert — falling back to
-        # the console parser it was built to replace, silently, on every run.
-        # So a failed lookup is retried against an actual Xcode.
-        attempts = [None]
-        if not os.environ.get("DEVELOPER_DIR"):
-            attempts.append(_newest_developer_dir())
-
-        data = None
-        for developer_dir in attempts:
-            env = dict(os.environ)
-            if developer_dir:
-                env["DEVELOPER_DIR"] = str(developer_dir)
-            try:
-                proc = subprocess.run(
-                    argv, capture_output=True, text=True, timeout=120, env=env
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if proc.returncode != 0:
-                continue
-            try:
-                data = json.loads(proc.stdout)
-            except json.JSONDecodeError:
-                continue
-            break
-
-        if data is None:
-            return None
+        data = _xcresulttool("summary", path)
         if not isinstance(data, dict) or data.get("totalTestCount") is None:
             return None
 
@@ -431,6 +395,29 @@ class SwiftXcodeAdapter(Adapter):
             "result": data.get("result"),
             "device": device,
         }
+
+    def failing_test_ids(self, stdout: str, stderr: str, bundle=None) -> list[str] | None:
+        """Failed test cases as ``-only-testing:`` selectors, bundle first.
+
+        ``<bundle>/<Class>/<method>`` is the form ``-only-testing:`` takes. The
+        result bundle names all three; the console names them in
+        ``Test Case '-[Bundle.Class method]' failed``, and Xcode 16's
+        ``Test case 'Class.method()' failed`` line names no bundle, so that
+        identity is ``<Class>/<method>``. A console with no failed case line
+        answers ``None``: a swift-testing run prints neither form (BUG_038),
+        and "named no test" there is a reading this adapter cannot make.
+        """
+        tree = _xcresulttool("tests", bundle)
+        if isinstance(tree, dict) and isinstance(tree.get("testNodes"), list):
+            return _failed_bundle_cases(tree["testNodes"])
+        found: dict[str, None] = {}
+        for match in _FAILED_CASE_LINE.finditer(f"{stdout}\n{stderr}"):
+            if match.group("bundle"):
+                ident = f"{match.group('bundle')}/{match.group('cls')}/{match.group('method')}"
+            else:
+                ident = f"{match.group('cls2')}/{match.group('method2')}"
+            found.setdefault(ident, None)
+        return list(found) or None
 
     def parse_coverage(self, raw: str) -> dict[str, float]:
         """Every measured source row `xccov` reported, whatever language it is.
@@ -956,6 +943,88 @@ def _swift_carries_executable_code(source: str) -> bool | None:
             return None
 
     return False
+
+
+def _xcresulttool(subcommand: str, path) -> object | None:
+    """``xcresulttool get test-results <subcommand>`` on a bundle, as JSON.
+
+    ``None`` for no bundle, a tool that cannot be run, a non-zero exit or
+    output that is not JSON. ``xcrun`` resolves tools through
+    ``xcode-select``, and a machine whose xcode-select points at
+    CommandLineTools cannot find xcresulttool at all. That is not
+    hypothetical: it made the bundle reader inert on the machine it was
+    written on, falling back to the console parser it was built to replace,
+    silently, on every run. So a failed lookup is retried against an actual
+    Xcode.
+    """
+    import json
+    import subprocess
+
+    if not path or not Path(path).exists():
+        return None
+    argv = [
+        "xcrun", "xcresulttool", "get", "test-results", subcommand,
+        "--path", str(path),
+    ]
+    attempts = [None]
+    if not os.environ.get("DEVELOPER_DIR"):
+        attempts.append(_newest_developer_dir())
+    for developer_dir in attempts:
+        env = dict(os.environ)
+        if developer_dir:
+            env["DEVELOPER_DIR"] = str(developer_dir)
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=120, env=env, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+#: Node types under which a bundle names the test target a case belongs to.
+_BUNDLE_NODES = frozenset({"Unit test bundle", "UI test bundle"})
+
+
+def _failed_bundle_cases(nodes: list, bundle: str = "", suite: str = "") -> list[str]:
+    """``<bundle>/<Class>/<method>`` for each failed Test Case node, in order."""
+    found: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("nodeType")
+        name = str(node.get("name") or "")
+        if kind == "Test Case":
+            if node.get("result") != "Failed":
+                continue
+            ident = str(node.get("nodeIdentifier") or f"{suite}/{name}")
+            ident = "/".join(part.removesuffix("()") for part in ident.split("/") if part)
+            ident = f"{bundle}/{ident}" if bundle else ident
+            if ident not in found:
+                found.append(ident)
+            continue
+        children = node.get("children") or []
+        if kind in _BUNDLE_NODES:
+            found += [i for i in _failed_bundle_cases(children, name, "") if i not in found]
+        elif kind == "Test Suite":
+            found += [i for i in _failed_bundle_cases(children, bundle, name) if i not in found]
+        else:
+            found += [i for i in _failed_bundle_cases(children, bundle, suite) if i not in found]
+    return found
+
+
+#: A failed case on the console: XCTest's ``-[Bundle.Class method]`` form, or
+#: Xcode 16's ``Class.method()`` form, which names no bundle.
+_FAILED_CASE_LINE = re.compile(
+    r"Test [Cc]ase '(?:-\[(?P<bundle>[\w]+)\.(?P<cls>[\w]+) (?P<method>[\w]+)\]"
+    r"|(?P<cls2>[\w]+)\.(?P<method2>[\w]+)\(\))' failed"
+)
 
 
 #: A failing test CASE. xcodebuild names each one it runs, so counting the

@@ -1498,6 +1498,76 @@ content fingerprint rather than a modification time, for the same reason: an
 mtime is a stored clock time, and it answers the wrong question anyway — the
 cache asks whether the source changed, not when.
 
+## Domain: sweep
+
+Not an FSM either (IDEA_032 increment 3, ADR-010 D4, D7, D9). A sweep is one
+command, `invariant sweep run`, that holds the gates a cadence moved off the
+per-change path: it runs the whole suite once and files what is new since the
+last sweep.
+
+```mermaid
+sequenceDiagram
+    participant S as sweep run
+    participant G as git
+    participant P as pipeline seam
+    participant A as adapter
+    participant W as workitem
+    S->>G: main checkout? a branch? no tracked change?
+    S->>G: last committed record on this branch (ls-tree, show at HEAD)
+    S->>P: one run: commands.coverage, else commands.test
+    S->>A: failing_test_ids
+    S->>S: core/sweep diff: new, still broken, recovered, floor drops
+    loop each new red, at most 20
+        S->>P: commands.test_one alone: red again, or green (flaky)
+    end
+    S->>W: open items carrying sweep_key (non-terminal states)
+    S->>W: new bug per unclaimed key, with sweep_key and sweep_range
+    S->>S: write the record, privacy-scan it, the message and the items
+    S->>G: commit --only the record and the filed items
+```
+
+| Invariant | How |
+|---|---|
+| The commit range is true of a committed tree | Refused outside the main checkout, on a detached HEAD, or with a tracked change; checked before anything runs. The sweep's own writes come after the check, so they never count against it |
+| A key is filed once | Dedup against OPEN items (the machine's non-terminal states, so `fixed` and `verified` count); `test:<id>` and `flaky:<id>` claim each other, so a hand-filed item is claimed by adding `sweep_key` to its frontmatter |
+| A flake is not a new red | Each new red is re-run alone; green alone is `flaky:<id>`; a re-run that executed nothing is not proof of green |
+| A systemic red is one item | More than 20 new reds files one `suite:red` and no per-test items |
+| The first sweep files nothing | No record on the branch: the run is recorded as the baseline |
+| A baseline is evidence | Records are read from git at `HEAD`, never the working tree; an uncommitted record is never a baseline, and an unreadable one is named and skipped |
+| Two sweeps cannot double-file | One lock under the state root, taken without waiting; a second sweep is refused |
+| Nothing measured, nothing recorded | A run that executed no tests, or a coverage run with no rows, raises before any write |
+
+A floor drop is a HELD file below the floor now that was not below it, or did
+not exist, at the last sweep. Both sides are judged by one policy,
+`core.rules.sweep_below_floor` — the floor's own `non_source`,
+`coverage_exclude` and `coverage_baseline` ratchet — so a sweep and a change
+cannot disagree about which file is held. When the last sweep ran no coverage,
+files under the floor are reported and not filed: there is no previous figure
+to have dropped from. Recovered keys are reported and never closed; closing a
+bug goes through its own lifecycle.
+
+### The record
+
+One JSON file per sweep, `<paths.sweeps>/<date>-<first 12 hex of head>.json`,
+committed by the sweep itself with the items it filed. Version 1 fields:
+`version`, `seq` (one more than the last on the branch), `ran_on` (bare UTC
+date), `branch`, `head` and `previous` (full hashes; `previous` null on a
+baseline), `command` (the manifest key, `coverage` or `test`, never the
+resolved command, which names a bundle under the state root), `executed`,
+`failed`, `passed`, `failing` (test identities, null where the adapter cannot
+read them; flaky ones excluded), `flaky`, `files` (`{project-relative path:
+pct}`; rows outside the project dropped), `floor`, `hazards` (ids), `filed`
+(`[{key, item}]`), `still_broken` (`[{key, item, status}]`) and `recovered`
+(keys). `passed` is beside `failed` because an adapter that counts nothing
+reports `None` for a green run and a red one alike.
+
+No clock time, host, session or absolute path is in it, so it is
+privacy-clean by construction, and checked anyway: the engine scans the record,
+the commit message and the filed items with the project's own patterns before
+committing, because its commit is a subprocess no hook sees. A finding leaves
+all three uncommitted and exits 1; the record is untracked, so it blocks
+nothing and is never read as a baseline.
+
 ## Storage layout
 
 ```
@@ -1511,8 +1581,17 @@ cache asks whether the source changed, not when.
   attention/<host-id>.json  one per host session: what it is waiting on, its
                           pid, and how its last turn ended. Written by that
                           host's hooks; read by the oracle (ADR-007 D5)
+  sweeps/<kind>.xcresult  the sweep's per-run result bundles, cleared before
+                          each use; never committed (ADR-010)
   locks/registry.lock     advisory lock file
+  locks/sweep.lock        held for the whole of a `sweep run`, so two sweeps
+                          cannot file at once
 ```
+
+The sweep's records are the one exception to "runtime state is never
+committed", and they are not runtime state: they live in the declared store
+`paths.sweeps` (default `docs/sweeps`), are committed, and are read back from
+git rather than from disk (Domain: sweep, above).
 
 **Why the git common directory.** State has to be shared by every worktree of a
 repository. It cannot live under the project root, because each linked worktree

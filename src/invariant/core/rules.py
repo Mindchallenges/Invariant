@@ -3022,6 +3022,10 @@ def _is_exempt(ctx: RuleContext, target: Path | None) -> bool:
     # the isolation rule refuse the one edit it has no review value over.
     patterns.extend(_store_patterns(ctx, ctx.manifest.get("paths.reports")))
 
+    # The sweep records (ADR-010 D9): a declared store the engine commits to
+    # from the main checkout, by the same mechanism and for the same reason.
+    patterns.extend(_store_patterns(ctx, ctx.manifest.get("paths.sweeps")))
+
     if not patterns:
         return False
 
@@ -3763,6 +3767,42 @@ def _ratcheted_against_baseline(
                 f"(down {recorded - pct:g} point(s))"
             )
     return still, ratcheted, regressed
+
+
+def sweep_below_floor(
+    manifest: Any, files: Mapping[str, float]
+) -> tuple[dict[str, float] | None, str | None]:
+    """The HELD files a sweep's coverage leaves under the floor (ADR-010 D4).
+
+    The floor's own policy, read through the floor's own helpers, so a sweep
+    and a change cannot disagree about which path a glob names or what a
+    baseline entry forgives: ``non_source`` and ``coverage_exclude`` paths are
+    never held, and a file at or above its ``coverage_baseline`` entry is a
+    pre-existing shortfall, not a finding. A file BELOW its entry is a
+    regression and stays. Returns ``(below, None)``, or ``(None, why)`` when
+    the baseline cannot be read: a record read in part would turn dropped
+    entries into findings, or hide real ones.
+    """
+    ctx = RuleContext(manifest=manifest, cwd=Path(manifest.root))
+    baseline, problem = _coverage_baseline(ctx)
+    if problem is not None:
+        return None, f"{problem.message}: {problem.detail}".rstrip(": ")
+    floor = float(manifest.get("methodology.gates.coverage_min", 0) or 0)
+    never_held = _declared_in_project(
+        ctx,
+        [
+            *(manifest.get("methodology.gates.non_source") or []),
+            *(manifest.get("methodology.gates.coverage_exclude") or []),
+        ],
+    )
+    below = {
+        rel: float(pct)
+        for rel, pct in files.items()
+        if float(pct) < floor and _first_matching_glob(rel, never_held) is None
+    }
+    _still, ratcheted, _regressed = _ratcheted_against_baseline(below, baseline, floor)
+    forgiven = {rel for rel in below for entry in ratcheted if entry.startswith(f"{rel} ")}
+    return {rel: pct for rel, pct in below.items() if rel not in forgiven}, None
 
 
 def _ratchet_detail(ratcheted: list[str]) -> str:

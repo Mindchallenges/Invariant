@@ -9,6 +9,7 @@ between a gate that verifies and a gate that can be satisfied by accident.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from collections.abc import Sequence
@@ -157,16 +158,26 @@ class Measurement:
     report_command: str | None
     report_exit: int
     measured: dict[str, float]
+    #: The suite's own output, for a reader that needs more than the counts —
+    #: the sweep reads failing test identities from it.
+    stdout: str = ""
+    stderr: str = ""
 
 
-def measure_coverage(manifest, adapter, command: str, bundle: Path, root: Path) -> Measurement:
+def measure_coverage(
+    manifest, adapter, command: str, bundle: Path, root: Path, runner=None
+) -> Measurement:
     """Run a coverage command and read it, or refuse a run that measured nothing.
 
     The measurement and the reading of it are separate programs in some
     ecosystems and one program in others. Where they are separate, they are
     run separately — see _refuse_chained_coverage for what joining them with a
     `;` cost, and why it cannot simply be tolerated.
+
+    ``runner`` replaces :func:`run_command` for a caller that injects its own
+    (the sweep's tests); every refusal below still applies to what it returns.
     """
+    runner = runner or run_command
     report_command: str | None = None
     if manifest.get("commands.coverage_report"):
         report_command = manifest.command_for(
@@ -174,7 +185,7 @@ def measure_coverage(manifest, adapter, command: str, bundle: Path, root: Path) 
         )
         _refuse_chained_coverage(command, report_command, str(bundle))
 
-    proc = run_command(command, root)
+    proc = runner(command, root)
     # The suite's own status, read from the command that RAN the suite.
     # When a report leg follows, this is the whole point of the split: the
     # exit code here is the compiler's and the test runner's, and nothing
@@ -185,7 +196,7 @@ def measure_coverage(manifest, adapter, command: str, bundle: Path, root: Path) 
         measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
         report_exit = proc.returncode
     else:
-        report = run_command(report_command, root)
+        report = runner(report_command, root)
         measured = adapter.parse_coverage(f"{report.stdout}\n{report.stderr}")
         report_exit = report.returncode
 
@@ -231,7 +242,23 @@ def measure_coverage(manifest, adapter, command: str, bundle: Path, root: Path) 
         report_command=report_command,
         report_exit=report_exit,
         measured=measured,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
     )
+
+
+def fresh_bundle(bundle: Path) -> Path:
+    """A result-bundle path, its directory made and any old bundle cleared.
+
+    Cleared because xcodebuild refuses an existing path, and because a stale
+    bundle read as a fresh one would republish the previous run's numbers.
+    Where the path lives is the caller's: it must be one no concurrent run
+    shares.
+    """
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    if bundle.exists():
+        shutil.rmtree(bundle, ignore_errors=True)
+    return bundle
 
 
 def _scope(selectors: Sequence[str]) -> str:
@@ -743,21 +770,12 @@ class PipelineDomain:
         return RECORDED
 
     def _fresh_bundle(self, session_id: str, kind: str) -> Path:
-        """A per-run result-bundle path, cleared before use.
+        """A per-run result-bundle path, per SESSION and per KIND, never shared.
 
-        Per SESSION and per KIND, never shared: two concurrent sessions writing
-        one bundle would overwrite each other's measurements while both
-        reported success. Cleared because xcodebuild refuses an existing path,
-        and because a stale bundle read as a fresh one would republish the
-        previous run's numbers.
+        Two concurrent sessions writing one bundle would overwrite each other's
+        measurements while both reported success.
         """
-        bundle = Path(self.store.root) / "coverage" / f"{session_id}.{kind}.xcresult"
-        bundle.parent.mkdir(parents=True, exist_ok=True)
-        if bundle.exists():
-            import shutil
-
-            shutil.rmtree(bundle, ignore_errors=True)
-        return bundle
+        return fresh_bundle(Path(self.store.root) / "coverage" / f"{session_id}.{kind}.xcresult")
 
     def run_coverage(
         self,
