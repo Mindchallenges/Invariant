@@ -746,3 +746,52 @@ class TestLayering:
                 if isinstance(node, ast.Import) and any("hosts" in a.name for a in node.names):
                     offenders.append(path.name)
         assert offenders == []
+
+
+# -- version skew (BUG_089) ----------------------------------------------------
+
+
+class TestVersionSkew:
+    # Repro for BUG_089 — see docs/backlog/BUG_089.md.
+    # Fails while the defect is live. When the fix lands, delete the
+    # expected-failure wrapper; the assertion must then pass unchanged.
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_089 is live — delete this marker with the fix",
+    )
+    def test_BUG_089_a_stale_rule_registry_is_not_every_project_unreadable(
+        self, tmp_path, monkeypatch
+    ):
+        """An oracle older than the installed profiles must not blame each project.
+
+        A long-running oracle keeps the rule registry it was started with,
+        while the editable install's shipped profile on disk names a rule id
+        added since. Simulated here by dropping that id from the registry the
+        scan's manifest validation consults. Both projects are fine (they load
+        cleanly with the full registry); the skew is the oracle's, so the scan
+        must not answer it with one "cannot read this project" error row per
+        project — the row the panel renders as "Cannot read this project".
+        """
+        from invariant.core import rules as rules_module
+
+        make_project(tmp_path, "one")
+        make_project(tmp_path, "two")
+        index = ProjectIndex(oracle_home())
+        healthy = scan_all(index, clock=lambda: NOW, cache=ScanCache())
+        assert [r for s in healthy for r in s.rows if r.kind == ROW_ERROR] == []
+
+        # The shipped default profile names this id; the "older build" lacks it.
+        assert rules_module.get_rule("sweep.no_full_run") is not None
+        monkeypatch.delitem(rules_module._REGISTRY, "sweep.no_full_run")
+
+        snapshots = scan_all(index, clock=lambda: NOW, cache=ScanCache())
+        unreadable = {
+            s.project.name: r.error
+            for s in snapshots
+            for r in s.rows
+            if r.kind == ROW_ERROR and r.session_id is None
+        }
+        assert unreadable == {}, (
+            "a stale oracle reported every project as unreadable: "
+            f"{unreadable}"
+        )
