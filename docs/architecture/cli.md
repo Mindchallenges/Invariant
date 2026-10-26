@@ -362,7 +362,11 @@ invariant pipeline coverage [--selector <sel>]...
     --selector runs commands.coverage_one instead, the scoped sibling
     (ADR-010), repeatable and joined by the adapter exactly as for `pipeline
     test`; with no coverage_one configured or supplied by the adapter it is
-    refused, having run nothing. The record's `scope` says `scoped`, and the
+    refused, having run nothing. A scoped run that executes no tests is still
+    refused, but its message names the selector as the likely cause (a filter
+    that matched nothing), keeps the build-or-launch alternative, and appends
+    the adapter's own note; a full run keeps the build-or-launch hint alone.
+    The record's `scope` says `scoped`, and the
     figures are a lower bound: under a sweep cadence they are reported, never
     held to the floor. With no --selector, under a cadence scheduling either
     gate, it is asked about first exactly as `pipeline test` is: a

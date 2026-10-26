@@ -1840,10 +1840,6 @@ echo "** TEST SUCCEEDED **"
 exit 0
 """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_088 is live — delete this marker with the fix",
-    )
     def test_BUG_088_scopedZeroExecutedRefusalNamesTheSelector(self, m):
         path = m.root / "fake-coverage.sh"
         path.write_text(self.CLEAN_ZERO_RUN, encoding="utf-8")

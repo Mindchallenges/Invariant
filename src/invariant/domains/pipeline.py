@@ -165,7 +165,13 @@ class Measurement:
 
 
 def measure_coverage(
-    manifest, adapter, command: str, bundle: Path, root: Path, runner=None
+    manifest,
+    adapter,
+    command: str,
+    bundle: Path,
+    root: Path,
+    runner=None,
+    selectors: Sequence[str] = (),
 ) -> Measurement:
     """Run a coverage command and read it, or refuse a run that measured nothing.
 
@@ -176,6 +182,9 @@ def measure_coverage(
 
     ``runner`` replaces :func:`run_command` for a caller that injects its own
     (the sweep's tests); every refusal below still applies to what it returns.
+    ``selectors`` says the run was scoped, which changes only the hint a
+    zero-executed refusal gives: a scoped run that built and launched cleanly
+    most likely matched nothing.
     """
     runner = runner or run_command
     report_command: str | None = None
@@ -205,13 +214,25 @@ def measure_coverage(
     # the world at best. `total is None` means this adapter does not count
     # tests, which is not the same as counting zero.
     if outcome.total == 0:
+        if selectors:
+            hint = (
+                "  The selector may have matched nothing — check "
+                f"{', '.join(selectors)} against the suite's test names. A "
+                "build or launch failure, or tests the scrape cannot count, "
+                "would look the same."
+            )
+            if getattr(outcome, "note", ""):
+                hint += f"\n  adapter note: {outcome.note}"
+        else:
+            hint = (
+                "  Usually a build or launch failure rather than a coverage "
+                "problem — read the build output first."
+            )
         raise UsageError(
             "the coverage run executed no tests, so its measurement "
             "describes nothing.\n"
             f"  command: {command}\n"
-            f"  exit: {proc.returncode}\n"
-            "  Usually a build or launch failure rather than a coverage "
-            "problem — read the build output first."
+            f"  exit: {proc.returncode}\n" + hint
         )
 
     if not measured:
@@ -820,7 +841,9 @@ class PipelineDomain:
             result_bundle=str(bundle),
             **extra,
         )
-        run = measure_coverage(self.manifest, adapter, command, bundle, root)
+        run = measure_coverage(
+            self.manifest, adapter, command, bundle, root, selectors=selectors
+        )
         outcome = run.outcome
 
         self.record_coverage(session_id, run.measured)
