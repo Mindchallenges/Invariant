@@ -202,6 +202,8 @@ graph TD
     SWEEPD -- sweep_below_floor --> RULES
     SWEEPD --> adapters
     CSWEEP --> GIT
+    CSWEEP -- project_relative --> MANIFEST
+    RULES -- the last sweep and its age --> CSWEEP
     CCTEL -- implements SampleSource --> STATS
 
     FSM --> METH
@@ -412,14 +414,22 @@ exactly one name — `DEFAULT_PATTERNS`, the single authoritative default
 pattern set — so the manifest's default and a bare `PrivacyScanner()` cannot
 drift apart (AUD-15).
 
-`SWEEPD` and `CSWEEP` are the sweep (IDEA_032 increment 3, ADR-010 D4, D9):
-the whole suite run once on a cadence from the main checkout, its findings
-filed and its own record committed. The split is the `stats` one. `core/sweep`
-is the arithmetic — the record type, the diff against the last sweep, the
-settling of new reds by their isolated re-runs, the dedup and the age — pure
-apart from reading committed records through `git` (`CSWEEP --> GIT`, `git
-ls-tree` and `git show` on a ref), so `core/rules` can ask about the last sweep
-in increment 4 without importing a domain. `domains/sweep` owns the effects,
+`SWEEPD` and `CSWEEP` are the sweep (IDEA_032 increments 3 and 4, ADR-010 D4,
+D6, D9): the whole suite run once on a cadence from the main checkout, its
+findings filed and its own record committed. The split is the `stats` one.
+`core/sweep` is the arithmetic — the record type, the diff against the last
+sweep, the settling of new reds by their isolated re-runs, the dedup and the
+age — pure apart from reading committed records through `git` (`CSWEEP -->
+GIT`, `git ls-tree` and `git show` on a ref), so `core/rules` asks about the
+last sweep without importing a domain. `RULES --> CSWEEP` is that question:
+`sweep.fresh` reads the last record on the session's base branch and its age,
+and the advisory coverage verdict quotes that record's figure for each file.
+`CSWEEP --> MANIFEST` is one name, `project_relative`, so `paths.sweeps` has the
+one spelling every reader of it uses (`directory_of`), along with the cadence
+and grace (`cadence_of`) that the domain's `status` and the rule both read.
+The rule rides beside each scheduled gate because `core/machines` injects it
+there by gate id (`Machine.inject_beside`), the by-id sibling of the by-role
+injection docs-first uses. `domains/sweep` owns the effects,
 and every arrow out of it reuses an owner rather than forking one.
 `SWEEPD --> PIPELINE` is the run-and-read seam increment 2 extracted
 (`run_command`, `measure_coverage`, `joined_selectors`), so a sweep spawns and
@@ -703,7 +713,11 @@ WHOLE suite is green. `sweep.no_full_run` reports a full run made on a change
 anyway, exactly at the CLI and, through the adapter's `test_scope_of`, at the
 hook. What holds the evidence is `invariant sweep run` (`core/sweep`,
 `domains/sweep`): a held file under the floor at a sweep, and not under it at
-the last one, is filed as a drop, judged by the floor's own policy.
+the last one, is filed as a drop, judged by the floor's own policy. How old
+that evidence is, is `sweep.fresh`, injected beside each scheduled gate: it
+warns on no sweep or one past `cadence_days + grace_days` and never blocks,
+and the advisory verdict names the last sweep's figure and commit for each
+file it reports.
 
 `SESSION → PLAN` is the newest arrow into `core/`, and it is drawn for the
 reason `SESSION → STATS` is. The deliverable set a session owes is *stored* on
@@ -790,7 +804,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 
 | Module | Owns | Never does |
 |---|---|---|
-| `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates | Persist anything; know what a session or a bug is |
+| `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through | Read state; run commands |
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level | Decide policy — levels come from the manifest |
@@ -800,7 +814,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, and the commit a revision names — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
-| `sweep` | The sweep record (version 1) and its file name; reading committed records from a git ref; the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
+| `sweep` | The sweep record (version 1) and its file name; where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
 

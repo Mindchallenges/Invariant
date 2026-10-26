@@ -146,6 +146,26 @@ with no executable lines. Anything else: declare it `non_source` if it is not
 code, `coverage_exclude` if it is measured but should not be held, or fix the
 coverage configuration so it produces a row.
 
+### `[warn] sweep.fresh` beside a gate
+
+The project runs its whole suite on a sweep cadence
+(`methodology.gates.schedule`), and the last sweep on the base branch is
+missing or older than `cadence_days + grace_days`. The verdict names the age
+and the sweep's commit. It never blocks, and the change in front of you does
+not owe the sweep: run `invariant sweep run` from the main checkout (or check
+that the scheduler calling it still does), then `git pull` on any other clone,
+since the records travel with the base branch. `invariant sweep status` shows
+the last sweep and its age. The rule cannot be raised to `block` or `ask`:
+the manifest refuses it.
+
+### `sweep.no_full_run` on `pipeline test` or `pipeline coverage`
+
+A cadence moved full runs to the sweep, and a bare `invariant pipeline test`
+or `pipeline coverage` is one. Record the affected suites with `--selector`.
+If the change touches a `schedule.held_paths` glob the full run is owed and
+the rule answers clean; for any other deliberate full run, `invariant override
+sweep.no_full_run --reason '<why>'` lets one through.
+
 ### `[BLOCK] privacy.clean` — findings in a document or commit message
 
 The scanner found a home path, an email, an IP, a token, a clock time or a

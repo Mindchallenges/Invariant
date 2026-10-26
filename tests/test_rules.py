@@ -162,8 +162,8 @@ class TestRegistry:
         """A graded rule that nothing ever evaluates reports a level it has no
         way to apply.
 
-        Two routes reach a rule: an event binding, or a gate naming it in some
-        machine. A rule with neither is dead code wearing an enforcement
+        Three routes reach a rule: an event binding, a gate naming it in some
+        machine, or an injection (by role, or beside a scheduled gate by id). A rule with neither is dead code wearing an enforcement
         level — `invariant rules list` shows it as `block`, the profiles argue
         about it, and it never once runs. That reads as a control being
         present, which is the failure mode this library exists to remove.
@@ -171,6 +171,7 @@ class TestRegistry:
         from invariant.core.machines import (
             AGENT_ROLE_GATES,
             DOCS_FIRST_GATES,
+            FRESHNESS_GATE,
             load_machine,
             shipped_ids,
         )
@@ -182,6 +183,7 @@ class TestRegistry:
             for gates in spec.values()
             for gate in gates
         }
+        reachable.add(FRESHNESS_GATE)
         for machine_id in shipped_ids():
             for state in load_machine(machine_id).states.values():
                 reachable.update(state.entry_gates)
@@ -7070,3 +7072,323 @@ class TestReadsWithoutOptionalLocks:
         with git.without_optional_locks():
             assert "GIT_OPTIONAL_LOCKS" not in os.environ
             assert git.is_repo(tmp_path) is False
+
+
+# -- sweep.fresh (IDEA_032 increment 4, ADR-010 D6) --------------------------
+
+
+def _utc_today():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).date()
+
+
+def sweep_record(ran_on, seq=1, head="c" * 40, branch="master", files=None, command="coverage"):
+    from invariant.core.sweep import SweepRecord
+
+    return SweepRecord(
+        seq=seq,
+        ran_on=ran_on,
+        branch=branch,
+        head=head,
+        previous=None,
+        command=command,
+        executed=10,
+        failed=0,
+        passed=True,
+        failing=[],
+        files=files if files is not None else {"src/app/mod.py": 97.0},
+        floor=90.0,
+    )
+
+
+def commit_sweep(root, rec, directory="docs/sweeps"):
+    target = Path(root) / directory / rec.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(rec.to_json(), encoding="utf-8")
+    run(["git", "add", "--", str(target)], root)
+    run(["git", "commit", "-qm", f"Sweep {rec.seq}"], root)
+
+
+def days_ago(n):
+    from datetime import timedelta
+
+    return (_utc_today() - timedelta(days=n)).isoformat()
+
+
+def cadence_manifest(root, schedule=None, extra_gates=None, rules=None):
+    gates = {
+        "coverage_min": 90,
+        "coverage_scope": "touched",
+        "schedule": schedule
+        if schedule is not None
+        else {"cadence_days": 7, "gates": ["coverage.meets_floor", "test.all_pass"]},
+    }
+    gates.update(extra_gates or {})
+    body = {
+        "version": 1,
+        "project": {"name": "demo", "ecosystems": ["python"]},
+        "methodology": {"gates": gates},
+    }
+    if rules:
+        body["enforcement"] = {"rules": rules}
+    write_manifest(root, body)
+
+
+def fresh(ctx):
+    return only(evaluate(["sweep.fresh"], ctx))
+
+
+class TestSweepFresh:
+    """A sweep cadence's evidence is only as good as the last sweep (ADR-010 D6).
+
+    The rule warns when no sweep is recorded or the last is older than the
+    cadence plus grace, names the age either way, and never stops work: its
+    level is capped at warn by validation (D3 item 5).
+    """
+
+    SESSION: ClassVar[dict] = {"id": "s1", "files": [], "base": "master"}
+
+    def test_without_a_cadence_it_does_not_apply(self, ctx_factory):
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.skipped
+        assert "no sweep cadence" in result.verdict.message
+
+    def test_no_sweep_recorded_warns_and_never_blocks(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "no sweep recorded on master" in result.verdict.message
+        assert result.level is Level.WARN
+        assert not result.blocks
+        assert any("invariant sweep run" in fix for fix in result.verdict.fixes)
+
+    def test_a_fresh_sweep_is_clean_and_names_its_age(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(2)))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.ok and not result.verdict.skipped, result.verdict.message
+        assert "2 day(s)" in result.verdict.message
+        assert "c" * 12 in result.verdict.message
+
+    def test_a_stale_sweep_warns_naming_its_age_and_commit(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(11)))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "11 day(s)" in result.verdict.message
+        assert "c" * 12 in result.verdict.message
+        assert "7" in result.verdict.message and "3" in result.verdict.message
+        assert not result.blocks
+
+    def test_the_grace_is_three_days_by_default(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(10)))
+        assert fresh(ctx_factory(session=self.SESSION)).verdict.ok
+
+    def test_the_grace_is_configurable(self, ctx_factory):
+        cadence_manifest(
+            ctx_factory.main,
+            schedule={"cadence_days": 7, "grace_days": 0, "gates": ["test.all_pass"]},
+            rules={"coverage.meets_floor": "warn"},
+        )
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(8)))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "8 day(s)" in result.verdict.message
+
+    def test_the_latest_record_on_the_base_branch_is_the_one_judged(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(20), seq=1, head="a" * 40))
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(1), seq=2, head="b" * 40))
+        commit_sweep(
+            ctx_factory.main,
+            sweep_record(days_ago(0), seq=9, head="d" * 40, branch="other"),
+        )
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.ok
+        assert "b" * 12 in result.verdict.message
+
+    def test_a_worktree_cut_before_the_sweep_still_sees_it(self, ctx_factory):
+        """Freshness reads the BASE branch's committed records, never the
+        worktree's tree: the sweep lands on the base after the session cut."""
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(1)))
+        assert not (ctx_factory.wt / "docs" / "sweeps").exists()
+        result = fresh(ctx_factory(cwd=ctx_factory.wt, session=self.SESSION))
+        assert result.verdict.ok, result.verdict.message
+
+    def test_an_uncommitted_record_is_not_a_sweep(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        rec = sweep_record(days_ago(1))
+        target = ctx_factory.main / "docs" / "sweeps" / rec.name
+        target.parent.mkdir(parents=True)
+        target.write_text(rec.to_json(), encoding="utf-8")
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert "no sweep recorded" in result.verdict.message
+
+    def test_without_a_session_the_checked_out_branch_is_read(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(3)))
+        result = fresh(ctx_factory())
+        assert result.verdict.ok
+        assert "3 day(s)" in result.verdict.message
+
+    def test_a_base_git_cannot_read_warns_rather_than_passing(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        result = fresh(ctx_factory(session={**self.SESSION, "base": "no-such-branch"}))
+        assert not result.verdict.ok
+        assert "no-such-branch" in result.verdict.message
+
+    def test_an_unreadable_record_is_named(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(1)))
+        bad = ctx_factory.main / "docs" / "sweeps" / "2026-01-01-broken.json"
+        bad.write_text("{not json", encoding="utf-8")
+        run(["git", "add", "-A"], ctx_factory.main)
+        run(["git", "commit", "-qm", "broken"], ctx_factory.main)
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.ok
+        assert "2026-01-01-broken.json" in result.verdict.detail
+
+    def test_a_record_whose_date_cannot_be_read_is_not_fresh(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record("someday"))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "someday" in result.verdict.message
+
+    @pytest.mark.parametrize("profile", ["loose", "standard", "strict"])
+    def test_it_warns_in_every_profile(self, ctx_factory, profile):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "enforcement": {"profile": profile},
+                "methodology": {
+                    "gates": {
+                        "schedule": {
+                            "cadence_days": 7,
+                            "gates": ["coverage.meets_floor", "test.all_pass"],
+                        }
+                    }
+                },
+            },
+        )
+        from invariant.core.manifest import Manifest
+
+        manifest = Manifest.load(ctx_factory.main)
+        assert manifest.rule_level("sweep.fresh") is Level.WARN
+
+
+class TestTheAdvisoryVerdictNamesTheLastSweep:
+    """Under a cadence an advisory file's scoped figure is a lower bound; the
+    verdict names the figure the last sweep measured for it, and that sweep's
+    commit, so the reader sees the number the floor is really held to."""
+
+    SHARED = "src/app/mod.py"
+
+    def ctx(self, ctx_factory, coverage=None):
+        cadence_manifest(ctx_factory.main)
+        path = ctx_factory.wt / self.SHARED
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def f():\n    return g()\n", encoding="utf-8")
+        evidence = {}
+        if coverage is not None:
+            evidence = {
+                "coverage": {str(path): coverage},
+                "coverage_run": {"scope": "scoped", "selectors": ["tests/test_mod.py"]},
+            }
+        return ctx_factory(
+            session={
+                "id": "s1",
+                "files": [self.SHARED],
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": evidence},
+        )
+
+    def floor(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_the_last_sweeps_figure_and_commit_are_named(self, ctx_factory):
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(2), head="e" * 40))
+        verdict = self.floor(self.ctx(ctx_factory, coverage=65.0))
+        assert verdict.ok, verdict.message
+        assert f"{self.SHARED} 65%, below the 90% floor" in verdict.detail
+        assert "last sweep 97%" in verdict.detail
+        assert "e" * 12 in verdict.detail
+
+    def test_an_unmeasured_file_still_gets_the_sweeps_figure(self, ctx_factory):
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(2), head="e" * 40))
+        verdict = self.floor(self.ctx(ctx_factory))
+        assert "not measured" in verdict.detail
+        assert "last sweep 97%" in verdict.detail
+
+    def test_a_file_the_last_sweep_did_not_measure_says_so(self, ctx_factory):
+        commit_sweep(
+            ctx_factory.main, sweep_record(days_ago(2), head="e" * 40, files={"other.py": 99.0})
+        )
+        verdict = self.floor(self.ctx(ctx_factory, coverage=95.0))
+        assert "not in the last sweep" in verdict.detail
+        assert "e" * 12 in verdict.detail
+
+    def test_a_sweep_that_ran_no_coverage_says_so(self, ctx_factory):
+        commit_sweep(
+            ctx_factory.main,
+            sweep_record(days_ago(2), head="e" * 40, files={}, command="test"),
+        )
+        verdict = self.floor(self.ctx(ctx_factory, coverage=95.0))
+        assert "measured no coverage" in verdict.detail
+
+    def test_no_sweep_recorded_is_said_once(self, ctx_factory):
+        verdict = self.floor(self.ctx(ctx_factory, coverage=95.0))
+        assert verdict.detail.count("No sweep is recorded on master") == 1
+
+    def test_a_glob_advisory_verdict_never_reads_the_sweep(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_advisory_paths": ["src/**"]}
+                },
+            },
+        )
+        path = ctx_factory.wt / self.SHARED
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def f():\n    return g()\n", encoding="utf-8")
+        verdict = self.floor(
+            ctx_factory(
+                session={"id": "s1", "files": [self.SHARED], "worktree": str(ctx_factory.wt),
+                         "base": "master"},
+                pipeline={"evidence": {}},
+            )
+        )
+        assert "sweep" not in verdict.detail
+
+
+class TestSweepCadenceSummary:
+    def test_it_names_held_paths_and_a_stale_sweep(self, ctx_factory):
+        from invariant.core.rules import sweep_cadence_summary
+
+        cadence_manifest(
+            ctx_factory.main,
+            schedule={
+                "cadence_days": 7,
+                "gates": ["coverage.meets_floor"],
+                "held_paths": ["core/**"],
+            },
+            rules={"coverage.meets_floor": "warn"},
+        )
+        text = sweep_cadence_summary(ctx_factory())
+        assert "held_paths: core/**" in text
+        assert "STALE: no sweep recorded on master" in text
+
+    def test_without_a_cadence(self, ctx_factory):
+        from invariant.core.rules import sweep_cadence_summary
+
+        assert sweep_cadence_summary(ctx_factory()) == "none configured"

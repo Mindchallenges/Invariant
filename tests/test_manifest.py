@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import pytest
 import yaml
 
@@ -424,3 +426,52 @@ class TestDeclaredPathsHaveOneSpelling:
 
         base = tmp_path / "proj"
         assert project_relative(f"{base}/docs/../../escape", [base]) is None
+
+
+class TestSweepFreshIsCappedAtWarn:
+    """ADR-010 D3 item 5, ruling 10: `sweep.fresh` only ever warns.
+
+    A stale sweep is evidence the project has not refreshed, never a reason
+    to stop a change; the engine holds that ruling at load rather than in
+    prose, so a manifest raising the rule's level is refused, naming it.
+    """
+
+    CADENCE: ClassVar[dict] = {"schedule": {"cadence_days": 7, "gates": ["coverage.meets_floor"]}}
+
+    @pytest.mark.parametrize("level", ["block", "ask"])
+    def test_a_level_that_stops_work_is_refused(self, tmp_path, level):
+        write_manifest(
+            tmp_path,
+            {"methodology": {"gates": self.CADENCE}, "enforcement": {"rules": {"sweep.fresh": level}}},
+        )
+        with pytest.raises(ManifestError) as caught:
+            Manifest.load(tmp_path)
+        text = str(caught.value)
+        assert "sweep.fresh" in text
+        assert level in text
+        assert "warn" in text
+
+    def test_it_is_refused_without_a_cadence_too(self, tmp_path):
+        """The cap is a property of the rule, not of the cadence: a level
+        nothing reads today would block the day a cadence is set."""
+        write_manifest(tmp_path, {"enforcement": {"rules": {"sweep.fresh": "block"}}})
+        with pytest.raises(ManifestError, match="sweep.fresh"):
+            Manifest.load(tmp_path)
+
+    @pytest.mark.parametrize("level", ["warn", "off"])
+    def test_warn_and_off_load(self, tmp_path, level):
+        write_manifest(
+            tmp_path,
+            {"methodology": {"gates": self.CADENCE}, "enforcement": {"rules": {"sweep.fresh": level}}},
+        )
+        assert Manifest.load(tmp_path).rule_level("sweep.fresh") is Level.parse(level)
+
+    @pytest.mark.parametrize("profile", ["loose", "standard", "strict"])
+    def test_every_shipped_profile_loads_it_at_warn(self, tmp_path, profile):
+        from invariant.core.manifest import DATA_DIR
+
+        raw = yaml.safe_load((DATA_DIR / "profiles" / f"{profile}.yaml").read_text())
+        assert raw["rules"]["sweep.fresh"] == "warn"
+        write_manifest(tmp_path, {"enforcement": {"profile": profile}})
+        assert Manifest.load(tmp_path).rule_level("sweep.fresh") is Level.WARN
+

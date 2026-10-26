@@ -138,6 +138,13 @@ invariant doctor
     host sessions. A `doctor` that goes permanently red on every project which
     adopts a checklist is the gate that gets ignored, and then switched off.
 
+    The `coverage advisory paths` and `sweep cadence` rows are informational
+    in the same way: the first names a configured `coverage_advisory_paths`
+    as an active exception, the second the sweep cadence, its scheduled gates,
+    any `held_paths` and the last sweep's age, prefixed STALE when
+    `sweep.fresh` would warn (ADR-010 D6). A late sweep is that rule's
+    warning, never a failed diagnosis.
+
     When the oracle's LaunchAgent is installed, one more row, `oracle agent
     interpreter`, fails if the interpreter its plist names no longer exists:
     an editable install can move, and the agent would then fail at every
@@ -400,7 +407,11 @@ invariant pipeline coverage [--selector <sel>]...
     outside methodology.gates.schedule.held_paths is advisory the same way,
     through the same split, the verdict naming the cadence instead of a glob.
     A held path is held as before, and its figure must come from a run with
-    no --selector (manifest.md, "A sweep cadence").
+    no --selector (manifest.md, "A sweep cadence"). Each advisory file is
+    named with the last committed sweep's figure for it and that sweep's
+    commit — "last sweep 97% at <12 hex>", "not in the last sweep", or one
+    sentence saying no sweep is recorded or the last measured no coverage —
+    so the scoped lower bound is read beside the number the floor is held to.
 
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
@@ -793,11 +804,25 @@ invariant sweep run [--dry-run]
 
 invariant sweep status [--branch <b>]
     The last sweep on the branch, its age in days, and the cadence and grace
-    it is held to. The freshness RULE is increment 4 (`sweep.fresh`).
+    it is held to. With a cadence it ends with the `sweep.fresh` verdict for
+    that branch, rendered as every gate renders it (`fresh` in --json), so
+    `status` and the gates cannot disagree about whether the sweep is stale.
 
 invariant sweep show [<seq> | <record file name> | <head prefix>] [--branch <b>]
     One record, the latest by default.
 ```
+
+Freshness (`sweep.fresh`, ADR-010 D6) is not a command of its own. It is a
+rule, injected beside every gate a cadence schedules, so it is reported on
+each transition and `pipeline gates` call that carries one; `invariant check`
+evaluates it with every other unbound rule; and `doctor` prints a `sweep
+cadence` row naming the cadence, the scheduled gates, any `held_paths` and
+the last sweep's age (`core.rules.sweep_cadence_summary`), informational and
+never failing. It reads committed records on the session's base branch, or on
+the checked-out branch with no session, so a worktree cut before the latest
+sweep still sees it. It warns on no sweep, an unreadable branch, an unreadable
+date, or an age past `cadence_days + grace_days`, and the manifest refuses it
+at `block` or `ask`.
 
 ## Rules and gates
 

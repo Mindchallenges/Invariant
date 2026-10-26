@@ -149,6 +149,30 @@ one project and advise in another with no code change.
 it came from, because "why is this rule blocking me" has to be answerable
 without reading library source.
 
+### Whole-suite runs on a schedule
+
+A project whose full suite is too slow to run on every change can move the
+whole suite and whole-scheme coverage to a sweep it runs on a cadence:
+
+```yaml
+methodology:
+  gates:
+    schedule:
+      cadence_days: 7
+      gates: [coverage.meets_floor, test.all_pass]
+      held_paths: []           # globs whose touch still owes a full run before merge
+```
+
+A change then records only its affected suites (`invariant pipeline test
+--selector`, `invariant pipeline coverage --selector`); the floor reports the
+scoped figures beside the last sweep's, without blocking on them, and a red
+scoped run still fails. `invariant sweep run`, from cron, a LaunchAgent or CI,
+runs everything once from the main checkout, files each new red or floor drop
+as a bug with its commit range, and commits its own record. `invariant sweep
+status` shows the last one; `sweep.fresh` warns, and never blocks, when it is
+older than the cadence plus `grace_days` (3 by default). See
+[Configuration](docs/guide/configuration.md#a-sweep-cadence).
+
 ## Opinions it holds
 
 Most of this library is mechanism. Three things are policy, taken deliberately:

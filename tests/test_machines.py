@@ -774,3 +774,100 @@ class TestBUG066ProvedNotFixedIsAnOutcome:
 
     def test_it_does_not_carry_the_landing_role(self):
         assert "landing" not in load_machine("bugfix").state("reproduced").roles
+
+
+class TestSweepFreshRidesBesideEachScheduledGate:
+    """ADR-010 D6, ruling 10: `sweep.fresh` is injected beside every gate a
+    sweep cadence has scheduled — by gate id, the way docs-first is injected
+    by role — so a transition that would have demanded whole-run evidence
+    reports how old the evidence holding it is. No cadence, no injection."""
+
+    BOTH: ClassVar[dict] = {
+        "cadence_days": 7,
+        "gates": ["coverage.meets_floor", "test.all_pass"],
+    }
+
+    def machine(self, make_manifest, methodology="tdd", schedule=None):
+        gates = {"schedule": schedule} if schedule is not None else {}
+        return load_pipeline_machine(
+            make_manifest({"methodology": {"pipeline": methodology, "gates": gates}})
+        )
+
+    def gates_of(self, machine):
+        return {
+            state.id: (state.entry_gates, state.exit_gates)
+            for state in machine.states.values()
+        }
+
+    @pytest.mark.parametrize("methodology", ["tdd", "bugfix", "spec-first", "chore", "docs", "none"])
+    def test_without_a_cadence_no_machine_carries_it(self, make_manifest, methodology):
+        assert "sweep.fresh" not in self.machine(make_manifest, methodology).gate_ids()
+
+    def test_it_sits_beside_every_scheduled_gate(self, make_manifest):
+        machine = self.machine(make_manifest, schedule=self.BOTH)
+        for state in machine.states.values():
+            for gates in (state.entry_gates, state.exit_gates):
+                scheduled = {"coverage.meets_floor", "test.all_pass"} & set(gates)
+                assert ("sweep.fresh" in gates) == bool(scheduled), (state.id, gates)
+
+    def test_it_appears_once_per_gate_set(self, make_manifest):
+        machine = self.machine(make_manifest, schedule=self.BOTH)
+        reviewing = machine.state("reviewing")
+        assert reviewing.entry_gates.count("sweep.fresh") == 1
+
+    def test_only_the_scheduled_gate_carries_it(self, make_manifest):
+        """tdd's `green`, `refactor` and `reviewing` carry `test.all_pass`
+        alone; with only the floor scheduled they gain nothing, and the
+        landing, which carries the floor, does."""
+        machine = self.machine(
+            make_manifest,
+            schedule={"cadence_days": 7, "gates": ["coverage.meets_floor"]},
+        )
+        assert "sweep.fresh" not in machine.state("green").entry_gates
+        assert "sweep.fresh" not in machine.state("reviewing").entry_gates
+        assert "sweep.fresh" in machine.state("committed").entry_gates
+
+    def test_a_machine_carrying_no_scheduled_gate_is_unchanged(self, make_manifest):
+        plain = self.machine(make_manifest, "none")
+        scheduled = self.machine(make_manifest, "none", schedule=self.BOTH)
+        assert self.gates_of(plain) == self.gates_of(scheduled)
+
+    def test_it_follows_the_gate_into_a_project_machine(self, make_manifest, tmp_path):
+        """By gate id, so a machine this library has never seen still gets it
+        wherever it put a scheduled gate."""
+        machines = tmp_path / "machines"
+        machines.mkdir()
+        (machines / "mine.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "id": "mine",
+                    "kind": "pipeline",
+                    "initial": "work",
+                    "terminal": ["done"],
+                    "states": {
+                        "work": {"exit_gates": ["test.all_pass"], "next": ["done"]},
+                        "done": {"roles": ["landing"]},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        machine = load_pipeline_machine(
+            make_manifest(
+                {
+                    "methodology": {
+                        "pipeline": "mine",
+                        "extra_machines": [str(machines)],
+                        "gates": {
+                            "schedule": {"cadence_days": 7, "gates": ["test.all_pass"]}
+                        },
+                    },
+                }
+            )
+        )
+        assert machine.state("work").exit_gates == ("test.all_pass", "sweep.fresh")
+        assert "sweep.fresh" not in machine.state("done").entry_gates
+
+    def test_no_methodology_file_declares_it(self):
+        for path in MACHINE_DIR.glob("*.yaml"):
+            assert "sweep.fresh" not in path.read_text(encoding="utf-8"), path.name

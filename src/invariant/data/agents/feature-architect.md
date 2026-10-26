@@ -142,6 +142,22 @@ So each advance is preceded by the command that gives it something to read:
 A red-phase run is *expected* to exit non-zero. That is the evidence, not a
 failure of the step — record it and move on.
 
+**Under a sweep cadence, every run in that table is scoped.** When `invariant
+config show` reports `methodology.gates.schedule.cadence_days` set, the
+project has moved whole-suite and whole-scheme evidence to a scheduled sweep
+(`invariant sweep run`), and a full run on a change is exactly what
+`sweep.no_full_run` reports (or refuses, at `block`). Record every phase with
+`invariant pipeline test --selector <the touched files' tests>` and coverage
+with `invariant pipeline coverage --selector <the same>` — never the bare
+forms. A scheduled `coverage.meets_floor` reads those scoped figures as
+advisory (a lower bound, shown beside the last sweep's figure for the file),
+and a scheduled `test.all_pass` still fails on a red scoped run. The one
+exception is a touched path under `methodology.gates.schedule.held_paths`: it
+owes a FULL run before merge, so record the bare `invariant pipeline test` /
+`invariant pipeline coverage` for it, which `sweep.no_full_run` then answers
+clean. A `sweep.fresh` warning beside a gate says the last sweep is late; it
+never blocks, and running the sweep is the project's job, not this change's.
+
 **If this task is a `BUG_<id>` that cleared gate B9**, the failing test already
 exists — `bug-reproducer` committed it. Do not write a second one. Your first
 edit is to delete its expected-failure wrapper so the assertion goes live,

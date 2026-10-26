@@ -307,6 +307,8 @@ Confirm the run actually executed tests — a selection filter that matches noth
 
 For each touched source file, confirm coverage meets the configured floor (`methodology.gates.coverage_min`).
 
+**Under a sweep cadence** (`invariant config show` reports `methodology.gates.schedule.cadence_days` set), the whole suite and whole-scheme coverage belong to a scheduled sweep (`invariant sweep run`), and a full run on a change is what `sweep.no_full_run` reports or refuses. Record this phase's evidence scoped, with `invariant pipeline test --selector <affected tests>` and `invariant pipeline coverage --selector <affected tests>` — never the bare forms. A scheduled `coverage.meets_floor` treats each touched file's scoped figure as advisory (a lower bound, named beside the last sweep's figure and commit), so a scoped figure under the floor is a `[WARN]` in the report, not a blocker; a red scoped run still blocks through `test.all_pass`. The exception is a touched path under `methodology.gates.schedule.held_paths`: it owes a FULL run before merge, so record the bare `invariant pipeline test` and `invariant pipeline coverage` for it, and hold it to the floor as usual. A `sweep.fresh` warning (no sweep, or one older than the cadence plus grace) is reported, never a blocker.
+
 Gate failures:
 - Any test failure → bail. Report the failing test + assertion + relevant log lines.
 - Any touched file below the floor → bail. Report which files and at what %, with suggested test cases.

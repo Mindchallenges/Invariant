@@ -28,6 +28,7 @@ from typing import Any
 from ..adapters import Adapter, get_adapter
 from . import git
 from . import plan as plan_reader
+from . import sweep as sweep_reader
 from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
@@ -2304,6 +2305,128 @@ def _sweep_no_full_run(ctx: RuleContext) -> Verdict:
     )
 
 
+@rule(
+    "sweep.fresh",
+    summary="Under a sweep cadence, the last committed sweep is no older than "
+    "the cadence plus its grace.",
+    events=(),
+)
+def _sweep_fresh(ctx: RuleContext) -> Verdict:
+    """How old the evidence holding the scheduled gates is (ADR-010 D6).
+
+    Injected beside every scheduled gate (``core/machines``) and evaluated in
+    ``invariant check``. It warns, and only warns: the manifest refuses a
+    level that would stop work (D3 item 5), because a sweep that ran late
+    leaves a change exactly as safe as one that ran on time, and a machine off
+    over a weekend must not block every session. The record is read from the
+    base branch's commits, never the working tree, so the answer is the same
+    in every worktree and on every clone that holds the branch (D9).
+    """
+    cadence, grace = sweep_reader.cadence_of(ctx.manifest)
+    if cadence is None:
+        return Verdict.na("no sweep cadence is configured")
+    last = _last_sweep(ctx)
+    limit = f"the {cadence}-day cadence plus {grace} day(s) grace"
+    fixes = (
+        (
+            f"invariant sweep run  # from the main checkout, on "
+            f"{last.branch or 'the base branch'}; or schedule it (cron, a LaunchAgent, CI)"
+        ),
+    )
+    advisory = (
+        "sweep.fresh only warns. The scheduled gates are held by the sweep, so "
+        "until one runs nothing has checked the whole suite since the last."
+    )
+    detail = _unreadable_records(last)
+    if not last.readable:
+        where = repr(last.branch) if last.branch else "a detached HEAD with no session base"
+        return Verdict.fail(
+            f"no sweep can be read: git could not read {where}",
+            detail=" ".join(p for p in (advisory, detail) if p),
+            fixes=fixes,
+        )
+    record = last.record
+    if record is None:
+        return Verdict.fail(
+            f"no sweep recorded on {last.branch}",
+            detail=" ".join(p for p in (advisory, detail) if p),
+            fixes=fixes,
+        )
+    age = sweep_reader.age_days(record.ran_on, _today(ctx))
+    which = f"sweep {record.seq} at {record.head[:12]}, {record.ran_on}"
+    if age is None:
+        return Verdict.fail(
+            f"the last sweep on {last.branch} has a date that cannot be read "
+            f"({record.ran_on!r}; {which}), so it is not fresh",
+            detail=" ".join(p for p in (advisory, detail) if p),
+            fixes=fixes,
+        )
+    if sweep_reader.overdue(age, cadence_days=cadence, grace_days=grace):
+        return Verdict.fail(
+            f"the last sweep on {last.branch} is {age} day(s) old ({which}), "
+            f"past {limit}",
+            detail=" ".join(p for p in (advisory, detail) if p),
+            fixes=fixes,
+        )
+    return Verdict.clean(
+        f"the last sweep on {last.branch} is {age} day(s) old ({which}), within {limit}",
+        detail=detail,
+    )
+
+
+def _today(ctx: RuleContext):
+    """The date ages are read against: ``extra["today"]`` when a caller pins it."""
+    return ctx.extra.get("today") or sweep_reader.utc_today()
+
+
+def _sweep_branch(ctx: RuleContext) -> str | None:
+    """The branch whose sweeps hold this change: the session's base, else HEAD's.
+
+    A session is judged against its BASE, where the sweep commits its records,
+    not its own branch, which no sweep ever runs on. With no session (a
+    scheduler, ``invariant check`` in the main checkout) the checked-out
+    branch is the answer.
+    """
+    base = str((ctx.session or {}).get("base") or "")
+    return base or git.current_branch(Path(ctx.manifest.root))
+
+
+def _last_sweep(ctx: RuleContext) -> sweep_reader.LastSweep:
+    return sweep_reader.last_on(
+        Path(ctx.manifest.root), _sweep_branch(ctx), sweep_reader.directory_of(ctx.manifest)
+    )
+
+
+def _unreadable_records(last: sweep_reader.LastSweep) -> str:
+    if not last.unreadable:
+        return ""
+    return (
+        f"{len(last.unreadable)} committed record(s) could not be read and were "
+        f"skipped: {', '.join(last.unreadable[:6])}."
+    )
+
+
+def sweep_cadence_summary(ctx: RuleContext) -> str:
+    """``doctor``'s informational row: the cadence, its gates, and the last sweep.
+
+    One wording for the reader that asks, in the spirit of
+    :func:`coverage_advisory_exception`. Informational, never failing: a
+    missing or stale sweep is ``sweep.fresh``'s warning, and a ``doctor`` red
+    for it would be red on every project the week it adopts a cadence.
+    """
+    cadence, grace = sweep_reader.cadence_of(ctx.manifest)
+    if cadence is None:
+        return "none configured"
+    gates = ", ".join(sorted(ctx.manifest.scheduled_gates()))
+    held = _held_path_globs(ctx)
+    parts = [f"every {cadence} day(s) + {grace} grace; scheduled: {gates}"]
+    if held:
+        parts.append(f"held_paths: {', '.join(held)}")
+    verdict = _sweep_fresh(ctx)
+    parts.append(("" if verdict.ok else "STALE: ") + verdict.message)
+    return "; ".join(parts)
+
+
 #: A leading ``NAME=value`` on a shell command: an environment assignment for
 #: the command after it, never the command itself.
 _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -3487,11 +3610,17 @@ def _advisory_detail(
     recorded = ctx.evidence("coverage", {}) or {}
     roots = _coverage_roots(ctx)
     coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
+    scheduled = all(reason == _SCHEDULED for _rel, reason in advisory)
+    # Under a cadence the floor is held by the sweep, so the figure that
+    # stands behind each advisory file is the one the last sweep measured.
+    last = _last_sweep(ctx) if scheduled else None
+    sweep_figure = _last_sweep_figure(last)
     entries: list[str] = []
     for rel, reason in advisory:
         # A glob is named as the project wrote it; the cadence is named once,
         # in the header, since it is the reason for every entry at once.
         tag = "" if reason == _SCHEDULED else f" ({reason!r})"
+        tag += sweep_figure(rel)
         if not recorded:
             entries.append(f"{rel} not measured, no coverage recorded{tag}")
             continue
@@ -3502,7 +3631,7 @@ def _advisory_detail(
         pct = float(hits[0])
         below = f", below the {floor:g}% floor" if pct < floor else ""
         entries.append(f"{rel} {pct:g}%{below}{tag}")
-    if all(reason == _SCHEDULED for _rel, reason in advisory):
+    if scheduled:
         header = (
             f"Advisory on the sweep cadence ({_SCHEDULE_KEY}), so never held to "
             "the floor per change; a scoped figure is a lower bound"
@@ -3510,6 +3639,8 @@ def _advisory_detail(
     else:
         header = f"Advisory under {_ADVISORY_KEY}, so never held to the floor"
     text = f"{header}: " + "; ".join(entries) + "."
+    if last is not None:
+        text += _last_sweep_note(last)
     run = ctx.evidence("coverage_run", {}) or {}
     overstating = run.get("overstating_hazards") or []
     if recorded and overstating:
@@ -3519,6 +3650,39 @@ def _advisory_detail(
             + "."
         )
     return text
+
+
+def _last_sweep_figure(last: sweep_reader.LastSweep | None) -> Callable[[str], str]:
+    """Per advisory file, what the last sweep measured for it, and at which commit.
+
+    Empty where there is no coverage sweep to quote; :func:`_last_sweep_note`
+    says why once rather than once per file.
+    """
+    record = last.record if last is not None else None
+    if record is None or record.command != "coverage":
+        return lambda _rel: ""
+    head = record.head[:12]
+
+    def figure(rel: str) -> str:
+        hits = [pct for f, pct in record.files.items() if _same_file(rel, f)]
+        if not hits:
+            return f" (not in the last sweep at {head})"
+        return f" (last sweep {float(hits[0]):g}% at {head})"
+
+    return figure
+
+
+def _last_sweep_note(last: sweep_reader.LastSweep) -> str:
+    record = last.record
+    if record is None:
+        where = last.branch or "the base branch"
+        return f" No sweep is recorded on {where} yet, so no whole-scheme figure stands behind these."
+    if record.command != "coverage":
+        return (
+            f" The last sweep ({record.head[:12]}, {record.ran_on}) ran "
+            f"commands.{record.command} and measured no coverage."
+        )
+    return f" Last sweep: {record.seq} at {record.head[:12]}, {record.ran_on}."
 
 
 def coverage_advisory_exception(manifest: Any) -> str | None:

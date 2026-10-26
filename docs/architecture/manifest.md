@@ -96,7 +96,7 @@ methodology:
       cadence_days: null       # null: none, today's behaviour exactly. A positive
                                # whole number: the gates below are held by a
                                # scheduled full run instead of by each change
-      grace_days: 3            # how late a sweep may be before it is called stale
+      grace_days: 3            # how late a sweep may be before sweep.fresh warns
       gates: []                # coverage.meets_floor and/or test.all_pass
       held_paths: []           # globs whose touch still owes a FULL run before
                                # merge. Empty by default
@@ -194,8 +194,19 @@ change anyway, at `pipeline test` and `pipeline coverage` without a selector
 and at the hook on a shell call; a change touching a held path owes one, and
 is not reported. `invariant sweep run` holds the gates: it runs the whole
 suite on the cadence and files what is new (cli.md, "Sweep"); its records are
-committed under `paths.sweeps`. The freshness rule, `sweep.fresh`, is still to
-come.
+committed under `paths.sweeps`.
+
+`sweep.fresh` says how old that evidence is (ADR-010 D6). With a cadence it
+warns when no sweep is committed on the base branch, or when the last one is
+older than `cadence_days + grace_days` (`grace_days` 3 by default, so a weekly
+sweep is called stale after day 10), naming the age and the sweep's commit;
+its clean verdict names the age too. `core/machines` injects it beside each
+scheduled gate by gate id, so every transition carrying one reports it; it is
+also evaluated by `invariant check` and summarised in a `doctor` row. It is
+`warn` in every shipped profile and can only be `warn` or `off`: a stale sweep
+never stops a change, and the manifest refuses `block` or `ask` (Validation,
+below). Under a scheduled floor the advisory verdict also names, for each
+touched file, the last sweep's figure and commit.
 
 ### Levels, and where each one can be delivered
 
@@ -334,6 +345,7 @@ graph TD
 | `methodology.gates.coverage_exclude` | `coverage.meets_floor` | held out | **was not held out**; now held out | **was not held out**; now held out |
 | `methodology.gates.coverage_advisory_paths` | `coverage.meets_floor`, `doctor` | advisory | advisory (normalised from the start) | advisory |
 | `methodology.gates.schedule.held_paths` | `coverage.meets_floor`, `test.all_pass`, `sweep.no_full_run` | held | held (normalised from the start) | held |
+| `paths.sweeps` | `_is_exempt`, `sweep run`, and `sweep.fresh` and the advisory verdict through `core.sweep.directory_of` | exempt; read at a ref | exempt; read at a ref (normalised from the start) | exempt; read at a ref |
 | `privacy.scope` entries and the `paths.*` its keywords name | `privacy.clean` | in scope | in scope (`Path()` already absorbed it) | in scope |
 | `paths.docs` | `docs.read_architecture`, `docs.updated` | every tree | every tree (resolved on join) | every tree |
 | `coverage_baseline` entries | `coverage.meets_floor` | matched | matched (`_same_file`); `x` and `./x` together are now refused as one file recorded twice | matched |
@@ -815,7 +827,9 @@ only satisfying evidence would still be a whole-scheme run; and a scheduled
 floor refuses a `coverage_scope` other than `touched` and a non-empty
 `coverage_advisory_paths`. Without one, `gates` and `held_paths` must be empty,
 since they would do nothing. Levels are read resolved — profile, overrides and
-`INVARIANT_DISABLE` — because that is what the gate would do.
+`INVARIANT_DISABLE` — because that is what the gate would do. `sweep.fresh` is
+refused at `block` or `ask`, with or without a cadence: the user ruled that it
+only ever warns, and the engine holds that ruling at load rather than in prose.
 Existence is checked at load; whether the file parses as a machine of the
 right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it

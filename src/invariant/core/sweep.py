@@ -3,9 +3,9 @@
 A sweep runs the whole suite on a cadence and files what it finds (ADR-010
 D4). Everything here is arithmetic over records and keys, apart from reading
 committed records through ``core/git`` — the same shape as ``core/plan``, so
-that a rule (``sweep.fresh``, increment 4) can ask about the last sweep without
-importing a domain. Running anything, filing anything and committing anything
-is ``domains/sweep``'s.
+that a rule (``sweep.fresh``, and the advisory coverage verdict) can ask about
+the last sweep without importing a domain. Running anything, filing anything
+and committing anything is ``domains/sweep``'s.
 
 A finding is named by one KEY, and the key is what deduplicates it across
 sweeps and machines: ``test:<id>`` a test red again when run alone,
@@ -18,11 +18,12 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import git
+from .manifest import project_relative
 
 RECORD_VERSION = 1
 
@@ -73,6 +74,31 @@ def claiming_keys(key: str) -> tuple[str, ...]:
     if test_id is None:
         return (key,)
     return (test_key(test_id), flaky_key(test_id))
+
+
+#: Where the records live when ``paths.sweeps`` is not set (ADR-010 D9).
+DEFAULT_DIRECTORY = "docs/sweeps"
+
+#: How late a sweep may be before it is called stale, when the manifest does
+#: not say (ruling 5): the warning starts after day 10 on a weekly cadence.
+DEFAULT_GRACE_DAYS = 3
+
+
+def directory_of(manifest: Any) -> str:
+    """``paths.sweeps``, spelled project-relative: the one spelling every reader uses."""
+    declared = manifest.get("paths.sweeps") or DEFAULT_DIRECTORY
+    return project_relative(declared, [Path(manifest.root)]) or DEFAULT_DIRECTORY
+
+
+def cadence_of(manifest: Any) -> tuple[int | None, int]:
+    """``(cadence_days, grace_days)`` as configured; ``None`` is no cadence."""
+    schedule = manifest.get("methodology.gates.schedule") or {}
+    return schedule.get("cadence_days"), int(schedule.get("grace_days", DEFAULT_GRACE_DAYS))
+
+
+def utc_today() -> date:
+    """Today as a bare UTC date, the only clock a record's age is read against."""
+    return datetime.now(timezone.utc).date()
 
 
 class SweepRecordError(ValueError):
@@ -204,6 +230,38 @@ def latest(records: Sequence[SweepRecord], branch: str) -> SweepRecord | None:
     """The record with the highest ``seq`` among those on ``branch``."""
     mine = [r for r in records if r.branch == branch]
     return max(mine, key=lambda r: r.seq) if mine else None
+
+
+@dataclass(frozen=True)
+class LastSweep:
+    """The last committed sweep on one branch, as a reader of it sees it.
+
+    ``readable`` is False when git could not read the branch at all, which is
+    a different answer from "no sweep recorded": the first is a question
+    nobody could answer, and neither is a fresh sweep.
+    """
+
+    branch: str | None
+    record: SweepRecord | None
+    readable: bool = True
+    unreadable: list[str] = field(default_factory=list)
+
+
+def last_on(cwd: Path, branch: str | None, directory: str) -> LastSweep:
+    """The latest record committed on ``branch``, read at that branch's tip.
+
+    Read from the branch, not ``HEAD``: a session worktree is on its own
+    branch, cut before the latest sweep landed on its base, and freshness is a
+    question about the base (D9). ``branch`` ``None`` (a detached HEAD with no
+    session to name a base) reads nothing and says so.
+    """
+    if not branch:
+        return LastSweep(None, None, readable=False)
+    read = read_records(cwd, branch, directory)
+    if read is None:
+        return LastSweep(branch, None, readable=False)
+    records, unreadable = read
+    return LastSweep(branch, latest(records, branch), True, unreadable)
 
 
 # -- the diff ----------------------------------------------------------------
@@ -368,7 +426,7 @@ def dedup(
     return to_file, held
 
 
-# -- age (read by sweep.fresh, increment 4) ----------------------------------
+# -- age (read by sweep.fresh) -----------------------------------------------
 
 
 def age_days(ran_on: str, today: date) -> int | None:

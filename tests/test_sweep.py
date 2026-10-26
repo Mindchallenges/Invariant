@@ -396,3 +396,56 @@ class TestTheGitReadsTheSweepUses:
 
         ok, output = core_git.commit_only(repo, ["no/such/file"], "m")
         assert not ok and output
+
+
+class TestTheLastSweepOnABranch:
+    """`last_on` and the manifest readers `sweep.fresh` and `sweep status` share."""
+
+    def test_the_latest_on_the_branch_is_read_at_its_tip(self, repo):
+        commit_record(repo, record(seq=1))
+        commit_record(repo, record(seq=2, head=HEAD_B, ran_on="2026-10-20"))
+        last = sweep.last_on(repo, "main", "docs/sweeps")
+        assert last.readable and last.branch == "main"
+        assert last.record.seq == 2
+
+    def test_no_branch_reads_nothing_and_says_so(self, repo):
+        last = sweep.last_on(repo, None, "docs/sweeps")
+        assert last == sweep.LastSweep(None, None, readable=False)
+
+    def test_a_branch_git_cannot_read_is_unreadable(self, repo):
+        last = sweep.last_on(repo, "nope", "docs/sweeps")
+        assert not last.readable and last.branch == "nope" and last.record is None
+
+    def test_no_record_is_readable_and_empty(self, repo):
+        last = sweep.last_on(repo, "main", "docs/sweeps")
+        assert last.readable and last.record is None
+
+    def test_the_manifest_readers(self, tmp_path):
+        m = Manifest.from_raw(
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "paths": {"sweeps": "./records/sweeps/"},
+                "methodology": {
+                    "gates": {"schedule": {"cadence_days": 7, "gates": ["test.all_pass"]}}
+                },
+            },
+            root=tmp_path,
+            path=tmp_path / MANIFEST_RELPATH,
+            env={},
+        )
+        assert sweep.directory_of(m) == "records/sweeps"
+        assert sweep.cadence_of(m) == (7, sweep.DEFAULT_GRACE_DAYS)
+
+    def test_the_defaults(self, tmp_path):
+        m = Manifest.from_raw(
+            {"version": 1, "project": {"name": "demo"}},
+            root=tmp_path,
+            path=tmp_path / MANIFEST_RELPATH,
+            env={},
+        )
+        assert sweep.directory_of(m) == "docs/sweeps"
+        assert sweep.cadence_of(m) == (None, 3)
+
+    def test_today_is_a_bare_date(self):
+        assert isinstance(sweep.utc_today(), date)

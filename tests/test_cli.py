@@ -3214,3 +3214,82 @@ class TestSweepCommands:
         assert run("sweep", "show") == 0
         assert "sweep 1" in out(capsys)
         assert run("sweep", "show", "7") == 2
+
+
+class TestSweepFreshness:
+    """`sweep.fresh` at the CLI (IDEA_032 increment 4, ADR-010 D6, ruling 10):
+    reported by `invariant check`, named by `sweep status`, and a `doctor`
+    row that informs and never fails."""
+
+    configure = TestSweepCommands.configure
+    GREEN = TestSweepCommands.GREEN
+
+    def doctor_row(self, capsys):
+        run("doctor", "--json")
+        rows = payload(capsys)["checks"]
+        return next(r for r in rows if r["check"] == "sweep cadence")
+
+    def test_check_warns_with_no_sweep_and_exits_clean(self, project, capsys):
+        self.configure(project)
+        capsys.readouterr()
+        assert run("check", "sweep.fresh") == 0
+        text = out(capsys)
+        assert "[warn] sweep.fresh" in text
+        assert "no sweep recorded on master" in text
+
+    def test_check_names_the_age_once_a_sweep_has_run(self, project, capsys):
+        self.configure(project)
+        assert run("sweep", "run") == 0
+        capsys.readouterr()
+        assert run("check", "--json", "sweep.fresh") == 0
+        verdict = payload(capsys)["verdicts"][0]
+        assert verdict["ok"] is True
+        assert "0 day(s)" in verdict["message"]
+
+    def test_status_names_the_freshness_verdict(self, project, capsys):
+        self.configure(project)
+        capsys.readouterr()
+        assert run("sweep", "status") == 0
+        assert "sweep.fresh" in out(capsys)
+
+    def test_doctor_row_without_a_cadence(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        capsys.readouterr()
+        row = self.doctor_row(capsys)
+        assert row["ok"] is True
+        assert row["detail"] == "none configured"
+
+    def test_doctor_row_names_the_cadence_the_gates_and_the_age(self, project, capsys):
+        self.configure(project)
+        assert run("sweep", "run") == 0
+        capsys.readouterr()
+        row = self.doctor_row(capsys)
+        assert row["ok"] is True
+        assert "every 7 day(s)" in row["detail"]
+        assert "coverage.meets_floor" in row["detail"] and "test.all_pass" in row["detail"]
+        assert "0 day(s)" in row["detail"]
+
+    def test_a_missing_sweep_never_turns_doctor_red(self, project, capsys):
+        self.configure(project)
+        capsys.readouterr()
+        row = self.doctor_row(capsys)
+        assert row["ok"] is True
+        assert "no sweep recorded" in row["detail"]
+
+
+def test_doctor_sweep_row_survives_an_unreadable_answer(project, capsys, monkeypatch):
+    """Informational like its siblings: a diagnosis that cannot be made is
+    named in the row and never takes `doctor` down or turns it red."""
+    import invariant.cli.main as cli
+    from invariant.core.errors import InvariantError
+
+    def boom(_ctx):
+        raise InvariantError("git said no")
+
+    run("init", "--ecosystem", "python")
+    monkeypatch.setattr(cli, "sweep_cadence_summary", boom)
+    capsys.readouterr()
+    run("doctor", "--json")
+    row = next(r for r in payload(capsys)["checks"] if r["check"] == "sweep cadence")
+    assert row["ok"] is True
+    assert "could not be read: git said no" in row["detail"]

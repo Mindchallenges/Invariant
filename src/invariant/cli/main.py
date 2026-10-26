@@ -28,6 +28,7 @@ from ..core.rules import (
     apply_acknowledgements,
     coverage_advisory_exception,
     evaluate,
+    sweep_cadence_summary,
 )
 from ..core.store import InertStore, JsonStore
 from ..domains.pipeline import PipelineDomain, describe_run, summarise
@@ -658,6 +659,16 @@ def cmd_doctor(args) -> int:
         checks.append(
             ("coverage advisory paths", True, advisory or "none configured")
         )
+
+        # The sweep cadence, its gates and the last sweep's age (ADR-010 D6,
+        # ruling 10). Informational like the rows above: a stale sweep is
+        # `sweep.fresh`'s warning, never a failed diagnosis.
+        try:
+            checks.append(
+                ("sweep cadence", True, sweep_cadence_summary(ctx.rule_context()))
+            )
+        except InvariantError as exc:
+            checks.append(("sweep cadence", True, f"could not be read: {exc}"))
 
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()
@@ -2727,6 +2738,18 @@ def cmd_sweep_status(args) -> int:
             f"\ncadence {status['cadence_days']} day(s) + {status['grace_days']} "
             f"grace: {'OVERDUE' if status['overdue'] else 'current'}"
         )
+        # The rule's own verdict, so `status` and every gate say one thing.
+        # Asked of the branch `status` reads, which is the one a sweep runs on.
+        fresh = evaluate(
+            ["sweep.fresh"],
+            RuleContext(
+                manifest=ctx.manifest,
+                cwd=ctx.cwd,
+                session={"base": status["branch"]} if status["branch"] else None,
+            ),
+        )[0]
+        status["fresh"] = {"ok": fresh.verdict.ok, "message": fresh.verdict.message}
+        text += "\n" + fresh.render()
     return emit(args, status, text)
 
 

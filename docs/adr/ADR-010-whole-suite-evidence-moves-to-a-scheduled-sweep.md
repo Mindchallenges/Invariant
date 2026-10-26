@@ -1,15 +1,18 @@
 # ADR-010 — Whole-suite and whole-scheme evidence move to a scheduled sweep
 
-- **Status:** Accepted, partly implemented. The user ruled on all eleven
-  decisions on 2026-10-26 ("Rulings" below), overriding two recommendations:
-  sweep records are a committed store (D9), and the pre-merge full-run
-  allowlist ships in v1 (D8). IDEA_032 builds it in three increments (see
-  "Increments"). Increment 2 delivers D1, D2, D3 (all but item 5), D5, D8 and
-  the run-seam extraction. Increment 3 delivers D4, D7 and D9 (`core/sweep`,
+- **Status:** Accepted; all v1 increments delivered. The user ruled on all
+  eleven decisions on 2026-10-26 ("Rulings" below), overriding two
+  recommendations: sweep records are a committed store (D9), and the pre-merge
+  full-run allowlist ships in v1 (D8). IDEA_032 built it in the increments
+  below. Increment 2 delivered D1, D2, D3 (all but item 5), D5, D8 and the
+  run-seam extraction. Increment 3 delivered D4, D7 and D9 (`core/sweep`,
   `domains/sweep`, `invariant sweep run|status|show`, `paths.sweeps`,
-  `failing_test_ids`); D6 (`sweep.fresh`), D3 item 5, the `doctor` row, the
-  last sweep's figure in the advisory verdict and the agents' `--selector`
-  guidance follow.
+  `failing_test_ids`). Increment 4 delivered D6 (`sweep.fresh`, injected
+  beside each scheduled gate, in `invariant check` and as a `doctor` row),
+  D3 item 5, the last sweep's figure and commit in the advisory verdict, and
+  the design and review agents' `--selector` guidance. The fast follow, out of
+  v1 by the user's ruling, is automatic bisect of a new red to its commit;
+  until it lands every filed item carries its commit range.
 - **Date:** 2026-10-26
 - **Supersedes:** nothing. Generalises the per-file advisory/held split
   IDEA_028 introduced for `methodology.gates.coverage_advisory_paths`, adds a
@@ -89,7 +92,7 @@ With a cadence set, what each scheduled gate answers per change:
 
 | Gate | Per change, when scheduled | Held by |
 |---|---|---|
-| `coverage.meets_floor` | Every touched source file outside `held_paths` is ADVISORY. The verdict names each with its scoped figure, "not measured", or "no coverage row" (and, once increment 3 lands, the last sweep's figure for it and that sweep's commit). It never fails on an advisory file. The claims about what a path IS (`non_source`, the built-in suffixes) still apply first and are still named. | the sweep (D4) |
+| `coverage.meets_floor` | Every touched source file outside `held_paths` is ADVISORY. The verdict names each with its scoped figure, "not measured", or "no coverage row" (and, since increment 4, the last sweep's figure for it and that sweep's commit). It never fails on an advisory file. The claims about what a path IS (`non_source`, the built-in suffixes) still apply first and are still named. | the sweep (D4) |
 | `test.all_pass` | Unchanged logic over the last recorded run, which is now a scoped run: a red scoped run still fails at the configured level, a zero-executed run still fails, a hazard still fails. A green scoped run passes with "the affected suites are green; the whole suite is on the sweep cadence", and a missing run's fix names `pipeline test --selector`. | the sweep (D4) |
 | `test.new_test_fails` | Unchanged. RED-first still blocks. | the change |
 
@@ -141,7 +144,7 @@ shape). Retiring the key is a separate decision for when no project uses it.
 4. `coverage.meets_floor` is scheduled and `coverage_advisory_paths` is
    non-empty (D2).
 5. `sweep.fresh` resolves to `block` or `ask` (ruling 10: the engine holds that
-   ruling rather than prose). Lands with the rule, in increment 3.
+   ruling rather than prose). Landed with the rule, in increment 4.
 6. `cadence_days` is not null or a positive integer, `grace_days` is not a
    non-negative integer, `schedule` is not a mapping, or `gates` is not a list
    of strings.
@@ -413,7 +416,9 @@ freshness and its own baseline; the ruling chose shared evidence.
 |---|---|---|
 | 1 | This ADR, accepted with the rulings (docs only). | `docs/adr/ADR-010-…`, `docs/index.md` |
 | 2 | D1 (both gates' cadence wording; the sweep figure waits for increment 3), D2 with D8's third reason, D3 items 1–4, 6, 7, D5 on both surfaces with `test_scope_of`, D8, `commands.coverage_one` and `pipeline coverage --selector`, `selectors`/`scope` on run records, the run-and-read seam extracted to module-level functions in `domains/pipeline` with `INVARIANT_HOST_SESSION_ID` and `INVARIANT_HANDOFF` stripped from the child environment, and the profile levels for `sweep.no_full_run`. | `core/rules`, `core/manifest`, `domains/pipeline`, `cli/main`, `adapters/base`, `adapters/python_`, `adapters/swift_xcode`, `adapters/node`, `data/profiles/*` |
-| 3 | D4, D6, D7, D9: `core/sweep`, `domains/sweep`, `invariant sweep run\|status\|show`, `paths.sweeps` and its exemption, `failing_test_ids`, filing and dedup, flaky re-runs, the engine-owned commit, `sweep.fresh` with its machine injection, D3 item 5, the `doctor` row, the last sweep's figure in the advisory verdict, and the design and review agents learning to record with `--selector` under a cadence. | new `core/sweep`, new `domains/sweep`, `core/rules`, `core/machines`, `core/manifest`, `cli/main`, `adapters/*`, `data/agents/*` |
+| 3 | D4, D7, D9: `core/sweep`, `domains/sweep`, `invariant sweep run\|status\|show`, `paths.sweeps` and its exemption, `failing_test_ids`, filing and dedup, flaky re-runs, the engine-owned commit. | new `core/sweep`, new `domains/sweep`, `core/rules`, `core/manifest`, `cli/main`, `adapters/*` |
+| 4 | D6 and D3 item 5: `sweep.fresh` injected beside each scheduled gate (`Machine.inject_beside`), evaluated in `invariant check`, its `doctor` row and its line in `sweep status`, its level capped at warn at load; the last sweep's figure and commit in the advisory verdict; the design and review agents recording with `--selector` under a cadence; the user-facing docs. | `core/sweep`, `core/rules`, `core/fsm`, `core/machines`, `core/manifest`, `domains/sweep`, `cli/main`, `data/profiles/*`, `data/agents/*` |
+| Fast follow | Automatic bisect of a new red to its commit (out of v1 by ruling). | — |
 
 ## Component plan
 
@@ -455,9 +460,9 @@ graph TD
 - `adapters/*`: `test_scope_of` (increment 2), `failing_test_ids`
   (increment 3).
 - `cli` (increment 2): `pipeline coverage --selector`, the CLI detection
-  surface and its override spend; (increment 3) `sweep run|status|show`, the
+  surface and its override spend; (increment 3) `sweep run|status|show`; (increment 4) the
   `doctor` row.
-- `data/profiles`: levels for the new rules. `data/agents` (increment 3): the
+- `data/profiles`: levels for the new rules. `data/agents` (increment 4): the
   design and review agents learn to record with `--selector` when a cadence is
   active.
 

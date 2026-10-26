@@ -130,6 +130,45 @@ override sweep.no_full_run --reason "<why>"` lets one deliberate full run
 through. The manifest refuses a cadence that would still demand a full run per
 change, such as an unscheduled `coverage.meets_floor` at `block`.
 
+`commands.coverage_one` is the scoped sibling of `test_one`, with `{selector}`
+substituted; each adapter supplies one, so it needs setting only when yours
+differs. `held_paths` (empty by default) is the exception a project keeps for
+itself: a touched file under one of those globs is held to the floor exactly as
+before, and its evidence must be a full run, so record the bare `invariant
+pipeline test` and `invariant pipeline coverage` for that change.
+`sweep.no_full_run` answers clean for it and says why.
+
+**Running the sweep.** `invariant sweep run` runs the whole suite once
+(`commands.coverage` when the floor is scheduled, else `commands.test`) from
+the main checkout, on a branch, with no tracked change; it refuses anywhere
+else. It re-runs each new red alone, files every new red, flaky test and floor
+drop as a bug carrying the commit range since the last sweep, never files a
+finding an open item already holds, and commits one record under
+`paths.sweeps` (default `docs/sweeps`) together with the items it filed. The
+first sweep on a branch is a baseline and files nothing; `--dry-run` writes,
+files and commits nothing. Scheduling it is yours — cron, a LaunchAgent or CI:
+
+```
+# crontab: early every Monday morning, from the main checkout
+0 6 * * 1  cd /path/to/project && invariant sweep run
+```
+
+**Reading it.** `invariant sweep status` prints the last sweep on the branch,
+its age in days, the cadence it is held to and the `sweep.fresh` verdict;
+`invariant sweep show [<seq>]` prints one record. Under a cadence the floor's
+advisory verdict names, for each touched file, the last sweep's figure for it
+and that sweep's commit beside the scoped figure.
+
+**Freshness.** `sweep.fresh` warns when no sweep is recorded on the base
+branch, or when the last one is older than `cadence_days + grace_days` (on a
+weekly cadence with the default grace of 3, after day 10), naming its age and
+commit; a clean verdict names the age too. It rides beside each scheduled gate
+on every transition and `invariant pipeline gates`, runs in `invariant check`,
+and `invariant doctor` shows a "sweep cadence" row. It never blocks: the
+manifest refuses `sweep.fresh` at `block` or `ask`. The records are read from
+the base branch's commits, so every worktree and every clone that has pulled
+the branch sees the same answer.
+
 ## Sessions
 
 ### Where worktrees live

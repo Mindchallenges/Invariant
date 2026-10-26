@@ -517,6 +517,7 @@ class Manifest:
                     f"got {value!r}"
                 )
         self._validate_schedule(gates)
+        self._validate_freshness_level()
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -623,6 +624,25 @@ class Manifest:
                 f"advisory, and methodology.gates.coverage_advisory_paths would "
                 f"load and do nothing. Remove it; {key}.held_paths is how a "
                 f"scheduled floor holds a path back."
+            )
+
+    def _validate_freshness_level(self) -> None:
+        """Refuse ``sweep.fresh`` at a level that stops work (ADR-010 D3 item 5).
+
+        Ruling 10 made the freshness rule advisory by construction: a stale
+        sweep is evidence the project has not refreshed, and stopping a change
+        for it would make one machine being off for a weekend block everyone.
+        The engine holds that ruling here rather than in prose. Refused with
+        or without a cadence, since a level nothing reads today would block on
+        the day one is set.
+        """
+        rule_id = "sweep.fresh"
+        level = self.rule_level(rule_id)
+        if level in (Level.BLOCK, Level.ASK):
+            raise ManifestError(
+                f"enforcement.rules.{rule_id} is {level.value}, but {rule_id} "
+                f"only ever warns: a stale or missing sweep never stops a change "
+                f"(ADR-010 ruling 10).\n  Set it to warn or off."
             )
 
     def scheduled_gates(self) -> frozenset[str]:

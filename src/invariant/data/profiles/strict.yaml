@@ -40,6 +40,9 @@ rules:
   # A whole-suite or whole-scheme run on a change, under a sweep cadence
   # (ADR-010 D5). N/A without one.
   sweep.no_full_run: block
+  # How old the last sweep is, beside each scheduled gate (ADR-010 D6).
+  # Warn in every profile, strict included: validation refuses block or ask.
+  sweep.fresh: warn
 
   privacy.clean: block
 

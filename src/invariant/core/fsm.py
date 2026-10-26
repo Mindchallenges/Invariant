@@ -12,9 +12,10 @@ separate question, resolved by policy, and lives in ``core.rules``.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
@@ -33,7 +34,7 @@ class State:
     roles: tuple[str, ...] = ()
 
     @classmethod
-    def from_dict(cls, state_id: str, raw: Mapping[str, Any] | None) -> "State":
+    def from_dict(cls, state_id: str, raw: Mapping[str, Any] | None) -> State:
         raw = raw or {}
         if not isinstance(raw, Mapping):
             raise UsageError(f"state {state_id!r} must be a mapping")
@@ -74,7 +75,7 @@ class Machine:
     # -- construction --------------------------------------------------
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "Machine":
+    def from_dict(cls, raw: Mapping[str, Any]) -> Machine:
         if not isinstance(raw, Mapping):
             raise UsageError("machine definition must be a mapping")
         for required in ("id", "initial", "states"):
@@ -106,7 +107,7 @@ class Machine:
         return machine
 
     @classmethod
-    def load(cls, path: Path) -> "Machine":
+    def load(cls, path: Path) -> Machine:
         path = Path(path)
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -212,7 +213,7 @@ class Machine:
 
     def inject_gates(
         self, by_role: Mapping[str, Mapping[str, list[str]]]
-    ) -> "Machine":
+    ) -> Machine:
         """Return a copy with extra gates attached to states by role.
 
         This is how a cross-cutting concern that every methodology must carry
@@ -232,6 +233,27 @@ class Machine:
                     entry_gates=_dedupe(current.entry_gates + entry),
                     exit_gates=_dedupe(current.exit_gates + exit_),
                 )
+        return replace(self, states=states)
+
+    def inject_beside(self, anchors: Collection[str], gate: str) -> Machine:
+        """Return a copy with ``gate`` added to every gate set naming an anchor.
+
+        The by-ID sibling of :meth:`inject_gates`: where a concern belongs to
+        a GATE rather than to a kind of state, it follows that gate wherever a
+        machine put it, entry or exit, including a machine this library has
+        never seen. A set naming none of ``anchors`` is untouched.
+        """
+        wanted = frozenset(anchors)
+        if not wanted:
+            return self
+        states = dict(self.states)
+        for state_id, current in self.states.items():
+            entry, exit_ = current.entry_gates, current.exit_gates
+            if wanted & set(entry):
+                entry = _dedupe(entry + (gate,))
+            if wanted & set(exit_):
+                exit_ = _dedupe(exit_ + (gate,))
+            states[state_id] = replace(current, entry_gates=entry, exit_gates=exit_)
         return replace(self, states=states)
 
 

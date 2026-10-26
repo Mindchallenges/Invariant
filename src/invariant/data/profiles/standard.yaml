@@ -46,6 +46,9 @@ rules:
   # (ADR-010 D5). N/A without one. Warns: a full run costs time, never passes
   # anything it should not; a project that rules "never" sets block.
   sweep.no_full_run: warn
+  # How old the last sweep is, beside each scheduled gate (ADR-010 D6).
+  # Warn in every profile, strict included: validation refuses block or ask.
+  sweep.fresh: warn
 
   # Personal data in a commit is not retractable once pushed.
   privacy.clean: block

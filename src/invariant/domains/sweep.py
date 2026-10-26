@@ -19,7 +19,7 @@ from __future__ import annotations
 import shlex
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 
 from ..adapters import get_adapter
@@ -93,14 +93,13 @@ class SweepDomain:
         self.store = store
         self.runner = runner or run_command
         self.adapter = adapter or get_adapter(manifest.ecosystems[0])
-        self.today = today or datetime.now(timezone.utc).date()
+        self.today = today or core.utc_today()
         self.root = Path(manifest.root)
 
     @property
     def directory(self) -> str:
         """``paths.sweeps``, spelled project-relative."""
-        declared = self.manifest.get("paths.sweeps") or "docs/sweeps"
-        return project_relative(declared, [self.root]) or "docs/sweeps"
+        return core.directory_of(self.manifest)
 
     # -- reads ---------------------------------------------------------
 
@@ -115,9 +114,7 @@ class SweepDomain:
         branch = branch or git.current_branch(self.root)
         records, unreadable = self.records()
         last = core.latest(records, branch) if branch else None
-        schedule = self.manifest.get("methodology.gates.schedule") or {}
-        cadence = schedule.get("cadence_days")
-        grace = int(schedule.get("grace_days", 3) or 0)
+        cadence, grace = core.cadence_of(self.manifest)
         age = core.age_days(last.ran_on, self.today) if last else None
         return {
             "branch": branch,

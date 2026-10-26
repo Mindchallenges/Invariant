@@ -428,3 +428,27 @@ class TestTheParentIsToldWhatTheModeCostsIt:
 
     def test_the_architect_can_record_what_is_left_instead_of_widening_scope(self):
         assert "invariant session plan add" in shipped("feature-architect")
+
+
+class TestTheAgentsRecordScopedEvidenceUnderACadence:
+    """ADR-010 increment 3 remainder: under a sweep cadence the design and
+    review agents record evidence with `--selector`, never a bare full run,
+    because `sweep.no_full_run` reports one and the sweep holds the whole
+    suite. Both must say how to tell a cadence is active, and both must name
+    the one exception, a touched `held_paths` glob, which owes a full run."""
+
+    @pytest.mark.parametrize("name", ["feature-architect", "compliance-reviewer"])
+    def test_each_names_the_scoped_recorders(self, name):
+        text = shipped(name)
+        assert "invariant pipeline test --selector" in text
+        assert "invariant pipeline coverage --selector" in text
+
+    @pytest.mark.parametrize("name", ["feature-architect", "compliance-reviewer"])
+    def test_each_says_how_a_cadence_is_recognised(self, name):
+        assert "methodology.gates.schedule" in shipped(name)
+
+    @pytest.mark.parametrize("name", ["feature-architect", "compliance-reviewer"])
+    def test_each_names_the_held_path_exception_and_the_rule(self, name):
+        text = shipped(name)
+        assert "held_paths" in text
+        assert "sweep.no_full_run" in text

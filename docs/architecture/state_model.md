@@ -1016,6 +1016,15 @@ Details that are load-bearing rather than incidental:
   the change's scoped run. Every recorded run says whether it was `full` or
   `scoped`, which is what lets a held path demand a full one.
 
+- **`sweep.fresh` rides beside a scheduled gate, by gate id.** With a cadence,
+  `core/machines` adds it to every entry or exit set naming a scheduled gate
+  (`Machine.inject_beside`), so the transition that once demanded whole-run
+  evidence reports how old the sweep holding it is. By id rather than by role,
+  because the concern belongs to the gate: a project machine that put
+  `test.all_pass` on an exit set gets it there. No cadence injects nothing, so
+  `pipeline gates` never lists a rule that cannot apply. It warns and never
+  blocks; the manifest refuses it at `block` or `ask` (ADR-010 D3 item 5, D6).
+
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —
 no implementation means no test could have failed first, no code means nothing
@@ -1545,6 +1554,20 @@ cannot disagree about which file is held. When the last sweep ran no coverage,
 files under the floor are reported and not filed: there is no previous figure
 to have dropped from. Recovered keys are reported and never closed; closing a
 bug goes through its own lifecycle.
+
+### Freshness
+
+`sweep.fresh` (ADR-010 D6) reads the same committed records, at the session's
+BASE branch rather than `HEAD` — a session's own branch never carries a sweep,
+and a worktree cut before the latest sweep still sees it on its base — or at
+the checked-out branch when no session is bound. The last record is the
+highest `seq` on that branch; its age is today's UTC date minus its bare
+`ran_on`, in whole days. No record, a branch git cannot read, or a date that
+cannot be parsed warns; an age past `cadence_days + grace_days` warns naming
+the age and commit; otherwise the verdict is clean and still names the age.
+Nothing here is stored: the answer is recomputed from git on every
+evaluation, so a clone that has not pulled the base sees an older sweep and
+warns, which is the right answer for evidence it does not hold.
 
 ### The record
 
