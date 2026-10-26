@@ -2,9 +2,21 @@
 id: IDEA_030
 type: idea
 title: Oracle starts a new Remote Control session in any registered project
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: null
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: null
+  forced: false
 priority: high
 effort: M
 tier: '2'
