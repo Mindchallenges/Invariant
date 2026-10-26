@@ -6222,7 +6222,18 @@ class TestTheNormalisedPayloadContract:
             "stop_hook_active",
             "tool_input.subagent_type",
             "tool_input.prompt",
+            "tool_input.command",
         }
+
+    def test_the_shell_command_is_part_of_the_contract(self):
+        """ADR-010 D5 widened the seam a third time, and this is the record.
+
+        `sweep.no_full_run` reads a shell call to find a full run of the
+        configured suite made around the CLI. `privacy.clean` already read the
+        same key through `tool_input` to find a `git commit`, and the list did
+        not say so.
+        """
+        assert "tool_input.command" in NORMALISED_PAYLOAD_KEYS
 
     def test_the_dispatched_agent_is_part_of_the_contract(self):
         """IDEA_020 widened the seam, and this is the record of that decision.

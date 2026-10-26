@@ -103,6 +103,33 @@ lists a configured list as an active exception. Ending the phase is deleting
 the list, after the owed coverage run. Each of the three glob lists must be a
 YAML list: a bare string is refused at load.
 
+### A sweep cadence
+
+A project that never runs the whole suite or whole-scheme coverage on a change
+moves those gates to a scheduled sweep (ADR-010):
+
+```yaml
+commands:
+  test_one: uv run pytest {selector}
+  coverage_one: uv run pytest --cov --cov-report=term-missing {selector}
+methodology:
+  gates:
+    schedule:
+      cadence_days: 7          # null (default): no cadence
+      grace_days: 3
+      gates: [coverage.meets_floor, test.all_pass]
+      held_paths: ["core/**"]  # touching these still owes a full run before merge
+```
+
+A change then records its affected suites — `invariant pipeline test
+--selector <tests>` and `invariant pipeline coverage --selector <tests>`. The
+floor reports each touched file's scoped figure without holding it, a red
+scoped run still fails `test.all_pass`, and `sweep.no_full_run` warns (blocks
+under `strict`) when a full run is made on a change anyway. `invariant
+override sweep.no_full_run --reason "<why>"` lets one deliberate full run
+through. The manifest refuses a cadence that would still demand a full run per
+change, such as an unscheduled `coverage.meets_floor` at `block`.
+
 ## Sessions
 
 ### Where worktrees live

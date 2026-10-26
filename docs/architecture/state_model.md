@@ -1009,6 +1009,13 @@ Details that are load-bearing rather than incidental:
   contract or an entry-point table changes a diagram with no code beside it,
   and still reads as source here.
 
+- **A gate on a sweep cadence stays where the machine puts it.** Scheduling
+  `coverage.meets_floor` or `test.all_pass` (`methodology.gates.schedule`,
+  ADR-010) changes what the gate demands per change, not which states carry
+  it: the floor turns advisory outside `held_paths`, and the suite gate judges
+  the change's scoped run. Every recorded run says whether it was `full` or
+  `scoped`, which is what lets a held path demand a full one.
+
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —
 no implementation means no test could have failed first, no code means nothing

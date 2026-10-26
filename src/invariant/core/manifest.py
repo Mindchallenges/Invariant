@@ -147,6 +147,11 @@ DEFAULTS: dict[str, Any] = {
         # set, the suite's exit status comes from the first command and the
         # numbers from the second, so neither can be mistaken for the other.
         "coverage_report": None,
+        # Scoped coverage, `{selector}` substituted: the sibling of `test_one`
+        # (ADR-010). A project whose floor moved to a sweep cadence records a
+        # change's coverage from its affected suites, and this is the command
+        # that runs them.
+        "coverage_one": None,
     },
     # Static substitutions for command templates.
     "vars": {},
@@ -205,6 +210,22 @@ DEFAULTS: dict[str, Any] = {
             "coverage_baseline": None,
             "non_source": [],
             "coverage_advisory_paths": [],
+            # A sweep cadence (ADR-010). `cadence_days` null means none, which
+            # is exactly the behaviour before the key existed. With one, the
+            # gates named in `gates` stop demanding whole-suite or whole-scheme
+            # evidence per change: a scheduled floor is advisory for every
+            # touched file outside `held_paths`, and a scheduled `test.all_pass`
+            # judges the change's scoped run. `held_paths` are globs whose
+            # touch still owes a FULL run before merge. `grace_days` is how late
+            # a sweep may be before `sweep.fresh` warns. Validated at load: a
+            # cadence that still requires whole-run evidence per change is
+            # refused, naming the gate and the key.
+            "schedule": {
+                "cadence_days": None,
+                "grace_days": 3,
+                "gates": [],
+                "held_paths": [],
+            },
         },
     },
     "enforcement": {"profile": "standard", "rules": {}},
@@ -490,6 +511,7 @@ class Manifest:
                     f"methodology.gates.{key} must be a list of glob strings, "
                     f"got {value!r}"
                 )
+        self._validate_schedule(gates)
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -505,6 +527,110 @@ class Manifest:
             find_machine_file(methodology, self)
         except ManifestError as exc:
             raise ManifestError(f"methodology.pipeline: {exc}") from exc
+
+    def _validate_schedule(self, gates: Mapping[str, Any]) -> None:
+        """Refuse a sweep cadence that still demands whole-run evidence (ADR-010 D3).
+
+        Every refusal names the key and, where there is one, the gate, because
+        the alternative is the shape BUG_050 recorded: a setting that loads,
+        does nothing, and reads as though it had taken effect. Levels are read
+        RESOLVED — profile, overrides and environment — since that is what a
+        gate would actually do with the evidence a change can produce.
+        """
+        schedule = gates.get("schedule")
+        key = "methodology.gates.schedule"
+        if not isinstance(schedule, Mapping):
+            raise ManifestError(f"{key} must be a mapping, got {schedule!r}")
+        cadence = schedule.get("cadence_days")
+        grace = schedule.get("grace_days")
+        scheduled = schedule.get("gates")
+        held = schedule.get("held_paths")
+        if cadence is not None and not _is_count(cadence, minimum=1):
+            raise ManifestError(
+                f"{key}.cadence_days must be null or a positive whole number of "
+                f"days, got {cadence!r}"
+            )
+        if not _is_count(grace, minimum=0):
+            raise ManifestError(
+                f"{key}.grace_days must be a whole number of days, 0 or more, "
+                f"got {grace!r}"
+            )
+        if not isinstance(scheduled, list) or not all(
+            isinstance(entry, str) for entry in scheduled
+        ):
+            raise ManifestError(
+                f"{key}.gates must be a list of rule ids, got {scheduled!r}"
+            )
+        # A relaxation like the coverage globs, so a bare string is refused
+        # for the reason it is refused there.
+        if not isinstance(held, list) or not all(isinstance(entry, str) for entry in held):
+            raise ManifestError(
+                f"{key}.held_paths must be a list of glob strings, got {held!r}"
+            )
+        if cadence is None:
+            if scheduled or held:
+                named = "gates" if scheduled else "held_paths"
+                raise ManifestError(
+                    f"{key}.{named} is set, but {key}.cadence_days is null, so "
+                    f"nothing is on a sweep cadence and the list would do "
+                    f"nothing.\n  Set cadence_days, or empty the list."
+                )
+            return
+        if not scheduled:
+            raise ManifestError(
+                f"{key}.gates is empty, but cadence_days is {cadence}: a cadence "
+                f"must move at least one of {', '.join(SCHEDULABLE_GATES)} to "
+                f"the sweep."
+            )
+        for gate in scheduled:
+            if gate not in SCHEDULABLE_GATES:
+                from difflib import get_close_matches
+
+                near = get_close_matches(gate, SCHEDULABLE_GATES, n=1, cutoff=0.6)
+                hint = f"; did you mean {near[0]!r}?" if near else ""
+                raise ManifestError(
+                    f"{key}.gates names {gate!r}, which cannot be scheduled"
+                    f"{hint}\n  The schedulable gates are "
+                    f"{', '.join(SCHEDULABLE_GATES)}."
+                )
+        floor_gate = "coverage.meets_floor"
+        if floor_gate not in scheduled:
+            level = self.rule_level(floor_gate)
+            if level in (Level.BLOCK, Level.ASK):
+                raise ManifestError(
+                    f"{floor_gate} is at {level.value} and not in {key}.gates, "
+                    f"so it still demands a whole-scheme coverage run on every "
+                    f"change: a scoped run is a lower bound it would block on.\n"
+                    f"  Schedule it ({key}.gates), or set "
+                    f"enforcement.rules.{floor_gate} to warn or off."
+                )
+            return
+        scope = str(gates.get("coverage_scope", "touched"))
+        if scope != "touched":
+            raise ManifestError(
+                f"{floor_gate} is scheduled, but methodology.gates.coverage_scope "
+                f"is {scope!r}: a floor over every measured row is whole-scheme "
+                f"evidence per change by definition. Use coverage_scope: touched."
+            )
+        if gates.get("coverage_advisory_paths"):
+            raise ManifestError(
+                f"{floor_gate} is scheduled, so every touched file is already "
+                f"advisory, and methodology.gates.coverage_advisory_paths would "
+                f"load and do nothing. Remove it; {key}.held_paths is how a "
+                f"scheduled floor holds a path back."
+            )
+
+    def scheduled_gates(self) -> frozenset[str]:
+        """The gates a sweep cadence has moved off the per-change path.
+
+        Empty when no cadence is set, whatever the list says — validation has
+        already refused that combination, and an empty answer is the one that
+        changes nothing.
+        """
+        schedule = self.get("methodology.gates.schedule") or {}
+        if schedule.get("cadence_days") is None:
+            return frozenset()
+        return frozenset(str(gate) for gate in schedule.get("gates") or ())
 
     # -- access --------------------------------------------------------
 
@@ -629,6 +755,16 @@ class Manifest:
 
 
 # -- helpers -----------------------------------------------------------
+
+#: The gates a sweep cadence may move off the per-change path (ADR-010 D1).
+#: Every other gate's evidence is per change by nature.
+SCHEDULABLE_GATES = ("coverage.meets_floor", "test.all_pass")
+
+
+def _is_count(value: Any, *, minimum: int) -> bool:
+    """A whole number at or above ``minimum``; a YAML boolean is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
 
 #: The `methodology.gates` keys whose value is a list of globs.
 _GLOB_LIST_GATES = ("coverage_exclude", "non_source", "coverage_advisory_paths")

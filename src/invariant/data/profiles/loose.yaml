@@ -35,6 +35,10 @@ rules:
   test.new_test_fails: warn
   test.all_pass: warn
   coverage.meets_floor: "off"
+  # A whole-suite or whole-scheme run on a change, under a sweep cadence
+  # (ADR-010 D5). N/A without one. Warns: a full run costs time, never passes
+  # anything it should not; a project that rules "never" sets block.
+  sweep.no_full_run: warn
 
   privacy.clean: block
 

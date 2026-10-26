@@ -330,10 +330,35 @@ invariant pipeline test [--phase <state>] [--selector <sel>]...
     child program: in the one repository whose suite exercises session
     creation, inheriting it collided every test that starts a session with the
     live one and wrote 25 false failures into durable evidence (BUG_035).
+    INVARIANT_HOST_SESSION_ID and INVARIANT_HANDOFF are stripped too, for the
+    same reason one variable over (BUG_058, BUG_077). One seam spawns and reads
+    every recorded run, module-level in domains/pipeline so the sweep
+    (ADR-010) runs the suite the same way.
 
-invariant pipeline coverage
+    Each record says which run it was: `selectors` as given, and `scope`,
+    `full` with none and `scoped` with some.
+
+    Under a sweep cadence that schedules test.all_pass, a run with no
+    --selector is the whole suite on a change, and `sweep.no_full_run` is
+    asked BEFORE anything spawns. Where it stops the work (block, or ask:
+    there is nobody here to ask) the command exits 1 having run and recorded
+    nothing, unless `invariant override sweep.no_full_run` was granted, which
+    this command spends and records with surface `cli`. At warn it prints the
+    verdict and runs. A change touching a `schedule.held_paths` glob owes the
+    full run and is not asked about it (ADR-010 D5, D8).
+
+invariant pipeline coverage [--selector <sel>]...
     Run commands.coverage, parse it with the adapter, and record per-file
     numbers as pipeline evidence. This is what coverage.meets_floor reads.
+
+    --selector runs commands.coverage_one instead, the scoped sibling
+    (ADR-010), repeatable and joined by the adapter exactly as for `pipeline
+    test`; with no coverage_one configured or supplied by the adapter it is
+    refused, having run nothing. The record's `scope` says `scoped`, and the
+    figures are a lower bound: under a sweep cadence they are reported, never
+    held to the floor. With no --selector, under a cadence scheduling either
+    gate, it is asked about first exactly as `pipeline test` is: a
+    whole-scheme coverage run also runs the whole suite.
 
     Where an ecosystem measures and reports with separate programs, set
     commands.coverage_report too: the suite's exit status is then read from
@@ -369,6 +394,12 @@ invariant pipeline coverage
     change touching only such files needs no coverage run at all, and the
     pass says so, naming the coverage run still owed before the list is
     removed.
+
+    Under a sweep cadence scheduling coverage.meets_floor, every touched file
+    outside methodology.gates.schedule.held_paths is advisory the same way,
+    through the same split, the verdict naming the cadence instead of a glob.
+    A held path is held as before, and its figure must come from a run with
+    no --selector (manifest.md, "A sweep cadence").
 
 invariant pipeline ack <rule> --reason "<why>"
     Record a deliberate decision to proceed against an ADVISORY gate. It then
@@ -781,6 +812,11 @@ invariant override <rule-id> --clear [--id <sid>]
     did not, and a blocking verdict there was final, with the only relief a
     permanent edit to project policy made mid-task to get past a single call
     (BUG_049).
+
+    One CLI surface spends a grant too: `sweep.no_full_run`, asked by
+    `pipeline test` and `pipeline coverage` before a full run on a change.
+    The command is the delivery surface there, so the grant is consumed and
+    recorded there, with surface `cli` (ADR-010 D5).
 
     A GRANT, not a flag, because there is nothing for a flag to be on: a tool
     call carries no argument the operator can add and no environment a running

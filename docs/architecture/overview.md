@@ -624,14 +624,21 @@ was measured, into ADVISORY and HELD:
 
 ```mermaid
 graph TD
-    T["touched source files<br/>(after non_source and the built-in suffixes)"] --> S{"under a<br/>coverage_advisory_paths glob?"}
+    T["touched source files<br/>(after non_source and the built-in suffixes)"] --> C{"coverage.meets_floor<br/>on a sweep cadence?"}
+    C -- no --> S{"under a<br/>coverage_advisory_paths glob?"}
+    C -- yes --> K{"under a<br/>schedule.held_paths glob?"}
     S -- no --> H["HELD: today's floor, unchanged<br/>no-record and no-row blocks, trust checks,<br/>floor, coverage_exclude, ratchet"]
-    S -- yes --> A["ADVISORY: never fails the gate"]
+    S -- yes --> A["ADVISORY: never fails the gate<br/>(reason: the glob)"]
+    K -- yes --> HF["HELD, and the coverage on record<br/>must be a FULL run"]
+    K -- no --> AS["ADVISORY<br/>(reason: the sweep cadence)"]
+    HF --> H
     H --> V{"anything held?"}
     V -- yes --> R["the held verdict, with every advisory file<br/>named: its figure, flagged under the floor,<br/>or not measured"]
-    V -- no --> P["PASS with no coverage run required,<br/>naming the count, the key, and the<br/>coverage run still owed before the list goes"]
+    V -- no --> P["PASS with no coverage run required,<br/>naming the count and the reason: the key and the<br/>run still owed, or the cadence that holds the floor"]
     A --> R
     A --> P
+    AS --> R
+    AS --> P
 ```
 
 The split happens on the way IN to the floor and the report on the way OUT, so
@@ -646,6 +653,24 @@ time; a configured list is instead an ACTIVE EXCEPTION row in `doctor`
 (`core.rules.coverage_advisory_exception`, one wording for both readers),
 informational for the reason the parked-session row is — the list is a
 deliberate phase state, and its removal is what ends the phase.
+
+A fifth lever arms the same split a second way. A consuming project ruled
+that a change never runs the whole suite or whole-scheme coverage: a weekly
+sweep does, and files what it finds. `methodology.gates.schedule` puts
+`coverage.meets_floor` and `test.all_pass` on that cadence (ADR-010). A
+scheduled floor makes every touched file advisory except those under
+`schedule.held_paths`, which stay held and must be measured by a full run, so
+`_split_advisory` is still the one place a file is classed and each advisory
+entry carries its reason — a glob, or the cadence. The two arms exclude each
+other at load: under a cadence every file is already advisory, so a
+`coverage_advisory_paths` beside it would load and do nothing. A scheduled
+`test.all_pass` keeps its logic and judges the change's scoped run, because a
+scoped red is a real red; what moves to the sweep is only the claim that the
+WHOLE suite is green. `sweep.no_full_run` reports a full run made on a change
+anyway, exactly at the CLI and, through the adapter's `test_scope_of`, at the
+hook. The sweep itself, `core/sweep` and `domains/sweep`, is IDEA_032's third
+increment; until it lands, a cadence moves the evidence and nothing yet holds
+it.
 
 `SESSION → PLAN` is the newest arrow into `core/`, and it is drawn for the
 reason `SESSION → STATS` is. The deliverable set a session owes is *stored* on
@@ -753,7 +778,10 @@ advance it. They are the only place where "what a session is" is encoded.
   sessions coexist on one machine, so this is the only domain with genuine
   cross-process concurrency, mediated by the locked registry.
 - **`pipeline`** — one task's progress through the configured methodology.
-  Scoped to a session; a session runs pipelines in sequence.
+  Scoped to a session; a session runs pipelines in sequence. Also owns the
+  run-and-read seam — `run_command`, `child_env`, `measure_coverage`,
+  `joined_selectors` — module-level, so the sweep (ADR-010) spawns and reads
+  the suite exactly as a recorded run does.
 - **`workitem`** — ideas and bugs, their statuses, and the transitions between
   them, including a ruled transition whose rows record who ruled and on which
   commit; and what `item new` may set — an explicit id it checks is unspent,
@@ -819,7 +847,13 @@ the kind question, a suffix wrongly listed would RELAX a gate, so the table is
 conservative. For the row pattern, a suffix wrongly listed matches nothing while
 one omitted drops a real measurement — so the parser takes the whole table.
 
-`join_selectors` is the newest of those questions and carries the layer's
+`test_scope_of` is the newest of those questions: given the tokens that follow
+the project's own test or coverage template in a shell call, is that the whole
+suite? It is asked by `sweep.no_full_run`, and only `"full"` fires the rule, so
+an adapter claims it only on positive evidence and answers `None` for anything
+it cannot read (ADR-010 D5).
+
+`join_selectors` carries the layer's
 usual asymmetry. Whether several test selectors are a space-separated list of
 positional arguments or a repeated FLAG is a fact about the tool the manifest's
 `commands.test_one` template invokes, and the template is a project's to
@@ -878,6 +912,13 @@ creates its own session and pipeline dispatches *before* either exists, so the
 design agent that created a pipeline could never be evidence for it (BUG_028).
 No layering rule could recover that; only a fact the host already knows and
 now hands upward. A host that cannot say who is acting omits the key.
+
+It was widened a third time by one key that was already read: `tool_input.command`.
+`privacy.clean` had always found a `git commit` in it, and `sweep.no_full_run`
+reads it to find a full run of the configured suite made through the shell
+rather than through `pipeline test` (ADR-010 D5). The rule never parses the
+command more confidently than the ecosystem adapter can: only a definite
+`"full"` from `test_scope_of` fires it.
 
 It was widened a second time by two keys (IDEA_020). `tool_input.subagent_type`
 is which agent a dispatch names: `agents.gated_dispatch_has_pipeline` warns at

@@ -87,7 +87,12 @@ NORMALISED_PAYLOAD_KEYS = (
     "stop_hook_active",
     "tool_input.subagent_type",
     "tool_input.prompt",
+    "tool_input.command",
 )
+#: ``tool_input.command`` is the third widening (ADR-010 D5). It was already
+#: read above ``hosts/`` — ``privacy.clean`` finds a ``git commit`` in it —
+#: and ``sweep.no_full_run`` reads it to find a full run of the configured
+#: suite made through the shell. The list now says so.
 #: ``tool_input.subagent_type`` and ``tool_input.prompt`` joined together
 #: (IDEA_020). The first is which agent a dispatch names. The host read it
 #: already, but a warning before a gated dispatch is a rule so a project can
@@ -1792,13 +1797,28 @@ def _test_new_test_fails(ctx: RuleContext) -> Verdict:
 
 @rule("test.all_pass", summary="The suite is green.", events=())
 def _test_all_pass(ctx: RuleContext) -> Verdict:
+    # On a sweep cadence (ADR-010 D1) the logic below is unchanged and only
+    # the claim narrows: a red scoped run is a real red, not an under-reading,
+    # so it still fails here. What moves to the sweep is "the WHOLE suite is
+    # green", and a change touching a held path still owes that claim.
+    scheduled = _scheduled(ctx, "test.all_pass")
     runs = ctx.evidence("test_runs", []) or []
     if not runs:
         return Verdict.fail(
             "no test run recorded",
             detail="Running the suite outside the pipeline leaves no record, "
-            "and this gate can only answer from the record.",
-            fixes=("invariant pipeline test",),
+            "and this gate can only answer from the record."
+            + (
+                " The whole suite is on the sweep cadence, so record the "
+                "suites this change affects."
+                if scheduled
+                else ""
+            ),
+            fixes=(
+                ("invariant pipeline test --selector <test>",)
+                if scheduled
+                else ("invariant pipeline test",)
+            ),
         )
     last = runs[-1]
     if not last.get("passed"):
@@ -1828,7 +1848,37 @@ def _test_all_pass(ctx: RuleContext) -> Verdict:
             detail="; ".join(str(h) for h in hazards),
             fixes=("re-run without the hazard condition",),
         )
+    if scheduled:
+        return _scheduled_suite_verdict(ctx, last)
     return Verdict.clean("suite is green and the pass is trustworthy")
+
+
+def _scheduled_suite_verdict(ctx: RuleContext, last: Mapping[str, Any]) -> Verdict:
+    """A green last run, judged as a scheduled `test.all_pass` judges it.
+
+    A full run says what it always said. A scoped one passes, naming the
+    cadence that now holds the whole suite — unless the change touches a
+    `held_paths` glob, which owes a whole-suite run before merge (ADR-010 D8).
+    """
+    full = _run_scope(last) == "full"
+    held, unanswerable = _held_paths_touched(ctx)
+    if unanswerable is not None:
+        return unanswerable
+    if held and not full:
+        return Verdict.fail(
+            f"{len(held)} touched path(s) under {_HELD_PATHS_KEY} owe a "
+            "whole-suite run, and the last run was not one",
+            detail=", ".join(held[:6])
+            + ". The project holds these paths back from the sweep cadence: a "
+            "change touching one is merged only on a full run.",
+            fixes=("invariant pipeline test  # the whole suite, which held_paths owes",),
+        )
+    if full:
+        return Verdict.clean("suite is green and the pass is trustworthy")
+    return Verdict.clean(
+        "the affected suites are green; the whole suite is on the sweep cadence "
+        f"({_cadence_phrase(ctx)})"
+    )
 
 
 @rule(
@@ -1891,6 +1941,20 @@ def _held_files_floor(ctx: RuleContext, advisory: list[tuple[str, str]]) -> Verd
         advisory.extend(split_off)
         if split_off and not source_changed:
             return Verdict.na("nothing held to the floor was touched")
+        # On a sweep cadence a change with nothing held owes no coverage run
+        # at all, source or not: the per-change floor demands nothing the
+        # sweep does not hold (ADR-010 D1). The one exception is a held-path
+        # list over a change nobody could establish, which keeps the
+        # refusal below rather than reading "unknown" as "none touched".
+        if (
+            not source_changed
+            and _scheduled(ctx, "coverage.meets_floor")
+            and (touched_set.paths or touched_set.answerable or not _held_path_globs(ctx))
+        ):
+            return Verdict.na(
+                "no touched source file is held to the floor; coverage.meets_floor "
+                "is on the sweep cadence"
+            )
 
         # Whether anything here is MEASURABLE is a different question from
         # whether anything was measured, and only the first is answerable
@@ -1914,6 +1978,23 @@ def _held_files_floor(ctx: RuleContext, advisory: list[tuple[str, str]]) -> Verd
             "measured anything in this pipeline.",
             fixes=("invariant pipeline coverage",),
         )
+
+    # Under a sweep cadence the only files still held are under `held_paths`,
+    # and they owe a FULL run: a scoped figure is the lower bound the cadence
+    # exists to stop holding to the floor (ADR-010 D8).
+    if scope == "touched" and source_changed and _scheduled(ctx, "coverage.meets_floor"):
+        run = ctx.evidence("coverage_run", {}) or {}
+        if _run_scope(run) != "full":
+            held = sorted(source_changed)
+            return Verdict.fail(
+                f"{len(held)} touched path(s) under {_HELD_PATHS_KEY} owe a full "
+                "coverage run, and the coverage on record is not one",
+                detail=", ".join(held[:6])
+                + ". A scoped run measures a lower bound, which is why a "
+                "scheduled floor is advisory; these paths are held back from the "
+                "cadence, so their figure must come from a whole-scheme run.",
+                fixes=("invariant pipeline coverage  # the full run held_paths owes",),
+            )
 
     coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
 
@@ -2154,6 +2235,134 @@ def _held_files_floor(ctx: RuleContext, advisory: list[tuple[str, str]]) -> Verd
         + (f"  {aside}" if aside else ""),
         fixes=("add tests for the uncovered branches",),
     )
+
+
+# -- the sweep cadence -------------------------------------------------
+
+
+@rule(
+    "sweep.no_full_run",
+    summary="Under a sweep cadence, a change does not run the whole suite or "
+    "whole-scheme coverage.",
+    events=("pre-tool-use",),
+)
+def _sweep_no_full_run(ctx: RuleContext) -> Verdict:
+    """A full run on a change, where the project moved full runs to a sweep.
+
+    Two surfaces, one rule (ADR-010 D5). The CLI names its own run in
+    ``ctx.extra["full_run"]`` — ``pipeline test`` or ``pipeline coverage``
+    with no ``--selector`` is the configured whole-suite or whole-scheme
+    command by construction, so that surface is exact for every host and for
+    none. The hook reads a shell call, and fires only where the project's own
+    template leads the call and the ecosystem adapter answers ``"full"`` for
+    what follows; any doubt is no verdict, because a false "full" refuses a
+    legitimate scoped run and a missed one only costs time.
+    """
+    scheduled = ctx.manifest.scheduled_gates()
+    if not scheduled:
+        return Verdict.na("no sweep cadence is configured")
+    kind = ctx.extra.get("full_run")
+    if kind is None:
+        command = ctx.tool_input.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return Verdict.na("not screened: this call is not a shell command")
+        kind = _full_run_in(ctx, command)
+        if kind is None:
+            return Verdict.na(
+                "not a full run of the configured suite, or not one this "
+                "ecosystem's adapter can tell is full"
+            )
+    # A whole-scheme coverage run runs the whole suite too, so it is caught
+    # when either gate is on the cadence.
+    if kind == "test" and "test.all_pass" not in scheduled:
+        return Verdict.na("test.all_pass is not on the sweep cadence")
+
+    held, _unanswerable = _held_paths_touched(ctx) if ctx.session else ([], None)
+    if held:
+        return Verdict.clean(
+            f"a full run is owed: this change touches {len(held)} path(s) under "
+            f"{_HELD_PATHS_KEY}",
+            detail=", ".join(held[:6]),
+        )
+    what = "whole-scheme coverage" if kind == "coverage" else "whole-suite"
+    scoped = (
+        "invariant pipeline coverage --selector <test>"
+        if kind == "coverage"
+        else "invariant pipeline test --selector <test>"
+    )
+    return Verdict.fail(
+        f"a {what} run on a change: {', '.join(sorted(scheduled))} "
+        f"{'is' if len(scheduled) == 1 else 'are'} on the sweep cadence "
+        f"({_cadence_phrase(ctx)})",
+        detail="This project moved whole-suite and whole-scheme evidence to a "
+        "scheduled sweep; a change records the suites it affects, and the "
+        "sweep runs everything and files what broke.",
+        fixes=(
+            scoped,
+            "invariant override sweep.no_full_run --reason '<why>'  # one deliberate full run",
+        ),
+    )
+
+
+#: A leading ``NAME=value`` on a shell command: an environment assignment for
+#: the command after it, never the command itself.
+_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _full_run_in(ctx: RuleContext, command: str) -> str | None:
+    """``"coverage"`` or ``"test"`` when the shell command runs that template in full.
+
+    Each segment between shell separators is tried, leading ``VAR=value``
+    assignments dropped. A template is matched as a token prefix, a template
+    token carrying a ``{placeholder}`` matching any one token; the coverage
+    template is tried first because the test template is usually a prefix of
+    it. What follows the template is the adapter's to judge.
+    """
+    tokens = _shell_words(command)
+    if not tokens:
+        return None
+    adapter = get_adapter(ctx.manifest.ecosystems[0])
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token not in _SHELL_SEPARATORS:
+            segment.append(token)
+            continue
+        while segment and _ENV_ASSIGNMENT.match(segment[0]):
+            segment = segment[1:]
+        for key in ("coverage", "test"):
+            template = _shell_words(str(ctx.manifest.get(f"commands.{key}") or ""))
+            extra = _after_template(template, segment)
+            if extra is not None and adapter.test_scope_of(extra) == "full":
+                return key
+        segment = []
+    return None
+
+
+def _shell_words(command: str) -> list[str]:
+    """A shell command as words, with ``;``, ``|`` and ``&&`` split off.
+
+    `_shell_tokens` keeps ``start;`` as one word, which is right for the
+    commit readers and wrong here, where the separators are what divide one
+    command from the next. Nothing when the command cannot be read as words.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: nothing here is reliable
+        return []
+
+
+def _after_template(template: list[str], tokens: list[str]) -> list[str] | None:
+    """What follows ``template`` in ``tokens``, or ``None`` if it does not lead them."""
+    if not template or len(tokens) < len(template):
+        return None
+    for want, got in zip(template, tokens):
+        if "{" in want and "}" in want:
+            continue
+        if want != got:
+            return None
+    return tokens[len(template):]
 
 
 # -- privacy rule ------------------------------------------------------
@@ -3123,31 +3332,102 @@ def _excluded_by_manifest_globs(
 
 
 _ADVISORY_KEY = "methodology.gates.coverage_advisory_paths"
+_SCHEDULE_KEY = "methodology.gates.schedule"
+_HELD_PATHS_KEY = "methodology.gates.schedule.held_paths"
+
+#: The reason an advisory entry carries when a sweep cadence, not a glob,
+#: made it advisory.
+_SCHEDULED = "scheduled"
 
 
 def _split_advisory(ctx: RuleContext, paths):
     """Split ``paths`` into the ones held to the floor and the advisory ones.
 
+    The ONE place a touched file is classed HELD or ADVISORY, armed two ways
+    (ADR-010 D2). A sweep cadence scheduling the floor makes every file
+    advisory except those under ``schedule.held_paths``; with no cadence,
+    ``coverage_advisory_paths`` makes the files under its globs advisory. The
+    manifest refuses both at once, so a file never has two reasons.
+
     ``paths`` is a set of project-relative paths or a ``{path: pct}`` mapping;
     the held part comes back in the same shape, the advisory part as
-    ``(path, pattern as written)``. Matched by the same normaliser and glob
-    reader as `coverage_exclude` and `non_source`, so the three lists cannot
-    come to disagree about what a pattern names.
+    ``(path, reason)`` — the pattern as written, or :data:`_SCHEDULED`.
+    Matched by the same normaliser and glob reader as `coverage_exclude` and
+    `non_source`, so the lists cannot come to disagree about what a pattern
+    names.
     """
-    patterns = _declared_in_project(ctx, ctx.manifest.get(_ADVISORY_KEY) or [])
-    if not patterns:
-        return paths, []
+    scheduled = _scheduled(ctx, "coverage.meets_floor")
+    if scheduled:
+        patterns = _declared_in_project(ctx, _held_path_globs(ctx))
+    else:
+        patterns = _declared_in_project(ctx, ctx.manifest.get(_ADVISORY_KEY) or [])
+        if not patterns:
+            return paths, []
     split_off: list[tuple[str, str]] = []
     kept = {} if isinstance(paths, dict) else set()
     for rel in sorted(paths):
         matched = _first_matching_glob(rel, patterns)
-        if matched is not None:
-            split_off.append((rel, matched))
+        advisory = matched is None if scheduled else matched is not None
+        if advisory:
+            split_off.append((rel, _SCHEDULED if scheduled else str(matched)))
         elif isinstance(kept, dict):
             kept[rel] = paths[rel]
         else:
             kept.add(rel)
     return kept, split_off
+
+
+def _scheduled(ctx: RuleContext, gate: str) -> bool:
+    """Has a sweep cadence moved this gate off the per-change path?"""
+    return gate in ctx.manifest.scheduled_gates()
+
+
+def _held_path_globs(ctx: RuleContext) -> list[str]:
+    return [str(g) for g in ctx.manifest.get(_HELD_PATHS_KEY) or ()]
+
+
+def _cadence_phrase(ctx: RuleContext) -> str:
+    days = ctx.manifest.get(f"{_SCHEDULE_KEY}.cadence_days")
+    return f"every {days} day(s), {_SCHEDULE_KEY}"
+
+
+def _run_scope(run: Mapping[str, Any]) -> str | None:
+    """``"full"``, ``"scoped"``, or ``None`` for a record that does not say.
+
+    A record written before runs carried a scope says nothing, and nothing is
+    not proof of a full run: the held-path checks read ``None`` as "not
+    full", the do-not-relax direction.
+    """
+    scope = run.get("scope")
+    if scope in ("full", "scoped"):
+        return str(scope)
+    return "scoped" if run.get("selectors") else None
+
+
+def _held_paths_touched(ctx: RuleContext) -> tuple[list[str], Verdict | None]:
+    """The touched paths under ``schedule.held_paths``, or the refusal to say.
+
+    Asked only where held paths are configured, so a project without them
+    never pays for a changed-set read. An unestablished changed set is
+    refused rather than read as "no held path touched" — the BUG_012 reading
+    of an unanswered question — and the second element carries that verdict.
+    """
+    globs = _held_path_globs(ctx)
+    if not globs:
+        return [], None
+    changed = _changed_set(ctx)
+    if not changed.paths and not changed.answerable:
+        return [], _unestablished_changed_set(changed)
+    patterns = _declared_in_project(ctx, globs)
+    roots = _coverage_roots(ctx)
+    held = sorted(
+        {
+            rel
+            for rel in (_relative_to_any(path, roots) for path in changed.paths)
+            if _first_matching_glob(rel, patterns) is not None
+        }
+    )
+    return held, None
 
 
 def _with_advisory_report(
@@ -3166,23 +3446,32 @@ def _with_advisory_report(
         return held
     floor = float(ctx.manifest.get("methodology.gates.coverage_min", 0) or 0)
     report = _advisory_detail(ctx, advisory, floor)
+    scheduled = all(reason == _SCHEDULED for _rel, reason in advisory)
 
     if held.skipped:
-        message = (
-            f"{len(advisory)} touched source file(s) under {_ADVISORY_KEY}, "
-            f"where the {floor:g}% floor is advisory, and nothing held to the "
-            "floor needs a coverage run; a coverage run is still owed before "
-            "that list is removed"
-        )
+        if scheduled:
+            message = (
+                f"{len(advisory)} touched source file(s) advisory: "
+                f"coverage.meets_floor is on the sweep cadence "
+                f"({_cadence_phrase(ctx)}), so the sweep holds the {floor:g}% "
+                "floor and nothing held to it needs a coverage run"
+            )
+        else:
+            message = (
+                f"{len(advisory)} touched source file(s) under {_ADVISORY_KEY}, "
+                f"where the {floor:g}% floor is advisory, and nothing held to the "
+                "floor needs a coverage run; a coverage run is still owed before "
+                "that list is removed"
+            )
         reason = f"Held files: {held.message}." if held.message else ""
         detail = " ".join(part for part in (report, reason, held.detail) if part)
         return Verdict.clean(message, detail=detail)
 
     detail = f"{held.detail}  {report}" if held.detail else report
     if held.ok:
+        where = "on the sweep cadence" if scheduled else "under coverage_advisory_paths"
         return Verdict.clean(
-            f"{held.message}; {len(advisory)} more advisory under "
-            f"coverage_advisory_paths, not held",
+            f"{held.message}; {len(advisory)} more advisory {where}, not held",
             detail=detail,
         )
     return Verdict.fail(held.message, detail=detail, fixes=held.fixes)
@@ -3195,22 +3484,28 @@ def _advisory_detail(
     roots = _coverage_roots(ctx)
     coverage = {_relative_to_any(path, roots): pct for path, pct in recorded.items()}
     entries: list[str] = []
-    for rel, pattern in advisory:
+    for rel, reason in advisory:
+        # A glob is named as the project wrote it; the cadence is named once,
+        # in the header, since it is the reason for every entry at once.
+        tag = "" if reason == _SCHEDULED else f" ({reason!r})"
         if not recorded:
-            entries.append(f"{rel} not measured, no coverage recorded ({pattern!r})")
+            entries.append(f"{rel} not measured, no coverage recorded{tag}")
             continue
         hits = [pct for f, pct in coverage.items() if _same_file(rel, f)]
         if not hits:
-            entries.append(f"{rel} not measured, no coverage row ({pattern!r})")
+            entries.append(f"{rel} not measured, no coverage row{tag}")
             continue
         pct = float(hits[0])
         below = f", below the {floor:g}% floor" if pct < floor else ""
-        entries.append(f"{rel} {pct:g}%{below} ({pattern!r})")
-    text = (
-        f"Advisory under {_ADVISORY_KEY}, so never held to the floor: "
-        + "; ".join(entries)
-        + "."
-    )
+        entries.append(f"{rel} {pct:g}%{below}{tag}")
+    if all(reason == _SCHEDULED for _rel, reason in advisory):
+        header = (
+            f"Advisory on the sweep cadence ({_SCHEDULE_KEY}), so never held to "
+            "the floor per change; a scoped figure is a lower bound"
+        )
+    else:
+        header = f"Advisory under {_ADVISORY_KEY}, so never held to the floor"
+    text = f"{header}: " + "; ".join(entries) + "."
     run = ctx.evidence("coverage_run", {}) or {}
     overstating = run.get("overstating_hazards") or []
     if recorded and overstating:

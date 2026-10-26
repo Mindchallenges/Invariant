@@ -81,15 +81,162 @@ def _refuse_chained_coverage(coverage: str, report: str, bundle: str) -> None:
 #: An inflated failure count on a phase that later reads green is the harder
 #: of the two mistakes to notice: a false green hides behind nothing, a false
 #: red hides behind a plausible regression a reader has to actively disprove.
-CHILD_ENV_STRIPPED = ("INVARIANT_SESSION_ID",)
+#:
+#: ``INVARIANT_HOST_SESSION_ID`` and ``INVARIANT_HANDOFF`` are the same fault
+#: one variable over (BUG_058, BUG_077): a host shell exports them, and a suite
+#: that exercises host binding or handoff claims then collides with the live
+#: host. A recorded run — and a scheduled sweep started from a host shell,
+#: which would file the collisions as bugs (ADR-010) — must measure the suite,
+#: not the shell it was started from.
+CHILD_ENV_STRIPPED = (
+    "INVARIANT_SESSION_ID",
+    "INVARIANT_HOST_SESSION_ID",
+    "INVARIANT_HANDOFF",
+)
 
 
-def _child_env() -> dict[str, str]:
+def child_env() -> dict[str, str]:
     """The environment for a command this domain spawns."""
     env = dict(os.environ)
     for name in CHILD_ENV_STRIPPED:
         env.pop(name, None)
     return env
+
+
+# -- the run-and-read seam ---------------------------------------------
+#
+# Module-level, not methods, because two domains run the suite: this one, per
+# change, and the sweep, on a cadence (ADR-010 D4). One copy of how a suite is
+# spawned and read is what keeps the two from disagreeing about what a run
+# showed — the subprocess, its environment, the chained-coverage refusal, and
+# the refusals of a run that measured nothing.
+
+
+def run_command(command: str, root: Path) -> subprocess.CompletedProcess:
+    """Run one configured command in ``root``, captured, in the child environment."""
+    return subprocess.run(
+        command,
+        shell=True,
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        env=child_env(),
+        check=False,  # the exit status is evidence, read by the adapter
+    )
+
+
+def joined_selectors(adapter, selectors: Sequence[str]) -> str:
+    """Several selectors as one ``{selector}`` value, or a refusal.
+
+    Whether several fit in one command is the adapter's answer; what to do
+    when they do not is the caller's, and the answer is to refuse. A refusal
+    costs one retry, and running a subset costs the belief that the scope was
+    covered (BUG_031).
+    """
+    joined = adapter.join_selectors(selectors)
+    if joined is None:
+        raise UsageError(
+            f"the {adapter.id!r} adapter takes one selector at a time, "
+            f"and {len(selectors)} were given.\n"
+            + "".join(f"  - {s}\n" for s in selectors)
+            + "  Run them one per invocation. Nothing was run and "
+            "nothing was recorded: a run covering part of the requested "
+            "scope would be read by test.all_pass as the state of the "
+            "whole suite."
+        )
+    return joined
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """What one coverage run measured, and the suite's own outcome beside it."""
+
+    command: str
+    exit_code: int
+    outcome: Any
+    report_command: str | None
+    report_exit: int
+    measured: dict[str, float]
+
+
+def measure_coverage(manifest, adapter, command: str, bundle: Path, root: Path) -> Measurement:
+    """Run a coverage command and read it, or refuse a run that measured nothing.
+
+    The measurement and the reading of it are separate programs in some
+    ecosystems and one program in others. Where they are separate, they are
+    run separately — see _refuse_chained_coverage for what joining them with a
+    `;` cost, and why it cannot simply be tolerated.
+    """
+    report_command: str | None = None
+    if manifest.get("commands.coverage_report"):
+        report_command = manifest.command_for(
+            "coverage_report", result_bundle=str(bundle)
+        )
+        _refuse_chained_coverage(command, report_command, str(bundle))
+
+    proc = run_command(command, root)
+    # The suite's own status, read from the command that RAN the suite.
+    # When a report leg follows, this is the whole point of the split: the
+    # exit code here is the compiler's and the test runner's, and nothing
+    # a reporting tool does afterwards can overwrite it.
+    outcome = adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle)
+
+    if report_command is None:
+        measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
+        report_exit = proc.returncode
+    else:
+        report = run_command(report_command, root)
+        measured = adapter.parse_coverage(f"{report.stdout}\n{report.stderr}")
+        report_exit = report.returncode
+
+    # A suite that never ran cannot have measured anything, and a report
+    # produced from a build that fell over describes the previous state of
+    # the world at best. `total is None` means this adapter does not count
+    # tests, which is not the same as counting zero.
+    if outcome.total == 0:
+        raise UsageError(
+            "the coverage run executed no tests, so its measurement "
+            "describes nothing.\n"
+            f"  command: {command}\n"
+            f"  exit: {proc.returncode}\n"
+            "  Usually a build or launch failure rather than a coverage "
+            "problem — read the build output first."
+        )
+
+    if not measured:
+        # Naming the leg matters. While the two were chained, this message
+        # printed the whole chain and its LAST exit status, so a reader
+        # diagnosing "no measurements" was shown a command whose test half
+        # had in fact succeeded — and the failure was twice attributed to
+        # the suite, and once to an imagined race, before anyone looked at
+        # the reporting tool.
+        raise UsageError(
+            "the coverage run produced no per-file measurements.\n"
+            f"  command: {report_command or command}\n"
+            f"  exit: {report_exit}\n"
+            + (
+                f"  The suite itself ran: executed={outcome.total} "
+                f"failed={outcome.failed}, exit {proc.returncode}. Only "
+                "the reporting leg came back empty.\n"
+                if report_command
+                else ""
+            )
+            + "  Recording an empty result would make the gate pass on a "
+            "measurement that never happened, so nothing was recorded."
+        )
+    return Measurement(
+        command=command,
+        exit_code=proc.returncode,
+        outcome=outcome,
+        report_command=report_command,
+        report_exit=report_exit,
+        measured=measured,
+    )
+
+
+def _scope(selectors: Sequence[str]) -> str:
+    """What a run's evidence says it covered: the whole suite, or a subset."""
+    return "scoped" if selectors else "full"
 
 
 #: How an agent came to be in ``agents_run``. Kept beside the list rather than
@@ -612,7 +759,12 @@ class PipelineDomain:
             shutil.rmtree(bundle, ignore_errors=True)
         return bundle
 
-    def run_coverage(self, session_id: str, cwd: Path | None = None) -> dict:
+    def run_coverage(
+        self,
+        session_id: str,
+        cwd: Path | None = None,
+        selectors: Sequence[str] | None = None,
+    ) -> dict:
         """Run the configured coverage command and record what it measured.
 
         This is the missing half of ``coverage.meets_floor``. The rule, the
@@ -621,97 +773,39 @@ class PipelineDomain:
         produce and advised running "the configured coverage command" — which
         no command ever ran. A blocking gate that cannot be satisfied does not
         enforce a standard, it teaches people to reach for --force.
+
+        ``selectors`` runs ``commands.coverage_one`` instead, the scoped
+        sibling (ADR-010): the figure is a lower bound, and the record says the
+        run was scoped so no gate reads it as a whole-scheme measurement.
         """
-        pipeline = self.require(session_id)
+        self.require(session_id)
         root = Path(cwd or self.manifest.root)
+        selectors = [s for s in (selectors or ()) if s]
+        adapter = get_adapter(self.manifest.ecosystems[0])
 
         # A per-run path, supplied here rather than configured. Writing a
         # result-bundle path into a manifest would make it shared state between
         # concurrent sessions, and two runs would overwrite each other's
         # measurements while both reported success.
-        bundle = self._fresh_bundle(session_id, "coverage")
-        command = self.manifest.command_for("coverage", result_bundle=str(bundle))
-        adapter = get_adapter(self.manifest.ecosystems[0])
-
-        # The measurement and the reading of it are separate programs in some
-        # ecosystems and one program in others. Where they are separate, they
-        # are run separately — see _refuse_chained_coverage for what joining
-        # them with a `;` cost, and why it cannot simply be tolerated.
-        report_command: str | None = None
-        if self.manifest.get("commands.coverage_report"):
-            report_command = self.manifest.command_for(
-                "coverage_report", result_bundle=str(bundle)
-            )
-            _refuse_chained_coverage(command, report_command, str(bundle))
-
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            env=_child_env(),
-        )
-        # The suite's own status, read from the command that RAN the suite.
-        # When a report leg follows, this is the whole point of the split: the
-        # exit code here is the compiler's and the test runner's, and nothing
-        # a reporting tool does afterwards can overwrite it.
-        outcome = adapter.read_run(
-            proc.stdout, proc.stderr, proc.returncode, bundle=bundle
-        )
-
-        if report_command is None:
-            measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
-            report_exit = proc.returncode
-        else:
-            report = subprocess.run(
-                report_command,
-                shell=True,
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                env=_child_env(),
-            )
-            measured = adapter.parse_coverage(f"{report.stdout}\n{report.stderr}")
-            report_exit = report.returncode
-
-        # A suite that never ran cannot have measured anything, and a report
-        # produced from a build that fell over describes the previous state of
-        # the world at best. `total is None` means this adapter does not count
-        # tests, which is not the same as counting zero.
-        if outcome.total == 0:
-            raise UsageError(
-                "the coverage run executed no tests, so its measurement "
-                "describes nothing.\n"
-                f"  command: {command}\n"
-                f"  exit: {proc.returncode}\n"
-                "  Usually a build or launch failure rather than a coverage "
-                "problem — read the build output first."
-            )
-
-        if not measured:
-            # Naming the leg matters. While the two were chained, this message
-            # printed the whole chain and its LAST exit status, so a reader
-            # diagnosing "no measurements" was shown a command whose test half
-            # had in fact succeeded — and the failure was twice attributed to
-            # the suite, and once to an imagined race, before anyone looked at
-            # the reporting tool.
-            raise UsageError(
-                "the coverage run produced no per-file measurements.\n"
-                f"  command: {report_command or command}\n"
-                f"  exit: {report_exit}\n"
-                + (
-                    f"  The suite itself ran: executed={outcome.total} "
-                    f"failed={outcome.failed}, exit {proc.returncode}. Only "
-                    "the reporting leg came back empty.\n"
-                    if report_command
-                    else ""
+        extra = {}
+        if selectors:
+            if not self.manifest.get("commands.coverage_one"):
+                raise UsageError(
+                    "a scoped coverage run needs commands.coverage_one, the "
+                    "coverage command with {selector} substituted, and none is "
+                    "configured or supplied by the adapter. Nothing was run."
                 )
-                + "  Recording an empty result would make the gate pass on a "
-                "measurement that never happened, so nothing was recorded."
-            )
+            extra["selector"] = joined_selectors(adapter, selectors)
+        bundle = self._fresh_bundle(session_id, "coverage")
+        command = self.manifest.command_for(
+            "coverage_one" if selectors else "coverage",
+            result_bundle=str(bundle),
+            **extra,
+        )
+        run = measure_coverage(self.manifest, adapter, command, bundle, root)
+        outcome = run.outcome
 
-        self.record_coverage(session_id, measured)
+        self.record_coverage(session_id, run.measured)
 
         # A coverage run IS a test run — it runs the suite. Not recording it
         # left `test.all_pass` reading the last `pipeline test` entry, which
@@ -719,7 +813,7 @@ class PipelineDomain:
         # one as though it were current. A whole-suite run with 625 failures
         # sat beside a rule saying "the suite is green and the pass is
         # trustworthy", because the rule was never shown this run at all.
-        self._record_test_run(session_id, "coverage", command, outcome)
+        self._record_test_run(session_id, "coverage", command, outcome, selectors=selectors)
 
         # The suite's state at the moment of measurement, kept with it. A file
         # at 100% measured on a run where twelve tests failed is a different
@@ -734,15 +828,20 @@ class PipelineDomain:
             # that: unable to tell whether an annotation was missing because
             # nothing was recorded or because nothing needed annotating.
             "command": command,
+            # And said outright, because a held path under a sweep cadence
+            # owes a FULL run, and a command string is not a reliable answer
+            # to "was this one" (ADR-010 D1, D8).
+            "selectors": list(selectors),
+            "scope": _scope(selectors),
             "executed": outcome.total,
             "failed": outcome.failed,
-            "exit_code": proc.returncode,
+            "exit_code": run.exit_code,
             # Kept apart on purpose. One number used to stand for both, and
             # which one it stood for depended on which command the shell
             # happened to finish with — so the evidence could not answer "did
             # the suite fail, or did the reader fail?" at all.
-            "report_command": report_command,
-            "report_exit_code": report_exit,
+            "report_command": run.report_command,
+            "report_exit_code": run.report_exit,
             "suite_passed": outcome.passed,
             # A hazard on the measuring run travels with the measurement. Exit
             # 65 can mean whole suites never ran, which makes coverage
@@ -761,11 +860,13 @@ class PipelineDomain:
 
         return {
             "command": command,
-            "exit_code": proc.returncode,
-            "report_command": report_command,
-            "report_exit_code": report_exit,
-            "files": len(measured),
-            "coverage": measured,
+            "exit_code": run.exit_code,
+            "report_command": run.report_command,
+            "report_exit_code": run.report_exit,
+            "files": len(run.measured),
+            "coverage": run.measured,
+            "selectors": list(selectors),
+            "scope": _scope(selectors),
             "executed": outcome.total,
             "failed": outcome.failed,
             # These were missing, and their absence made describe_run silent
@@ -805,31 +906,15 @@ class PipelineDomain:
         selectors = [s for s in (selectors or ()) if s]
         adapter = get_adapter(self.manifest.ecosystems[0])
         command_key = "test_one" if selectors else "test"
-        bundle = self._fresh_bundle(session_id, "test")
-        extra = {"result_bundle": str(bundle)}
+        extra = {}
         if selectors:
-            joined = adapter.join_selectors(selectors)
-            if joined is None:
-                raise UsageError(
-                    f"the {adapter.id!r} adapter takes one selector at a time, "
-                    f"and {len(selectors)} were given.\n"
-                    + "".join(f"  - {s}\n" for s in selectors)
-                    + "  Run them one per invocation. Nothing was run and "
-                    "nothing was recorded: a run covering part of the requested "
-                    "scope would be read by test.all_pass as the state of the "
-                    "whole suite."
-                )
-            extra["selector"] = joined
-        command = self.manifest.command_for(command_key, **extra)
-
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(cwd or self.manifest.root),
-            capture_output=True,
-            text=True,
-            env=_child_env(),
+            extra["selector"] = joined_selectors(adapter, selectors)
+        bundle = self._fresh_bundle(session_id, "test")
+        command = self.manifest.command_for(
+            command_key, result_bundle=str(bundle), **extra
         )
+
+        proc = run_command(command, Path(cwd or self.manifest.root))
         result = adapter.read_run(
             proc.stdout, proc.stderr, proc.returncode, bundle=bundle
         )
@@ -839,7 +924,8 @@ class PipelineDomain:
         )
 
         return self._record_test_run(
-            session_id, phase, command, result, read_as_red=read_as_red
+            session_id, phase, command, result, read_as_red=read_as_red,
+            selectors=selectors,
         )
 
     def _read_red_phase_run(
@@ -905,7 +991,13 @@ class PipelineDomain:
         )
 
     def _record_test_run(
-        self, session_id: str, phase: str, command: str, result, read_as_red=False
+        self,
+        session_id: str,
+        phase: str,
+        command: str,
+        result,
+        read_as_red=False,
+        selectors: Sequence[str] = (),
     ):
         """Append one run to the evidence every test rule reads.
 
@@ -922,6 +1014,11 @@ class PipelineDomain:
             # was chosen, so a run against the wrong device is indistinguishable
             # from a run against the right one.
             "command": command,
+            # Which tests were asked for, and so whether this was the whole
+            # suite. A held path under a sweep cadence owes a full run, and a
+            # resolved command string cannot be relied on to say (ADR-010 D1).
+            "selectors": list(selectors),
+            "scope": _scope(selectors),
             "passed": result.passed,
             "exit_code": result.exit_code,
             "executed": result.total,

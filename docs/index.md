@@ -38,6 +38,7 @@ adr/ADR-006-proved-not-fixed-is-a-pipeline-outcome
 adr/ADR-007-a-machine-wide-read-only-oracle
 adr/ADR-008-the-oracle-listens-on-the-tailnet-only
 adr/ADR-009-the-oracle-page-becomes-a-mobile-control-panel
+adr/ADR-010-whole-suite-evidence-moves-to-a-scheduled-sweep
 ```
 
 ```{toctree}

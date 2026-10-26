@@ -37,6 +37,9 @@ rules:
   test.new_test_fails: block
   test.all_pass: block
   coverage.meets_floor: block
+  # A whole-suite or whole-scheme run on a change, under a sweep cadence
+  # (ADR-010 D5). N/A without one.
+  sweep.no_full_run: block
 
   privacy.clean: block
 

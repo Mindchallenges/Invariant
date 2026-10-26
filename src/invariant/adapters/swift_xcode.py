@@ -96,6 +96,16 @@ class SwiftXcodeAdapter(Adapter):
                 "-enableCodeCoverage YES -resultBundlePath {result_bundle}"
             ),
             "coverage_report": "xcrun xccov view --report {result_bundle}",
+            # The scoped sibling of `coverage`, as `test_one` is of `test`
+            # (ADR-010). Under a sweep cadence a change's coverage comes from
+            # its affected suites; the figure is a lower bound and is reported,
+            # not held to the floor.
+            "coverage_one": (
+                "xcodebuild test -workspace {workspace} -scheme {scheme} "
+                "-destination 'platform=iOS Simulator,id={destination_id}' "
+                "-enableCodeCoverage YES -resultBundlePath {result_bundle} "
+                "-only-testing:{selector}"
+            ),
             "test_one": (
                 "xcodebuild test -workspace {workspace} -scheme {scheme} "
                 "-destination 'platform=iOS Simulator,id={destination_id}' "
@@ -120,6 +130,23 @@ class SwiftXcodeAdapter(Adapter):
     # defect as the discarded selector this answers (BUG_031). The base
     # `None` makes the CLI refuse and say so, and one selector per invocation
     # still works.
+
+    def test_scope_of(self, extra_tokens) -> str | None:
+        """``-only-testing:`` narrows; ``-skip-testing:`` and anything else is doubt.
+
+        xcodebuild's own selection flags are the only ones this adapter can
+        read. ``-skip-testing:`` removes tests from a run that may otherwise be
+        whole, which is neither answer, and any other token may be a setting
+        that changes what runs (ADR-010 D5).
+        """
+        tokens = list(extra_tokens)
+        if not tokens:
+            return "full"
+        if any(t.startswith("-skip-testing:") for t in tokens):
+            return None
+        if any(t.startswith("-only-testing:") for t in tokens):
+            return "scoped"
+        return None
 
     def is_test_file(self, path: Path) -> bool | None:
         """The convention `swift test` and Xcode both key on.

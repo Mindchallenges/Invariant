@@ -22,6 +22,7 @@ class PythonAdapter(Adapter):
             "test_one": "pytest {selector}",
             "lint": "ruff check .",
             "coverage": "pytest --cov --cov-report=term-missing",
+            "coverage_one": "pytest --cov --cov-report=term-missing {selector}",
         },
         "docs": {"format": "markdown", "diagrams": "mermaid"},
     }
@@ -40,6 +41,48 @@ class PythonAdapter(Adapter):
         and no separator of its own.
         """
         return " ".join(selectors)
+
+    def test_scope_of(self, extra_tokens: Sequence[str]) -> str | None:
+        """pytest's whole-suite and narrowing arguments, and nothing guessed.
+
+        A positional is a path or node id, and ``-k``, ``-m``, ``--lf``,
+        ``--ff`` and ``--deselect`` select a subset: any of them is
+        ``"scoped"``. Only options known not to narrow the collected set —
+        verbosity, ``-x``, ``-s``, traceback style, ``-p <plugin>``, the
+        ``--cov`` family, ``--no-header`` — leave a run ``"full"``. Any other
+        option is ``None``: pytest plugins add options freely, and a guess
+        that one does not narrow is how a legitimate scoped run gets refused
+        (ADR-010 D5).
+        """
+        tokens = list(extra_tokens)
+        doubt = False
+        # A bare word straight after an option this reader does not know may
+        # be that option's VALUE (`-n 4`) rather than a path, so it proves
+        # nothing either way.
+        after_unknown = False
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            index += 1
+            if not token.startswith("-"):
+                if after_unknown:
+                    after_unknown = False
+                    continue
+                return "scoped"
+            after_unknown = False
+            name = token.split("=", 1)[0]
+            if name in _PYTEST_NARROWING:
+                return "scoped"
+            if token in _PYTEST_TAKES_VALUE:
+                if index >= len(tokens):
+                    doubt = True
+                index += 1
+                continue
+            if _pytest_keeps_the_whole_suite(token):
+                continue
+            doubt = True
+            after_unknown = "=" not in token
+        return None if doubt else "full"
 
     def measured_scope(self, root: Path) -> list[Path] | None:
         """``[tool.coverage.run] source``, resolved to directories.
@@ -222,6 +265,24 @@ class PythonAdapter(Adapter):
         ):
             out[match.group("file")] = float(match.group("pct"))
         return out
+
+
+#: Options that select a subset of the collected tests.
+_PYTEST_NARROWING = frozenset({"-k", "-m", "--lf", "--last-failed", "--ff", "--deselect"})
+
+#: Options known not to narrow that take their value as the NEXT token.
+_PYTEST_TAKES_VALUE = frozenset({"-p"})
+
+
+def _pytest_keeps_the_whole_suite(token: str) -> bool:
+    """A pytest option known to leave the collected set untouched."""
+    if re.fullmatch(r"-[qvxs]+", token):
+        return True
+    if token.startswith(("--tb=", "-p")) and token not in ("--tb=", "-p"):
+        return True
+    if token == "--cov" or token.startswith(("--cov=", "--cov-")):
+        return True
+    return token in {"--no-header", "--quiet", "--verbose", "--exitfirst"}
 
 
 def _xfail_markers_are_strict(tree: ast.AST) -> bool | None:

@@ -31,6 +31,9 @@ commands:                      # adapters supply defaults; these override
   coverage_report: null          # optional: reads the measurement, separately
                                  # — a shell reports only the LAST command's
                                  # status, so the two must not be one command
+  coverage_one: null             # scoped coverage, {selector} substituted: the
+                                 # sibling of test_one, run by `pipeline
+                                 # coverage --selector` (ADR-010)
 
 docs:
   format: markdown             # markdown | sphinx
@@ -88,6 +91,14 @@ methodology:
                                # For a phase that lands new, flag-off code on
                                # scoped suites; ending the phase is deleting the
                                # list. Empty by default.
+    schedule:                  # a sweep cadence (ADR-010). See "A sweep cadence"
+      cadence_days: null       # null: none, today's behaviour exactly. A positive
+                               # whole number: the gates below are held by a
+                               # scheduled full run instead of by each change
+      grace_days: 3            # how late a sweep may be before it is called stale
+      gates: []                # coverage.meets_floor and/or test.all_pass
+      held_paths: []           # globs whose touch still owes a FULL run before
+                               # merge. Empty by default
 
 enforcement:
   profile: standard            # strict | standard | loose
@@ -152,6 +163,36 @@ agents:
 host:
   kind: claude_code
 ```
+
+### A sweep cadence
+
+A consuming project ruled that a change never runs the whole test suite or
+whole-scheme coverage: the full suite runs once a week, and whatever it finds
+becomes a work item. `methodology.gates.schedule` is how a project says so
+(ADR-010). With `cadence_days` set, the gates named in `gates` stop demanding
+whole-run evidence per change:
+
+| Gate | Per change, when scheduled |
+|---|---|
+| `coverage.meets_floor` | Every touched source file outside `held_paths` is ADVISORY: named with its scoped figure, "not measured" or "no coverage row", never failing. A scoped figure is a lower bound (one file read 65% scoped against 97% whole-scheme), so holding it to the floor would block on a number known to read low. A change with nothing held needs no coverage run at all. |
+| `test.all_pass` | The same logic over the last recorded run, which is now a scoped one. A red scoped run still fails: it is a real red, not an under-reading. A green one passes, saying the whole suite is on the cadence. |
+
+`held_paths` is the exception a project keeps for itself. A touched file under
+one of its globs is held exactly as before, and its evidence must be a FULL
+run: `coverage.meets_floor` fails on a scoped coverage run for it, and a
+scheduled `test.all_pass` fails on a scoped green. A run record says which it
+was — `selectors` and `scope` on every `test_runs` entry and on
+`coverage_run` — and a record from before the field existed is not taken as
+proof of a full run.
+
+The advisory files go through the one split `coverage_advisory_paths` uses
+(`core.rules._split_advisory`), each carrying its reason, so the two ways of
+making the floor advisory cannot drift. `sweep.no_full_run` (`warn` in
+`standard` and `loose`, `block` in `strict`) reports a full run made on a
+change anyway, at `pipeline test` and `pipeline coverage` without a selector
+and at the hook on a shell call; a change touching a held path owes one, and
+is not reported. The sweep that holds the gates, its records and the
+freshness rule are IDEA_032's increment 3.
 
 ### Levels, and where each one can be delivered
 
@@ -288,6 +329,7 @@ graph TD
 | `methodology.gates.non_source` | `coverage.meets_floor`, `docs.updated` | held out | **was not held out**; now held out | **was not held out**; now held out |
 | `methodology.gates.coverage_exclude` | `coverage.meets_floor` | held out | **was not held out**; now held out | **was not held out**; now held out |
 | `methodology.gates.coverage_advisory_paths` | `coverage.meets_floor`, `doctor` | advisory | advisory (normalised from the start) | advisory |
+| `methodology.gates.schedule.held_paths` | `coverage.meets_floor`, `test.all_pass`, `sweep.no_full_run` | held | held (normalised from the start) | held |
 | `privacy.scope` entries and the `paths.*` its keywords name | `privacy.clean` | in scope | in scope (`Path()` already absorbed it) | in scope |
 | `paths.docs` | `docs.read_architecture`, `docs.updated` | every tree | every tree (resolved on join) | every tree |
 | `coverage_baseline` entries | `coverage.meets_floor` | matched | matched (`_same_file`); `x` and `./x` together are now refused as one file recorded twice | matched |
@@ -758,6 +800,18 @@ The three glob lists under `methodology.gates` — `coverage_exclude`,
 every one of them is a relaxation, and a bare string given for one was iterated
 character by character downstream, so `"web/**"` contributed a lone `*` that
 matches every path in the project.
+A sweep cadence is checked too, because each way it can be wrong is a
+setting that loads and quietly keeps demanding the full run it was meant to
+retire (ADR-010 D3). `schedule` must be a mapping, `cadence_days` null or a
+positive whole number, `grace_days` a whole number of 0 or more, `gates` a list
+naming only `coverage.meets_floor` or `test.all_pass` (a near miss is named),
+and `held_paths` a list of globs. With a cadence, `gates` may not be empty; an
+unscheduled `coverage.meets_floor` may not be at `block` or `ask`, since its
+only satisfying evidence would still be a whole-scheme run; and a scheduled
+floor refuses a `coverage_scope` other than `touched` and a non-empty
+`coverage_advisory_paths`. Without one, `gates` and `held_paths` must be empty,
+since they would do nothing. Levels are read resolved — profile, overrides and
+`INVARIANT_DISABLE` — because that is what the gate would do.
 Existence is checked at load; whether the file parses as a machine of the
 right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it
@@ -844,8 +898,19 @@ class Adapter:
     def source_files(self, changed: list[Path]) -> list[Path]: ...
     def carries_executable_code(self, path: Path) -> bool | None: ...
     def expected_failures_are_strict(self, root: Path, selectors) -> bool | None: ...
+    def test_scope_of(self, extra_tokens) -> str | None: ...
     def hazards(self) -> list[Hazard]: ...
 ```
+
+`test_scope_of` is asked by `sweep.no_full_run` at the hook, about a shell
+call led by the project's own `commands.test` or `commands.coverage` template:
+are the tokens after it the whole suite (`"full"`), a subset (`"scoped"`), or
+"cannot tell" (`None`)? Only `"full"` fires the rule, so it is claimed only on
+positive evidence — the base answer is "full" for nothing extra and doubt for
+anything else. Python reads pytest's narrowing arguments (a positional, `-k`,
+`-m`, `--lf`, `--ff`, `--deselect`) and its known non-narrowing options;
+Swift reads `-only-testing:` and doubts `-skip-testing:`; node claims nothing
+past the bare script (ADR-010 D5).
 
 `expected_failures_are_strict` is asked only by the red-phase recorder, about
 a run that exited clean with expected failures counted (`TestResult.

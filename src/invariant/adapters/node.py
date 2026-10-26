@@ -18,12 +18,18 @@ class NodeAdapter(Adapter):
             "test_one": "npm test -- {selector}",
             "lint": "npm run lint",
             "coverage": "npm test -- --coverage",
+            "coverage_one": "npm test -- --coverage {selector}",
         },
         "docs": {"format": "markdown", "diagrams": "mermaid"},
     }
 
     def detect(self, root: Path) -> bool:
         return (root / "package.json").is_file()
+
+    # `test_scope_of` is deliberately the base answer. Everything after the
+    # script is passed to whichever runner the project's `test` script names,
+    # and what a `--` argument narrows is that runner's business, so only
+    # nothing-at-all is claimed as the whole suite (ADR-010 D5).
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix in {".ts", ".tsx", ".js", ".jsx"}]

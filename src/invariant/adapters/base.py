@@ -216,6 +216,24 @@ class Adapter:
         selectors = list(selectors)
         return selectors[0] if len(selectors) == 1 else None
 
+    def test_scope_of(self, extra_tokens: Sequence[str]) -> str | None:
+        """Is a run of the configured suite with these extra tokens the WHOLE suite?
+
+        Asked by ``sweep.no_full_run`` at the hook (ADR-010 D5), about a shell
+        call whose leading tokens are the project's own ``commands.test`` or
+        ``commands.coverage`` template; ``extra_tokens`` is what followed.
+        ``"full"`` claims the call runs everything the template runs,
+        ``"scoped"`` claims it runs a subset, and ``None`` is "cannot tell".
+
+        Only ``"full"`` makes the rule fire, so the two wrong answers are not
+        symmetrical: a false ``"full"`` refuses a legitimate scoped run, which
+        is visible and one override away, while a missed full run costs time
+        and passes nothing it should not. So ``"full"`` is claimed only on
+        positive evidence. The base answer knows no runner: nothing extra is
+        the template itself, and anything else is doubt.
+        """
+        return "full" if not list(extra_tokens) else None
+
     def source_files(self, changed: list[Path]) -> list[Path]:
         """Narrow a changed-file list to this ecosystem's source files."""
         return list(changed)

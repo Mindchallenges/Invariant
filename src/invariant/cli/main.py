@@ -25,6 +25,7 @@ from ..core.rules import (
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
     all_rules,
+    apply_acknowledgements,
     coverage_advisory_exception,
     evaluate,
 )
@@ -2270,10 +2271,59 @@ def cmd_pipeline_ack(args) -> int:
     )
 
 
+#: The rule a full run on a change answers to under a sweep cadence.
+FULL_RUN_RULE = "sweep.no_full_run"
+
+
+def _ask_before_a_full_run(ctx, session, kind: str) -> None:
+    """The CLI surface of ``sweep.no_full_run``, asked before anything spawns.
+
+    ``pipeline test`` and ``pipeline coverage`` with no ``--selector`` are the
+    configured whole-suite and whole-scheme commands by construction, so this
+    surface is exact and host-neutral (ADR-010 D5). A verdict that stops the
+    work refuses the command having run and recorded nothing — unless an
+    ``invariant override`` grant is held, which is spent here, at the delivery
+    surface, and recorded with surface ``cli`` like any other spend. A warning
+    is printed and the run goes ahead. ``ask`` stops it: there is nobody here
+    to ask.
+    """
+    pipeline = ctx.pipelines.current(session.id)
+    rule_ctx = RuleContext(
+        manifest=ctx.manifest,
+        cwd=ctx.cwd,
+        session=session.to_dict(),
+        pipeline=pipeline.to_dict() if pipeline else None,
+        extra={"full_run": kind},
+    )
+    verdicts = apply_acknowledgements(
+        rule_ctx.pipeline, evaluate([FULL_RUN_RULE], rule_ctx)
+    )
+    for verdict in verdicts:
+        if verdict.blocks:
+            spent = ctx.sessions.consume_override(session.id, FULL_RUN_RULE, surface="cli")
+            if spent is None:
+                print(verdict.render(), file=sys.stderr)
+                raise GateFailure(
+                    f"{FULL_RUN_RULE} refused this run; nothing was run or recorded",
+                    verdicts=verdicts,
+                )
+            print(
+                f"[override] {FULL_RUN_RULE}: passed deliberately — "
+                f"{spent.get('reason', 'overridden')}\n"
+                f"        it would have said: {verdict.verdict.message}",
+                file=sys.stderr,
+            )
+        elif verdict.warns:
+            print(verdict.render(), file=sys.stderr)
+
+
 def cmd_pipeline_coverage(args) -> int:
     ctx = Context()
     session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
-    result = ctx.pipelines.run_coverage(session.id, cwd=ctx.cwd)
+    selectors = [s for s in (args.selector or []) if s]
+    if not selectors:
+        _ask_before_a_full_run(ctx, session, "coverage")
+    result = ctx.pipelines.run_coverage(session.id, cwd=ctx.cwd, selectors=selectors)
     lines = [
         # Echo what was actually run. Discovery substitutes values nobody typed
         # — a simulator id most of all — and a wrong one produces a plausible
@@ -2376,6 +2426,8 @@ def cmd_pipeline_advance(args) -> int:
 def cmd_pipeline_test(args) -> int:
     ctx = Context()
     session = ctx.require_session()
+    if not [s for s in (args.selector or []) if s]:
+        _ask_before_a_full_run(ctx, session, "test")
     record = ctx.pipelines.run_tests(
         session.id, phase=args.phase, selectors=args.selector, cwd=ctx.cwd
     )
@@ -4258,6 +4310,9 @@ def build_parser() -> argparse.ArgumentParser:
         "coverage", help="run the configured coverage command and record it"
     )
     q.add_argument("--id")
+    # Repeatable, as on `pipeline test`, and for the same reason (BUG_031).
+    # Runs commands.coverage_one: a scoped figure, recorded as scoped (ADR-010).
+    q.add_argument("--selector", action="append")
     q.set_defaults(func=cmd_pipeline_coverage)
 
     q = pipeline.add_parser("start")
