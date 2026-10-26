@@ -38,6 +38,8 @@ Shipped so far, the plain-language panel ("Using the page" below):
 - A leftover Claude window can be closed from the Leftovers screen, with
   its Terminal tab, after a confirm that names it ("Closing a leftover Claude
   window" below).
+- A new Claude session can be started on the Mac, with Remote Control on, in
+  any registered project ("Start a new session" below).
 
 Still to come:
 
@@ -349,6 +351,50 @@ Mac, whether or not anyone is at it, and you can pick that session up from
 Claude Code's Remote Control on the phone. Every action is logged on the Mac
 in `~/.invariant/web/actions.log`, and `oracle status` shows the last one.
 
+**Start a new session.** "New session…" at the top of the Sessions screen
+opens a sheet for starting a new Claude window on the Mac, with Remote
+Control on, so you can pick it up on the phone. Each project also has its own
+"New session…" under **Projects** at the bottom of the list, which opens the
+same sheet with that project already chosen. Only projects invariant knows
+are listed: ones where you ran `invariant init`, started a session, or ran
+`invariant oracle projects add`.
+
+The sheet says what happens: "A new Terminal window on the Mac runs Claude
+with Remote Control in <project>'s main folder." Under it:
+
+- **Project**, to choose another.
+- **Name**, the window's label, set to the time ("1026-0049") until you
+  change it. The line under it shows the full name the window gets, the
+  project and the label, such as `invariant-1026-0049`: that is the name
+  Remote Control lists it by. If a window already uses that name, a `-2` is
+  added.
+- **First message**, optional. Claude starts with it, as if you had typed it.
+- **Checked just now**: how many Claude windows are already open in that
+  project, and whether its main folder has uncommitted changes. These are
+  for your information; neither stops the start.
+- **Exact command and folder**, closed: the `claude` line that will run, with
+  Copy, and the folder it runs in.
+
+Each time you change a field, the sheet asks the Mac again, and "Start
+session" waits a moment for the answer, so what starts is always what the
+sheet shows. If the Mac refuses (a name with no letter or digit, a first
+message that starts with `-`, a project that is no longer registered), the
+sheet says why in red and keeps what you typed. Nothing runs until you press
+"Start session"; Cancel is selected when the sheet opens, and the confirm
+lasts two minutes, like any other.
+
+Claude starts in its normal permission mode. The page never offers to skip
+permission prompts, and never answers one: each prompt of the new window
+reaches you in Remote Control. No invariant session is created in advance;
+Claude starts one when the work begins, as in any window.
+
+After you press it, the start shows as a card at the top of **Working**: the
+project, the name, and "Starting…". Once the Mac sees the new window (usually
+within a few seconds), the card becomes that window's row, under its name;
+tap it for its details. If the window has not appeared after a minute, the
+card says "Did not start" and why. Every start is logged on the Mac in
+`~/.invariant/web/actions.log`, with the line it ran.
+
 **Copy** puts the exact command on the clipboard, with any variable it needs
 in front, so you can run it in a terminal of your own. Copying runs nothing.
 Over plain HTTP the phone does not allow the clipboard, so the command is
@@ -384,6 +430,11 @@ on its certificate. The agent's log is `~/.invariant/oracle/web.log`.
 | Closing a window says "Claude ended; macOS has not allowed the oracle to control Terminal" | Claude has ended, but macOS did not let the page's agent control Terminal, so the tab stays open; close it by hand this once. The first close from the agent asks for the Automation permission on the Mac, and nobody may have been there to answer (the page waits 30 seconds), or it was refused (error -1743). On the Mac, open System Settings > Privacy & Security > Automation, find the app that runs the oracle (the Python the agent runs, or the terminal you started `oracle web` from), and turn on Terminal under it. If it is not listed, close a window from the page while you are at the Mac and answer the prompt. |
 | Closing a window says "nothing was done: …" | Something changed between the confirm and the button: the window closed, its process is another one now, or a session started using it. Nothing was signalled. Refresh the page; the Leftovers screen shows what is there now. |
 | "Claude did not exit; nothing else was done" | Claude was asked to end and was still running 10 seconds later. The page never forces it. Look at the window on the Mac: it may be busy with a turn. |
+| A started session says "Did not start: The window did not appear on the Mac within a minute" | The Mac opened Terminal, but no Claude window by that name showed up. Look at the Mac: Claude may be waiting on a prompt before it starts, such as "Do you trust the files in this folder?" for a folder it has not opened before, or a login. Answer it there, and the window appears on the page by itself. If no Terminal window opened at all, see the next row. |
+| A started session says "Did not start" and "invariant said: the launch did not start a successor" | Terminal did not run the line, or Claude exited at once. The full output has the exact line; run it in a terminal on the Mac to see Claude's own message. The first start from the page's agent may also need the Automation permission for Terminal (see the Automation row above). |
+| "invariant said: no claude on PATH to start" | The page's agent cannot find `claude`. Its `PATH` is the one its plist sets, and `install --web` adds the folder `claude` was in when you ran it. Run `invariant oracle install --web` again from a terminal where `claude` works, so the agent gets that folder. |
+| A project is not in the New session list | Only registered projects are offered. Run `invariant oracle projects add` in that project on the Mac (or `invariant init` if it has no manifest yet); `invariant oracle projects list` shows what is registered. A project whose folder lost its manifest is refused with a pointer to `invariant oracle projects prune`. |
+| "the window would now be named …-2, not …" | Another Claude window took the name between the sheet and the button. Nothing was started; open the sheet again, and it shows the name the window would get now. |
 | A leftover window has no "Close…" | It was used in the last hour, Claude says it is working or waiting for you, its process id is not known or two sources disagree on it, it was started outside this project, or another project's session lists it. These are left alone on purpose. A window waiting for you is in Needs you, not the Leftovers. |
 
 ## Remove it

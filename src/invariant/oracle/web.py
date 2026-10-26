@@ -19,7 +19,10 @@ in ADR-008. In short:
   a row's step as the TUI's confirm does, with a nonce and the sheet's words;
   ``POST /api/act`` runs it, carrying only the row key and that nonce, from
   the page's own origin (``oracle/webactions``, ADR-008 D8–D12). ``GET
-  /api/job`` is its result. The home-screen app's manifest and icons
+  /api/job`` is its result. ``GET /api/start/confirm`` and ``POST
+  /api/start`` are the "New session" sheet's confirm and start, the same way:
+  a registered project's key and a nonce, never a path (IDEA_030, ADR-009
+  D16). The home-screen app's manifest and icons
   (ADR-009 D10) are served under the same token, and read nothing.
 * **A slow or greedy client is cut off**: a socket timeout per request, a cap
   on headers, and a cap on connections at once.
@@ -292,15 +295,16 @@ def retry_delay(interval: float, failures: int) -> float:
 
 
 def view(loaded: Loaded, acting: bool = False,
-         jobs: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+         jobs: Iterable[Mapping[str, Any]] = (), starting: bool = False) -> dict[str, Any]:
     """What the page draws: ``oracle/panel``'s view of the document.
 
     The groups, the strip's counts, the leftovers and each session's detail,
     every word from the panel's one table (ADR-009 D2, D3). With ``acting``, a
     row whose step runs gets its button; ``jobs`` are the device's recent
-    actions, listed on their session.
+    actions, listed on their session, its starts under Working. With
+    ``starting``, the projects a session may be started in.
     """
-    return panel.view(loaded.document, acting=acting, jobs=jobs)
+    return panel.view(loaded.document, acting=acting, jobs=jobs, starting=starting)
 
 
 def freshness_fields(loaded: Loaded, served_at: float) -> dict[str, Any]:
@@ -436,8 +440,9 @@ def _origin_required(headers: Mapping[str, str], scheme: str) -> bool:
     return headers.get("sec-fetch-site", "same-origin") == "same-origin"
 
 
-def _action_fields(headers: Mapping[str, str], body: bytes) -> tuple[str, str] | int:
-    """The row key and the nonce from a JSON or form body, else a status."""
+def _action_fields(headers: Mapping[str, str], body: bytes,
+                   subject: str = "row") -> tuple[str, str] | int:
+    """The ``subject`` (the row key, or a start's project) and the nonce, else a status."""
     if len(body) > MAX_BODY:
         return HTTPStatus.REQUEST_ENTITY_TOO_LARGE
     content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -453,7 +458,7 @@ def _action_fields(headers: Mapping[str, str], body: bytes) -> tuple[str, str] |
         sent = {name: values[0] for name, values in parse_qs(text).items()}
     else:
         return HTTPStatus.UNSUPPORTED_MEDIA_TYPE
-    row, nonce = sent.get("row"), sent.get("nonce")
+    row, nonce = sent.get(subject), sent.get("nonce")
     if not isinstance(row, str) or not isinstance(nonce, str) or not row:
         return HTTPStatus.BAD_REQUEST
     return row, nonce
@@ -507,8 +512,11 @@ class WebApp:
         if device is None:
             return _html(HTTPStatus.UNAUTHORIZED, webpage.not_paired(nonce), nonce)
         acting = self.remote is not None
+        starting = acting and self.remote.starter is not None  # type: ignore[union-attr]
         if acting and target.path == "/api/act":
             return self._act(request, headers, device)
+        if starting and target.path == "/api/start":
+            return self._start(request, headers, device)
         if request.method not in ("GET", "HEAD"):
             return _html(HTTPStatus.METHOD_NOT_ALLOWED, webpage.message(
                 nonce, "not allowed", "Only a confirmed action is sent here."), nonce,
@@ -523,12 +531,21 @@ class WebApp:
                           webpage.manifest(panel.WORDS).encode("utf-8"))
         if target.path in webpage.ICONS:
             return _asset("image/png", webpage.icon(webpage.ICONS[target.path]))
-        query = parse_qs(target.query)
+        query = parse_qs(target.query, keep_blank_values=True)
         if acting and target.path == "/api/confirm":
             row = (query.get("row") or [""])[0]
             if not row:
                 return _json(HTTPStatus.BAD_REQUEST, {"error": "name a row: ?row=<key>"})
             answer = self.remote.confirm(device, row)
+            return _json(answer.status, answer.body)
+        if starting and target.path == "/api/start/confirm":
+            project = (query.get("project") or [""])[0]
+            if not project:
+                return _json(HTTPStatus.BAD_REQUEST,
+                             {"error": "name a project: ?project=<key>"})
+            answer = self.remote.confirm_start(  # type: ignore[union-attr]
+                device, project, (query.get("label") or [""])[0],
+                (query.get("prompt") or [""])[0])
             return _json(answer.status, answer.body)
         if acting and target.path == "/api/job":
             job = self.remote.job(device, (query.get("id") or [""])[0])
@@ -554,10 +571,14 @@ class WebApp:
         except Exception as exc:  # noqa: BLE001 - shown to the page; the next read runs
             return _json(HTTPStatus.SERVICE_UNAVAILABLE,
                          {"error": f"{type(exc).__name__}: {exc}"})
-        jobs = self.remote.recent(device) if self.remote is not None else []
+        jobs: list[dict[str, Any]] = []
+        if self.remote is not None:
+            self.remote.observe(loaded.document)
+            jobs = self.remote.recent(device)
+        starting = self.remote is not None and self.remote.starter is not None
         return _json(HTTPStatus.OK, {
             "document": loaded.document,
-            "view": view(loaded, acting=self.remote is not None, jobs=jobs),
+            "view": view(loaded, acting=self.remote is not None, jobs=jobs, starting=starting),
             "freshness": freshness_fields(loaded, self.clock()),
             "jobs": jobs,
         })
@@ -575,6 +596,21 @@ class WebApp:
                                            "nothing ran"})
         row, nonce = fields
         answer = self.remote.act(device, row, nonce)  # type: ignore[union-attr]
+        return _json(answer.status, answer.body)
+
+    def _start(self, request: Request, headers: Mapping[str, str], device: Device) -> Response:
+        """``POST /api/start``: a project's key and the nonce its confirm issued."""
+        if request.method != "POST":
+            return _json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST a confirmed start"})
+        if not _origin_required(headers, self.scheme):
+            return _json(HTTPStatus.FORBIDDEN, {
+                "error": "a start must come from this page (its Origin); nothing ran"})
+        fields = _action_fields(headers, request.body, subject="project")
+        if isinstance(fields, int):
+            return _json(fields, {"error": "send the project and the nonce, as JSON or a "
+                                           "form; nothing ran"})
+        project, nonce = fields
+        answer = self.remote.start(device, project, nonce)  # type: ignore[union-attr]
         return _json(answer.status, answer.body)
 
     def _pair(self, request: Request, headers: Mapping[str, str], query: str,

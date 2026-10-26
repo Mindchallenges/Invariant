@@ -58,7 +58,7 @@ graph TD
         TLS["tls (IDEA_026)"]
         DEVICES[devices]
         CLOSEHOST["closehost (IDEA_027 inc 6)"]
-        START["startsession (IDEA_030)"]
+        START["startsession (IDEA_030; inc 2: Starter, find_started)"]
     end
 
     subgraph core["core/"]
@@ -156,6 +156,9 @@ graph TD
     START --> GIT
     START --> DOMAINS
     CLI -. "opens the window, reads the names in use, through" .-> HOST
+    WEBACT --> START
+    PANEL --> START
+    CLI -. "injects a Starter (its own prepare and launch) into" .-> WEBACT
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -1116,7 +1119,7 @@ removes the page alone and `oracle uninstall` removes both (ADR-008 D15).
 | `ProgramArguments` | `[<python>, -m, invariant, oracle, web, --port, N, --wait]` | The watcher's rules for the interpreter. Never `--allow-loopback`. |
 | `RunAtLoad`, `KeepAlive` | `true` | As the watcher's. `--wait` means it never exits for a missing tailnet, so launchd has no crash to restart. |
 | `StandardOutPath`, `StandardErrorPath` | `<oracle home>/oracle/web.log` | The loop's state changes only: waiting, serving, a changed address, a failed bind. Requests are never logged, because a request line can carry a pairing code. |
-| `EnvironmentVariables` | `PATH`, and `INVARIANT_HOME` only if set | `PATH` finds `invariant` (an action runs it), git, osascript and `tailscale`, then the interpreter's own directory, then the system directories. No `TERM`, which launchd does not set either: `web.run_program` gives Tailscale's CLI one (BUG_084, "Over HTTPS"). |
+| `EnvironmentVariables` | `PATH`, and `INVARIANT_HOME` only if set | `PATH` finds `invariant` (an action runs it), `claude` (a resume or a start from the page opens it, IDEA_030), git, osascript and `tailscale`, then the interpreter's own directory, then the system directories. No `TERM`, which launchd does not set either: `web.run_program` gives Tailscale's CLI one (BUG_084, "Over HTTPS"). |
 
 `LaunchdInstaller` takes the label, so both agents are written, loaded,
 replaced and checked by one code path. The CLI reaches the second through
@@ -1255,6 +1258,12 @@ tokens, wording, the increment plan) is
   read-only premise (ADR-009 D1): the scan, the watcher and the gate cache
   stay read-only, and only a confirmed `invariant oracle close-host` signals
   anything ("Close host" below).
+- **IDEA_030 increment 2 has shipped**: "New session…" in the top bar and a
+  shortcut per project open a confirm sheet that starts a new Claude window,
+  Remote Control on, in a registered project's main checkout, through
+  `oracle start-session`'s own path; the start is a "Starting…" card under
+  Working until a scan sees its window ("Start a session" below, ADR-009
+  D16).
 - **Increment 7** adds the clean-up and unstick actions (IDEA_017). Each
   destructive action is confirmed, re-checks its precondition at confirm
   time, runs as an `invariant` command with no refusal override, and is
@@ -1425,7 +1434,59 @@ a new `claude` carrying the name's flags still alive 3 s after it appeared,
 within 15 s. Otherwise the command fails, removes the launch file, and
 prints the line to run by hand. The JSON's `name` is what a later scan
 matches the window by (the record's `launched_name`), which the panel's
-"Starting…" card will use (increment 2).
+"Starting…" card uses; its `label` is the label the name was made from.
+
+### From the phone (increment 2)
+
+The panel's "New session…" sheet runs the command's own two steps, not a copy
+of them. The CLI splits `start-session` into `_start_prepare` (resolve the
+project from the index, check its manifest and host kind, name the window,
+read the facts, build the plan without staging it) and `_start_launch`
+(`_open_claude_window` in the entry's root), and hands the page both as an
+`oracle/startsession.Starter`. `oracle/webactions` imports neither the CLI
+nor `hosts/`.
+
+```mermaid
+sequenceDiagram
+    participant Page as Phone (New session sheet)
+    participant Web as web
+    participant Srv as webactions
+    participant Start as Starter (the CLI's prepare and launch)
+    participant Host as hosts/claude_code_launch (via the CLI)
+    Page->>Web: GET /api/start/confirm?project=KEY&label=L&prompt=P
+    Web->>Srv: confirm_start(device, KEY, L, P)
+    Srv->>Srv: fresh read of the machine
+    Srv->>Start: prepare(KEY, L or None, P or None, that project of the read)
+    Note over Start: index.match(KEY), manifest, host.kind, name, facts, plan (not staged). A refusal is the command's own
+    Start-->>Srv: name, label, argv, cwd, facts
+    Srv-->>Page: the sheet's words, and a nonce bound to (device, KEY|start, label, name, prompt)
+    Note over Page: every edit asks again after 400 ms, Start session waits for the answer
+    Page->>Web: POST /api/start {project: KEY, nonce} (this page's Origin)
+    Web->>Srv: start(device, KEY, nonce)
+    Srv->>Srv: spend the nonce, fresh read, prepare again from the confirmed label and prompt
+    Note over Srv: the name changed (another window took it), or any refusal: 409, nothing ran
+    Srv->>Srv: reserve KEY|start (one per project), audit start line
+    Srv->>Start: launch(prepared), in a thread
+    Start->>Host: _open_claude_window(name, prompt, root): plan, launcher, successor watch
+    Srv->>Srv: audit end line, the job's words (Why from invariant's own line)
+    Page->>Web: GET /api/state (every refresh)
+    Web->>Srv: observe(document): a live host launched as the name? mark it appeared
+```
+
+| Step | Rule |
+|---|---|
+| The project | Only a key the page got from the snapshot's project list is offered, and the server resolves whatever it is sent through `ProjectIndex.match`, as the command does. A path that names no entry is refused with the command's own sentence; nothing is launched (ADR-009 D16) |
+| The label and the first message | Validated where the command validates them: a label with no letter or digit is refused by `session_name`, and a first message that starts with `-` by `plan_launch`. A blank label takes the time, a blank message is none. A first message over 4000 characters (`webactions.MAX_PROMPT`) is refused before anything is asked, because it travels in the confirm's query string |
+| The nonce | Bound to the device, the row `<key>\|start` and the tuple `("start", key, label, name, prompt)` the server answered. The start carries only the project and the nonce; the label and prompt are the server's own copy. A row's nonce cannot start a session and a start's nonce cannot run a row's step: the rows differ |
+| The name at the start | Prepared again, with fresh names in use. If it is no longer the name the sheet showed, the start is refused, 409, and the sheet is opened again; a window is never started under a name the person did not see |
+| One at a time | The job is keyed `<key>\|start`, so a second start in the same project waits for the first launch (at most the successor watch's 15 s); starts in two projects run side by side, under `MAX_RUNNING` |
+| The audit | The start and end lines of every action, with `kind` `start`, the `argv` of the `claude` line (the prompt included: it is what ran) and the `cwd`. `exit` is `null` |
+| A launch that failed | The `InvariantError` the launcher raised becomes the job's output as `invariant: <message>`, so "Why" quotes invariant's own sentence (ADR-009 D9) |
+| The window appearing | `RemoteActions.observe`, on every `/api/state`, marks a start once `startsession.find_started` finds a host in its project that is alive and whose `launched_name` is the start's name. The panel draws the rest ([oracle-panel.md](oracle-panel.md), "As built in IDEA_030 increment 2") |
+
+The seams are the command's: `_oracle_names_in_use`, `_oracle_cache`,
+`_handoff_launcher` and `_handoff_successor`. The suite replaces all four, so
+no test opens a window, reads the process table or reads `~/.claude`.
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

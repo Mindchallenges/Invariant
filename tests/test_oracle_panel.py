@@ -886,3 +886,168 @@ class TestTechnicalConflict:
         assert (f"Host {HOST_ID} · process ids disagree: attention 3 (gone), "
                 "record 4 (alive)") in lines
         assert not any("not recorded" in line for line in lines)
+
+
+# -- IDEA_030 increment 2: start a new session (ADR-009 D16) --------------------------------
+
+NAME = "heap-1026-0049"
+NEW_HOST = "5e1f0000-aaaa-bbbb-cccc-000000000001"
+TIMEOUT = ("The window did not appear on the Mac within a minute; check the Mac (a trust "
+           "prompt or a login may be waiting).")
+
+
+def start_job(state="done", ok=True, started=NOW - 10, name=NAME, appeared=False, status=None,
+              why="", job_id="j1", project="K"):
+    job = {"id": job_id, "row": f"{project}|start", "subject": "Heap", "kind": "start",
+           "argv": ["/opt/bin/claude", "--name", name, "--remote-control", name], "cwd": "/r",
+           "started": started, "remote_control": name, "state": state,
+           "ok": ok if state == "done" else None, "status": status, "output": "",
+           "elapsed": 3.0, "audit_error": "", "project": project, "appeared": appeared}
+    job["words"] = {**panel.result_words(job), "why": why, "outcome": ""}
+    return job
+
+
+def named_orphan(name=NAME, cause="active", alive=True):
+    row = orphan(NEW_HOST, signals=[sig("orphan_host", cause, alert=False, severity="info")],
+                 alive=alive, last_activity=NOW - 5)
+    row["hosts"][0]["launched_name"] = name
+    return row
+
+
+def started(*rows, jobs=(), acting=True, starting=True):
+    return panel.view(doc(*rows), acting=acting, jobs=list(jobs), starting=starting)
+
+
+class TestStartCards:
+    def test_a_running_start_is_a_starting_card_under_working(self):
+        shown = started(jobs=[start_job(state="running")])
+        assert cards(shown, "working") == [{
+            "start": "j1", "state": "starting", "project": "Heap", "title": NAME,
+            "line": "Starting…", "chips": [], "result": None}]
+        assert shown["summary"]["working"] == 1
+        assert [g["id"] for g in shown["groups"]] == ["working"]
+
+    def test_a_window_not_seen_yet_is_still_starting_for_a_minute(self):
+        [card] = cards(started(jobs=[start_job(started=NOW - 59)]), "working")
+        assert card["state"] == "starting"
+
+    def test_a_window_not_seen_within_a_minute_is_a_failure_that_says_why(self):
+        [card] = cards(started(jobs=[start_job(started=NOW - 61)]), "working")
+        assert card["state"] == "failed"
+        assert card["chips"] == [{"text": "Did not start", "tone": "problem"}]
+        assert card["line"] == TIMEOUT
+        assert card["result"] == {"headline": "Failed", "line": "Start session",
+                                  "tone": "failed", "why": TIMEOUT, "outcome": ""}
+
+    def test_a_launch_that_failed_says_its_own_why_at_once(self):
+        job = start_job(ok=False, why="invariant said: no claude on PATH to start")
+        [card] = cards(started(jobs=[job]), "working")
+        assert card["state"] == "failed"
+        assert card["line"] == "invariant said: no claude on PATH to start"
+        assert card["result"] is None
+
+    def test_a_failure_is_shown_for_an_hour(self):
+        assert cards(started(jobs=[start_job(ok=False, started=NOW - 3601)]), "working") == []
+        assert cards(started(jobs=[start_job(started=NOW - 3601)]), "working") == []
+
+    def test_a_document_older_than_the_start_is_still_starting(self):
+        [card] = cards(started(jobs=[start_job(started=NOW + 30)]), "working")
+        assert card["state"] == "starting"
+
+    def test_the_window_once_seen_is_the_normal_row_under_working_by_its_name(self):
+        shown = started(named_orphan(), jobs=[start_job()])
+        [card] = cards(shown, "working")
+        key = f"K|host:{NEW_HOST}"
+        assert card["row"] == key and card["title"] == NAME and "start" not in card
+        assert shown["summary"]["leftovers"] == 0 and shown["leftovers_card"] is None
+        detail = shown["details"][key]
+        assert detail["title"] == NAME
+        assert detail["going_on"][-1] == ("Claude is running in a new window on the Mac. Pick "
+                                          f"it up from Remote Control on your phone as {NAME}.")
+
+    def test_a_window_a_session_took_is_shown_as_that_session_only(self):
+        row = session("s9", name="fix-it-s9", hosts=[host(NEW_HOST)])
+        row["hosts"][0]["launched_name"] = NAME
+        shown = started(row, jobs=[start_job()])
+        assert not any("start" in c for g in shown["groups"] for c in g["cards"])
+        assert cards(shown, "idle")[0]["title"] == "Fix it"
+
+    def test_a_window_seen_and_gone_leaves_nothing(self):
+        assert started(jobs=[start_job(appeared=True, started=NOW - 600)])["groups"] == []
+
+    def test_a_seen_window_that_went_quiet_is_a_leftover_again(self):
+        shown = started(named_orphan(cause="unmanaged"), jobs=[start_job()])
+        assert cards(shown, "working") == []
+        assert shown["summary"]["leftovers"] == 1
+
+    def test_a_window_by_another_name_is_not_the_start(self):
+        shown = started(named_orphan(name="heap-other"), jobs=[start_job()])
+        assert cards(shown, "working")[0]["state"] == "starting"
+        assert shown["summary"]["leftovers"] == 1
+
+    def test_other_actions_make_no_start_card(self):
+        job = {**start_job(), "kind": "run", "argv": ["invariant", "doctor"]}
+        assert started(jobs=[job])["groups"] == []
+
+
+class TestStartPicker:
+    def test_it_lists_the_registered_projects_with_their_live_sessions(self):
+        document = {"now": NOW, "projects": [
+            {"project": {"key": "K", "name": "Heap", "root": "/r"},
+             "rows": [session("s1"), session("s2"), orphan()]},
+            {"project": {"key": "L", "name": "Lark", "root": "/l"}, "rows": [session("t1")]},
+            {"project": {"key": "M", "name": "Moss", "root": "/m"}, "rows": []},
+        ]}
+        shown = panel.view(document, acting=True, starting=True)
+        assert shown["start"] == {"projects": [
+            {"id": "K", "name": "Heap", "line": "2 live sessions"},
+            {"id": "L", "name": "Lark", "line": "1 live session"},
+            {"id": "M", "name": "Moss", "line": "No live session"},
+        ]}
+
+    def test_a_read_only_page_or_one_without_a_starter_offers_none(self):
+        assert started(acting=False)["start"] is None
+        assert started(starting=False)["start"] is None
+        assert panel.view(doc())["start"] is None
+
+
+class TestStartWords:
+    def prepared(self, prompt=None):
+        argv = ["/opt/bin/claude", "--name", NAME, "--remote-control", NAME,
+                *([prompt] if prompt else [])]
+        return {"name": NAME, "label": "1026-0049", "argv": argv, "cwd": "/r", "prompt": prompt,
+                "facts": {"open_windows": 2, "uncommitted": 3, "dirty": True}}
+
+    def test_the_sheet_says_what_starts_where_and_by_what_name(self):
+        assert panel.start_words(self.prepared("go"), "Heap") == {
+            "title": "Start a new session?",
+            "sentence": ("A new Terminal window on the Mac runs Claude with Remote Control in "
+                         "Heap's main folder."),
+            "button": "Start session",
+            "name": NAME,
+            "name_line": f"Remote Control name: {NAME}",
+            "label": "1026-0049",
+            "prompt": "go",
+            "command": f"/opt/bin/claude --name {NAME} --remote-control {NAME} go",
+            "place": "In Heap › main checkout",
+            "cwd": "/r",
+            "facts": ["2 Claude windows already open here",
+                      "Main folder has uncommitted changes (3 files)"],
+        }
+
+    def test_no_prompt_is_an_empty_one(self):
+        assert panel.start_words(self.prepared(), "Heap")["prompt"] == ""
+
+    def test_a_starts_result_is_worded_as_a_window(self):
+        job = start_job(state="running")
+        assert panel.result_words(job) == {"headline": "Running…", "line": "Start session",
+                                           "tone": "running"}
+        assert panel.result_words(start_job())["headline"] == "Opened in a new window"
+        failed = panel.result_words(start_job(ok=False))
+        assert failed["headline"] == "Failed" and failed["line"].startswith("Start session · ")
+
+    def test_the_fixed_strings_the_sheet_needs_are_in_the_table(self):
+        for key in ("new_session", "projects", "project_field", "label_field", "prompt_field",
+                    "prompt_hint", "exact_start", "checked_now"):
+            assert panel.WORDS[key], key
+        assert panel.WORDS["new_session"] == "New session…"

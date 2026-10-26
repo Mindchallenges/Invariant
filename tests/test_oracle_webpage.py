@@ -541,3 +541,306 @@ class TestCloseFromTheLeftovers:
   withClass(screen(), "tile-leftovers")[0].fire("click", {preventDefault() {}});
   say({pills: withClass(screen(), "pill").length});""")
         assert result == {"pills": 0}
+
+
+# -- IDEA_030 increment 2: start a new session (ADR-009 D16) --------------------------------
+
+_NAME = "heap-1026-0049"
+_TIMEOUT = ("The window did not appear on the Mac within a minute; check the Mac (a trust "
+            "prompt or a login may be waiting).")
+
+
+def _start_state(rows=None, jobs=(), acting=True, projects=None):
+    document = {"now": NOW, "projects": projects or [
+        {"project": {"key": "K", "name": "Heap", "root": "/r"},
+         "rows": list(_ROWS if rows is None else rows)},
+        {"project": {"key": "L", "name": "Lark", "root": "/l"}, "rows": []}]}
+    return {"document": {}, "view": panel.view(document, acting=acting, jobs=list(jobs),
+                                                starting=True),
+            "freshness": {"age": 1.0, "interval": 5, "stale_after": 15, "banner": ""},
+            "jobs": list(jobs)}
+
+
+def _prepared(name=_NAME, label="1026-0049", prompt=None, windows=2, changes=3):
+    argv = ["/opt/bin/claude", "--name", name, "--remote-control", name,
+            *([prompt] if prompt else [])]
+    return {"name": name, "label": label, "argv": argv, "cwd": "/r", "prompt": prompt,
+            "facts": {"open_windows": windows, "uncommitted": changes, "dirty": bool(changes)}}
+
+
+def _start_confirm(nonce="S1", project="K", **prepared):
+    shaped = _prepared(**prepared)
+    return {"project": project, "nonce": nonce, "refused": None, "expires_in": 120,
+            "name": shaped["name"], "label": shaped["label"],
+            "words": panel.start_words(shaped, "Heap" if project == "K" else "Lark")}
+
+
+def _start_job(state="done", ok=True, started=NOW - 5):
+    job = {"id": "sj1", "row": "K|start", "subject": "Heap", "kind": "start",
+           "argv": ["/opt/bin/claude", "--name", _NAME, "--remote-control", _NAME],
+           "cwd": "/r", "started": started, "remote_control": _NAME, "state": state,
+           "ok": ok if state == "done" else None, "status": None,
+           "output": "claude is running\n", "elapsed": 4.0, "audit_error": "",
+           "project": "K", "appeared": False}
+    job["words"] = {**panel.result_words(job), "why": "", "outcome": ""}
+    return job
+
+
+class TestStartASession:
+    def test_the_top_bar_button_opens_the_sheet_with_the_first_project(self):
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()]}, r"""
+  const button = element("newsession");
+  const before = {hidden: button.hidden};
+  button.fire("click");
+  await settle();
+  const picker = find(sheet(), (n) => n.tagName === "SELECT");
+  const label = find(sheet(), (n) => n.tagName === "INPUT");
+  const prompt = find(sheet(), (n) => n.tagName === "TEXTAREA");
+  const exact = find(sheet(), (n) => n.tagName === "DETAILS");
+  say({before: before, fetched: fetched.filter((u) => u.startsWith("/api/start")),
+       title: texts(sheet(), "sheet-title"), sentence: texts(sheet(), "sentence"),
+       options: picker.children.map((o) => [o.attrs.value, o.textContent]),
+       project: picker.value, label: label.value, prompt: prompt.value,
+       name: texts(sheet(), "start-name"), facts: texts(sheet(), "checked"),
+       exactOpen: exact.open, exact: exact.textContent,
+       buttons: withClass(sheet(), "sheet").map((n) => n.textContent),
+       disabled: withClass(sheet(), "primary")[0].disabled,
+       focused: focused.textContent, expiry: texts(sheet(), "expiry"), posted: posted});""")
+        assert result["before"] == {"hidden": False}
+        assert result["fetched"] == ["/api/start/confirm?project=K&label=&prompt="]
+        assert result["title"] == ["Start a new session?"]
+        assert result["sentence"] == [("A new Terminal window on the Mac runs Claude with "
+                                       "Remote Control in Heap's main folder.")]
+        assert result["options"] == [["K", "Heap"], ["L", "Lark"]]
+        assert result["project"] == "K"
+        assert result["label"] == "1026-0049" and result["prompt"] == ""
+        assert result["name"] == [f"Remote Control name: {_NAME}"]
+        assert result["facts"] == [("Checked just now2 Claude windows already open hereMain "
+                                    "folder has uncommitted changes (3 files)")]
+        assert result["exactOpen"] is False
+        assert f"/opt/bin/claude --name {_NAME} --remote-control {_NAME}" in result["exact"]
+        assert "In Heap › main checkout" in result["exact"] and "/r" in result["exact"]
+        assert result["buttons"] == ["Start session", "Cancel"]
+        assert result["disabled"] is False
+        assert result["focused"] == "Cancel"
+        assert result["expiry"] == ["This confirm expires in 2:00"]
+        assert result["posted"] == []
+
+    def test_a_projects_shortcut_opens_the_sheet_with_it_chosen(self):
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm(project="L")]}, r"""
+  const section = find(screen(), (n) => n.className === "section projects");
+  const rows = texts(section, "row-title");
+  withClass(section, "pill")[1].fire("click");
+  await settle();
+  say({heading: texts(section, "section-label"), rows: rows,
+       lines: texts(section, "row-line"), pills: texts(section, "pill"),
+       fetched: fetched.filter((u) => u.startsWith("/api/start")),
+       project: find(sheet(), (n) => n.tagName === "SELECT").value});""")
+        assert result["heading"] == ["Projects"]
+        assert result["rows"] == ["Heap", "Lark"]
+        assert result["lines"] == ["3 live sessions", "No live session"]
+        assert result["pills"] == ["New session…", "New session…"]
+        assert result["fetched"] == ["/api/start/confirm?project=L&label=&prompt="]
+        assert result["project"] == "L"
+
+    def test_editing_asks_the_mac_again_and_the_deed_waits_for_its_answer(self):
+        updated = _start_confirm(nonce="S2", name="heap-flaky", label="flaky", prompt="go on")
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()],
+                       "/api/start": [202, {"job": _start_job(state="running")}]}, r"""
+  element("newsession").fire("click");
+  await settle();
+  const label = find(sheet(), (n) => n.tagName === "INPUT");
+  const prompt = find(sheet(), (n) => n.tagName === "TEXTAREA");
+  const run = withClass(sheet(), "primary")[0];
+  label.value = "flaky";
+  label.fire("input");
+  prompt.value = "go on";
+  prompt.fire("input");
+  const waiting = run.disabled;
+  answers["/api/start/confirm"] = [200, UPDATED];
+  const debounce = timers.filter((t) => t.ms === 400);
+  timers.length = 0;
+  debounce[debounce.length - 1].fn();
+  await settle();
+  const after = {disabled: run.disabled, name: texts(sheet(), "start-name"),
+                 command: texts(sheet(), "command-text"), label: label.value};
+  run.fire("click");
+  await settle();
+  say({waiting: waiting, debounces: debounce.length, after: after,
+       fetched: fetched.filter((u) => u.startsWith("/api/start/confirm")),
+       posted: posted, headline: texts(sheet(), "result-title")});""".replace(
+            "UPDATED", json.dumps(updated)))
+        assert result["waiting"] is True
+        assert result["debounces"] == 2
+        assert result["fetched"][-1] == ("/api/start/confirm?project=K&label=flaky"
+                                         "&prompt=go%20on")
+        assert len(result["fetched"]) == 2
+        assert result["after"] == {
+            "disabled": False, "name": ["Remote Control name: heap-flaky"],
+            "command": ["/opt/bin/claude --name heap-flaky --remote-control heap-flaky 'go on'"],
+            "label": "flaky"}
+        assert result["posted"] == [{"project": "K", "nonce": "S2"}]
+        assert result["headline"] == ["Running…"]
+
+    def test_a_refusal_is_said_in_the_sheet_and_the_fields_stay(self):
+        refused = {**_start_confirm(), "nonce": None, "words": None,
+                   "refused": "a session name must contain at least one alphanumeric character"}
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()]}, r"""
+  element("newsession").fire("click");
+  await settle();
+  const label = find(sheet(), (n) => n.tagName === "INPUT");
+  label.value = "!!!";
+  label.fire("input");
+  answers["/api/start/confirm"] = [200, REFUSED];
+  timers.filter((t) => t.ms === 400).pop().fn();
+  await settle();
+  const refusal = withClass(sheet(), "start-refused")[0];
+  say({refusal: refusal.textContent, hidden: refusal.hidden, label: label.value,
+       disabled: withClass(sheet(), "primary")[0].disabled,
+       still: find(sheet(), (n) => n.tagName === "INPUT") === label});""".replace(
+            "REFUSED", json.dumps(refused)))
+        assert result == {
+            "refusal": "Not run: a session name must contain at least one alphanumeric character",
+            "hidden": False, "label": "!!!", "disabled": True, "still": True}
+
+    def test_the_picker_changes_the_project_and_asks_again(self):
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()]}, r"""
+  element("newsession").fire("click");
+  await settle();
+  const picker = find(sheet(), (n) => n.tagName === "SELECT");
+  picker.value = "L";
+  picker.fire("change");
+  timers.filter((t) => t.ms === 400).pop().fn();
+  await settle();
+  say({fetched: fetched.filter((u) => u.startsWith("/api/start/confirm"))});""")
+        assert result["fetched"][-1].startswith("/api/start/confirm?project=L&label=1026-0049")
+
+    def test_the_confirm_expires_and_looking_again_keeps_the_fields(self):
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()]}, r"""
+  element("newsession").fire("click");
+  await settle();
+  find(sheet(), (n) => n.tagName === "TEXTAREA").value = "keep me";
+  fakeNow += 121000;
+  tickIntervals();
+  const expired = {text: texts(sheet(), "expiry"),
+                   disabled: withClass(sheet(), "primary")[0].disabled};
+  byText(sheet(), "Look again").fire("click");
+  await settle();
+  say({expired: expired, fetched: fetched.filter((u) => u.startsWith("/api/start/confirm")),
+       prompt: find(sheet(), (n) => n.tagName === "TEXTAREA").value,
+       disabled: withClass(sheet(), "primary")[0].disabled});""")
+        assert result["expired"] == {"text": ["This confirm expired.Look again"],
+                                     "disabled": True}
+        assert result["fetched"][-1] == ("/api/start/confirm?project=K&label=1026-0049"
+                                         "&prompt=keep%20me")
+        assert result["prompt"] == "keep me"
+        assert result["disabled"] is False
+
+    def test_cancel_closes_it_and_a_confirm_that_did_not_load_says_so(self):
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()]}, r"""
+  element("newsession").fire("click");
+  await settle();
+  byText(sheet(), "Cancel").fire("click");
+  const closed = sheet().hidden;
+  answers["/api/start/confirm"] = [503, {refused: "the machine could not be read"}];
+  element("newsession").fire("click");
+  await settle();
+  say({closed: closed, said: texts(sheet(), "sentence")});""")
+        assert result["closed"] is True
+        assert result["said"] == ["Not run: the machine could not be read"]
+
+    def test_a_refused_start_is_said(self):
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm()],
+                       "/api/start": [409, {"error": "the name changed; nothing ran"}]}, r"""
+  element("newsession").fire("click");
+  await settle();
+  withClass(sheet(), "primary")[0].fire("click");
+  await settle();
+  say({said: texts(sheet(), "sentence")});""")
+        assert result["said"] == ["Not run: the name changed; nothing ran"]
+
+    def test_a_read_only_page_offers_no_start(self):
+        result = _run({"/api/state": [200, _state(acting=False)]}, r"""
+  say({hidden: element("newsession").hidden,
+       projects: withClass(screen(), "projects").length});""")
+        assert result == {"hidden": True, "projects": 0}
+
+
+class TestTheStartingCard:
+    def test_it_shows_under_working_and_opens_the_starts_result(self):
+        result = _run({"/api/state": [200, _start_state(rows=[],
+                                                        jobs=[_start_job(state="running")])],
+                       "/api/job": [200, _start_job()]}, r"""
+  const card = withClass(screen(), "start-card")[0];
+  const shown = {text: card.textContent, cls: card.className,
+                 headings: texts(screen(), "heading"), tiles: texts(screen(), "tile")};
+  card.fire("click");
+  await settle();
+  const running = texts(sheet(), "result-title");
+  timers.filter((t) => t.ms === 1000).pop().fn();
+  await settle();
+  say({shown: shown, running: running, done: texts(sheet(), "result-title"),
+       rc: texts(sheet(), "sentence")});""")
+        shown = result["shown"]
+        assert shown["text"] == f"Heap{_NAME}Starting…"
+        assert "start-starting" in shown["cls"]
+        assert shown["headings"] == ["Working"]
+        assert shown["tiles"][2] == "1Working"
+        assert result["running"] == ["Running…"]
+        assert result["done"] == ["Opened in a new window"]
+        assert result["rc"] == [f"Pick it up from Remote Control on your phone as {_NAME}."]
+
+    def test_a_start_not_seen_in_a_minute_is_a_failure_with_its_reason(self):
+        result = _run({"/api/state": [200, _start_state(rows=[],
+                                                        jobs=[_start_job(started=NOW - 61)])]},
+                      r"""
+  const card = withClass(screen(), "start-card")[0];
+  const shown = {cls: card.className, chips: texts(card, "chip"), note: texts(card, "note")};
+  card.fire("click");
+  await settle();
+  say({shown: shown, headline: texts(sheet(), "result-title"), why: texts(sheet(), "why"),
+       rc: texts(sheet(), "sentence"), fetched: fetched.filter((u) => u.startsWith("/api/job"))});""")
+        assert result["shown"] == {"cls": "card compact start-card start-failed",
+                                   "chips": ["Did not start"], "note": [_TIMEOUT]}
+        assert result["headline"] == ["Failed"]
+        assert result["why"] == ["Why" + _TIMEOUT]
+        assert result["rc"] == [_TIMEOUT]
+        assert result["fetched"] == []
+
+    def test_the_card_updates_on_the_next_refresh_without_a_reload(self):
+        later = _start_state(rows=[], jobs=[_start_job(started=NOW - 61)])
+        result = _run({"/api/state": [200, _start_state(rows=[],
+                                                        jobs=[_start_job(state="running")])]},
+                      r"""
+  const before = withClass(screen(), "start-card")[0].className;
+  answers["/api/state"] = [200, LATER];
+  await refresh();
+  say({before: before, after: withClass(screen(), "start-card")[0].className,
+       reloads: location.reloads});""".replace("LATER", json.dumps(later)))
+        assert result == {"before": "card compact start-card start-starting",
+                          "after": "card compact start-card start-failed", "reloads": 0}
+
+
+class TestTheStartMarkup:
+    def test_the_fields_are_16_px_and_44_px_and_never_scroll_sideways(self):
+        from invariant.oracle import webpage
+
+        style = webpage._STYLE
+        assert (".field input, .field select, .field textarea { font: 16px/22px var(--font);"
+                in style)
+        assert "min-height: 44px; width: 100%;" in style
+        assert ".newbtn { height: 44px;" in style
+        assert "#top.sub #newsession" in style
+        # The pairing form's code field keeps its own look; the sheet's fields do not
+        # inherit its capitals.
+        assert "form input {" in style
+        page = webpage.page("n", panel.WORDS)
+        assert 'id="newsession"' in page and "hidden" in page.split('id="newsession"')[1][:40]

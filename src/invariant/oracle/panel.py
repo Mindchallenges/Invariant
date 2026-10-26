@@ -19,6 +19,12 @@ browser:
 * **The page holds no vocabulary.** :data:`WORDS` is embedded in the page by
   ``oracle/web``; the rest arrives with every ``/api/state`` read.
 
+* **A start shows until its window does** (IDEA_030, ADR-009 D16). A start
+  from this device is a "Starting…" card under Working until a scan sees a
+  live host launched by its name; then that host's own row is drawn under
+  Working by the name, with its detail. A window that has not appeared a
+  minute after the start is a failure with its reason.
+
 It imports nothing that runs anything: no ``actions``, no ``webactions``, no
 ``hosts/``. The table is the design of record's, in
 ``docs/architecture/oracle-panel.md``, "Wording".
@@ -36,7 +42,7 @@ from datetime import datetime
 from typing import Any
 
 from .recommend import CLI, RUN, TERMINAL
-from .scan import ROW_ERROR, ROW_HOST, ROW_WORKTREE, row_key
+from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, row_key
 from .signals import (
     ERROR,
     FINISHED,
@@ -56,6 +62,7 @@ from .signals import (
     WAITING_INPUT,
     YOUR_TURN,
 )
+from .startsession import START, find_started
 
 NEEDS = "needs"
 PROBLEMS = "problems"
@@ -145,6 +152,13 @@ WORDS: dict[str, str] = {
              "audit log has it: web/actions.log in the oracle home."),
     "remote_control": "Pick it up from Remote Control on your phone as {name}.",
     "audit_error": "The audit line for its end could not be written: {error}",
+    "new_session": "New session…",
+    "projects": "Projects",
+    "project_field": "Project",
+    "label_field": "Name",
+    "prompt_field": "First message (optional)",
+    "prompt_hint": "Claude starts with this message. Leave it empty to start without one.",
+    "exact_start": "Exact command and folder",
 }
 
 #: Each fact's chip, tone and sentence for "What is going on". ``{n}`` is a
@@ -370,6 +384,36 @@ _RESULT = {
     "stopped": "{step} · stopped after {seconds} s",
     "unknown_step": "This step",
 }
+
+#: Starting a new session (ADR-009 D16): the sheet, its facts and the card.
+_START = {
+    "title": "Start a new session?",
+    "sentence": ("A new Terminal window on the Mac runs Claude with Remote Control in "
+                 "{project}'s main folder."),
+    "button": "Start session",
+    "name": "Remote Control name: {name}",
+    "windows_none": "No Claude window is open here",
+    "windows_one": "1 Claude window already open here",
+    "windows": "{n} Claude windows already open here",
+    "clean": "Main folder has no uncommitted changes",
+    "dirty_one": "Main folder has uncommitted changes (1 file)",
+    "dirty": "Main folder has uncommitted changes ({n} files)",
+    "dirty_unknown": "Could not tell whether the main folder has uncommitted changes",
+    "starting": "Starting…",
+    "failed_chip": "Did not start",
+    "timeout": ("The window did not appear on the Mac within a minute; check the Mac (a "
+                "trust prompt or a login may be waiting)."),
+    "opened": ("Claude is running in a new window on the Mac. Pick it up from Remote "
+               "Control on your phone as {name}."),
+    "sessions_none": "No live session",
+    "sessions_one": "1 live session",
+    "sessions": "{n} live sessions",
+}
+
+#: Seconds a started window has to appear in a scan before its card says it
+#: did not; and how long a start that failed stays on the overview.
+START_APPEARS_WITHIN = 60.0
+START_FAILURE_SHOWN = 3600.0
 
 #: A failed job's "Why" (ADR-009 D9). ``said`` and the causes are for a line
 #: invariant itself wrote (``invariant: <message>``, the CLI's error line);
@@ -698,13 +742,13 @@ def _note(row: dict[str, Any]) -> str | None:
 
 
 def _card(row: dict[str, Any], project: str, group: str, now: float,
-          acting: bool) -> dict[str, Any]:
+          acting: bool, title: str | None = None) -> dict[str, Any]:
     since = _since(row, now)
     words = _runnable(row)
     card: dict[str, Any] = {
         "row": row_key(row),
         "project": project,
-        "title": _title(row),
+        "title": title or _title(row),
         "chips": _chips(row, now),
         "age": age_text(now - since) if since is not None else "",
     }
@@ -741,14 +785,21 @@ def _step(row: dict[str, Any], project: str, acting: bool) -> dict[str, Any] | N
     }
 
 
+def _job_step(job: Mapping[str, Any]) -> str:
+    """The deed a job did, as its result and "Recent" name it."""
+    if job.get("kind") == START:
+        return _START["button"]
+    words = step_words(job.get("argv") or ())
+    return words.run if words else _RESULT["unknown_step"]
+
+
 def result_words(job: Mapping[str, Any]) -> dict[str, str]:
     """A job's outcome in words: the headline, the line under it, and its tone."""
-    words = step_words(job.get("argv") or ())
-    name = words.run if words else _RESULT["unknown_step"]
+    name = _job_step(job)
     if job.get("state") != "done":
         return {"headline": _RESULT["running"], "line": name, "tone": "running"}
     seconds = max(1, math.ceil(float(job.get("elapsed") or 0)))
-    terminal = job.get("kind") == TERMINAL
+    terminal = job.get("kind") in (TERMINAL, START)
     if job.get("ok"):
         headline = _RESULT["opened"] if terminal else _RESULT["done"].format(seconds=seconds)
         return {"headline": headline, "line": name, "tone": "ok"}
@@ -801,9 +852,7 @@ def _recent(row: dict[str, Any], key: str, jobs: Iterable[Mapping[str, Any]]) ->
         add(_RECENT["plan"], row["plan_touched"])
     for job in jobs:
         if job.get("row") == key and isinstance(job.get("started"), (int, float)):
-            words = step_words(job.get("argv") or ())
-            step = words.run if words else _RESULT["unknown_step"]
-            add(_RECENT["job"].format(step=step, result=result_words(job)["headline"]),
+            add(_RECENT["job"].format(step=_job_step(job), result=result_words(job)["headline"]),
                 job["started"])
     return sorted(events, key=lambda e: -e["at"])
 
@@ -835,15 +884,19 @@ def _technical(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _detail(row: dict[str, Any], project: str, now: float, acting: bool,
-            jobs: list[Mapping[str, Any]]) -> dict[str, Any]:
+            jobs: list[Mapping[str, Any]], started: str | None = None) -> dict[str, Any]:
+    """A row's detail view; ``started`` names the window a start of this page opened."""
     key = row_key(row)
     lane = lane_text((row.get("pipeline") or {}).get("methodology"))
+    going_on = _sentences(row, now)
+    if started:
+        going_on = [*going_on, _START["opened"].format(name=started)]
     return {
         "row": key,
         "kicker": f"{project} · {lane}" if lane else project,
-        "title": _title(row),
+        "title": started or _title(row),
         "chips": _chips(row, now, aged=True),
-        "going_on": _sentences(row, now),
+        "going_on": going_on,
         "step": _step(row, project, acting),
         "recent": _recent(row, key, jobs),
         "technical": _technical(row),
@@ -930,17 +983,22 @@ def _leftovers(hosts: list[dict[str, Any]], folders: list[dict[str, str]]):
 
 
 def view(document: Mapping[str, Any], acting: bool = False,
-         jobs: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+         jobs: Iterable[Mapping[str, Any]] = (), starting: bool = False) -> dict[str, Any]:
     """Everything the panel draws, from one ``assess`` document.
 
     With ``acting``, a row whose step runs (``run`` or ``terminal``) and that
     waits on no prompt gets its button (ADR-009 D8). ``jobs`` are this
-    device's recent actions, listed under "Recent" on their session.
+    device's recent actions, listed under "Recent" on their session; its
+    starts are drawn under Working (:func:`_starts`). With ``starting`` too,
+    the page may start a session, and ``start`` lists the projects it may
+    start one in.
     """
     now = float(document.get("now") or 0.0)
     jobs = list(jobs)
+    pending, named = _starts(document, jobs, now)
     placed: dict[str, list[tuple[int, float, int, dict[str, Any]]]] = {
-        g.id: [] for g in GROUPS}
+        g.id: [(-1, math.inf, 0, card) for card in pending] if g.id == WORKING else []
+        for g in GROUPS}
     details: dict[str, dict[str, Any]] = {}
     hosts: list[dict[str, Any]] = []
     folders: list[dict[str, str]] = []
@@ -949,6 +1007,9 @@ def view(document: Mapping[str, Any], acting: bool = False,
         name = (project.get("project") or {}).get("name", "")
         for row in project.get("rows", []):
             group = group_of(row)
+            started = named.get(row_key(row))
+            if started and group == LEFTOVERS and _orphan_class(row) == "active":
+                group = WORKING
             if group == LEFTOVERS:
                 if row.get("kind") == ROW_HOST:
                     hosts.append(_host_leftover(row, name, now, acting))
@@ -958,8 +1019,8 @@ def view(document: Mapping[str, Any], acting: bool = False,
             since = _since(row, now)
             position += 1
             placed[group].append((_rank(row, group), since if since is not None else math.inf,
-                                  position, _card(row, name, group, now, acting)))
-            details[row_key(row)] = _detail(row, name, now, acting, jobs)
+                                  position, _card(row, name, group, now, acting, started)))
+            details[row_key(row)] = _detail(row, name, now, acting, jobs, started)
     groups = []
     for group in GROUPS:
         cards = [card for *_, card in sorted(placed[group.id], key=lambda p: p[:3])]
@@ -985,6 +1046,95 @@ def view(document: Mapping[str, Any], acting: bool = False,
         "leftovers_card": card,
         "leftovers": screen,
         "details": details,
+        "start": _start_projects(document) if acting and starting else None,
+    }
+
+
+# -- starting a new session (ADR-009 D16) ------------------------------------------------
+
+
+def _starts(document: Mapping[str, Any], jobs: list[Mapping[str, Any]],
+            now: float) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """This device's starts: the cards still pending, and the windows they opened.
+
+    A start whose window a scan shows (a live host launched by its name) is
+    no card: an orphan host's row is named by it instead (the second answer,
+    row key to name), and a session that took the window is drawn as that
+    session. One not seen is "Starting…" while it runs and for a minute
+    after; then, or when the launch itself failed, a failure with its reason,
+    shown for an hour. One seen once and gone since leaves nothing.
+    """
+    pending: list[dict[str, Any]] = []
+    named: dict[str, str] = {}
+    for job in jobs:
+        if job.get("kind") != START:
+            continue
+        name = job.get("remote_control") or ""
+        row = find_started(dict(document), job.get("project") or "", name)
+        if row is not None:
+            if row.get("kind") == ROW_HOST:
+                named[row_key(row)] = name
+            continue
+        if job.get("appeared"):
+            continue
+        age = now - float(job.get("started") or 0.0)
+        result = None
+        if job.get("state") != "done" or (job.get("ok") and age < START_APPEARS_WITHIN):
+            state, line, chips = "starting", _START["starting"], []
+        elif age >= START_FAILURE_SHOWN:
+            continue
+        else:
+            state, chips = "failed", [{"text": _START["failed_chip"], "tone": TONE_PROBLEM}]
+            line = (job.get("words") or {}).get("why") or ""
+            if job.get("ok"):
+                line = _START["timeout"]
+                result = {"headline": _RESULT["failed"], "line": _START["button"],
+                          "tone": "failed", "why": line, "outcome": ""}
+        pending.append({"start": job.get("id"), "state": state,
+                        "project": job.get("subject") or "", "title": name, "line": line,
+                        "chips": chips, "result": result})
+    return pending, named
+
+
+def _start_projects(document: Mapping[str, Any]) -> dict[str, Any]:
+    """The registered projects a start may name, each with its live sessions counted."""
+    projects = []
+    for project in document.get("projects", []):
+        entry = project.get("project") or {}
+        count = sum(1 for row in project.get("rows", []) if row.get("kind") == ROW_SESSION)
+        line = (_START["sessions_none"] if count == 0 else _START["sessions_one"] if count == 1
+                else _START["sessions"].format(n=count))
+        projects.append({"id": entry.get("key", ""), "name": entry.get("name", ""),
+                         "line": line})
+    return {"projects": projects}
+
+
+def start_words(prepared: Mapping[str, Any], project: str) -> dict[str, Any]:
+    """What the "New session" sheet says for a start ``oracle start-session`` prepared.
+
+    ``prepared`` is the command's ``--dry-run --json`` answer. The two facts
+    are worded so neither reads as a refusal: they inform, and block nothing.
+    """
+    facts = prepared.get("facts") or {}
+    windows = int(facts.get("open_windows") or 0)
+    changes = facts.get("uncommitted")
+    return {
+        "title": _START["title"],
+        "sentence": _START["sentence"].format(project=project),
+        "button": _START["button"],
+        "name": prepared["name"],
+        "name_line": _START["name"].format(name=prepared["name"]),
+        "label": prepared.get("label") or "",
+        "prompt": prepared.get("prompt") or "",
+        "command": copy_line(prepared.get("argv") or (), None),
+        "place": _PLACE["main"].format(project=project),
+        "cwd": prepared.get("cwd"),
+        "facts": [
+            (_START["windows_none"] if windows == 0 else _START["windows_one"] if windows == 1
+             else _START["windows"].format(n=windows)),
+            (_START["dirty_unknown"] if changes is None else _START["clean"] if changes == 0
+             else _START["dirty_one"] if changes == 1 else _START["dirty"].format(n=changes)),
+        ],
     }
 
 

@@ -68,8 +68,9 @@ SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 NEEDED_PROGRAMS = ("git", "osascript")
 
 #: The programs the web page needs: an action runs ``invariant``, a scan runs
-#: git, a terminal step osascript, and discovery asks ``tailscale``.
-WEB_PROGRAMS = ("invariant", "git", "osascript", "tailscale")
+#: git, a terminal step osascript, discovery asks ``tailscale``, and a resume
+#: or a new session started from the page opens ``claude`` (IDEA_030).
+WEB_PROGRAMS = ("invariant", "claude", "git", "osascript", "tailscale")
 
 #: How long ``launchctl`` may take to answer one call.
 LAUNCHCTL_TIMEOUT_SECONDS = 30

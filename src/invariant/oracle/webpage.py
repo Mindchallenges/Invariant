@@ -32,6 +32,15 @@ which holds focus. The sheet counts the nonce down and disables the deed when
 it expires. Only the deed posts ``/api/act``, carrying the row key and the
 nonce and nothing else; the result is polled from ``/api/job``.
 
+**It starts a new session only on the same kind of confirm** (IDEA_030,
+ADR-009 D16). "New session…" in the top bar, and each project's shortcut
+under "Projects", open a sheet with the project picker, the label, the first
+message, the two facts and the exact command, all from
+``/api/start/confirm``; every edit asks the Mac again, after a pause, and the
+deed waits for its answer, so what is posted to ``/api/start`` (the project
+and the nonce) is exactly what the sheet last showed. A start is then a card
+under Working until its window appears.
+
 **It follows the page to HTTPS** (ADR-008 D23): a state fetch answered with a
 redirect it did not follow reloads the page.
 
@@ -105,10 +114,14 @@ a { color: var(--link); text-decoration: none; }
 a:active, .link:active { color: var(--link-pressed); }
 h1, h2, p { margin: 0; }
 #top { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
-.headrow { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+.headrow { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px;
+           flex-wrap: wrap; }
 .headtext { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 #title { font-size: 32px; line-height: 38px; font-weight: 700; letter-spacing: -0.4px; }
-#top.sub #title, #top.sub #refresh { display: none; }
+#top.sub #title, #top.sub #refresh, #top.sub #newsession { display: none; }
+.headbtns { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.newbtn { height: 44px; border-radius: 22px; background: var(--surface-button); padding: 0 16px;
+          font-size: 15px; font-weight: 600; white-space: nowrap; }
 .fresh { display: flex; align-items: center; gap: 6px; font-size: 13px;
          color: var(--text-secondary); }
 .fresh .dot { width: 7px; height: 7px; border-radius: 4px; background: var(--live);
@@ -244,9 +257,15 @@ details summary::-webkit-details-marker { display: none; }
 pre.output { margin: 0; font: 12px/18px var(--mono); color: var(--text-secondary);
              max-height: 160px; overflow: auto; white-space: pre; }
 .refused { color: var(--accent-problem); }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field input, .field select, .field textarea { font: 16px/22px var(--font); color: var(--text);
+  background: var(--surface-inset); border: 1px solid var(--border); border-radius: 12px;
+  padding: 10px 12px; min-height: 44px; width: 100%; max-width: 100%; }
+.field textarea { min-height: 88px; resize: vertical; }
+.start-name { font-family: var(--mono); font-size: 13px; }
 form { display: grid; gap: 12px; max-width: 360px; margin-top: 16px; }
-input { font: inherit; padding: 10px; text-transform: uppercase; letter-spacing: .1em;
-        min-height: 44px; }
+form input { font: inherit; padding: 10px; text-transform: uppercase; letter-spacing: .1em;
+             min-height: 44px; }
 form button { min-height: 44px; background: var(--accent-primary); color: #FFFFFF;
               border-radius: 12px; font-weight: 600; }
 """
@@ -326,6 +345,16 @@ const ORACLE = (function () {
   function actionBody(row, nonce) {
     return JSON.stringify({row: row, nonce: nonce});
   }
+  // A start names a registered project by its key and nothing else; the label
+  // and the first message travel only to be confirmed, and the start itself
+  // carries the project and the nonce the Mac answered with.
+  function startUrl(form) {
+    return "/api/start/confirm?project=" + encodeURIComponent(form.project) +
+      "&label=" + encodeURIComponent(form.label) + "&prompt=" + encodeURIComponent(form.prompt);
+  }
+  function startBody(project, nonce) {
+    return JSON.stringify({project: project, nonce: nonce});
+  }
   // The Mac moved the page to HTTPS: the fetch saw a redirect it did not follow.
   function moved(response) {
     return response.type === "opaqueredirect";
@@ -395,6 +424,28 @@ const ORACLE = (function () {
         card.line ? h("span", {cls: "note", text: card.line}) : null]),
       icon(h, "right", 18, "2", "chevron")]);
   }
+  // A start of this device: "Starting…" until its window appears, or why it did not.
+  function startCard(h, on, card) {
+    const parts = [h("span", {cls: "project", text: card.project}),
+                   h("span", {cls: "card-title", text: card.title})];
+    if (card.chips.length) parts.push(chips(h, card.chips));
+    if (card.line) parts.push(h("span", {cls: "note", text: card.line}));
+    return h("button", {cls: "card compact start-card start-" + card.state,
+                        on: {click: () => on.startJob(card)}},
+             [h("span", {cls: "compact-text"}, parts), icon(h, "right", 18, "2", "chevron")]);
+  }
+  function projects(h, on, start) {
+    const rows = start.projects.map((project) => h("div", {cls: "list-row"}, [
+      h("span", {cls: "row-text"}, [h("span", {cls: "row-title", text: project.name}),
+                                    h("span", {cls: "row-line", text: project.line})]),
+      h("button", {cls: "pill row-pill",
+                   attrs: {"aria-label": WORDS.new_session + " " + project.name},
+                   on: {click: () => on.newSession(project.id)}},
+        [h("span", {text: WORDS.new_session})])]));
+    return h("div", {cls: "section projects"}, [
+      h("div", {cls: "section-head"}, [h("span", {cls: "section-label", text: WORDS.projects})]),
+      h("div", {cls: "list"}, rows)]);
+  }
   function overview(view, ui, h, on) {
     const nodes = [h("nav", {cls: "strip"}, view.tiles.map((tile) => h("a", {
       cls: "tile tile-" + tile.id, attrs: {href: tile.href},
@@ -403,8 +454,9 @@ const ORACLE = (function () {
     for (const group of view.groups) {
       nodes.push(h("section", {cls: "group group-" + group.id, attrs: {id: group.id}}, [
         h("h2", {cls: "heading", text: group.heading}),
-        ...group.cards.map((card) => group.compact ? compactCard(h, on, card)
-                                                    : fullCard(h, on, card))]));
+        ...group.cards.map((card) => card.start ? startCard(h, on, card)
+                                   : group.compact ? compactCard(h, on, card)
+                                   : fullCard(h, on, card))]));
     }
     if (view.empty) nodes.push(h("p", {cls: "quiet", text: view.empty}));
     const left = view.leftovers_card;
@@ -415,6 +467,7 @@ const ORACLE = (function () {
                                           h("span", {cls: "note", text: left.line})]),
         icon(h, "right", 18, "2", "chevron")]));
     }
+    if (view.start && view.start.projects.length) nodes.push(projects(h, on, view.start));
     return nodes;
   }
   function back(h, on) {
@@ -559,6 +612,74 @@ const ORACLE = (function () {
                expiry);
     return {nodes: nodes, focus: cancel, run: run, expiry: expiry};
   }
+  function field(h, label, children) {
+    return h("label", {cls: "field"}, [h("span", {cls: "label", text: label}), ...children]);
+  }
+  // The "New session" sheet. Its fields keep what the person typed; fillStart
+  // puts the Mac's answer for them in place without rebuilding the sheet, so a
+  // field never loses its focus or its caret to an answer.
+  function startSheet(h, on, projectList, form, data) {
+    const edit = (name) => (event, node) => on.startEdit(name, node.value);
+    const picker = h("select", {attrs: {"aria-label": WORDS.project_field},
+                                value: form.project, on: {change: edit("project")}},
+                     projectList.map((p) => h("option", {attrs: {value: p.id}, text: p.name})));
+    const label = h("input", {attrs: {type: "text", autocomplete: "off", autocapitalize: "none",
+                                      spellcheck: "false", "aria-label": WORDS.label_field},
+                              value: form.label, on: {input: edit("label")}});
+    const prompt = h("textarea", {attrs: {rows: "3", "aria-label": WORDS.prompt_field},
+                                  value: form.prompt, on: {input: edit("prompt")}});
+    const built = {
+      picker: picker, label: label, prompt: prompt,
+      title: h("h2", {cls: "sheet-title"}), sentence: h("p", {cls: "sentence"}),
+      name: h("div", {cls: "note start-name"}), facts: h("div", {cls: "inset checked"}),
+      refused: h("p", {cls: "refused start-refused", hidden: true}),
+      command: h("div", {cls: "mono scroll command-text"}), place: h("div", {cls: "note"}),
+      cwd: h("div", {cls: "mono scroll"}), expiry: h("div", {cls: "expiry"}),
+      project: data.project, nonce: null,
+    };
+    const copy = h("button", {cls: "pill copy", on: {click: (event, node) =>
+      on.copy(built.command.textContent, node, built.command)}}, [h("span", {text: WORDS.copy})]);
+    built.run = h("button", {cls: "btn sheet primary", text: data.words.button,
+                             on: {click: (event, node) => {
+                               node.disabled = true;
+                               on.startAct();
+                             }}});
+    built.focus = h("button", {cls: "btn sheet secondary", text: WORDS.cancel,
+                               on: {click: () => on.close()}});
+    built.nodes = [
+      grabber(h), h("div", {cls: "sheet-head"}, [built.title, built.sentence]),
+      field(h, WORDS.project_field, [picker]),
+      field(h, WORDS.label_field, [label, built.name]),
+      field(h, WORDS.prompt_field, [prompt, h("span", {cls: "note", text: WORDS.prompt_hint})]),
+      built.facts, built.refused,
+      h("details", {cls: "sheet-toggle"}, [
+        h("summary", {text: WORDS.exact_start}),
+        h("div", {cls: "disclosure-body"}, [
+          h("div", {cls: "inset"}, [
+            h("div", {cls: "inset-head"}, [h("span", {cls: "label", text: WORDS.command}), copy]),
+            built.command, built.place]),
+          built.cwd])]),
+      h("div", {cls: "sheet-buttons"}, [built.run, built.focus]), built.expiry];
+    fillStart(h, built, data);
+    return built;
+  }
+  function fillStart(h, built, data) {
+    const w = data.words;
+    built.refused.hidden = !data.refused;
+    built.refused.textContent = data.refused ? fill(WORDS.not_run, {reason: data.refused}) : "";
+    built.nonce = data.nonce || null;
+    if (data.project) built.project = data.project;
+    built.run.disabled = !built.nonce;
+    if (!w) return;
+    built.title.textContent = w.title;
+    built.sentence.textContent = w.sentence;
+    built.name.textContent = w.name_line;
+    built.facts.replaceChildren(h("span", {cls: "label", text: WORDS.checked_now}),
+                                ...w.facts.map((line) => h("div", {text: line})));
+    built.command.textContent = w.command;
+    built.place.textContent = w.place;
+    built.cwd.textContent = w.cwd || "";
+  }
   function resultSheet(h, on, ui, job) {
     const w = job.words;
     const mark = h("span", {cls: "mark mark-" + w.tone},
@@ -593,7 +714,8 @@ const ORACLE = (function () {
   return {retryDelay: retryDelay, ageOf: ageOf, fill: fill, freshnessText: freshnessText,
           countdown: countdown, makeLoop: makeLoop, actionBody: actionBody, jobPoll: jobPoll,
           moved: moved, clock: clock, screen: screen, messageSheet: messageSheet,
-          confirmSheet: confirmSheet, resultSheet: resultSheet};
+          confirmSheet: confirmSheet, resultSheet: resultSheet, startUrl: startUrl,
+          startBody: startBody, startSheet: startSheet, fillStart: fillStart};
 })();
 
 if (typeof document !== "undefined") {
@@ -605,6 +727,11 @@ if (typeof document !== "undefined") {
   let lastError = "";
   let panelJob = null;
   let countdownTimer = null;
+  // The open "New session" sheet: what it asks for, its handles, its pause.
+  let startForm = null;
+  let startBuilt = null;
+  let startPause = null;
+  let startAsked = 0;
 
   function h(tag, props, children) {
     const p = props || {};
@@ -620,6 +747,8 @@ if (typeof document !== "undefined") {
       node.addEventListener(name, (event) => handlers[name](event, node));
     }
     for (const child of children || []) if (child) node.appendChild(child);
+    // After the children: a select takes a value only once its options are there.
+    if (p.value !== undefined && p.value !== null) node.value = String(p.value);
     return node;
   }
 
@@ -651,10 +780,18 @@ if (typeof document !== "undefined") {
     if (built.focus) built.focus.focus();
   }
 
-  function closeSheet() {
-    panelJob = null;
+  function stopCountdown() {
     if (countdownTimer !== null) clearInterval(countdownTimer);
     countdownTimer = null;
+  }
+
+  function closeSheet() {
+    panelJob = null;
+    stopCountdown();
+    if (startPause !== null) clearTimeout(startPause);
+    startPause = null;
+    startForm = null;
+    startBuilt = null;
     const sheet = byId("sheet");
     sheet.hidden = true;
     sheet.replaceChildren();
@@ -706,27 +843,104 @@ if (typeof document !== "undefined") {
     const built = ORACLE.confirmSheet(h, on, data);
     showSheet(built);
     if (!built.run) return;
+    expireIn(built, data.expires_in, () => openConfirm(row));
+  }
+
+  // Count the nonce down on a sheet; at zero the deed is off and "Look again" asks anew.
+  function expireIn(built, seconds, again) {
+    stopCountdown();
     const opened = Date.now();
+    built.expiry.textContent = ORACLE.countdown(seconds).text;
     countdownTimer = setInterval(() => {
-      const said = ORACLE.countdown(data.expires_in - (Date.now() - opened) / 1000);
+      const said = ORACLE.countdown(seconds - (Date.now() - opened) / 1000);
       built.expiry.textContent = said.text;
       if (!said.expired) return;
-      clearInterval(countdownTimer);
-      countdownTimer = null;
+      stopCountdown();
       built.run.disabled = true;
       built.expiry.appendChild(h("button", {cls: "link", text: WORDS.look_again,
-                                            on: {click: () => openConfirm(row)}}));
+                                            on: {click: again}}));
     }, 1000);
   }
 
-  async function confirmAct(row, nonce) {
-    if (countdownTimer !== null) clearInterval(countdownTimer);
-    countdownTimer = null;
+  // Ask the Mac what the sheet's fields would start. {data}, {error}, or null
+  // when a later question has been asked since, whose answer is the one shown.
+  async function askStart() {
+    const asked = ++startAsked;
+    try {
+      const response = await fetch(ORACLE.startUrl(startForm),
+                                   {cache: "no-store", credentials: "same-origin"});
+      const data = await response.json();
+      return asked === startAsked ? {data: data} : null;
+    } catch (err) {
+      return asked === startAsked ? {error: err.message} : null;
+    }
+  }
+
+  async function openStart(project) {
+    const start = current && current.view.start;
+    if (!start || !start.projects.length) return;
+    closeSheet();
+    startForm = {project: project || start.projects[0].id, label: "", prompt: ""};
+    showSheet(ORACLE.messageSheet(h, on, WORDS.loading, false));
+    const answer = await askStart();
+    if (!answer || !startForm) return;
+    if (answer.error) {
+      message(ORACLE.fill(WORDS.confirm_failed, {error: answer.error}));
+      return;
+    }
+    const data = answer.data;
+    if (!data.words) {
+      message(data.refused ? ORACLE.fill(WORDS.not_run, {reason: data.refused})
+                           : WORDS.nothing_to_run);
+      return;
+    }
+    startForm.label = data.label || "";
+    startBuilt = ORACLE.startSheet(h, on, start.projects, startForm, data);
+    showSheet(startBuilt);
+    expireIn(startBuilt, data.expires_in, askAgain);
+  }
+
+  // An edit: the deed waits, and the Mac is asked once the typing pauses.
+  function startEdit(name, value) {
+    if (!startForm || !startBuilt) return;
+    startForm[name] = value;
+    startBuilt.run.disabled = true;
+    if (startPause !== null) clearTimeout(startPause);
+    startPause = setTimeout(askAgain, 400);
+  }
+
+  async function askAgain() {
+    startPause = null;
+    if (!startBuilt) return;
+    const built = startBuilt;
+    startForm.project = built.picker.value;
+    startForm.label = built.label.value;
+    startForm.prompt = built.prompt.value;
+    built.run.disabled = true;
+    const answer = await askStart();
+    if (!answer || startBuilt !== built) return;
+    const data = answer.error ? {refused: ORACLE.fill(WORDS.confirm_failed,
+                                                      {error: answer.error})} : answer.data;
+    ORACLE.fillStart(h, built, data);
+    if (built.nonce) expireIn(built, data.expires_in, askAgain);
+  }
+
+  function startAct() {
+    if (!startBuilt || !startBuilt.nonce) return;
+    return postAction("/api/start", ORACLE.startBody(startBuilt.project, startBuilt.nonce));
+  }
+
+  function confirmAct(row, nonce) {
+    return postAction("/api/act", ORACLE.actionBody(row, nonce));
+  }
+
+  async function postAction(url, body) {
+    stopCountdown();
     let response, data;
     try {
-      response = await fetch("/api/act", {
+      response = await fetch(url, {
         method: "POST", cache: "no-store", credentials: "same-origin",
-        headers: {"Content-Type": "application/json"}, body: ORACLE.actionBody(row, nonce),
+        headers: {"Content-Type": "application/json"}, body: body,
       });
       data = await response.json();
     } catch (err) {
@@ -779,6 +993,19 @@ if (typeof document !== "undefined") {
     more: (id) => { ui.more[id] = true; draw(); },
     confirm: (row) => openConfirm(row),
     act: (row, nonce) => confirmAct(row, nonce),
+    newSession: (project) => openStart(project),
+    startEdit: startEdit,
+    startAct: startAct,
+    // A start's card: its result, live while it runs; a window that never
+    // came is shown as the failure the card says it is.
+    startJob: (card) => {
+      const job = ((current && current.jobs) || []).find((j) => j.id === card.start);
+      if (!job) return;
+      closeSheet();
+      const shown = card.result ? Object.assign({}, job, {ok: false, words: card.result}) : job;
+      showSheet(ORACLE.resultSheet(h, on, ui, shown));
+      if (!card.result && job.state !== "done") pollJob(job.id);
+    },
     copy: copy,
     close: closeSheet,
   };
@@ -789,6 +1016,7 @@ if (typeof document !== "undefined") {
     const banner = byId("banner");
     banner.textContent = data.freshness.banner || "";
     banner.hidden = !data.freshness.banner;
+    byId("newsession").hidden = !data.view.start;
     document.title = data.view.doc_title;
   }
 
@@ -837,6 +1065,7 @@ if (typeof document !== "undefined") {
     }
   });
   byId("refresh").addEventListener("click", () => loop.wake());
+  byId("newsession").addEventListener("click", () => openStart(null));
   byId("scrim").addEventListener("click", closeSheet);
   setInterval(showAge, 1000);
   document.addEventListener("visibilitychange", () => {
@@ -993,8 +1222,10 @@ def page(nonce: str, words: Mapping[str, str], interval: float = DEFAULT_INTERVA
         f'<h1 id="title">{escape(words["title"])}</h1>'
         f'<div id="fresh" class="fresh stale"><span class="dot" aria-hidden="true"></span>'
         f'<span id="freshtext">{escape(words["never"])}</span></div></div>'
+        '<div class="headbtns">'
+        f'<button id="newsession" class="newbtn" hidden>{escape(words["new_session"])}</button>'
         f'<button id="refresh" class="iconbtn" aria-label="{escape(words["refresh"])}">'
-        f"{_REFRESH_ICON}</button></div>"
+        f"{_REFRESH_ICON}</button></div></div>"
         f"{_warning(warning)}"
         '<div id="banner" class="notice" hidden></div>'
         '<div id="error" class="notice" hidden></div></header>'

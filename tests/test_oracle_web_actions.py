@@ -1258,10 +1258,17 @@ def _browser_origin(referrer_policy: str, mode: str, page_origin: str, target_or
 
 
 def _fetch_mode(page_html: str, url: str) -> str:
-    """The ``mode`` the page's script passes to ``fetch(url, ...)``; "cors" without one."""
+    """The ``mode`` the page's script passes to ``fetch(url, ...)``; "cors" without one.
+
+    A POST the page sends through its one ``postAction(url, body)`` (the
+    action and the start, IDEA_030) is read from that function's ``fetch``.
+    """
     import re
 
     call = re.search(r'fetch\("' + re.escape(url) + r'",\s*\{(.*?)\}\);', page_html, re.DOTALL)
+    if call is None and re.search(r'postAction\("' + re.escape(url) + r'"', page_html):
+        call = re.search(r'async function postAction\(url, body\) \{.*?fetch\(url,\s*\{(.*?)\}\);',
+                         page_html, re.DOTALL)
     assert call, f"the page no longer fetches {url}"
     mode = re.search(r'\bmode:\s*"([a-z-]+)"', call.group(1))
     return mode.group(1) if mode else "cors"
@@ -1368,3 +1375,419 @@ class TestCloseHostFromThePage:
         nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
         job = world.remote.act(PHONE, world.key(), nonce).body["job"]
         assert job["words"]["outcome"] == ""
+
+
+# -- IDEA_030 increment 2: start a new session from the page (ADR-009 D16) ---------------
+
+
+class FakeStarter:
+    """The CLI's starter, as ``oracle/startsession.Starter`` names it, recorded.
+
+    ``prepare`` answers what ``invariant oracle start-session --dry-run --json``
+    would for a project ``K`` whose main folder is ``cwd``; ``launch`` records
+    the prepared start instead of opening a window.
+    """
+
+    def __init__(self, cwd: Path) -> None:
+        self.cwd = str(cwd)
+        self.prepared: list = []
+        self.launched: list = []
+        self.taken: set[str] = set()
+        self.refuse: str | None = None
+        self.fail: str | None = None
+        self.crash: Exception | None = None
+
+    def prepare(self, key, label, prompt, project):
+        from invariant.core.errors import UsageError
+
+        self.prepared.append((key, label, prompt, project))
+        if self.refuse:
+            raise UsageError(self.refuse)
+        if key != "K":
+            raise UsageError(f"no registered project matches {key!r}")
+        label = label if label is not None else "1026-0049"
+        name, n = f"p-{label}", 2
+        while name in self.taken:
+            name, n = f"p-{label}-{n}", n + 1
+        argv = ["/opt/bin/claude", "--name", name, "--remote-control", name,
+                *([prompt] if prompt else [])]
+        windows = sum(1 for row in (project or {}).get("rows", []) if row.get("hosts"))
+        return {"project": {"key": key, "name": "p", "root": self.cwd, "via": "manual"},
+                "name": name, "label": label, "cwd": self.cwd, "argv": argv,
+                "prompt": prompt, "by_hand": "cd x && claude", "dry_run": False,
+                "successor": None,
+                "facts": {"open_windows": windows, "uncommitted": 2, "dirty": True}}
+
+    def launch(self, prepared):
+        self.launched.append(prepared)
+        if self.crash:
+            raise self.crash
+        if self.fail:
+            from invariant.core.errors import InvariantError
+
+            raise InvariantError(self.fail)
+        return f"claude is running as {prepared['name']} (pid 4242)"
+
+
+@pytest.fixture
+def starting(world):
+    from invariant.oracle.startsession import Starter
+
+    fake = FakeStarter(world.cwd)
+    world.starter = fake
+    world.remote = RemoteActions(
+        world.actions, world._fresh, AuditLog(world.home, clock=world.clock),
+        clock=world.clock, timer=world.clock, spawn=lambda work: world.spawn(work),
+        token=lambda: next(world.tokens), starter=Starter(fake.prepare, fake.launch),
+    )
+    return world
+
+
+def _start_nonce(world, label="", prompt="", device=PHONE, key="K"):
+    answer = world.remote.confirm_start(device, key, label, prompt)
+    assert answer.status == 200, answer.body
+    return answer.body["nonce"]
+
+
+class TestStartConfirm:
+    def test_it_says_what_starts_names_the_window_and_runs_nothing(self, starting):
+        answer = starting.remote.confirm_start(PHONE, "K", "", "")
+        body = answer.body
+        assert answer.status == 200
+        assert body["project"] == "K" and body["refused"] is None
+        assert body["name"] == "p-1026-0049" and body["label"] == "1026-0049"
+        assert body["nonce"] == "tok0000" and body["expires_in"] == CONFIRM_TTL
+        words = body["words"]
+        assert words["title"] == "Start a new session?"
+        assert words["sentence"] == ("A new Terminal window on the Mac runs Claude with "
+                                     "Remote Control in p's main folder.")
+        assert words["button"] == "Start session"
+        assert words["name_line"] == "Remote Control name: p-1026-0049"
+        assert words["command"] == "/opt/bin/claude --name p-1026-0049 --remote-control p-1026-0049"
+        assert words["cwd"] == str(starting.cwd)
+        assert words["place"] == "In p › main checkout"
+        assert words["facts"] == ["No Claude window is open here",
+                                  "Main folder has uncommitted changes (2 files)"]
+        assert starting.starter.launched == [] and starting.audit() == []
+
+    def test_the_project_is_resolved_from_the_fresh_read_and_the_index(self, starting):
+        starting.remote.confirm_start(PHONE, "K", "x", "")
+        ((key, label, prompt, project),) = starting.starter.prepared
+        assert (key, label, prompt) == ("K", "x", None)
+        assert project == starting.document["projects"][0]
+        assert starting.reads == 1
+
+    def test_the_first_message_is_part_of_the_command_quoted(self, starting):
+        words = starting.remote.confirm_start(PHONE, "K", "x", "fix it's $HOME").body["words"]
+        assert words["command"].endswith(" 'fix it'\"'\"'s $HOME'")
+        assert words["prompt"] == "fix it's $HOME"
+
+    def test_a_label_or_prompt_the_command_refuses_is_said_and_offers_no_nonce(self, starting):
+        starting.starter.refuse = "a session name must contain at least one alphanumeric character"
+        body = starting.remote.confirm_start(PHONE, "K", "!!!", "").body
+        assert body["refused"] == ("a session name must contain at least one alphanumeric "
+                                   "character")
+        assert body["nonce"] is None and body["words"] is None
+        assert len(starting.remote.confirms) == 0
+
+    def test_a_project_the_read_does_not_list_still_goes_to_the_index(self, starting):
+        body = starting.remote.confirm_start(PHONE, "/nowhere", "", "").body
+        assert body["refused"] == "no registered project matches '/nowhere'"
+        assert starting.starter.prepared[0][3] == {}
+
+    def test_an_overlong_first_message_is_refused_before_anything_is_asked(self, starting):
+        body = starting.remote.confirm_start(PHONE, "K", "", "x" * (webactions.MAX_PROMPT + 1)
+                                             ).body
+        assert "longer than" in body["refused"] and body["nonce"] is None
+        assert starting.starter.prepared == []
+
+    def test_an_unreadable_machine_is_a_503(self, starting):
+        starting._fresh = _raises
+        starting.remote.fresh = _raises
+        answer = starting.remote.confirm_start(PHONE, "K", "", "")
+        assert answer.status == 503 and "could not be read" in answer.body["refused"]
+
+    @pytest.mark.parametrize("windows, changes, facts", [
+        (1, 0, ["1 Claude window already open here", "Main folder has no uncommitted changes"]),
+        (3, 1, ["3 Claude windows already open here",
+                "Main folder has uncommitted changes (1 file)"]),
+        (0, None, ["No Claude window is open here",
+                   "Could not tell whether the main folder has uncommitted changes"]),
+    ])
+    def test_the_facts_are_worded_and_block_nothing(self, windows, changes, facts):
+        from invariant.oracle import panel
+
+        prepared = {"name": "p-x", "argv": ["claude"], "cwd": "/r", "prompt": None,
+                    "label": "x", "facts": {"open_windows": windows, "uncommitted": changes,
+                                            "dirty": None}}
+        assert panel.start_words(prepared, "p")["facts"] == facts
+
+
+class TestStart:
+    def test_the_nonce_starts_exactly_what_it_confirmed(self, starting):
+        nonce = _start_nonce(starting, "x", "fix it")
+        answer = starting.remote.start(PHONE, "K", nonce)
+        assert answer.status == 202, answer.body
+        job = answer.body["job"]
+        assert job["kind"] == "start" and job["row"] == "K|start" and job["project"] == "K"
+        assert job["remote_control"] == "p-x" and job["subject"] == "p"
+        assert job["argv"] == ["/opt/bin/claude", "--name", "p-x", "--remote-control", "p-x",
+                               "fix it"]
+        assert job["cwd"] == str(starting.cwd)
+        assert job["state"] == "done" and job["ok"] is True
+        assert job["words"]["headline"] == "Opened in a new window"
+        assert job["words"]["line"] == "Start session"
+        assert job["appeared"] is False
+        (launched,) = starting.starter.launched
+        assert launched["name"] == "p-x" and launched["prompt"] == "fix it"
+        # Prepared again at the moment of the start, from the label and prompt
+        # the server confirmed, not from anything the client sent now.
+        assert [p[:3] for p in starting.starter.prepared] == [("K", "x", "fix it")] * 2
+        assert starting.reads == 2
+
+    def test_every_start_is_audited(self, starting):
+        starting.remote.start(PHONE, "K", _start_nonce(starting, "x", "go"))
+        start, done = starting.audit()
+        assert start["event"] == "start" and done["event"] == "done"
+        assert start["kind"] == "start" and start["row"] == "K|start"
+        assert start["argv"][-1] == "go" and start["cwd"] == str(starting.cwd)
+        assert start["device"] == PHONE.id
+        assert done["ok"] is True and done["exit"] is None
+
+    def test_a_nonce_works_once_for_its_device_and_its_project(self, starting):
+        nonce = _start_nonce(starting)
+        assert starting.remote.start(TABLET, "K", nonce).status == 403
+        assert starting.remote.start(PHONE, "K", nonce).status == 403
+        other = _start_nonce(starting)
+        assert starting.remote.start(PHONE, "K2", other).status == 403
+        row_nonce = starting.remote.confirm(PHONE, starting.key()).body["nonce"]
+        assert starting.remote.start(PHONE, "K", row_nonce).status == 403
+        assert starting.starter.launched == []
+
+    def test_a_start_nonce_cannot_run_a_row_step(self, starting):
+        nonce = _start_nonce(starting)
+        assert starting.remote.act(PHONE, "K|start", nonce).status in (403, 409)
+        assert starting.runner.calls == []
+
+    def test_a_name_taken_since_the_confirm_is_refused(self, starting):
+        nonce = _start_nonce(starting, "x")
+        starting.starter.taken.add("p-x")
+        answer = starting.remote.start(PHONE, "K", nonce)
+        assert answer.status == 409
+        assert "p-x-2" in answer.body["error"] and "nothing ran" in answer.body["error"]
+        assert starting.starter.launched == [] and starting.audit() == []
+
+    def test_a_refusal_at_the_moment_of_the_start_runs_nothing(self, starting):
+        nonce = _start_nonce(starting)
+        starting.starter.refuse = "demo is registered, but its root no longer carries a manifest"
+        answer = starting.remote.start(PHONE, "K", nonce)
+        assert answer.status == 409 and "manifest" in answer.body["error"]
+        assert "nothing ran" in answer.body["error"]
+        assert starting.starter.launched == []
+
+    def test_an_unreadable_machine_at_the_start_runs_nothing(self, starting):
+        nonce = _start_nonce(starting)
+        starting.remote.fresh = _raises
+        assert starting.remote.start(PHONE, "K", nonce).status == 503
+        assert starting.starter.launched == []
+
+    def test_a_window_that_did_not_open_says_why_in_invariants_words(self, starting):
+        starting.starter.fail = ("the launch did not start a successor: no claude with "
+                                 "--name p-x --remote-control p-x is running")
+        job = starting.remote.start(PHONE, "K", _start_nonce(starting, "x")).body["job"]
+        assert job["ok"] is False
+        assert job["words"]["headline"] == "Failed"
+        assert job["words"]["why"].startswith("invariant said: the launch did not start")
+        assert starting.audit()[-1]["ok"] is False
+
+    def test_an_unexpected_error_is_a_failed_start_and_the_server_goes_on(self, starting):
+        starting.starter.crash = RuntimeError("boom")
+        job = starting.remote.start(PHONE, "K", _start_nonce(starting)).body["job"]
+        assert job["ok"] is False and "RuntimeError: boom" in job["output"]
+
+    def test_one_start_per_project_at_a_time(self, starting):
+        starting.defer()
+        assert starting.remote.start(PHONE, "K", _start_nonce(starting, "a")).status == 202
+        answer = starting.remote.start(PHONE, "K", _start_nonce(starting, "b"))
+        assert answer.status == 409 and "already running" in answer.body["error"]
+        starting.deferred[0]()
+        assert starting.remote.start(PHONE, "K", _start_nonce(starting, "b")).status == 202
+
+    def test_an_audit_that_cannot_be_written_starts_nothing(self, starting, monkeypatch):
+        monkeypatch.setattr(starting.remote.audit, "record", _raises_state)
+        answer = starting.remote.start(PHONE, "K", _start_nonce(starting))
+        assert answer.status == 503 and "audit" in answer.body["error"]
+        assert starting.starter.launched == []
+        assert starting.remote.recent(PHONE) == []
+
+    def test_the_start_is_listed_with_the_devices_actions(self, starting):
+        starting.remote.start(PHONE, "K", _start_nonce(starting))
+        assert [j["kind"] for j in starting.remote.recent(PHONE)] == ["start"]
+        assert starting.remote.recent(TABLET) == []
+
+
+class TestObserve:
+    def _seen(self, name="p-x", alive=True):
+        return _doc({"kind": "host", "project": "K", "session_id": None, "path": None,
+                     "hosts": [{"host_session_id": "new1", "alive": alive,
+                                "launched_name": name}], "signals": [],
+                     "recommendation": None})
+
+    def test_a_start_is_marked_once_a_scan_sees_its_window(self, starting):
+        starting.remote.start(PHONE, "K", _start_nonce(starting, "x"))
+        starting.remote.observe(self._seen("p-y"))
+        assert starting.remote.recent(PHONE)[0]["appeared"] is False
+        starting.remote.observe(self._seen("p-x", alive=False))
+        assert starting.remote.recent(PHONE)[0]["appeared"] is False
+        starting.remote.observe(self._seen("p-x"))
+        assert starting.remote.recent(PHONE)[0]["appeared"] is True
+        starting.remote.observe(_doc())
+        assert starting.remote.recent(PHONE)[0]["appeared"] is True
+
+    def test_other_actions_are_never_marked(self, starting):
+        starting.remote.act(PHONE, starting.key(), starting.remote.confirm(
+            PHONE, starting.key()).body["nonce"])
+        starting.remote.observe(self._seen())
+        assert starting.remote.recent(PHONE)[0]["appeared"] is False
+
+
+def _start_post(app, token, body, origin=ORIGIN):
+    headers = {"host": f"{TS4}:7341", "content-type": "application/json"}
+    if token:
+        headers["cookie"] = f"{COOKIE_NAME}={token}"
+    if origin is not None:
+        headers["origin"] = origin
+    return app.handle(Request("POST", "/api/start", headers, json.dumps(body).encode()))
+
+
+def _start_confirm_path(project="K", label="", prompt=""):
+    return "/api/start/confirm?" + urllib.parse.urlencode(
+        {"project": project, "label": label, "prompt": prompt})
+
+
+class TestStartOverHttp:
+    def test_the_confirm_and_the_start_need_a_paired_device(self, starting, store):
+        app = _app(starting, store)
+        assert _get(app, _start_confirm_path()).status == 401
+        assert _start_post(app, None, {"project": "K", "nonce": "x"}).status == 401
+        assert starting.starter.prepared == []
+
+    def test_the_confirm_answers_the_sheet_and_the_start_runs_it(self, starting, store):
+        app = _app(starting, store)
+        _, token = _paired(store)
+        shown = _get(app, _start_confirm_path(label="x", prompt="go on"), token)
+        assert shown.status == 200
+        body = json.loads(shown.body)
+        assert body["name"] == "p-x" and body["words"]["command"].endswith("p-x 'go on'")
+        response = _start_post(app, token, {"project": "K", "nonce": body["nonce"]})
+        assert response.status == 202, response.body
+        assert json.loads(response.body)["job"]["remote_control"] == "p-x"
+        assert starting.starter.launched[0]["prompt"] == "go on"
+
+    def test_the_confirm_needs_a_project(self, starting, store):
+        app = _app(starting, store)
+        _, token = _paired(store)
+        assert _get(app, "/api/start/confirm", token).status == 400
+
+    def test_the_start_needs_this_pages_origin_and_both_fields(self, starting, store):
+        app = _app(starting, store)
+        _, token = _paired(store)
+        nonce = json.loads(_get(app, _start_confirm_path(), token).body)["nonce"]
+        assert _start_post(app, token, {"project": "K", "nonce": nonce},
+                           origin="http://evil.example").status == 403
+        assert _start_post(app, token, {"project": "K", "nonce": nonce}, origin=None).status == 403
+        assert _start_post(app, token, {"nonce": nonce}).status == 400
+        assert starting.starter.launched == []
+
+    def test_the_start_is_posted_only(self, starting, store):
+        app = _app(starting, store)
+        _, token = _paired(store)
+        headers = {"host": f"{TS4}:7341", "cookie": f"{COOKIE_NAME}={token}"}
+        assert app.handle(Request("GET", "/api/start", headers, b"")).status == 405
+
+    def test_without_a_starter_there_is_no_start(self, world, store):
+        app = _app(world, store)
+        _, token = _paired(store)
+        assert _get(app, _start_confirm_path(), token).status == 404
+        # As any POST the server does not take: only a confirmed action is sent here.
+        assert _start_post(app, token, {"project": "K", "nonce": "n"}).status == 405
+        state = json.loads(_get(app, "/api/state", token).body)
+        assert state["view"]["start"] is None
+
+    def test_a_read_only_page_has_no_start(self, starting, store):
+        app = _app(starting, store, remote=False)
+        _, token = _paired(store)
+        assert _get(app, _start_confirm_path(), token).status == 404
+        assert json.loads(_get(app, "/api/state", token).body)["view"]["start"] is None
+
+    def test_the_state_lists_the_projects_and_observes_the_starts(self, starting, store):
+        app = _app(starting, store)
+        _, token = _paired(store)
+        nonce = json.loads(_get(app, _start_confirm_path(label="x"), token).body)["nonce"]
+        _start_post(app, token, {"project": "K", "nonce": nonce})
+        starting.document["projects"][0]["rows"].append(
+            {"kind": "host", "project": "K", "session_id": None, "path": None,
+             "hosts": [{"host_session_id": "new1", "alive": True, "launched_name": "p-x"}],
+             "signals": [], "recommendation": None})
+        state = json.loads(_get(app, "/api/state", token).body)
+        assert [p["name"] for p in state["view"]["start"]["projects"]] == ["p"]
+        assert state["jobs"][0]["appeared"] is True
+
+
+class TestStartThroughTheCommand:
+    """``oracle web`` as the CLI wires it: the page's start is the command's path."""
+
+    @pytest.fixture
+    def app(self, capsys, oracle_web, machine_world, monkeypatch, _no_real_successor_watch):
+        from invariant.hosts import claude_code_launch as launch
+
+        monkeypatch.setattr(cli_main, "_oracle_cache",
+                            lambda: ScanCache(probe=machine_world["probe"]))
+        monkeypatch.setattr(launch, "host_platform", lambda: "darwin")
+        monkeypatch.setattr(launch, "resolve_claude", lambda: "/usr/local/bin/claude")
+        oracle_web.addresses = [TS4]
+        assert main(["oracle", "web"]) == 0
+        capsys.readouterr()
+        app = oracle_web.servers[0].app
+        app.remote.spawn = lambda work: work()
+        _, token = _paired(DeviceStore(oracle_home()))
+        return app, token
+
+    def _gamma(self, app, token):
+        state = json.loads(_get(app, "/api/state", token).body)
+        return next(p["id"] for p in state["view"]["start"]["projects"] if p["name"] == "gamma")
+
+    def test_it_opens_one_window_in_the_projects_main_checkout(
+        self, app, machine_world, _no_real_terminal_launch, _no_real_successor_watch
+    ):
+        app, token = app
+        _no_real_successor_watch.pid = 4242
+        key = self._gamma(app, token)
+        shown = json.loads(_get(app, _start_confirm_path(key, "flaky", "look at it"),
+                                token).body)
+        assert shown["name"] == "gamma-flaky", shown
+        assert shown["words"]["facts"][1] == "Main folder has no uncommitted changes"
+        response = _start_post(app, token, {"project": key, "nonce": shown["nonce"]})
+        job = json.loads(response.body)["job"]
+        (plan,) = _no_real_terminal_launch.plans
+        assert Path(plan.cwd).resolve() == machine_world["gamma"].root.resolve()
+        assert plan.argv[1:] == ("--name", "gamma-flaky", "--remote-control", "gamma-flaky",
+                                 "look at it")
+        assert job["ok"] is True and "pid 4242" in job["output"]
+        lines = (oracle_home() / AUDIT_FILE).read_text().splitlines()
+        assert [json.loads(line)["kind"] for line in lines] == ["start", "start"]
+
+    def test_a_flag_prompt_is_refused_on_the_server(self, app, _no_real_terminal_launch):
+        app, token = app
+        key = self._gamma(app, token)
+        shown = json.loads(_get(app, _start_confirm_path(key, "x", "--permission-mode=x"),
+                                token).body)
+        assert "flag" in shown["refused"] and shown["nonce"] is None
+        assert _no_real_terminal_launch.plans == []
+
+    def test_a_path_that_is_not_registered_is_refused(self, app, tmp_path,
+                                                      _no_real_terminal_launch):
+        app, token = app
+        shown = json.loads(_get(app, _start_confirm_path(str(tmp_path)), token).body)
+        assert "no registered project" in shown["refused"]
+        assert _no_real_terminal_launch.plans == []

@@ -33,6 +33,17 @@ them. It names a cause only from invariant's own line, and never guesses one
 line its command wrote (``panel.outcome_words``, ADR-009 D15). The output
 itself is kept as it was, behind "Show full output".
 
+**Starting a new session** (IDEA_030, ADR-009 D16) is the one action that is
+not a row's step. Its confirm names a registered project by its index key, a
+label and an optional first message; the server asks the CLI's own start path
+(``oracle/startsession.Starter``) what that would start, from its fresh read
+and the index, and binds the nonce to the project, the label, the name and the
+prompt it answered. The start carries the project and the nonce only: the
+label and prompt are the ones the server confirmed, prepared again, and a name
+that changed in between (another window took it) is not started. A start is a
+job like any other, audited, one per project at a time; :meth:`observe` marks
+it once a scan sees its window, so the panel can end its "Starting…" card.
+
 The oracle never answers a permission prompt, and neither does this: there is
 no route to one, and ``refusal`` refuses a step on a row that waits on one.
 """
@@ -52,7 +63,7 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-from ..core.errors import StateError
+from ..core.errors import InvariantError, StateError
 from . import panel
 from .actions import (
     Actions,
@@ -68,6 +79,7 @@ from .devices import Device
 from .home import append_private
 from .recommend import INFO, TERMINAL
 from .scan import row_key
+from .startsession import START, Starter, find_started
 
 #: The audit log, under the oracle home. A record, not derived state.
 AUDIT_FILE = "web/actions.log"
@@ -92,6 +104,10 @@ MAX_OUTPUT = 65536
 
 #: Characters of a reason's quoted line; a longer one ends in "…".
 MAX_REASON = 160
+
+#: The longest first message a start takes, in characters. It travels in the
+#: confirm's query string, so it is bounded well under the request line's cap.
+MAX_PROMPT = 4000
 
 #: How invariant's CLI starts the line it writes for an error it raised.
 OWN_PREFIX = "invariant: "
@@ -237,8 +253,12 @@ class Confirms:
         return len(self._book)
 
     def issue(self, device: str, row: str, step: Step) -> Confirm:
+        return self.bind(device, row, command_of(step))
+
+    def bind(self, device: str, row: str, command: tuple[Any, ...]) -> Confirm:
+        """A nonce for ``device`` and ``row`` that agrees to run ``command``."""
         now = self.clock()
-        confirm = Confirm(self.token(), device, row, command_of(step), now + self.ttl)
+        confirm = Confirm(self.token(), device, row, command, now + self.ttl)
         with self._lock:
             for nonce in [n for n, c in self._book.items() if c.expires <= now]:
                 del self._book[nonce]
@@ -331,6 +351,10 @@ class Job:
     why: str = ""
     #: What a successful close did, from its last line (ADR-009 D15).
     outcome: str = ""
+    #: A start's project, by its index key; ``None`` for a row's step.
+    project: str | None = None
+    #: Whether a scan has seen a start's window alive (:meth:`RemoteActions.observe`).
+    appeared: bool = False
     _began: float = field(default=0.0, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -340,7 +364,8 @@ class Job:
             "argv": list(self.argv), "cwd": self.cwd, "started": self.started,
             "remote_control": self.remote_control, "state": self.state, "ok": self.ok,
             "status": self.status, "output": self.output, "elapsed": self.elapsed,
-            "audit_error": self.audit_error,
+            "audit_error": self.audit_error, "project": self.project,
+            "appeared": self.appeared,
         }
         body["words"] = {**panel.result_words(body), "why": self.why, "outcome": self.outcome}
         return body
@@ -359,8 +384,11 @@ class RemoteActions:
         spawn: Callable[[Callable[[], None]], None] = start_thread,
         token: Callable[[], str] | None = None,
         ttl: float = CONFIRM_TTL,
+        starter: Starter | None = None,
     ) -> None:
         self.actions = actions
+        #: The CLI's start path; ``None`` and the page offers no start.
+        self.starter = starter
         #: A fresh read of the machine: the ``assess`` document, scanned now.
         self.fresh = fresh
         self.audit = audit
@@ -372,12 +400,15 @@ class RemoteActions:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def _read(self, key: str) -> tuple[dict[str, Any] | None, str | None]:
+    def _document(self) -> tuple[dict[str, Any] | None, str | None]:
         try:
-            document = self.fresh()
+            return self.fresh(), None
         except Exception as exc:  # noqa: BLE001 - shown to the page; the next read runs
             return None, f"the machine could not be read ({type(exc).__name__}: {exc})"
-        return find_row(document, key), None
+
+    def _read(self, key: str) -> tuple[dict[str, Any] | None, str | None]:
+        document, failed = self._document()
+        return (find_row(document, key) if document is not None else None), failed
 
     def confirm(self, device: Device, key: str) -> Answer:
         """What the confirm view shows for row ``key``, and its nonce if it may run.
@@ -440,7 +471,9 @@ class RemoteActions:
             return _refused(HTTPStatus.CONFLICT,
                             "the recommended step changed since it was confirmed; nothing "
                             "ran. Open it again to see what would run")
-        job = self._reserve(device, key, step)
+        name = terminal_request(step)[0] if step.kind == TERMINAL else None
+        job = self._reserve(device, key, step.subject, step.kind, step.argv, step.cwd,
+                            remote_control=name)
         if isinstance(job, str):
             return _refused(HTTPStatus.CONFLICT, job)
         try:
@@ -454,16 +487,17 @@ class RemoteActions:
         self.spawn(lambda: self._run(job, step, device))
         return Answer(HTTPStatus.ACCEPTED, {"job": self.job(device, job.id)})
 
-    def _reserve(self, device: Device, key: str, step: Step) -> Job | str:
+    def _reserve(self, device: Device, key: str, subject: str, kind: str,
+                 argv: tuple[str, ...], cwd: str | None, remote_control: str | None = None,
+                 project: str | None = None) -> Job | str:
         with self._lock:
             running = [j for j in self._jobs.values() if j.state == RUNNING]
             if any(j.row == key for j in running):
                 return "an action on this row is already running; wait for its result"
             if len(running) >= MAX_RUNNING:
                 return f"{len(running)} actions are already running; wait for one to finish"
-            name = terminal_request(step)[0] if step.kind == TERMINAL else None
-            job = Job(self.token(), device.id, key, step.subject, step.kind, step.argv,
-                      step.cwd, self.clock(), remote_control=name, _began=self.timer())
+            job = Job(self.token(), device.id, key, subject, kind, argv, cwd, self.clock(),
+                      remote_control=remote_control, project=project, _began=self.timer())
             self._jobs[job.id] = job
             done = [j for j in self._jobs.values() if j.state == DONE]
             for old in done[: max(0, len(self._jobs) - MAX_KEPT)]:
@@ -475,6 +509,9 @@ class RemoteActions:
             outcome = self.actions.perform(step)
         except Exception as exc:  # noqa: BLE001 - the page shows it; the server goes on
             outcome = Outcome(False, f"{type(exc).__name__}: {exc}")
+        self._finish(job, outcome, device)
+
+    def _finish(self, job: Job, outcome: Outcome, device: Device) -> None:
         with self._lock:
             job.state, job.ok, job.status = DONE, outcome.ok, outcome.status
             job.output = _tail(outcome.text)
@@ -485,6 +522,100 @@ class RemoteActions:
             self.audit.record(self._entry("done", job, device))
         except StateError as exc:
             job.audit_error = f"the audit line for its end could not be written: {exc}"
+
+    # -- starting a new session (ADR-009 D16) -------------------------------------
+
+    def _prepare(self, key: str, label: str | None, prompt: str | None,
+                 document: dict[str, Any]) -> dict[str, Any]:
+        """The start the CLI's own path answers, from this read; raises its refusal."""
+        project = next((p for p in document.get("projects", [])
+                        if (p.get("project") or {}).get("key") == key), {})
+        return self.starter.prepare(key, label, prompt, project)  # type: ignore[union-attr]
+
+    def confirm_start(self, device: Device, key: str, label: str, prompt: str) -> Answer:
+        """What the "New session" sheet shows for project ``key``, with its nonce.
+
+        ``label`` blank takes the time; ``prompt`` blank is none. The project
+        is resolved from the index by the CLI's path, never from a path the
+        client sent, and every refusal is the command's own. Nothing runs.
+        """
+        body: dict[str, Any] = {"project": key, "nonce": None, "refused": None,
+                                "expires_in": None, "words": None, "name": None,
+                                "label": label}
+        if len(prompt) > MAX_PROMPT:
+            return Answer(HTTPStatus.OK, {**body, "refused": (
+                f"the first message is longer than {MAX_PROMPT} characters; shorten it")})
+        document, failed = self._document()
+        if failed:
+            return Answer(HTTPStatus.SERVICE_UNAVAILABLE, {**body, "refused": failed})
+        try:
+            prepared = self._prepare(key, label.strip() or None, prompt or None, document)
+        except InvariantError as exc:
+            return Answer(HTTPStatus.OK, {**body, "refused": str(exc)})
+        command = (START, key, prepared["label"], prepared["name"], prepared["prompt"])
+        confirm = self.confirms.bind(device.id, _start_row(key), command)
+        return Answer(HTTPStatus.OK, {
+            **body, "nonce": confirm.nonce, "expires_in": self.confirms.ttl,
+            "name": prepared["name"], "label": prepared["label"],
+            "words": panel.start_words(prepared, prepared["project"].get("name") or "")})
+
+    def start(self, device: Device, key: str, nonce: str) -> Answer:
+        """Start what ``nonce`` confirmed for project ``key``, if it still would."""
+        command, why = self.confirms.spend(nonce, device.id, _start_row(key))
+        if why:
+            return _refused(HTTPStatus.FORBIDDEN, why)
+        if not command or command[0] != START:
+            return _refused(HTTPStatus.FORBIDDEN, "this confirm is not a start; nothing ran")
+        _, _, label, name, prompt = command
+        document, failed = self._document()
+        if failed:
+            return _refused(HTTPStatus.SERVICE_UNAVAILABLE, f"{failed}; nothing ran")
+        try:
+            prepared = self._prepare(key, label, prompt, document)
+        except InvariantError as exc:
+            return _refused(HTTPStatus.CONFLICT, f"{exc}; nothing ran")
+        if (prepared["name"], prepared["prompt"]) != (name, prompt):
+            return _refused(HTTPStatus.CONFLICT, (
+                f"the window would now be named {prepared['name']}, not {name}: another "
+                f"window took the name since the confirm; nothing ran. Open it again"))
+        job = self._reserve(device, _start_row(key), prepared["project"].get("name") or "",
+                            START, tuple(prepared["argv"]), prepared["cwd"],
+                            remote_control=name, project=key)
+        if isinstance(job, str):
+            return _refused(HTTPStatus.CONFLICT, job)
+        try:
+            self.audit.record(self._entry("start", job, device))
+        except StateError as exc:
+            with self._lock:
+                del self._jobs[job.id]
+            return _refused(HTTPStatus.SERVICE_UNAVAILABLE,
+                            f"the start could not be recorded in the audit log ({exc}); "
+                            f"nothing ran")
+        self.spawn(lambda: self._run_start(job, prepared, device))
+        return Answer(HTTPStatus.ACCEPTED, {"job": self.job(device, job.id)})
+
+    def _run_start(self, job: Job, prepared: dict[str, Any], device: Device) -> None:
+        try:
+            outcome = Outcome(True, self.starter.launch(prepared))  # type: ignore[union-attr]
+        except InvariantError as exc:
+            # The CLI's own error line, so "Why" quotes invariant (ADR-009 D9).
+            outcome = Outcome(False, f"{OWN_PREFIX}{exc}")
+        except Exception as exc:  # noqa: BLE001 - the page shows it; the server goes on
+            outcome = Outcome(False, f"{type(exc).__name__}: {exc}")
+        self._finish(job, outcome, device)
+
+    def observe(self, document: dict[str, Any]) -> None:
+        """Mark each start whose window ``document`` shows alive, by its name.
+
+        Once marked, the panel stops counting the minute the window has to
+        appear in, so a window that appeared and then closed is not reported
+        as one that never came.
+        """
+        with self._lock:
+            for job in self._jobs.values():
+                if (job.kind == START and not job.appeared
+                        and find_started(document, job.project or "", job.remote_control)):
+                    job.appeared = True
 
     @staticmethod
     def _entry(event: str, job: Job, device: Device) -> dict[str, Any]:
@@ -510,3 +641,8 @@ class RemoteActions:
 
 def _refused(status: int, error: str) -> Answer:
     return Answer(status, {"error": error})
+
+
+def _start_row(key: str) -> str:
+    """What a start's nonce and job are keyed by: one start per project at a time."""
+    return f"{key}|{START}"

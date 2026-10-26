@@ -103,6 +103,14 @@ class TestTheWebPlist:
         path = search_path(found.get, programs=launchd.WEB_PROGRAMS, extra=("/venv/bin",))
         assert path.split(":") == ["/x/bin", "/opt/ts", "/venv/bin", *launchd.SYSTEM_PATH]
 
+    def test_the_pages_search_path_finds_claude_for_a_start_from_the_phone(self):
+        # A session started from the page opens Claude from inside this agent
+        # (IDEA_030), so the directory claude is in must be on its PATH.
+        found = {"invariant": "/x/bin/invariant", "claude": "/c/bin/claude"}
+        path = search_path(found.get, programs=launchd.WEB_PROGRAMS)
+        assert "claude" in launchd.WEB_PROGRAMS
+        assert path.split(":")[:2] == ["/x/bin", "/c/bin"]
+
     def test_the_watchers_search_path_is_unchanged(self):
         found = {"git": "/g/git", "osascript": "/usr/bin/osascript"}
         assert search_path(found.get).split(":")[:2] == ["/g", "/usr/bin"]

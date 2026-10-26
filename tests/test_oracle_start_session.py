@@ -506,3 +506,134 @@ class TestTheSeamsAreGuarded:
         monkeypatch.setattr(launch.ClaudeCodeProbe, "host_processes", unreadable)
         monkeypatch.setattr(launch.ProcessTableWatch, "table", lambda self: "")
         assert cli_main._real_oracle_names_in_use() == set()
+
+
+# -- increment 2: what the page's start shares with the command ---------------
+
+
+def _named_host(host_id, name, alive=True):
+    return {"host_session_id": host_id, "alive": alive, "launched_name": name}
+
+
+class TestFindingTheStartedWindow:
+    """The "Starting…" card ends once a scan sees a live host by the start's name."""
+
+    def _doc(self, *rows, key="/k"):
+        return {"projects": [{"project": {"key": key, "name": "demo", "root": "/r"},
+                              "rows": list(rows)}]}
+
+    def test_a_live_host_launched_by_that_name_is_found(self):
+        row = {"kind": "host", "hosts": [_named_host("a", "demo-x")]}
+        assert startsession.find_started(self._doc(row), "/k", "demo-x") is row
+
+    def test_a_session_that_took_the_window_is_found_too(self):
+        row = {"kind": "session", "session_id": "s1",
+               "hosts": [_named_host("old", "demo-y", alive=False), _named_host("a", "demo-x")]}
+        assert startsession.find_started(self._doc(row), "/k", "demo-x") is row
+
+    @pytest.mark.parametrize("hosts", [
+        [_named_host("a", "demo-x", alive=False)],
+        [_named_host("a", "demo-x", alive=None)],
+        [_named_host("a", "demo-x-2")],
+        [{"host_session_id": "a", "alive": True}],
+        [],
+    ])
+    def test_a_dead_unknown_or_other_named_host_is_not(self, hosts):
+        doc = self._doc({"kind": "host", "hosts": hosts})
+        assert startsession.find_started(doc, "/k", "demo-x") is None
+
+    def test_another_projects_host_is_not(self):
+        doc = self._doc({"kind": "host", "hosts": [_named_host("a", "demo-x")]}, key="/other")
+        assert startsession.find_started(doc, "/k", "demo-x") is None
+
+    def test_a_worktree_or_error_row_never_matches(self):
+        doc = self._doc({"kind": "worktree", "hosts": [_named_host("a", "demo-x")]},
+                        {"kind": "error"})
+        assert startsession.find_started(doc, "/k", "demo-x") is None
+        assert startsession.find_started({}, "/k", "demo-x") is None
+        assert startsession.find_started(doc, "/k", None) is None
+
+
+class TestTheCommandReportsItsLabel:
+    def test_the_json_carries_the_label_it_named_the_window_by(
+        self, project, capsys, _no_real_terminal_launch, macos_with_claude
+    ):
+        assert main(["oracle", "start-session", "demo", "--name", "Flaky", "--dry-run",
+                     "--json"]) == 0
+        out = _json(capsys)
+        assert out["label"] == "Flaky" and out["name"] == "demo-flaky"
+
+    def test_without_a_label_it_reports_the_time_label(
+        self, project, capsys, _no_real_terminal_launch, macos_with_claude
+    ):
+        assert main(["oracle", "start-session", "demo", "--dry-run", "--json"]) == 0
+        out = _json(capsys)
+        assert re.fullmatch(r"\d{4}-\d{4}", out["label"])
+        assert out["name"] == f"demo-{out['label']}"
+
+
+class TestTheStarterThePageUses:
+    """``_oracle_starter``: the page's start is the command's own path, not a copy."""
+
+    def _starter(self):
+        return cli_main._oracle_starter(cli_main._project_index())
+
+    def _key(self, capsys):
+        assert main(["oracle", "projects", "list", "--json"]) == 0
+        return _json(capsys)["projects"][0]["key"]
+
+    def test_it_prepares_what_the_command_would_print(
+        self, project, capsys, _no_real_terminal_launch, macos_with_claude
+    ):
+        key = self._key(capsys)
+        prepared = self._starter().prepare(key, "Flaky", PROMPT, {})
+        assert main(["oracle", "start-session", key, "--name", "Flaky", "--prompt", PROMPT,
+                     "--dry-run", "--json"]) == 0
+        printed = _json(capsys)
+        assert {**prepared, "dry_run": True} == printed
+        assert prepared["argv"][-1] == PROMPT
+        assert _no_real_terminal_launch.plans == []
+
+    def test_a_blank_label_takes_the_time_and_a_blank_prompt_is_none(
+        self, project, capsys, macos_with_claude
+    ):
+        prepared = self._starter().prepare(self._key(capsys), None, "  ", {})
+        assert re.fullmatch(r"demo-\d{4}-\d{4}", prepared["name"])
+        assert prepared["prompt"] is None
+
+    def test_the_facts_come_from_the_project_it_is_handed(self, project, capsys,
+                                                          macos_with_claude):
+        doc = {"rows": [{"kind": "host", "hosts": [{"host_session_id": "a", "alive": True}]}]}
+        prepared = self._starter().prepare(self._key(capsys), "x", None, doc)
+        assert prepared["facts"]["open_windows"] == 1
+
+    @pytest.mark.parametrize("selector, label, prompt, said", [
+        ("nope", "x", None, "no registered project"),
+        (None, "!!!", None, "alphanumeric"),
+        (None, "x", "--dangerously-skip-permissions", "flag"),
+        (None, "x", "-p hello", "flag"),
+    ])
+    def test_it_refuses_what_the_command_refuses(self, project, capsys, macos_with_claude,
+                                                 selector, label, prompt, said):
+        key = self._key(capsys)
+        with pytest.raises(InvariantError, match=said):
+            self._starter().prepare(selector or key, label, prompt, {})
+
+    def test_it_launches_through_the_launcher_seam(
+        self, project, capsys, _no_real_terminal_launch, macos_with_claude, successor
+    ):
+        starter = self._starter()
+        prepared = starter.prepare(self._key(capsys), "x", PROMPT, {})
+        text = starter.launch(prepared)
+        (plan,) = _no_real_terminal_launch.plans
+        assert plan.argv[-1] == PROMPT and plan.name == "demo-x"
+        assert Path(plan.cwd).resolve() == project.resolve()
+        assert "claude is running as demo-x (pid 4242)" in text
+
+    def test_a_window_that_never_appears_is_an_error_with_the_line_to_run(
+        self, project, capsys, _no_real_terminal_launch, macos_with_claude
+    ):
+        starter = self._starter()
+        prepared = starter.prepare(self._key(capsys), "x", None, {})
+        with pytest.raises(InvariantError, match="did not start a successor"):
+            starter.launch(prepared)

@@ -940,9 +940,12 @@ invariant oracle start-session PROJECT [--prompt TEXT] [--name LABEL] [--dry-run
     INVARIANT_HANDOFF is unset in the window. It counts once the new claude
     is seen alive; otherwise exit 1 with the line to run by hand. Off macOS,
     or without claude on PATH, exit 1. --dry-run prints the command and the
-    facts and launches nothing. JSON: {"project", "name", "cwd", "argv",
-    "prompt", "by_hand", "facts": {"open_windows", "uncommitted", "dirty"},
-    "dry_run", "successor": {"pid"} | null}.
+    facts and launches nothing. JSON: {"project", "name", "label", "cwd",
+    "argv", "prompt", "by_hand", "facts": {"open_windows", "uncommitted",
+    "dirty"}, "dry_run", "successor": {"pid"} | null}; "label" is the label
+    the name was made from (the time when --name was not given). The web
+    page's "New session…" sheet runs this command's own prepare and launch
+    steps, not a copy (oracle.md, "Start a session").
 
 invariant oracle notify-test [--json]
     Post one notification through the seam the watcher uses, to check that

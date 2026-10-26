@@ -12,7 +12,9 @@ the server, transport and pairing it keeps, are in [oracle.md](oracle.md),
 failure reasons, and increment 6, orphan classes and close host, are what
 the page serves now; "As built in increment 3" to "As built in increment 6"
 below record where they fill in what this page left open. Increment 7 is not
-built.
+built. IDEA_030's increment 2 added the "New session" sheet and the
+"Starting…" card ("7 · New session" and "As built in IDEA_030 increment 2"
+below; ADR-009 D16).
 
 **Visual reference.** The approved mockup is a private claude.ai artifact of
 six 390-pixel-wide phone screens. The scratch files it was drawn from did not
@@ -46,6 +48,7 @@ graph TD
         DASH[dashboard]
         SIGNALS["signals / recommend (inc 6, shipped: orphan classes, close host)"]
         SCAN["scan (inc 6, shipped: rooted_here, claimed_elsewhere)"]
+        START["startsession (IDEA_030 inc 2: Starter, find_started)"]
     end
     CLI --> WEB
     WEB --> PANEL
@@ -56,6 +59,9 @@ graph TD
     WEBACT --> PANEL
     WEBACT --> ACTIONS
     SIGNALS --> SCAN
+    WEBACT --> START
+    PANEL --> START
+    CLI -. injects the Starter into .-> WEBACT
 ```
 
 `webactions → panel` is for the confirm's and the result's words: the
@@ -63,7 +69,10 @@ confirm sheet's title, sentence and button come from the same table as the
 card's button, and the result's "Why" is worded by `panel.why_words` from
 what `webactions.evidence` read in the output. The new arrows are `web → panel`, `panel → scan` (for
 `row_key` and the row kinds), `panel → signals` (the signal kinds and
-`recommend`'s step kinds) and `webactions → panel`. As built, the panel
+`recommend`'s step kinds) and `webactions → panel`. IDEA_030 adds
+`webactions → startsession` (the `Starter` the CLI injects, and
+`find_started`) and `panel → startsession` (`find_started` and the `start`
+kind), both pure. As built, the panel
 needs nothing from `dashboard`, so the `panel → dashboard` arrow this page
 first drew is not there, and `web` no longer reads `scan` or `signals`
 itself: the two arrows `web → scan` and `web → signals` went with the old
@@ -88,6 +97,11 @@ stateDiagram-v2
     Result --> Detail: Done
     Destructive --> Leftovers: Cancel (a close from the leftovers, inc 6)
     Result --> Leftovers: Done (a close from the leftovers, inc 6)
+    Overview --> NewSession: New session… (top bar), or a project's New session…
+    NewSession --> NewSession: an edit (the Mac is asked again)
+    NewSession --> Result: Start session
+    NewSession --> Overview: Cancel
+    Overview --> Result: a Starting… card
     Detail --> Overview: back
     Leftovers --> Overview: back
 ```
@@ -235,6 +249,56 @@ step is one the panel runs: "Close…" for a host every close guard lets go,
 "Attach…" for an unmanaged one that is the only live window the one
 session here without a window could take. A row with nothing to run has no
 pill, and the folders have none until increment 7.
+
+### 7 · New session (IDEA_030)
+
+A bottom sheet, built like screen 3, opened by "New session…" in the
+overview's top bar (left of Refresh; 44 px tall, radius 22, `surface-button`,
+15 px semibold; hidden on the detail and leftovers screens and on a page that
+cannot act) or by a project's "New session…" pill in the **Projects**
+section, the overview's last block: one 64 px list row per registered project,
+its name over "N live sessions", and the pill. The pill opens the sheet with
+that project chosen; the top bar's chooses the first.
+
+1. Grabber, the title "Start a new session?", and the sentence "A new
+   Terminal window on the Mac runs Claude with Remote Control in <project>'s
+   main folder."
+2. **Project**: a picker of the registered projects, the snapshot's list.
+3. **Name**: the label, a text field holding the time label ("1026-0049")
+   until edited, and under it the full name in 13 px monospace, "Remote
+   Control name: invariant-1026-0049".
+4. **First message (optional)**: a three-line text area, and the note
+   "Claude starts with this message. Leave it empty to start without one."
+5. **Checked just now**: an inset block, "N Claude windows already open here"
+   (or "No Claude window is open here") and "Main folder has uncommitted
+   changes (N files)" (or "has no uncommitted changes", or "Could not tell
+   …"). Neither blocks.
+6. A refusal, when the Mac refuses what the fields say: one red line, "Not
+   run: <reason>". The fields keep what was typed.
+7. A closed toggle, "Exact command and folder": the Command block (the
+   `claude` line with the first message quoted, Copy, "In <project> › main
+   checkout") and the folder.
+8. "Start session" (primary, 52 px) over Cancel, which holds focus, and the
+   expiry line.
+
+Fields are 16 px (so iOS does not zoom), at least 44 px tall and the sheet's
+full width. Each edit disables "Start session" and asks the Mac again 400 ms
+after the typing stops; the answer refills the name, the facts and the
+command in place and re-arms the button with a new nonce. What is posted is
+always what the sheet shows.
+
+**The Starting… card.** After "Start session", the result sheet shows the
+start like any action ("Running…", then "Opened in a new window" and "Pick
+it up from Remote Control on your phone as <name>."). On the overview the
+start is a compact card at the top of **Working**: the project, the name, and
+"Starting…". Tapping it opens the start's result. Once a scan sees a live
+Claude window launched by that name, the card is gone and the window's own
+row is drawn there instead, titled by the name; its detail says "Claude is
+running in a new window on the Mac. Pick it up from Remote Control on your
+phone as <name>." A window not seen a minute after the start, or a launch
+that failed, turns the card into a failure: a red "Did not start" chip and
+the reason, and tapping it opens the failed result (screen 5) with that
+reason under "Why".
 
 ## Components
 
@@ -403,6 +467,7 @@ these (ADR-009 D3).
 | `session adopt <host> --id` | Attach… | Attach this window to its session? | Binds the open Claude window to the one session here that has none. | Attach |
 | `oracle close-host <host> --pid --start [--tty]` | Close… | Close this Claude window? | Ends Claude in this window, then closes the Terminal tab. You can reopen the conversation later with claude --resume. (Destructive sheet: "This ends" lists the window and its process.) | Close window |
 | `doctor` | Check setup… | Run invariant's setup check? | Checks this project's hooks and settings. Nothing is changed. | Run check |
+| a start (`oracle start-session`, IDEA_030) | New session… | Start a new session? | A new Terminal window on the Mac runs Claude with Remote Control in <project>'s main folder. | Start session |
 | `info` step, or waiting | (no button) | — | — | — |
 
 Increment 6 added close host. Increment 7 adds rows here for kill a leaked
@@ -425,6 +490,8 @@ re-dispatch a stuck agent, each with its "This deletes" lines.
 | Failure fallback | Failed, exit N. <last meaningful line> |
 | Leftovers | Things that outlived their session. None of them needs you; tidy them when you like. · Claude windows with no session · Left-over folders · Show N more · Close… · Remove… |
 | Leftover classes (inc 6) | leftover host: Still open on the Mac · unmanaged: Open, never had a session · recently active (leftover or unmanaged): Active, no session · gone: Already closed · record only · unknown: Process id not recorded (no pid), Still open on the Mac (alive, no activity known) · process ids disagree: Its process ids disagree |
+| New session (IDEA_030) | New session… · Projects · Project · Name · Remote Control name: <name> · First message (optional) · Claude starts with this message. Leave it empty to start without one. · Exact command and folder · Start session · N Claude windows already open here / 1 Claude window already open here / No Claude window is open here · Main folder has uncommitted changes (N files) / (1 file) / Main folder has no uncommitted changes / Could not tell whether the main folder has uncommitted changes · No live session / 1 live session / N live sessions |
+| Starting card (IDEA_030) | Starting… · Did not start · The window did not appear on the Mac within a minute; check the Mac (a trust prompt or a login may be waiting). · Claude is running in a new window on the Mac. Pick it up from Remote Control on your phone as <name>. |
 | Back | Sessions |
 | Technical details | Session <id> · state <state> · lane <methodology>:<phase>; Host <id> · process id <pid> / process id not recorded / process ids disagree: <source> <pid> (<alive, gone or unknown>), … |
 
@@ -546,6 +613,24 @@ build decided what this page left open:
 | The result | A refusal is the "Why" panel ("invariant said: nothing was done: process 41001 has already exited"). A close that ran shows "What happened", the command's last line: "Claude ended, and its Terminal tab closed.", "… its Terminal window closed.", "Claude ended; the window was left open because …", or the Automation sentence. The job's `words` gain `outcome` (`panel.outcome_words`), empty for every other step |
 | A conflict row | "Its process ids disagree" on the leftovers screen, and "process ids disagree: attention 3 (gone), record 4 (alive)" under Technical details, instead of "process id not recorded" |
 | Close beside Attach (a known gap) | Not offered. A row has one step, the one `recommend` derives, and the confirm and the action are keyed by the row alone (ADR-008 D9), so a window offered "Attach…" cannot also reach "Close…" from the panel. A second action per row needs the route of its own that "More actions" waits for: a step selector bound into the nonce, re-derived on the server, and a second pill on the leftovers row. Until then the unique-attach rule keeps Attach rare, and a window that is attached can be closed through its session. Asked for 2026-10-25; left for increment 7 |
+
+## As built in IDEA_030 increment 2
+
+Start a new session from the phone (ADR-009 D16). Where the build decided
+what this page and IDEA_030 left open:
+
+| Question | As built |
+|---|---|
+| Where the per-project shortcut lives | The overview groups by attention, not by project, so there is no project header to put it on. A **Projects** section after the leftovers card lists every registered project (the snapshot's list, so an unregistered folder is never offered) with its live sessions counted and a "New session…" pill |
+| The top bar's button | "New session…": it opens a confirm, so it ends with "…" (the wording rule above) |
+| The routes | `GET /api/start/confirm?project=<key>&label=&prompt=` answers the sheet and a nonce; `POST /api/start {project, nonce}` starts it, from this page's `Origin` only. A server without a starter, and a read-only one, answers neither, and the view's `start` is `null` (oracle.md, "From the phone") |
+| How the name is shown before the start | The Mac answers it: the slug and the `-2` suffix are `startsession.session_name`'s, never the page's. The page asks again after each pause in the typing, and "Start session" waits for the answer |
+| When the card ends | When `startsession.find_started` finds a live host in the project whose `launched_name` is the name. `RemoteActions.observe` marks the job `appeared` on each state read, so a window that appeared and closed again leaves nothing rather than a false "did not appear" |
+| Where the window is drawn once seen | Its orphan-host row, titled by the name, under Working while its orphan class is `active` (alive and heard from within the hour); it is not also counted as a leftover. Quiet longer than that, it is a leftover again. A session that took the window is drawn as that session |
+| The minute | `panel.START_APPEARS_WITHIN`, 60 s from the start, against the document's own `now`, so a stale snapshot never fails a start early |
+| How long a failure stays | `panel.START_FAILURE_SHOWN`, an hour from the start; after it the audit log has it |
+| Where the starts are kept | With every action's result, in `RemoteActions`' memory (the last 20 per server), so a pending start survives a page refresh and a reload, and is listed for its device only. A restart of the server forgets it, as it forgets any result (the audit log keeps both lines) |
+| A launch that failed | The job's own "Why", quoting invariant's sentence ("invariant said: the launch did not start a successor: …"); the card's line is the same sentence |
 
 ## Increment plan
 

@@ -2956,25 +2956,24 @@ def _oracle_names_in_use() -> set[str]:
     return _real_oracle_names_in_use()
 
 
-def cmd_oracle_start_session(args) -> int:
-    """Open a new Claude window, Remote Control on, in a registered project (ADR-009 D16).
+def _start_prepare(index, selector: str, label: str | None, prompt: str | None, now: float,
+                   project: dict | None = None):
+    """What ``oracle start-session`` would start: ``(entry, result)``, nothing launched.
 
-    The project is one the oracle's index names, by key, root or name; nothing
-    else is launchable. The window runs ``claude --name <name>
-    --remote-control <name> [prompt]`` in the project's recorded root, its
-    main checkout, in Claude's default permission mode. No invariant session
-    is created: Claude starts one itself, as it does in any window. Before the
-    launch it reports the two facts the confirm shows, the Claude windows
-    already open in the project and the main checkout's uncommitted changes;
-    neither blocks the start.
+    The one place a start is decided, for the command and the page alike
+    (ADR-009 D16). ``selector`` is matched as ``projects remove`` matches it,
+    so a path the index does not name is refused; so is a root that lost its
+    manifest and a project whose host is not Claude Code. ``label`` ``None``
+    takes the time; a blank ``prompt`` is none, and one that reads as a flag
+    is refused when the plan is built. The facts come from ``project``, one
+    project of the ``assess`` document, else from a scan of this project now.
     """
     from ..hosts import claude_code_launch as launch
     from ..oracle import startsession
     from ..oracle.recommend import assess
     from ..oracle.scan import scan_all
 
-    index = _project_index()
-    entry = index.match(args.project)
+    entry = index.match(selector)
     if not entry.has_manifest:
         raise UsageError(
             f"{entry.name} is registered, but {entry.root or 'its root'} no longer "
@@ -2987,57 +2986,99 @@ def cmd_oracle_start_session(args) -> int:
             f"oracle start-session starts a Claude Code session, and {entry.name}'s "
             f"host.kind is {kind!r}, not 'claude_code'"
         )
-    now = time.time()
-    label = args.name if args.name is not None else startsession.default_label(now)
+    label = label if label is not None else startsession.default_label(now)
     name = startsession.session_name(entry.name, label, _oracle_names_in_use())
-    prompt = args.prompt if args.prompt and args.prompt.strip() else None
-
-    snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
-    projects = assess(snapshots, now)["projects"]
-    facts = startsession.start_facts(
-        projects[0] if projects else {}, startsession.checkout_changes(entry.root)
-    )
-    claude = launch.resolve_claude()
+    prompt = prompt if prompt and prompt.strip() else None
+    if project is None:
+        snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
+        projects = assess(snapshots, now)["projects"]
+        project = projects[0] if projects else {}
+    facts = startsession.start_facts(project, startsession.checkout_changes(entry.root))
     preview = launch.plan_launch(
-        claude or launch.CLAUDE_BINARY, name, prompt, entry.root, stage=False
+        launch.resolve_claude() or launch.CLAUDE_BINARY, name, prompt, entry.root, stage=False
     )
-    result = {
+    return entry, {
         "project": entry.to_dict(),
         "name": name,
+        "label": label,
         "cwd": preview.cwd,
         "argv": list(preview.argv),
         "prompt": prompt,
         "by_hand": preview.by_hand,
         "facts": facts,
-        "dry_run": bool(args.dry_run),
+        "dry_run": False,
         "successor": None,
     }
+
+
+def _start_launch(result: dict) -> tuple[dict, list[str]]:
+    """Open the window ``_start_prepare`` described: ``(result, lines)``.
+
+    Through ``_open_claude_window``, the one launcher, in the entry's recorded
+    root. Raises when the window did not open, with the line to run by hand.
+    """
+    name = result["name"]
+    plan, pid = _open_claude_window(name, result["prompt"], result["project"]["root"])
+    lines = [
+        f"  opened a new Terminal window in {plan.cwd}:",
+        f"    {shlex.join(plan.argv)}",
+        f"  claude is running as {name} (pid {pid}); Remote Control lists it by that name",
+    ]
+    return {**result, "argv": list(plan.argv), "successor": {"pid": pid}}, lines
+
+
+def _oracle_starter(index):
+    """The page's way into ``oracle start-session``'s own path (ADR-009 D16).
+
+    ``prepare`` and ``launch`` are ``_start_prepare`` and ``_start_launch``,
+    so a start from the phone is decided, refused and launched exactly as one
+    from a terminal, through the same seams the suite replaces.
+    """
+    from ..oracle.startsession import Starter
+
+    def prepare(selector: str, label: str | None, prompt: str | None, project: dict) -> dict:
+        return _start_prepare(index, selector, label, prompt, time.time(), project)[1]
+
+    def launch(prepared: dict) -> str:
+        return "\n".join(_start_launch(prepared)[1])
+
+    return Starter(prepare=prepare, launch=launch)
+
+
+def cmd_oracle_start_session(args) -> int:
+    """Open a new Claude window, Remote Control on, in a registered project (ADR-009 D16).
+
+    The project is one the oracle's index names, by key, root or name; nothing
+    else is launchable. The window runs ``claude --name <name>
+    --remote-control <name> [prompt]`` in the project's recorded root, its
+    main checkout, in Claude's default permission mode. No invariant session
+    is created: Claude starts one itself, as it does in any window. Before the
+    launch it reports the two facts the confirm shows, the Claude windows
+    already open in the project and the main checkout's uncommitted changes;
+    neither blocks the start. The panel's "New session" sheet runs the same
+    two steps (``_oracle_starter``).
+    """
+    from ..hosts import claude_code_launch as launch
+    from ..oracle import startsession
+
+    entry, result = _start_prepare(_project_index(), args.project, args.name, args.prompt,
+                                   time.time())
+    result["dry_run"] = bool(args.dry_run)
     head = [
-        f"start {name} in {entry.name}" + (" — dry run, nothing launched" if args.dry_run else ""),
-        *(f"  {line}" for line in startsession.fact_lines(facts)),
+        f"start {result['name']} in {entry.name}"
+        + (" — dry run, nothing launched" if args.dry_run else ""),
+        *(f"  {line}" for line in startsession.fact_lines(result["facts"])),
     ]
     if args.dry_run:
-        lines = [*head, f"  command: {preview.by_hand}"]
-        if claude is None:
+        lines = [*head, f"  command: {result['by_hand']}"]
+        if launch.resolve_claude() is None:
             lines.append(
                 f"  note: {launch.CLAUDE_BINARY} is not on PATH; a real run refuses until it is"
             )
         return emit(args, result, "\n".join(lines))
 
-    plan, pid = _open_claude_window(name, prompt, entry.root)
-    result.update({"argv": list(plan.argv), "successor": {"pid": pid}})
-    return emit(
-        args,
-        result,
-        "\n".join(
-            [
-                *head,
-                f"  opened a new Terminal window in {plan.cwd}:",
-                f"    {shlex.join(plan.argv)}",
-                f"  claude is running as {name} (pid {pid}); Remote Control lists it by that name",
-            ]
-        ),
-    )
+    result, opened = _start_launch(result)
+    return emit(args, result, "\n".join([*head, *opened]))
 
 
 def cmd_oracle_tui(args) -> int:
@@ -3502,7 +3543,8 @@ def cmd_oracle_web(args) -> int:
         with reading:
             return _oracle_scan_document(index, cache, gates)
 
-    remote = RemoteActions(_oracle_actions(), scan, AuditLog(index.home))
+    remote = RemoteActions(_oracle_actions(), scan, AuditLog(index.home),
+                           starter=_oracle_starter(index))
     certificates = Certificates(index.home, _oracle_web_certificates())
 
     def listener(bound: list[str], served=None):

@@ -8,7 +8,13 @@ same facts and the same name from the same functions:
   until no live Claude window holds it (:func:`session_name`);
 * **the facts the confirm shows**: how many Claude windows are open in the
   project and whether its main checkout has uncommitted changes
-  (:func:`start_facts`). They inform; neither blocks a start.
+  (:func:`start_facts`). They inform; neither blocks a start;
+* **the window, once it is there**: the row of a later scan whose live host
+  was launched by the start's name (:func:`find_started`), which ends the
+  panel's "Starting…" card.
+
+The page reaches the command's own path through a :class:`Starter` the CLI
+builds, so a start from the phone and one from a terminal are one code path.
 
 Everything here is pure but :func:`checkout_changes`, which asks git one
 read-only question with optional locks off, so it never takes ``index.lock``
@@ -20,6 +26,8 @@ Claude Code's, and the CLI joins them.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +38,32 @@ from .scan import ROW_HOST, ROW_SESSION
 #: The default label: the month, day, hour and minute the start was asked
 #: for, in local time, so ``heap-1026-0930`` reads as "this morning's".
 LABEL_FORMAT = "%m%d-%H%M"
+
+#: A job that starts a new Claude window: the kind beside ``run`` and
+#: ``terminal`` that the page's actions and the panel's words key on.
+START = "start"
+
+
+@dataclass(frozen=True)
+class Starter:
+    """How the page's start reaches ``invariant oracle start-session``'s own path.
+
+    The CLI builds it (the oracle imports nothing from ``hosts/`` or the CLI):
+
+    * ``prepare(project, label, prompt, scanned)`` answers what the command
+      would print with ``--dry-run --json`` for that selector, label and
+      prompt, the facts read from ``scanned``, one project of the ``assess``
+      document (``{}`` when the read has none). It refuses, with an
+      ``InvariantError``, whatever the command refuses: a project the index
+      does not name, a label with no letter or digit, a prompt that reads as
+      a flag. Nothing is launched.
+    * ``launch(prepared)`` opens the window ``prepare`` described, through
+      the one launcher, and returns the lines the command prints; it raises
+      ``InvariantError`` when the window did not open.
+    """
+
+    prepare: Callable[[str, str | None, str | None, dict[str, Any]], dict[str, Any]]
+    launch: Callable[[dict[str, Any]], str]
 
 
 def default_label(now: float) -> str:
@@ -70,6 +104,28 @@ def open_windows(project: dict[str, Any]) -> int:
             if host.get("alive") is True:
                 alive.add(host.get("host_session_id"))
     return len(alive)
+
+
+def find_started(document: dict[str, Any], key: str, name: str | None) -> dict[str, Any] | None:
+    """The row of project ``key`` whose live host was launched as ``name``; else ``None``.
+
+    ``document`` is an ``assess`` document. The host is matched by the name
+    Claude Code's per-process record carries (``launched_name``), and only a
+    host known to be alive counts. The row is the orphan host a new window is
+    at first, or the session that took it once Claude started one.
+    """
+    if not name:
+        return None
+    for project in document.get("projects") or []:
+        if (project.get("project") or {}).get("key") != key:
+            continue
+        for row in project.get("rows") or []:
+            if row.get("kind") not in (ROW_SESSION, ROW_HOST):
+                continue
+            if any(h.get("alive") is True and h.get("launched_name") == name
+                   for h in row.get("hosts") or []):
+                return row
+    return None
 
 
 def checkout_changes(root: Path | str) -> int | None:
