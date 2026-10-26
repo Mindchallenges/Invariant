@@ -66,7 +66,8 @@ host session rooted in Heap, not from here.
 Then A1 and B1 in parallel; A2, then A3, then A4. B2 and B3 after A2 and A3.
 B4 after A6. B5 last. A5, A7 and A8 anywhere after A4. Sequencing set by the
 user on 2026-10-26: [IDEA_030](IDEA_030.md) is finished before any of this
-starts.
+starts, and [IDEA_032](IDEA_032.md) (scheduled sweep, T1) goes ahead of the
+BUG_040 fix and A0.
 
 **Acceptance:**
 
