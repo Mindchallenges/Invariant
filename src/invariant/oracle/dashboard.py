@@ -162,6 +162,9 @@ class Line:
     #: session, so it carries the session's row.
     row: dict[str, Any]
     nested: bool = False
+    #: The index key of the line's project, so the "New session" key can
+    #: preselect it. A nested host line carries its session's.
+    project_key: str = ""
 
 
 def next_text(advice: dict[str, Any] | None) -> str:
@@ -236,6 +239,7 @@ def lines(document: dict[str, Any]) -> list[Line]:
                     next=next_text(row.get("recommendation")),
                     tone=row_tone(row),
                     row=row,
+                    project_key=entry.get("key", ""),
                 )
             )
             if row.get("kind") != ROW_SESSION:
@@ -253,6 +257,7 @@ def lines(document: dict[str, Any]) -> list[Line]:
                         tone=DIM,
                         row=row,
                         nested=True,
+                        project_key=entry.get("key", ""),
                     )
                 )
     return out

@@ -100,6 +100,7 @@ invariant oracle list                 # every session, every project, plain inst
 invariant oracle install              # a LaunchAgent that keeps the watcher running
 invariant oracle tui                  # the dashboard (the [oracle] extra adds Textual)
 invariant oracle install --web        # the same panel on your phone, over Tailscale only
+invariant oracle start-session <project> [--prompt TEXT]  # a new Claude window, Remote Control on
 ```
 
 The phone page is a control panel: it leads with what needs you, and every
@@ -109,6 +110,14 @@ and can close one properly: Claude is asked to exit, never killed, and the
 Terminal tab goes only when nothing but a shell is left in it. A window that
 is working, waiting for you, used in the last hour, or not identified beyond
 doubt is never offered. The oracle never answers a permission prompt.
+
+The panel, the dashboard (`n`) and `invariant oracle start-session` can also
+start a new Claude window on the Mac, with Remote Control on, in any
+registered project, so you can pick it up on the phone. Each shows the
+project, the window's name, the exact command, how many Claude windows are
+already open there and whether the main checkout has uncommitted changes, and
+starts nothing until you confirm. Claude runs in its default permission mode:
+there is no option to skip permission prompts.
 
 Setup, pairing and troubleshooting: [The oracle on your phone](docs/guide/oracle-web.md).
 

@@ -8,8 +8,8 @@
   D15. Increment 7's clean-up actions remain; the two facts they waited for,
   BUG_078 and IDEA_024, have shipped. D16, the oracle starting a new Claude
   window (IDEA_030), was added on 2026-10-26; its CLI core and shared
-  launcher shipped with IDEA_030 increment 1, and the panel's sheet and the
-  TUI key follow. IDEA_029's transcript decision is D17.
+  launcher shipped with IDEA_030 increment 1, the panel's sheet with
+  increment 2, and the TUI key with increment 3. IDEA_029's transcript decision is D17.
   The design of record (screens, components, tokens, wording) is
   [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23

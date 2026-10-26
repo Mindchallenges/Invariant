@@ -637,3 +637,67 @@ class TestTheStarterThePageUses:
         prepared = starter.prepare(self._key(capsys), "x", None, {})
         with pytest.raises(InvariantError, match="did not start a successor"):
             starter.launch(prepared)
+
+
+#: A read of two projects, for the shared confirm rule.
+TWO_PROJECTS = {"projects": [
+    {"project": {"key": "k-a", "name": "a"}, "rows": [{"kind": "host"}]},
+    {"project": {"key": "k-b", "name": "b"}, "rows": []},
+]}
+
+
+class TestConfirmingAgain:
+    """``Starter.prepare_in`` and ``Starter.again``: the one rule the page and the TUI share.
+
+    A start is prepared from one project of a read, and at the button it is
+    prepared again from a fresh read; a name that moved since the confirm, or
+    any refusal the command makes, starts nothing.
+    """
+
+    DOC = TWO_PROJECTS
+
+    def _starter(self, taken=(), refuse=None):
+        calls = []
+
+        def prepare(key, label, prompt, project):
+            calls.append((key, label, prompt, project))
+            if refuse:
+                raise InvariantError(refuse)
+            name = startsession.session_name(key, label or "1026-0930", set(taken))
+            return {"name": name, "label": label or "1026-0930", "prompt": prompt}
+
+        return startsession.Starter(prepare=prepare, launch=lambda p: ""), calls
+
+    def test_project_of_finds_one_project_of_the_read(self):
+        assert startsession.project_of(self.DOC, "k-b")["project"]["name"] == "b"
+        assert startsession.project_of(self.DOC, "nope") == {}
+        assert startsession.project_of({}, "k-a") == {}
+
+    def test_prepare_in_hands_the_starter_that_project(self):
+        starter, calls = self._starter()
+        starter.prepare_in(self.DOC, "k-a", None, "go")
+        assert calls == [("k-a", None, "go", self.DOC["projects"][0])]
+
+    def test_again_is_the_start_when_nothing_moved(self):
+        starter, _ = self._starter()
+        prepared, why = starter.again(self.DOC, "k-a", "x", "k-a-x", "go")
+        assert why is None and prepared["name"] == "k-a-x"
+
+    def test_again_refuses_a_name_another_window_took(self):
+        starter, _ = self._starter(taken={"k-a-x"})
+        prepared, why = starter.again(self.DOC, "k-a", "x", "k-a-x", None)
+        assert prepared is None
+        assert why == ("the window would now be named k-a-x-2, not k-a-x: another window "
+                       "took the name since the confirm; nothing ran. Open it again")
+
+    def test_again_turns_the_commands_refusal_into_nothing_ran(self):
+        starter, _ = self._starter(refuse="no registered project matches 'k-a'")
+        prepared, why = starter.again(self.DOC, "k-a", "x", "k-a-x", None)
+        assert prepared is None
+        assert why == "no registered project matches 'k-a'; nothing ran"
+
+    def test_choices_are_the_reads_projects_by_name(self):
+        assert startsession.choices(self.DOC) == [("a", "k-a"), ("b", "k-b")]
+        assert startsession.choices({"projects": [{"project": {"key": "k"}}]}) == [("k", "k")]
+        assert startsession.choices({}) == []
+        assert startsession.choices({"projects": [{"project": {"name": "keyless"}}]}) == []

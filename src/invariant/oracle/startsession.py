@@ -13,8 +13,11 @@ same facts and the same name from the same functions:
   was launched by the start's name (:func:`find_started`), which ends the
   panel's "Starting…" card.
 
-The page reaches the command's own path through a :class:`Starter` the CLI
-builds, so a start from the phone and one from a terminal are one code path.
+The page and the dashboard reach the command's own path through a
+:class:`Starter` the CLI builds, so a start from the phone, from the TUI and
+from a terminal are one code path. :meth:`Starter.again` is the one rule for
+the button: prepare again from a fresh read, and start nothing if the name
+moved since the confirm.
 
 Everything here is pure but :func:`checkout_changes`, which asks git one
 read-only question with optional locks off, so it never takes ``index.lock``
@@ -32,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import git
+from ..core.errors import InvariantError
 from ..domains.session import handoff_name
 from .scan import ROW_HOST, ROW_SESSION
 
@@ -64,6 +68,53 @@ class Starter:
 
     prepare: Callable[[str, str | None, str | None, dict[str, Any]], dict[str, Any]]
     launch: Callable[[dict[str, Any]], str]
+
+    def prepare_in(self, document: dict[str, Any], key: str, label: str | None,
+                   prompt: str | None) -> dict[str, Any]:
+        """``prepare`` with the facts read from project ``key`` of ``document``."""
+        return self.prepare(key, label, prompt, project_of(document, key))
+
+    def again(self, document: dict[str, Any], key: str, label: str, name: str,
+              prompt: str | None) -> tuple[dict[str, Any] | None, str | None]:
+        """At the button: ``(prepared, None)`` if the confirm still holds, else ``(None, why)``.
+
+        ``label``, ``name`` and ``prompt`` are what the confirm showed, the
+        label already resolved, so a default time label is not taken again.
+        The start is prepared once more from ``document``, a fresh read. A
+        refusal the command makes, and a name another window took since the
+        confirm, start nothing: a window is never started under a name the
+        person did not see. ``why`` ends in "nothing ran".
+        """
+        try:
+            prepared = self.prepare_in(document, key, label, prompt)
+        except InvariantError as exc:
+            return None, f"{exc}; nothing ran"
+        if (prepared["name"], prepared["prompt"]) != (name, prompt):
+            return None, (f"the window would now be named {prepared['name']}, not {name}: "
+                          f"another window took the name since the confirm; nothing ran. "
+                          f"Open it again")
+        return prepared, None
+
+
+def project_of(document: dict[str, Any], key: str) -> dict[str, Any]:
+    """Project ``key`` of an ``assess`` document; ``{}`` when the read has none."""
+    return next((p for p in document.get("projects") or []
+                 if (p.get("project") or {}).get("key") == key), {})
+
+
+def choices(document: dict[str, Any]) -> list[tuple[str, str]]:
+    """``(name, key)`` of each project of the read, in its order: what a picker offers.
+
+    The read lists every registered project, so the picker offers exactly
+    those; whatever is chosen is still resolved by the index in ``prepare``.
+    """
+    out = []
+    for project in document.get("projects") or []:
+        entry = project.get("project") or {}
+        key = entry.get("key")
+        if key:
+            out.append((entry.get("name") or key, key))
+    return out
 
 
 def default_label(now: float) -> str:

@@ -128,6 +128,28 @@ Without the watcher the dashboard still works. It scans in-process and shows
 a "watcher not running" banner. It never answers a permission prompt for
 you. See [the oracle's architecture page](../architecture/oracle.md).
 
+**Starting a session.** The oracle can open a new Claude window on the Mac,
+with Remote Control on, in any registered project:
+
+```bash
+invariant oracle start-session <project> --prompt "look at the flaky test" --dry-run
+invariant oracle start-session <project>    # opens it; --name sets the label
+```
+
+In the dashboard, `n` opens the same start as a confirm: pick the project
+(the highlighted row's is chosen for you), add a first message or a label if
+you like, and check the name, the exact command, the Claude windows already
+open there and the main checkout's uncommitted changes before you press
+Start. The phone page's "New session…" sheet is the same start. Claude runs
+in its default permission mode, and the oracle answers none of its prompts.
+
+**After upgrading, run `invariant oracle install --web` again** if you serve
+the page, from a shell where `claude` resolves (`command -v claude` prints a
+path). The page's agent runs with the `PATH` its plist sets, and the install
+adds the folder `claude` is in only when it can find it; a plist written
+before the upgrade does not carry it, and a start from the phone then fails
+with "no claude on PATH to start".
+
 ### The dashboard on your phone, over Tailscale
 
 The oracle can serve its dashboard from the Mac to your phone, with the same

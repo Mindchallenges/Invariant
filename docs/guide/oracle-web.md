@@ -395,6 +395,10 @@ tap it for its details. If the window has not appeared after a minute, the
 card says "Did not start" and why. Every start is logged on the Mac in
 `~/.invariant/web/actions.log`, with the line it ran.
 
+The same start is `n` in `invariant oracle tui` on the Mac, and `invariant
+oracle start-session <project>` on its command line; all three ask the same
+questions and refuse the same things.
+
 **Copy** puts the exact command on the clipboard, with any variable it needs
 in front, so you can run it in a terminal of your own. Copying runs nothing.
 Over plain HTTP the phone does not allow the clipboard, so the command is

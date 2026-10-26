@@ -293,6 +293,11 @@ class AuditLog:
     watcher's derived ``oracle/``. Only :meth:`last` reads it back, for
     ``oracle status`` and ``doctor`` (ADR-008 D17). It holds no token, nonce,
     environment or output.
+
+    A line's ``argv`` is the command as it ran. For a ``start`` (ADR-009 D16)
+    that is the ``claude`` line, so it carries the first message the new
+    window was started with: the message is part of what ran, and nothing
+    else records it.
     """
 
     def __init__(self, home: Path, clock: Callable[[], float] = time.time) -> None:
@@ -525,13 +530,6 @@ class RemoteActions:
 
     # -- starting a new session (ADR-009 D16) -------------------------------------
 
-    def _prepare(self, key: str, label: str | None, prompt: str | None,
-                 document: dict[str, Any]) -> dict[str, Any]:
-        """The start the CLI's own path answers, from this read; raises its refusal."""
-        project = next((p for p in document.get("projects", [])
-                        if (p.get("project") or {}).get("key") == key), {})
-        return self.starter.prepare(key, label, prompt, project)  # type: ignore[union-attr]
-
     def confirm_start(self, device: Device, key: str, label: str, prompt: str) -> Answer:
         """What the "New session" sheet shows for project ``key``, with its nonce.
 
@@ -549,7 +547,8 @@ class RemoteActions:
         if failed:
             return Answer(HTTPStatus.SERVICE_UNAVAILABLE, {**body, "refused": failed})
         try:
-            prepared = self._prepare(key, label.strip() or None, prompt or None, document)
+            prepared = self.starter.prepare_in(  # type: ignore[union-attr]
+                document, key, label.strip() or None, prompt or None)
         except InvariantError as exc:
             return Answer(HTTPStatus.OK, {**body, "refused": str(exc)})
         command = (START, key, prepared["label"], prepared["name"], prepared["prompt"])
@@ -570,14 +569,10 @@ class RemoteActions:
         document, failed = self._document()
         if failed:
             return _refused(HTTPStatus.SERVICE_UNAVAILABLE, f"{failed}; nothing ran")
-        try:
-            prepared = self._prepare(key, label, prompt, document)
-        except InvariantError as exc:
-            return _refused(HTTPStatus.CONFLICT, f"{exc}; nothing ran")
-        if (prepared["name"], prepared["prompt"]) != (name, prompt):
-            return _refused(HTTPStatus.CONFLICT, (
-                f"the window would now be named {prepared['name']}, not {name}: another "
-                f"window took the name since the confirm; nothing ran. Open it again"))
+        prepared, moved = self.starter.again(  # type: ignore[union-attr]
+            document, key, label, name, prompt)
+        if prepared is None:
+            return _refused(HTTPStatus.CONFLICT, str(moved))
         job = self._reserve(device, _start_row(key), prepared["project"].get("name") or "",
                             START, tuple(prepared["argv"]), prepared["cwd"],
                             remote_control=name, project=key)

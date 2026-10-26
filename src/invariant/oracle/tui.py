@@ -23,6 +23,16 @@ web page and ``oracle status`` use too.
 an ``info`` step shows its text and has no action; a ``run`` or ``terminal``
 step shows the exact argv, cwd and environment, focuses Cancel, and runs only
 on ``y`` or the Run button. The output is shown when it finishes.
+
+**A new session, the same way** (IDEA_030, ADR-009 D16). ``n`` opens the "New
+session" modal: a picker of the registered projects, the highlighted row's
+preselected, an optional first message, an editable label, and what would
+start, the full name, the two facts (open windows, uncommitted changes in the
+main checkout) and the exact command, asked of the CLI's own
+:class:`~invariant.oracle.startsession.Starter` after every edit. Nothing runs
+until Start; Start prepares again from a fresh read and starts nothing if the
+name moved (:meth:`~invariant.oracle.startsession.Starter.again`), and the
+outcome is shown as a step's output is.
 """
 
 from __future__ import annotations
@@ -38,8 +48,9 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Button, DataTable, Footer, Header, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, Select, Static
 
+from ..core.errors import InvariantError
 from .actions import Actions, Outcome, Step, refusal, step_for
 from .dashboard import (
     AMBER,
@@ -53,6 +64,7 @@ from .dashboard import (
     lines,
 )
 from .recommend import INFO
+from .startsession import Starter, choices, fact_lines
 from .watcher import DEFAULT_INTERVAL
 
 COLUMNS = ("project", "session", "stage / lane", "status", "signals", "next")
@@ -69,6 +81,17 @@ _MODAL_CSS = """
 {name} Horizontal {{ height: auto; margin-top: 1; }}
 {name} Button {{ margin-right: 2; }}
 """
+
+#: Seconds the "New session" modal waits after an edit before it asks again,
+#: as the page waits after a keystroke: reading the names in use costs a
+#: process-table read.
+START_DEBOUNCE = 0.3
+
+#: What the modal says about the mode; there is no choice to offer (D16).
+START_MODE = (
+    "Claude's default permission mode: every permission prompt reaches you "
+    "through Remote Control, and the oracle answers none"
+)
 
 
 class InfoScreen(ModalScreen[None]):
@@ -135,12 +158,12 @@ class ConfirmScreen(ModalScreen[bool]):
 
 
 class OutputScreen(InfoScreen):
-    """What a confirmed step did."""
+    """What a confirmed step, or a start, did."""
 
     DEFAULT_CSS = _MODAL_CSS.format(name="OutputScreen")
 
-    def __init__(self, step: Step, outcome: Outcome) -> None:
-        super().__init__(f"{step.subject}: {step.label}", outcome.text or "(no output)")
+    def __init__(self, title: str, outcome: Outcome) -> None:
+        super().__init__(title, outcome.text or "(no output)")
         self.outcome = outcome
 
     def compose(self) -> ComposeResult:
@@ -159,6 +182,128 @@ class OutputScreen(InfoScreen):
                 yield Button("Close", id="close")
 
 
+class StartScreen(ModalScreen["tuple[str, dict] | None"]):
+    """The "New session" confirm: what would start, asked again on every edit.
+
+    Every answer is the Starter's, the CLI's own ``_start_prepare``, so the
+    name, the facts, the command and every refusal are the command's. Start
+    is enabled only while the shown answer is for what the fields hold now,
+    and dismisses with ``(project key, prepared)``; nothing runs here.
+    """
+
+    DEFAULT_CSS = _MODAL_CSS.format(name="StartScreen") + """
+    StartScreen Select, StartScreen Input { margin-top: 1; }
+    StartScreen #name { margin-top: 1; text-style: bold; }
+    StartScreen #refused { color: $error; text-style: bold; }
+    """
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "cancel")]
+
+    def __init__(self, starter: Starter, document: dict, offered: list[tuple[str, str]],
+                 selected: str) -> None:
+        super().__init__()
+        self.starter = starter
+        self.document = document
+        self.choices = offered
+        self.selected = selected
+        #: The answer shown, and the project it is for.
+        self.prepared: dict | None = None
+        self.prepared_key = ""
+        self._pending: Timer | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(Text("New session", style="bold"))
+            yield Static(Text(
+                "A new Terminal window with Remote Control on, in the project's main "
+                "checkout. Nothing starts until Start.", style="dim"))
+            yield Select(self.choices, value=self.selected, allow_blank=False, id="project")
+            yield Input(placeholder="first message (optional)", id="prompt")
+            yield Input(placeholder="label (blank: the time, MMDD-HHMM)", id="label")
+            yield Static(id="name")
+            yield Static(id="refused")
+            yield Static(id="message")
+            yield Static(id="facts")
+            yield Static(id="command")
+            yield Static(Text(START_MODE, style="dim"), id="mode")
+            with Horizontal():
+                yield Button("Cancel", id="cancel", variant="primary")
+                yield Button("Start", id="start", variant="error", disabled=True)
+
+    def on_mount(self) -> None:
+        self.query_one("#prompt", Input).focus()
+        self.ask(*self.inputs())
+
+    def selected_key(self) -> str:
+        value = self.query_one("#project", Select).value
+        return value if isinstance(value, str) else ""
+
+    def inputs(self) -> tuple[str, str, str]:
+        """``(project key, label, first message)`` as the fields hold them now."""
+        return (self.selected_key(), self.query_one("#label", Input).value,
+                self.query_one("#prompt", Input).value)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._edited()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        self._edited()
+
+    def _edited(self) -> None:
+        self.query_one("#start", Button).disabled = True
+        if self._pending is not None:
+            self._pending.stop()
+        self._pending = self.set_timer(START_DEBOUNCE, lambda: self.ask(*self.inputs()))
+
+    @work(thread=True, exclusive=True, group="start-prepare")
+    def ask(self, key: str, label: str, prompt: str) -> None:
+        """Ask the Starter what ``(key, label, prompt)`` would start; launches nothing."""
+        try:
+            prepared, why = self.starter.prepare_in(
+                self.document, key, label.strip() or None, prompt or None), None
+        except InvariantError as exc:
+            prepared, why = None, str(exc)
+        except Exception as exc:  # noqa: BLE001 - shown in the modal; the dashboard goes on
+            prepared, why = None, f"{type(exc).__name__}: {exc}"
+        self.app.call_from_thread(self.show_answer, (key, label, prompt), prepared, why)
+
+    def show_answer(self, asked: tuple[str, str, str], prepared: dict | None,
+                    why: str | None) -> None:
+        """Show one answer, unless the fields moved on since it was asked."""
+        if asked != self.inputs():
+            return
+        self.prepared, self.prepared_key = prepared, asked[0]
+        start = self.query_one("#start", Button)
+        if prepared is None:
+            self.query_one("#refused", Static).update(Text(f"will not start: {why}"))
+            for part in ("#name", "#message", "#facts", "#command"):
+                self.query_one(part, Static).update("")
+            start.disabled = True
+            return
+        message = prepared.get("prompt")
+        self.query_one("#refused", Static).update("")
+        self.query_one("#name", Static).update(Text(f"name: {prepared['name']}"))
+        self.query_one("#message", Static).update(
+            Text(f"first message: {message}" if message else "first message: none"))
+        self.query_one("#facts", Static).update(Text("\n".join(fact_lines(prepared["facts"]))))
+        self.query_one("#command", Static).update(
+            Text(f"command  {prepared['by_hand']}\nin       {prepared['cwd']}"))
+        start.disabled = False
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "start":
+            self.action_start()
+        else:
+            self.dismiss(None)
+
+    def action_start(self) -> None:
+        if self.prepared is None or self.query_one("#start", Button).disabled:
+            return
+        self.dismiss((self.prepared_key, self.prepared))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class OracleApp(App):
     """Every session on the machine, and the one next step for each."""
 
@@ -172,6 +317,7 @@ class OracleApp(App):
     """
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("a", "act", "act on the row"),
+        Binding("n", "new_session", "new session"),
         Binding("r", "reload", "refresh"),
         Binding("q", "quit", "quit"),
     ]
@@ -182,12 +328,17 @@ class OracleApp(App):
         actions: Actions,
         interval: float = DEFAULT_INTERVAL,
         clock: Callable[[], float] = time.time,
+        starter: Starter | None = None,
     ) -> None:
         super().__init__()
         self.loader = loader
         self.actions = actions
         self.clock = clock
+        #: How ``n`` reaches ``oracle start-session``'s own path; ``None``: not offered.
+        self.starter = starter
         self.lines: dict[str, Line] = {}
+        #: The last read shown, whose projects the "New session" picker offers.
+        self.document: dict = {}
         #: Seconds between refreshes until a read says otherwise.
         self.interval = interval
         self.refresh_timer: Timer | None = None
@@ -252,6 +403,7 @@ class OracleApp(App):
             source = "scanned in-process"
         self.query_one("#source", Static).update(Text(source))
 
+        self.document = loaded.document
         table = self.query_one("#rows", DataTable)
         keep = self.current_key()
         table.clear()
@@ -305,8 +457,53 @@ class OracleApp(App):
     @work(thread=True, group="act")
     def _perform(self, step: Step) -> None:
         outcome = self.actions.perform(step)
-        self.call_from_thread(self.push_screen, OutputScreen(step, outcome))
+        self.call_from_thread(self.push_screen, OutputScreen(f"{step.subject}: {step.label}", outcome))
         self.call_from_thread(self.action_reload)
+
+    # -- starting a session (ADR-009 D16) ------------------------------
+
+    def action_new_session(self) -> None:
+        if self.starter is None:
+            self.notify("starting a session is not available here")
+            return
+        offered = choices(self.document)
+        if not offered:
+            self.notify("no registered project to start a session in")
+            return
+        key = self.current_key()
+        here = self.lines[key].project_key if key is not None else ""
+        selected = here if here in {k for _, k in offered} else offered[0][1]
+        self.push_screen(StartScreen(self.starter, self.document, offered, selected),
+                         self._confirmed_start)
+
+    def _confirmed_start(self, confirmed: tuple[str, dict] | None) -> None:
+        if confirmed is not None:
+            self._start(*confirmed)
+
+    @work(thread=True, group="act")
+    def _start(self, key: str, prepared: dict) -> None:
+        outcome = self._start_outcome(key, prepared)
+        self.call_from_thread(self.push_screen, OutputScreen("New session", outcome))
+        self.call_from_thread(self.action_reload)
+
+    def _start_outcome(self, key: str, prepared: dict) -> Outcome:
+        """Prepare again from a fresh read, as the page does, and launch only if it holds."""
+        try:
+            document = self.loader().document
+        except Exception as exc:  # noqa: BLE001 - shown; the dashboard goes on
+            return Outcome(False, f"did not start: could not read the machine: "
+                                  f"{type(exc).__name__}: {exc}; nothing ran")
+        starter: Starter = self.starter  # type: ignore[assignment]
+        try:
+            again, why = starter.again(document, key, prepared["label"], prepared["name"],
+                                       prepared["prompt"])
+            if again is None:
+                return Outcome(False, f"did not start: {why}")
+            return Outcome(True, f"started as {again['name']}\n{starter.launch(again)}")
+        except InvariantError as exc:
+            return Outcome(False, f"did not start: {exc}")
+        except Exception as exc:  # noqa: BLE001 - shown; the dashboard goes on
+            return Outcome(False, f"did not start: {type(exc).__name__}: {exc}")
 
 
 def _cells(line: Line) -> tuple[Text, ...]:

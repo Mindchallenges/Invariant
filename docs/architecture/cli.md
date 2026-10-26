@@ -889,7 +889,15 @@ invariant oracle tui
     alert amber, markers dim) and the recommended next command. It reads the
     watcher's snapshot while it is fresh, and otherwise scans in-process, as
     `list` does, under a "watcher not running" banner. It refreshes on the
-    snapshot's interval; r refreshes now, q quits. Enter or a on a row opens
+    snapshot's interval; r refreshes now, q quits. n opens a New session
+    modal for `oracle start-session`: a picker of the registered projects
+    (the highlighted row's preselected), an optional first message and an
+    editable label, then the full name, the open-window and uncommitted-
+    change facts and the exact command, asked again after each edit through
+    the command's own prepare step. Nothing launches until Start, which
+    prepares again from a fresh read and starts nothing if the name moved;
+    the outcome ("started as <name>", or "did not start: <why>") is shown as
+    a step's output is. Enter or a on a row opens
     a confirm modal showing the step's exact argv, cwd and added environment;
     nothing runs without y or the Run button. A run step is started as a
     subprocess with no shell and no stdin, without Claude Code's host markers
@@ -944,8 +952,8 @@ invariant oracle start-session PROJECT [--prompt TEXT] [--name LABEL] [--dry-run
     "argv", "prompt", "by_hand", "facts": {"open_windows", "uncommitted",
     "dirty"}, "dry_run", "successor": {"pid"} | null}; "label" is the label
     the name was made from (the time when --name was not given). The web
-    page's "New session…" sheet runs this command's own prepare and launch
-    steps, not a copy (oracle.md, "Start a session").
+    page's "New session…" sheet and the dashboard's n run this command's own
+    prepare and launch steps, not a copy (oracle.md, "Start a session").
 
 invariant oracle notify-test [--json]
     Post one notification through the seam the watcher uses, to check that
@@ -970,8 +978,11 @@ invariant oracle install --web [--port 7341] [--dry-run] [--json]
     --web installs the web page's agent instead, and only it (ADR-008 D15):
     ~/Library/LaunchAgents/dev.invariant.oracle.web.plist, running `oracle
     web --port N --wait`, kept alive, logging to <oracle home>/oracle/web.log,
-    with a PATH that also finds invariant (an action runs it), tailscale and
-    the interpreter's own directory. A second --web install replaces it. It
+    with a PATH that also finds invariant (an action runs it), claude (a
+    start from the page opens it; the folder `claude` resolves to in the
+    shell that runs the install), git, osascript, tailscale and the
+    interpreter's own directory. After an upgrade that adds a program to that
+    list, run `install --web` again so the plist carries it. A second --web install replaces it. It
     says so when the watcher's agent is not installed. --port without --web,
     --interval with it, and a port outside 1-65535 exit 2. JSON: as above.
 

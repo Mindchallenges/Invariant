@@ -17,8 +17,9 @@ mobile control panel: its increments 3, the plain-language panel, 4, the
 home-screen app, 5, failure reasons, and 6, orphan classes and close host,
 have shipped ("The control panel" below, ADR-009), and increment 7 is to
 come. IDEA_030 lets the oracle start a new Claude window, Remote Control on,
-in any registered project; its first increment, the CLI core and the shared
-launcher, has shipped ("Start a session" below, ADR-009 D16).
+in any registered project; its CLI core and shared launcher, the phone's
+"New session" sheet and the dashboard's `n` have shipped ("Start a session"
+below, ADR-009 D16).
 
 | # | Increment | Status |
 |---|---|---|
@@ -58,7 +59,7 @@ graph TD
         TLS["tls (IDEA_026)"]
         DEVICES[devices]
         CLOSEHOST["closehost (IDEA_027 inc 6)"]
-        START["startsession (IDEA_030; inc 2: Starter, find_started)"]
+        START["startsession (IDEA_030; inc 2: Starter, find_started; inc 3: Starter.again)"]
     end
 
     subgraph core["core/"]
@@ -159,6 +160,8 @@ graph TD
     WEBACT --> START
     PANEL --> START
     CLI -. "injects a Starter (its own prepare and launch) into" .-> WEBACT
+    TUI --> START
+    CLI -. "injects the same Starter into" .-> TUI
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -820,7 +823,7 @@ Three modules, split so that only the drawing needs Textual:
 |---|---|---|
 | `dashboard` | `load(home, now, scan)`: the watcher's snapshot while it is fresh, else the `scan` it is handed, behind a banner. `lines(document)`: each row as a table line, each line's tone, the status flag `oracle list` prints too | Import Textual; run anything |
 | `actions` | `Step`, a row's recommendation as the confirm modal shows it; `confirm_lines`; `refusal`; `child_env`; `Actions`, the dispatch on a confirmed step through an injected runner and terminal launcher; `run_subprocess`, the real runner; `RecordingRunner` for tests | Import `hosts/`; run a step nobody confirmed; answer a prompt |
-| `tui` | `OracleApp`, the table and its refresh, and three modals: `ConfirmScreen`, `InfoScreen`, `OutputScreen` | Decide anything the two modules above decide |
+| `tui` | `OracleApp`, the table and its refresh, and four modals: `ConfirmScreen`, `InfoScreen`, `OutputScreen` and `StartScreen`, the `n` key's "New session" confirm ("Start a session", "From the dashboard") | Decide anything the two modules above decide, or what a start would be |
 
 **Where the rows come from.** `load` asks `watcher.snapshot_status`, the rule
 `oracle status` reports. A snapshot that exists, is not older than three of
@@ -878,6 +881,9 @@ the oracle never answers one, and a waiting row recommends nothing to run in
 the first place. It also refuses an `argv` that is not an `invariant`
 command, a `cwd` that does not exist, and a kind it does not know, because
 the snapshot is a file and a file is not a reason to run a program.
+
+`n` opens the "New session" modal, a start in any registered project; its
+rules are under "Start a session", "From the dashboard (increment 3)".
 
 **The host facts are injected.** Which variables are host markers
 (`without_host_markers`) and how a terminal is opened (`_handoff_launcher`,
@@ -1366,7 +1372,7 @@ the test itself spawned through `subprocess.Popen`, and raises
 `invariant oracle start-session <project> [--prompt TEXT] [--name LABEL]
 [--dry-run]` opens a new macOS Terminal window running `claude --name <name>
 --remote-control <name> [prompt]` in a registered project's main checkout.
-It is the core the panel's "New session" sheet and the TUI's key will run
+It is the core the panel's "New session" sheet and the TUI's `n` run
 (IDEA_030 increments 2 and 3). The decisions are ADR-009 D16's.
 
 | Module | Owns | Never does |
@@ -1487,6 +1493,52 @@ sequenceDiagram
 The seams are the command's: `_oracle_names_in_use`, `_oracle_cache`,
 `_handoff_launcher` and `_handoff_successor`. The suite replaces all four, so
 no test opens a window, reads the process table or reads `~/.claude`.
+
+### From the dashboard (increment 3)
+
+`n` in `invariant oracle tui` opens `StartScreen`, the same confirm in a
+Textual modal. `cmd_oracle_tui` hands `OracleApp` the Starter
+`_oracle_starter` builds for the page, so the modal reaches
+`_start_prepare` and `_start_launch` and nothing else; `oracle/tui` imports
+neither the CLI nor `hosts/`.
+
+```mermaid
+sequenceDiagram
+    participant Key as n (OracleApp)
+    participant Modal as StartScreen
+    participant Start as Starter (the CLI's prepare and launch)
+    participant Host as hosts/claude_code_launch (via the CLI)
+    Key->>Modal: choices(the shown read), the highlighted row's project_key
+    loop every edit, after 0.3 s, in a worker thread
+        Modal->>Start: prepare_in(the shown read, key, label or None, message or None)
+        Start-->>Modal: name, facts, by_hand, cwd, or the command's refusal
+        Note over Modal: an answer for fields that moved since is dropped. Start is enabled only on a current answer
+    end
+    Modal-->>Key: Start: (key, prepared). Cancel or Escape: nothing
+    Key->>Key: a fresh read (the dashboard's loader), in a worker thread
+    Key->>Start: again(that read, key, the resolved label, the shown name, the message)
+    Note over Key: the name moved, or any refusal: did not start, nothing ran
+    Key->>Start: launch(prepared)
+    Start->>Host: _open_claude_window(name, prompt, root)
+    Key->>Key: OutputScreen New session: started as NAME, or did not start and why. Then a refresh
+```
+
+| Step | Rule |
+|---|---|
+| The key | `n`, named "new session" in the footer. It offers nothing when the app has no Starter, or the shown read lists no project |
+| The project | A `Select` of `startsession.choices` of the read the table shows, every registered project by name; the highlighted line's `project_key` is preselected (a nested host line carries its session's), else the first. Whatever is chosen is resolved by `ProjectIndex.match` in `prepare`, as the command resolves it |
+| The fields | An optional first message and a label; the first message has the focus, so the dashboard's single-letter keys type into it. A blank label takes the time, a blank message is none, as on the page |
+| What it shows | The full name, the first message, `fact_lines` (the open windows and the main checkout's uncommitted changes, as the command prints them), the exact `by_hand` command and its folder, and that Claude runs in its default permission mode. A refusal replaces them with "will not start: <why>", the command's own sentence |
+| Asking again | Each edit disables Start and asks again 0.3 s after the last keystroke (`tui.START_DEBOUNCE`), in a thread worker, because the names in use cost a process-table read. An answer for fields that have moved on since is dropped |
+| Start | `Starter.again`, the page's own rule: prepare again from a fresh read with the label the modal resolved (so a default time label is not taken twice) and refuse if the name or the message differs. Then `launch`, in a worker thread. No nonce: the modal and the button are one process on the Mac, not a request from another device |
+| The outcome | An `OutputScreen` titled "New session": "done" and "started as <name>" with the launcher's lines, or "failed" and "did not start: <why>", invariant's own sentence for a refusal or a window that did not open. Any other error is shown the same way and the dashboard goes on. The table refreshes afterwards |
+| The audit | None: the audit log is the page's record of what remote devices ran (ADR-008 D13). A start from the TUI is a person at the Mac, like `start-session` in a terminal |
+
+The dashboard keeps refreshing under the modal: its timer belongs to the
+app, and the modal's workers are in their own group. The tests drive the
+modal through `App.run_test()` with a recording Starter, and through the
+CLI's own Starter behind the suite's launcher and successor seams, so no
+test opens a window.
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

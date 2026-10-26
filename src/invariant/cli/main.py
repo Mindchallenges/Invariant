@@ -3028,11 +3028,12 @@ def _start_launch(result: dict) -> tuple[dict, list[str]]:
 
 
 def _oracle_starter(index):
-    """The page's way into ``oracle start-session``'s own path (ADR-009 D16).
+    """The page's and the dashboard's way into ``oracle start-session``'s own path.
 
     ``prepare`` and ``launch`` are ``_start_prepare`` and ``_start_launch``,
-    so a start from the phone is decided, refused and launched exactly as one
-    from a terminal, through the same seams the suite replaces.
+    so a start from the phone or the TUI's ``n`` is decided, refused and
+    launched exactly as one from a terminal, through the same seams the suite
+    replaces (ADR-009 D16).
     """
     from ..oracle.startsession import Starter
 
@@ -3085,7 +3086,9 @@ def cmd_oracle_tui(args) -> int:
     """The live dashboard. Needs the ``invariant[oracle]`` extra (Textual).
 
     Reads the watcher's snapshot while it is fresh, else scans in-process
-    behind a banner. Every action is confirmed first.
+    behind a banner. Every action is confirmed first. ``n`` starts a new
+    Claude window through ``oracle start-session``'s own two steps
+    (``_oracle_starter``), as the phone's "New session" sheet does.
     """
     try:
         from ..oracle import tui
@@ -3108,6 +3111,7 @@ def cmd_oracle_tui(args) -> int:
     app = tui.OracleApp(
         lambda: load(index.home, time.time(), lambda: _oracle_scan_document(index, cache, gates)),
         _oracle_actions(),
+        starter=_oracle_starter(index),
     )
     app.run()
     return EXIT_OK
@@ -4444,7 +4448,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_oracle_watch)
     q = oracle.add_parser(
-        "tui", help="the live dashboard; every action is confirmed first (needs invariant[oracle])"
+        "tui", help="the live dashboard; every action is confirmed first, n starts a new "
+                    "session (needs invariant[oracle])"
     )
     q.set_defaults(func=cmd_oracle_tui)
     q = oracle.add_parser(
