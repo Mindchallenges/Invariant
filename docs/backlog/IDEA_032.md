@@ -2,9 +2,21 @@
 id: IDEA_032
 type: idea
 title: Whole-suite and whole-scheme coverage move to a scheduled sweep
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: null
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: null
+  forced: false
+- from: in_progress
+  to: done
+  reason: null
+  forced: false
 priority: high
 effort: L
 tier: '1'
@@ -114,6 +126,13 @@ range is always recorded on the filed item.
 **Closing obligation.** When the engine part lands, record the landing commit
 in this entry and send a short note back to the Heap session named
 s-1-sync-foundations saying it has shipped.
+
+**Landed 2026-10-26.** v1 merged to main at ac73b18, in three increments:
+e417275 (cadence mode, manifest validation, held_paths, coverage_one and
+--selector, sweep.no_full_run), 8fbf143 (invariant sweep run|status|show,
+committed records under docs/sweeps, auto-filing with sweep_key and
+sweep_range) and ac73b18 (sweep.fresh, the advisory verdict naming the last
+sweep, agent guidance, docs). Design: ADR-010. Fast follow: automatic bisect.
 
 **Why now / why this tier:**
 
