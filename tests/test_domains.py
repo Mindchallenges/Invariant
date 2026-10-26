@@ -1818,6 +1818,62 @@ exit 0
         assert not (bundle / "marker").exists()
 
 
+class TestBUG_088_ScopedZeroExecutedRefusal:
+    """Repro for BUG_088 — see docs/backlog/BUG_088.md.
+
+    Fails while the defect is live. When the fix lands, delete the
+    expected-failure marker; the assertion must then pass unchanged.
+
+    A scoped coverage run (`pipeline coverage --selector`, commands.coverage_one)
+    that builds, launches and exits 0 having executed nothing is refused — that
+    part is right. The symptom is the hint: it blames a build or launch failure,
+    when for a scoped run the likelier cause is a selector that matched nothing.
+    The assertion asks only that the refusal SAY a selector may have matched
+    nothing; it does not require certainty (BUG_038: under swift_xcode a zero
+    can also be a swift-testing run the scrape counted as nothing).
+    """
+
+    CLEAN_ZERO_RUN = """
+echo "Test Suite 'Selected tests' passed at 2026-10-27."
+echo "\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds"
+echo "** TEST SUCCEEDED **"
+exit 0
+"""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_088 is live — delete this marker with the fix",
+    )
+    def test_BUG_088_scopedZeroExecutedRefusalNamesTheSelector(self, m):
+        path = m.root / "fake-coverage.sh"
+        path.write_text(self.CLEAN_ZERO_RUN, encoding="utf-8")
+        path.chmod(0o755)
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo", "ecosystems": ["swift"]},
+                    "commands": {
+                        "coverage": f"sh {path}",
+                        "coverage_one": f"sh {path} {{selector}}",
+                        "coverage_report": None,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        fresh = Manifest.load(m.root)
+        session = SessionDomain(fresh).start("x")
+        pipelines = PipelineDomain(fresh)
+        pipelines.start(session.id, task="t")
+
+        with pytest.raises(UsageError, match="executed no tests") as refused:
+            pipelines.run_coverage(
+                session.id, cwd=m.root, selectors=["AppTests/NoSuchClass"]
+            )
+        assert "matched nothing" in str(refused.value).lower(), str(refused.value)
+
+
 class TestTheSuiteStatusAndTheReadStatusAreNotTheSameNumber(CoverageFixture):
     """A shell reports the LAST command's status, so a chain cannot say both.
 
