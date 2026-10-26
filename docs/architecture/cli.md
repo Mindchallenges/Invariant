@@ -471,7 +471,10 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     list also names `CLAUDE_EFFORT` and `GIT_EDITOR`, which Claude Code sets
     for its own tool shells: the first would pin the successor's effort level,
     and `GIT_EDITOR=true` makes git skip the editor, so git falls back to the
-    user's configured one instead (BUG_069).
+    user's configured one instead (BUG_069). The same `env` unsets an
+    inherited `INVARIANT_HANDOFF` before it sets this launch's own token, so
+    a window that names no note (`oracle start-session`, the dashboard's
+    terminal step) claims none (ADR-009 D16).
 
     A launch has succeeded only when a successor is seen alive (BUG_075): a new
     process — not one of that name already running — whose argv runs `claude`
@@ -914,6 +917,32 @@ invariant oracle close-host HOST_ID --pid N --start TOKEN [--tty TTY] [--json]
     first close from the launchd agent may raise macOS's Automation prompt for
     Terminal; refused or unanswered (30 s), it says so and how to allow it.
     JSON: {"host_id", "pid", "tty", "lines"}.
+
+invariant oracle start-session PROJECT [--prompt TEXT] [--name LABEL] [--dry-run] [--json]
+    Open a new macOS Terminal window running `claude --name <name>
+    --remote-control <name> [TEXT]` in a registered project's main checkout
+    (IDEA_030, ADR-009 D16). PROJECT is matched as `projects remove` matches
+    (key, root, then name); one the index does not name is refused (exit 2)
+    and nothing launches, and so is a registered root that lost its manifest
+    or a project whose host.kind is not claude_code. The name is
+    <project>-<LABEL>, slugged; LABEL defaults to the local time, MMDD-HHMM,
+    and a name a live Claude window holds (its Claude Code record, or a
+    --name or --remote-control on a claude in the process table) gets -2,
+    -3. --prompt is the first prompt, carried as one argument in the private
+    launch file the handoff writes; empty is none, and one that starts with
+    '-' is refused (exit 1), because claude would read it as a flag. Before
+    the launch it prints two facts, neither of which blocks it: the Claude
+    windows the scan knows to be alive in the project, and the main
+    checkout's uncommitted changes (git status, read without optional
+    locks). Claude runs in its default permission mode: the command never
+    carries --dangerously-skip-permissions or --permission-mode. No invariant
+    session is created, no note is recorded, and an inherited
+    INVARIANT_HANDOFF is unset in the window. It counts once the new claude
+    is seen alive; otherwise exit 1 with the line to run by hand. Off macOS,
+    or without claude on PATH, exit 1. --dry-run prints the command and the
+    facts and launches nothing. JSON: {"project", "name", "cwd", "argv",
+    "prompt", "by_hand", "facts": {"open_windows", "uncommitted", "dirty"},
+    "dry_run", "successor": {"pid"} | null}.
 
 invariant oracle notify-test [--json]
     Post one notification through the seam the watcher uses, to check that

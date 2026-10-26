@@ -421,7 +421,7 @@ class TestTheLaunchPlan:
     def test_the_shell_line_round_trips_through_shlex(self):
         plan = self.plan()
         tokens = shlex.split(plan.shell_line)
-        unset = [arg for name in launch.HOST_MARKERS for arg in ("-u", name)]
+        unset = [arg for name in launch.LAUNCH_UNSET for arg in ("-u", name)]
         assert tokens[:4] == ["cd", "/work/a dir/it's here", "&&", "env"]
         assert tokens[4 : 4 + len(unset)] == unset
         assert tokens[4 + len(unset) :] == [launch.LAUNCH_SHELL, plan.launch_file]

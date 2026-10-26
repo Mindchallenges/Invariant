@@ -979,7 +979,18 @@ Terminal.app is already polluted, and the environment `osascript` is run with,
 which keeps a Terminal.app the launch starts clean for every window opened
 afterwards. The list is named rather than matched by prefix because
 `CLAUDE_CODE_` also prefixes the user's own configuration, which the new
-window's login shell re-exports before the typed line runs.
+window's login shell re-exports before the typed line runs. The typed line
+also unsets `INVARIANT_HANDOFF` (`LAUNCH_UNSET`), before setting a token of
+its own when the launch recorded a note, so a window opened from a host that
+was itself handed off never claims that host's note.
+
+The plan is shared. `session handoff`, the oracle dashboard's terminal step
+and `oracle start-session` (ADR-009 D16) open their window through one CLI
+function, `_open_claude_window`, over this module's `plan_launch`, launcher
+and successor watch. The first prompt is optional, and a plan refuses an
+argv that carries a permission flag (`require_default_permissions`), as it
+refuses one without Remote Control: every window invariant opens runs
+Claude in its default permission mode.
 
 It also ends the host that ran the handoff, once the launch has succeeded —
 that is, once the watch has seen the successor alive (IDEA_009, BUG_075). `HostCloser` is a second seam beside `Launcher`, reached through

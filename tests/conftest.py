@@ -155,6 +155,20 @@ def _no_real_successor_watch(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_names_in_use(monkeypatch):
+    """No test reads the real ``~/.claude`` or process table for names in use.
+
+    ``oracle start-session`` gives a new window a name no live Claude holds,
+    and asks one seam, ``_oracle_names_in_use``, which reads Claude Code's
+    per-process records and ``ps``. Here it answers that none is in use; a
+    test about a clash sets its own.
+    """
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_names_in_use", lambda: set(), raising=False
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_real_notifier(monkeypatch):
     """No test posts a real macOS notification (IDEA_012 increment 4).
 

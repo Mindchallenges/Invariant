@@ -6,7 +6,10 @@
   checks were verified on 2026-10-25), and D9 with increment 5. Increment 6
   shipped D1's first destructive action, close host, with D7's guards and
   D15. Increment 7's clean-up actions remain; the two facts they waited for,
-  BUG_078 and IDEA_024, have shipped.
+  BUG_078 and IDEA_024, have shipped. D16, the oracle starting a new Claude
+  window (IDEA_030), was added on 2026-10-26; its CLI core and shared
+  launcher shipped with IDEA_030 increment 1, and the panel's sheet and the
+  TUI key follow. IDEA_029's transcript decision is D17.
   The design of record (screens, components, tokens, wording) is
   [oracle-panel.md](../architecture/oracle-panel.md).
 - **Date:** 2026-10-23
@@ -439,6 +442,79 @@ same path as every other action, with its refusals in one place (D7).
 Out of scope here: the leftover folders' "Remove…" (increment 7), IDEA_029's
 last message, and IDEA_017's actions. IDEA_025's one summary line per
 project in `oracle list` and the TUI is not built in this increment.
+
+### D16 — The oracle may start a new Claude window, confirmed, in a registered project (IDEA_030)
+
+*Added 2026-10-26. The user asked that the "Oracle can start a new session
+with a remote control enabled on any of the projects that I want", and
+settled the shape on IDEA_030 the same day.*
+
+Until now every confirmed action ran a step in a session that exists, or
+closed a window that exists. Starting a new `claude` process on the Mac at
+a phone's request is a new power, and it is bounded as follows:
+
+- **Confirm-first.** The start is an action like D1's: the panel's sheet and
+  the TUI's modal show the exact command, the full first prompt and the two
+  facts below before anything runs, and the server derives the start from
+  its own fresh read (ADR-008 D9, D10, D13). The CLI command,
+  `invariant oracle start-session`, is what the confirm runs.
+- **Registered projects only.** The project is named by its key, root or
+  name in the oracle's project index (`oracle/index`), and nothing else is
+  launchable: no free path, and an entry whose root no longer carries a
+  manifest is refused. The window starts in the entry's recorded root, the
+  project's main checkout.
+- **Remote Control on, and named.** The command line is always `claude
+  --name <name> --remote-control <name> [prompt]`. The name is
+  `<project>-<label>`, slugged; the label defaults to the time of the start
+  (`MMDD-HHMM`, local). A name a live Claude window holds, in Claude Code's
+  per-process records or in the process table, gets `-2`, `-3`, the user's
+  choice over refusing it. `LaunchPlan` refuses an argv without the pair
+  (ADR-005 D3).
+- **Claude's default permission mode only.** There is no mode picker. The
+  command never carries `--dangerously-skip-permissions`,
+  `--allow-dangerously-skip-permissions` or `--permission-mode`:
+  `LaunchPlan` refuses an argv that does, and a first prompt that starts
+  with `-`, which `claude` would read as a flag, is refused before a plan
+  is built. Every permission prompt of the new window reaches the person
+  through Remote Control, and the oracle answers none (D8).
+- **The prompt is data.** It is one positional argument, quoted by `shlex`
+  into the private launch file the handoff already writes (ADR-005 D3,
+  BUG_075), and never part of a shell string or the typed line.
+- **No invariant session is pre-created.** Claude starts one itself when the
+  work begins, as in any window. The launch also unsets an inherited
+  `INVARIANT_HANDOFF`, so the new window claims no note it was not launched
+  for (ADR-005 D6).
+- **Facts that inform, not block.** The confirm shows how many Claude
+  windows the scan knows to be alive in the project and whether its main
+  checkout has uncommitted changes. Neither stops the start: the new session
+  isolates before it edits, and a second window is the person's choice. The
+  checkout is read with `GIT_OPTIONAL_LOCKS=0` (ADR-007 D16).
+- **One launcher.** `session handoff`, the dashboard's terminal step and the
+  start all open their window through one CLI function over
+  `hosts/claude_code_launch`'s plan, launcher and successor watch; a start
+  counts once a successor is seen alive. IDEA_029's hand-off will reuse it
+  with a prepared prompt.
+
+**What a stolen paired device token can now do.** A device token is still
+reached only over Tailscale (ADR-008 D1), and its holder could already run
+any recommended step and close a leftover window. With D16 it can also open
+new Claude windows on the Mac. That is bounded three ways: only in the
+registered projects, never in a path it names; only through the confirm,
+which spends a single-use nonce bound to the device (ADR-008 D10); and only
+in Claude's default permission mode, so every tool call that needs a
+permission stops at a prompt the person sees in Remote Control, and the
+oracle answers none. A start is written to the audit log like every action
+(ADR-008 D13), and `oracle web revoke` ends the token. What it can do is
+start a window and give it a first prompt; it cannot make that window act
+without the person's permission where Claude asks for one.
+
+*Rejected:* a free path or a folder picker. It would let a token start
+Claude anywhere the user can write. *Rejected:* a permission-mode choice on
+the sheet. A phone confirm is the wrong place to waive every later prompt.
+*Rejected:* refusing a name in use. The user chose the suffix, and a second
+start in the same minute is ordinary. *Rejected:* creating the invariant
+session first. It would bind a session to a window that may never start,
+and Claude starts the session in its own turn.
 
 ## Alternatives rejected
 

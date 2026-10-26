@@ -16,7 +16,9 @@ ADR-008). IDEA_026 serves that page over HTTPS with Tailscale's certificate
 mobile control panel: its increments 3, the plain-language panel, 4, the
 home-screen app, 5, failure reasons, and 6, orphan classes and close host,
 have shipped ("The control panel" below, ADR-009), and increment 7 is to
-come.
+come. IDEA_030 lets the oracle start a new Claude window, Remote Control on,
+in any registered project; its first increment, the CLI core and the shared
+launcher, has shipped ("Start a session" below, ADR-009 D16).
 
 | # | Increment | Status |
 |---|---|---|
@@ -56,6 +58,7 @@ graph TD
         TLS["tls (IDEA_026)"]
         DEVICES[devices]
         CLOSEHOST["closehost (IDEA_027 inc 6)"]
+        START["startsession (IDEA_030)"]
     end
 
     subgraph core["core/"]
@@ -148,6 +151,11 @@ graph TD
     CLI --> CLOSEHOST
     CLOSEHOST --> SCAN
     CLI -. injects the record reader, ps, SIGTERM and the Terminal tab closer from .-> HOST
+    CLI --> START
+    START --> SCAN
+    START --> GIT
+    START --> DOMAINS
+    CLI -. "opens the window, reads the names in use, through" .-> HOST
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -1343,6 +1351,81 @@ anything. Beside the `osascript` guard, the `conftest.py` guard refuses
 the test itself spawned through `subprocess.Popen`, and raises
 `RefusedProgram`. The one test that sends a real SIGTERM sends it to a
 `python -c "sleep"` child of its own.
+
+## Start a session (IDEA_030)
+
+`invariant oracle start-session <project> [--prompt TEXT] [--name LABEL]
+[--dry-run]` opens a new macOS Terminal window running `claude --name <name>
+--remote-control <name> [prompt]` in a registered project's main checkout.
+It is the core the panel's "New session" sheet and the TUI's key will run
+(IDEA_030 increments 2 and 3). The decisions are ADR-009 D16's.
+
+| Module | Owns | Never does |
+|---|---|---|
+| `startsession` | `session_name` (`<project>-<label>`, slugged, `-2`, `-3` past a name in use), `default_label` (`MMDD-HHMM`, local), `open_windows` and `start_facts` (pure, over one project of the `assess` document, for the panel to reuse), `checkout_changes` (one `git status --porcelain` with optional locks off), `fact_lines` | Import `hosts/`; launch anything; block a start on a fact |
+| `hosts/claude_code_launch` | `plan_launch` with an optional prompt; `require_default_permissions` and `PERMISSION_FLAGS`; `LAUNCH_UNSET` (the host markers and `INVARIANT_HANDOFF`); `names_in_use`, `command_names_in_use` | Decide the project, the name or whether to start |
+| CLI | `cmd_oracle_start_session`; `_open_claude_window`, the one way invariant opens a Claude window (`session handoff`, the dashboard's terminal step and this command); the `_oracle_names_in_use` seam | Pass a permission flag; accept a path the index does not name |
+
+```mermaid
+sequenceDiagram
+    participant Cmd as oracle start-session
+    participant Index as oracle/index
+    participant Start as oracle/startsession
+    participant Host as hosts/claude_code_launch (injected)
+    Cmd->>Index: match(project): key, root or name
+    Note over Cmd: not registered, no manifest at its root, or host.kind not claude_code: refused, nothing launched
+    Cmd->>Host: names in use (live records, ps)
+    Cmd->>Start: session_name(project, label, taken)
+    Cmd->>Start: start_facts(scan of that project, checkout_changes(root))
+    Cmd->>Host: plan_launch(claude, name, prompt, root): launch file, typed line
+    Note over Host: refused: a permission flag in argv, a prompt starting with '-'
+    Cmd->>Host: _handoff_launcher().launch(plan); successor watch
+    Host-->>Cmd: pid of the live claude, or a failure with the line to run by hand
+```
+
+**Which projects.** The selector is matched as `projects remove` matches
+it: key, then root, then name. A selector that names no entry is refused
+(exit 2), so a free path is never launched; a root that lost its manifest is
+refused with a pointer to `projects prune`, and so is a project whose
+`host.kind` is not `claude_code`. The window starts in the entry's `root`,
+the main checkout's spelling of the project.
+
+**The name.** `--name` is the label; the name is `<project>-<label>`, each
+part slugged as a session name is (lower case, runs of other characters
+folded to `-`), so it cannot start with `-`. Without `--name` the label is
+the local time, `MMDD-HHMM`. A name held by a live Claude window gets `-2`,
+then `-3`: the names in use are the `name` of each Claude Code per-process
+record whose pid is alive, and every `--name`/`-n` and
+`--remote-control`/`--rc` value on a `claude` line of the process table. The
+CLI reads them through `_oracle_names_in_use`, which the suite replaces
+everywhere.
+
+**The prompt.** Optional; an empty one is none. It is the last argument,
+quoted by `shlex` into the launch file the handoff writes (mode 0600, removed
+as `claude` starts), never in the typed line. One that starts with `-` is
+refused, because `claude` would read it as a flag; one that only mentions a
+flag is data.
+
+**The facts.** Printed before the launch and in the JSON, and neither
+blocks it: `open_windows`, the distinct hosts the scan knows to be alive in
+the project (a session's current or earlier host, or an orphan; unknown
+liveness does not count), and `uncommitted`, the paths `git status
+--porcelain` lists in the main checkout (ignored files do not count), with
+`dirty` (`null` when git cannot say). The checkout is read with
+`GIT_OPTIONAL_LOCKS=0`.
+
+**What it never does.** It passes no `--dangerously-skip-permissions`,
+`--allow-dangerously-skip-permissions` or `--permission-mode`, and
+`LaunchPlan` refuses one. It creates no invariant session and records no
+note; the typed line unsets an inherited `INVARIANT_HANDOFF`, so the new
+window claims nothing. It ends no host.
+
+**When the window counts.** As for a handoff: once the successor watch sees
+a new `claude` carrying the name's flags still alive 3 s after it appeared,
+within 15 s. Otherwise the command fails, removes the launch file, and
+prints the line to run by hand. The JSON's `name` is what a later scan
+matches the window by (the record's `launched_name`), which the panel's
+"Starting…" card will use (increment 2).
 
 ## Known gap: a host rooted in another repository (BUG_040)
 

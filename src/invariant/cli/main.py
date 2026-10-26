@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from collections.abc import Mapping
@@ -1450,7 +1451,7 @@ def _handoff_successor():
     return _real_handoff_watch()
 
 
-def _launch_successor(launch, plan) -> int:
+def _launch_successor(launch, plan, after: str = "") -> int:
     """Launch ``plan`` and return the pid of the live successor it started.
 
     Terminal accepting the script is not a launch: the window's shell can
@@ -1458,7 +1459,9 @@ def _launch_successor(launch, plan) -> int:
     name already running are read first and never counted. On any failure the
     launch file is removed, so a window that opens late runs nothing rather
     than contradicting the failure just reported, and the error carries the
-    command to run by hand. The caller signals nothing either way.
+    command to run by hand. The caller signals nothing either way. ``after``
+    is the caller's own sentence about what the failure leaves, such as the
+    handoff's "the note is recorded".
     """
     watch = _handoff_successor()
     before = watch.running(plan.name)
@@ -1471,14 +1474,44 @@ def _launch_successor(launch, plan) -> int:
     if pid is None:
         plan.discard()
         raise InvariantError(
-            f"the handoff did not start a successor: no claude with "
+            f"the launch did not start a successor: no claude with "
             f"--name {plan.name} --remote-control {plan.name} is running "
             f"{launch.SUCCESSOR_GRACE_SECONDS}s after it appeared, or it never "
-            f"appeared within {launch.SUCCESSOR_TIMEOUT_SECONDS}s. This session "
-            f"stays open, and the note is recorded. Run it by hand:\n"
+            f"appeared within {launch.SUCCESSOR_TIMEOUT_SECONDS}s. "
+            f"{after + ' ' if after else ''}Run it by hand:\n"
             f"    {plan.by_hand}"
         )
     return pid
+
+
+def _open_claude_window(name: str, prompt: str | None, cwd, token: str | None = None,
+                        after: str = ""):
+    """The one way invariant opens a new Claude window: ``(plan, successor pid)``.
+
+    A new macOS Terminal window in ``cwd`` running ``claude --name <name>
+    --remote-control <name> [prompt]``, with the prompt carried in the launch
+    file as one argument, the host markers and any inherited claim token
+    unset, and ``token`` set when the caller recorded a note to claim. It
+    counts once a successor is seen alive (BUG_075). ``session handoff``, the
+    dashboard's terminal step and ``oracle start-session`` all come through
+    here, and IDEA_029's hand-off will too, with a prepared prompt. Refused,
+    with the line to run by hand, off macOS; refused without ``claude`` on
+    PATH. Nothing here records or ends anything.
+    """
+    from ..hosts import claude_code_launch as launch
+
+    if launch.host_platform() != "darwin":
+        preview = launch.plan_launch(launch.CLAUDE_BINARY, name, prompt, cwd, token,
+                                     stage=False)
+        raise InvariantError(
+            "opening a Terminal window needs macOS. Run it by hand:\n"
+            f"    {preview.by_hand}"
+        )
+    claude = launch.resolve_claude()
+    if claude is None:
+        raise InvariantError(f"no claude on PATH to start; {launch.CLAUDE_BINARY} was not found")
+    plan = launch.plan_launch(claude, name, prompt, cwd, token)
+    return plan, _launch_successor(launch, plan, after)
 
 
 def _close_launching_host(launch, keep_open: bool) -> tuple[dict, str]:
@@ -1732,7 +1765,10 @@ def cmd_session_handoff(args) -> int:
 
     updated = ctx.sessions.record_handoff(session.id, note, name)
     token = handoff_token(updated.id, updated.handoffs[-1]["at"])
-    plan = launch.plan_launch(claude, name, note, main_checkout, token=token)
+    plan, successor = _open_claude_window(
+        name, note, main_checkout, token=token,
+        after="This session stays open, and the note is recorded.",
+    )
     result.update(
         {
             "token": token,
@@ -1742,7 +1778,6 @@ def cmd_session_handoff(args) -> int:
             "applescript": plan.applescript,
         }
     )
-    successor = _launch_successor(launch, plan)
     result["successor"] = {"pid": successor}
     close, close_line = _close_launching_host(launch, args.keep_open)
     result["close"] = close
@@ -2820,22 +2855,14 @@ def _oracle_launch_plan(step, stage: bool):
 def _oracle_terminal(step) -> str:
     """Open a new host session for a dashboard ``terminal`` step.
 
-    The same launch as ``session handoff``: a Terminal window through
-    ``_handoff_launcher``, counted only once a successor is seen alive
-    (BUG_075). Unlike a handoff it ends no host and records no note; the
-    first prompt asks the new session to run the step's command.
+    The same launch as ``session handoff``, through ``_open_claude_window``.
+    Unlike a handoff it ends no host and records no note; the first prompt
+    asks the new session to run the step's command.
     """
-    from ..hosts import claude_code_launch as launch
+    from ..oracle.actions import terminal_request
 
-    if launch.host_platform() != "darwin":
-        raise InvariantError(
-            "opening a Terminal window needs macOS. Run it by hand:\n"
-            f"    {_oracle_launch_plan(step, stage=False).by_hand}"
-        )
-    if launch.resolve_claude() is None:
-        raise InvariantError(f"no claude on PATH to start; {launch.CLAUDE_BINARY} was not found")
-    plan = _oracle_launch_plan(step, stage=True)
-    pid = _launch_successor(launch, plan)
+    name, note = terminal_request(step)
+    plan, pid = _open_claude_window(name, note, step.cwd)
     return f"opened a Terminal window: claude (pid {pid}) is running {plan.name} in {plan.cwd}"
 
 
@@ -2905,6 +2932,112 @@ def cmd_oracle_close_host(args) -> int:
     lines = close_host(request, _oracle_host_seams(), bound)
     payload = {"host_id": args.host_id, "pid": args.pid, "tty": args.tty, "lines": lines}
     return emit(args, payload, "\n".join(lines))
+
+
+def _real_oracle_names_in_use() -> set[str]:
+    from ..hosts import claude_code_launch as launch
+    from ..oracle.scan import pid_exists
+
+    try:
+        records = launch.ClaudeCodeProbe().host_processes()
+    except (OSError, ValueError):
+        records = []
+    return launch.names_in_use(records, launch.ProcessTableWatch().table(), pid_exists)
+
+
+def _oracle_names_in_use() -> set[str]:
+    """The session names live Claude windows hold now, for ``start-session``.
+
+    Claude Code's per-process records whose process is alive, and the
+    ``--name`` and Remote Control values in the process table. A seam, like
+    ``_handoff_successor``: the suite replaces it everywhere, so no test reads
+    the real ``~/.claude`` or the process table.
+    """
+    return _real_oracle_names_in_use()
+
+
+def cmd_oracle_start_session(args) -> int:
+    """Open a new Claude window, Remote Control on, in a registered project (ADR-009 D16).
+
+    The project is one the oracle's index names, by key, root or name; nothing
+    else is launchable. The window runs ``claude --name <name>
+    --remote-control <name> [prompt]`` in the project's recorded root, its
+    main checkout, in Claude's default permission mode. No invariant session
+    is created: Claude starts one itself, as it does in any window. Before the
+    launch it reports the two facts the confirm shows, the Claude windows
+    already open in the project and the main checkout's uncommitted changes;
+    neither blocks the start.
+    """
+    from ..hosts import claude_code_launch as launch
+    from ..oracle import startsession
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    index = _project_index()
+    entry = index.match(args.project)
+    if not entry.has_manifest:
+        raise UsageError(
+            f"{entry.name} is registered, but {entry.root or 'its root'} no longer "
+            f"carries a manifest; nothing was launched. `invariant oracle projects "
+            f"prune` drops it"
+        )
+    kind = Manifest.load(Path(entry.root)).get("host.kind")
+    if kind != "claude_code":
+        raise UsageError(
+            f"oracle start-session starts a Claude Code session, and {entry.name}'s "
+            f"host.kind is {kind!r}, not 'claude_code'"
+        )
+    now = time.time()
+    label = args.name if args.name is not None else startsession.default_label(now)
+    name = startsession.session_name(entry.name, label, _oracle_names_in_use())
+    prompt = args.prompt if args.prompt and args.prompt.strip() else None
+
+    snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
+    projects = assess(snapshots, now)["projects"]
+    facts = startsession.start_facts(
+        projects[0] if projects else {}, startsession.checkout_changes(entry.root)
+    )
+    claude = launch.resolve_claude()
+    preview = launch.plan_launch(
+        claude or launch.CLAUDE_BINARY, name, prompt, entry.root, stage=False
+    )
+    result = {
+        "project": entry.to_dict(),
+        "name": name,
+        "cwd": preview.cwd,
+        "argv": list(preview.argv),
+        "prompt": prompt,
+        "by_hand": preview.by_hand,
+        "facts": facts,
+        "dry_run": bool(args.dry_run),
+        "successor": None,
+    }
+    head = [
+        f"start {name} in {entry.name}" + (" — dry run, nothing launched" if args.dry_run else ""),
+        *(f"  {line}" for line in startsession.fact_lines(facts)),
+    ]
+    if args.dry_run:
+        lines = [*head, f"  command: {preview.by_hand}"]
+        if claude is None:
+            lines.append(
+                f"  note: {launch.CLAUDE_BINARY} is not on PATH; a real run refuses until it is"
+            )
+        return emit(args, result, "\n".join(lines))
+
+    plan, pid = _open_claude_window(name, prompt, entry.root)
+    result.update({"argv": list(plan.argv), "successor": {"pid": pid}})
+    return emit(
+        args,
+        result,
+        "\n".join(
+            [
+                *head,
+                f"  opened a new Terminal window in {plan.cwd}:",
+                f"    {shlex.join(plan.argv)}",
+                f"  claude is running as {name} (pid {pid}); Remote Control lists it by that name",
+            ]
+        ),
+    )
 
 
 def cmd_oracle_tui(args) -> int:
@@ -4284,6 +4417,18 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--tty", default=None,
                    help="the terminal it runs on, as confirmed (ttysNNN); omit for none")
     q.set_defaults(func=cmd_oracle_close_host)
+    q = oracle.add_parser(
+        "start-session",
+        help="open a new Claude window, Remote Control on, in a registered project",
+    )
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    q.add_argument("--prompt", default=None, help="the new session's first prompt")
+    q.add_argument("--name", default=None,
+                   help="the label after the project in the session name "
+                        "(default: MMDD-HHMM)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="print the command and the facts; launch nothing")
+    q.set_defaults(func=cmd_oracle_start_session)
     q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
     q.set_defaults(func=cmd_oracle_notify_test)
     q = oracle.add_parser(

@@ -231,6 +231,19 @@ def changed_files(cwd: Path, since: str | None = None) -> list[Path]:
     return sorted(seen.values(), key=str)
 
 
+def uncommitted_count(cwd: Path) -> int | None:
+    """How many paths ``git status`` reports as changed or untracked in ``cwd``.
+
+    Ignored files do not count. ``None`` when git cannot answer: not a
+    repository, or no git. A reader asking about a checkout somebody else may
+    be working in wraps this in :func:`without_optional_locks`.
+    """
+    code, out, _ = _run(["status", "--porcelain", "--untracked-files=normal"], cwd)
+    if code != 0:
+        return None
+    return len([line for line in out.splitlines() if line.strip()])
+
+
 def branch_files(cwd: Path, base: str, tip: str = "HEAD") -> list[Path] | None:
     """Paths touched by commits on ``tip`` since ``base``.
 

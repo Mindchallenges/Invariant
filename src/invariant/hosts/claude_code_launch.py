@@ -77,6 +77,15 @@ the script proves nothing about what the window then runs, so the CLI asks a
 NEW process whose argv carries ``--name <slug>`` and ``--remote-control
 <slug>``, still alive ``SUCCESSOR_GRACE_SECONDS`` after it was first seen.
 Without one the handoff fails, and the launching host is never signalled.
+
+**Three callers, one plan (ADR-009 D16).** ``session handoff``, the oracle
+dashboard's terminal step and ``oracle start-session`` all build their window
+here, so the first prompt is optional, and every plan is checked twice over
+by construction: it must enable Remote Control under its name, and it must
+carry no flag that leaves Claude's default permission mode
+(``PERMISSION_FLAGS``). A first prompt that starts with ``-`` is refused, as
+``claude`` would read it as a flag. The typed line also unsets an inherited
+``HANDOFF_ENV``, so only a launch that names a note can claim one.
 """
 
 from __future__ import annotations
@@ -145,6 +154,15 @@ HOST_MARKERS: tuple[str, ...] = (
     "CLAUDE_EFFORT",
     "GIT_EDITOR",
 )
+
+
+#: What the typed line unsets in front of the launch shell: the host markers,
+#: and the claim token. A window opened from a host that was itself launched
+#: by a handoff inherits that host's token through ``osascript`` and Terminal,
+#: and a new session must claim only the note its own launch names (ADR-005
+#: D6). ``env -u`` runs before ``env``'s assignments, so a plan that names a
+#: token still sets it.
+LAUNCH_UNSET: tuple[str, ...] = (*HOST_MARKERS, HANDOFF_ENV)
 
 
 #: The variable naming the launching Claude Code process, which Claude Code
@@ -240,6 +258,7 @@ class LaunchPlan:
 
     def __post_init__(self) -> None:
         require_remote_control(self.argv, self.name)
+        require_default_permissions(self.argv)
 
     def discard(self) -> None:
         """Remove the launch file, if this plan wrote one and it is still there."""
@@ -258,8 +277,48 @@ def require_remote_control(argv, name: str) -> None:
     pairs = set(pairwise(argv))
     if not name or ("--remote-control", name) not in pairs:
         raise InvariantError(
-            f"a handoff launch must enable Remote Control: the command carries "
+            f"a launch must enable Remote Control: the command carries "
             f"no '--remote-control {name or '<name>'}'"
+        )
+
+
+#: The flags that would start ``claude`` in a permission mode other than its
+#: default (ADR-009 D16). No launch this module plans carries one: every
+#: permission prompt of a window the oracle opens reaches the person.
+PERMISSION_FLAGS: tuple[str, ...] = (
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "--permission-mode",
+)
+
+
+def require_default_permissions(argv) -> None:
+    """Refuse an argv that carries any of ``PERMISSION_FLAGS``, in either spelling.
+
+    Checked where ``require_remote_control`` is, on every ``LaunchPlan``, so
+    no caller and no later edit to ``plan_launch`` can add one silently.
+    """
+    for word in argv:
+        for flag in PERMISSION_FLAGS:
+            if word == flag or str(word).startswith(f"{flag}="):
+                raise InvariantError(
+                    f"a launch runs claude in its default permission mode only; "
+                    f"the command carries {flag}"
+                )
+
+
+def require_prompt_is_not_a_flag(prompt: str) -> None:
+    """Refuse a first prompt ``claude`` would parse as an option.
+
+    The prompt is a positional argument, and ``claude`` reads a word that
+    starts with ``-`` as a flag wherever it stands, so a prompt such as
+    ``--dangerously-skip-permissions`` would change how the window runs
+    rather than what it is asked. A prompt that only mentions a flag is data.
+    """
+    if prompt.startswith("-"):
+        raise InvariantError(
+            "the first prompt starts with '-', and claude would read it as a "
+            "flag, not a prompt; reword its start"
         )
 
 
@@ -365,7 +424,7 @@ def launch_script(launch_file: str, argv: tuple[str, ...]) -> str:
 def plan_launch(
     claude: str,
     name: str,
-    note: str,
+    note: str | None,
     cwd: Path | str,
     token: str | None = None,
     *,
@@ -378,16 +437,22 @@ def plan_launch(
     Control list. The note is the LAST argument and is positional: that is the
     initial prompt. ``--remote-control`` takes an optional value, so the name
     is given to it explicitly rather than left for the note to be read as.
-    ``LaunchPlan`` refuses an argv without that pair.
+    ``LaunchPlan`` refuses an argv without that pair, and one that carries a
+    permission flag (``PERMISSION_FLAGS``).
+
+    ``note`` is the first prompt, and is optional: ``None`` or an empty
+    string starts ``claude`` with no prompt (``oracle start-session``, ADR-009
+    D16). One that starts with ``-`` is refused, because ``claude`` would read
+    it as a flag.
 
     ``token`` names the recorded note, and is set as ``HANDOFF_ENV`` in front
     of the launch shell — a prefix assignment through ``env``, so it reaches
     that process, the ``claude`` it becomes and the hooks that spawns, and not
-    the window's shell. ``None`` sets nothing: a plan built before the note is
-    recorded has no note to name.
+    the window's shell. ``None`` sets nothing, and an inherited token is
+    unset: a launch that recorded no note has no note to name.
 
     The launch shell is run through ``env``, which first unsets
-    ``HOST_MARKERS``. It is a program rather than shell syntax, so the line
+    ``LAUNCH_UNSET``. It is a program rather than shell syntax, so the line
     means the same in whichever shell the window opens, and an unset name is
     not an error.
 
@@ -396,10 +461,12 @@ def plan_launch(
     ``MAX_CANON`` — only a very long main-checkout path can make one now — is
     refused before anything is written.
     """
-    argv = (claude, "--name", name, "--remote-control", name, note)
+    if note:
+        require_prompt_is_not_a_flag(note)
+    argv = (claude, "--name", name, "--remote-control", name, *((note,) if note else ()))
     require_remote_control(argv, name)
     env = ((HANDOFF_ENV, token),) if token else ()
-    unset = "".join(f"-u {marker} " for marker in HOST_MARKERS)
+    unset = "".join(f"-u {marker} " for marker in LAUNCH_UNSET)
     assign = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
     prefix = f"cd {shlex.quote(str(cwd))} && env {unset}{assign}"
     by_hand = prefix + shlex.join(argv)
@@ -473,7 +540,7 @@ class TerminalLauncher:
             raise InvariantError(
                 f"osascript could not open a Terminal window: "
                 f"{(proc.stderr or proc.stdout).strip() or 'no reason given'}\n"
-                f"  The note is recorded. Run it by hand:\n"
+                f"  Run it by hand:\n"
                 f"    {plan.by_hand}"
             )
 
@@ -959,6 +1026,62 @@ def carries_successor_flags(command: str, name: str) -> bool:
             pairs = set(pairwise(rest))
             return ("--name", name) in pairs and ("--remote-control", name) in pairs
     return False
+
+
+#: The ``claude`` flags that carry a session's name: ``--name``/``-n`` and
+#: ``--remote-control``/``--rc``. The second takes an optional value.
+_NAME_FLAGS = ("--name", "-n")
+_RC_FLAGS = ("--remote-control", "--rc")
+
+
+def command_names(command: str) -> set[str]:
+    """The ``--name`` and Remote Control names on one ``ps -o command=`` line.
+
+    Only a line whose program is ``claude`` (or ``claude`` run by an
+    interpreter, as :func:`carries_successor_flags` reads it) names anything.
+    Both ``--flag value`` and ``--flag=value`` are read. A bare
+    ``--remote-control`` followed by another flag names nothing; one followed
+    by a word takes that word, which may over-count a prompt's first word as
+    a name in use, and an over-count only costs a suffix.
+    """
+    words = command.split()
+    start = next((i for i, w in enumerate(words) if is_claude_process_name(w)), None)
+    if start is None:
+        return set()
+    found = set()
+    rest = words[start + 1 :]
+    for index, word in enumerate(rest):
+        flag, eq, value = word.partition("=")
+        if flag not in _NAME_FLAGS + _RC_FLAGS:
+            continue
+        if not eq:
+            value = rest[index + 1] if index + 1 < len(rest) else ""
+        if value and not value.startswith("-"):
+            found.add(value)
+    return found
+
+
+def command_names_in_use(table: str) -> set[str]:
+    """Every name a ``claude`` in a ``ps -axo pid=,command=`` listing was given."""
+    found: set[str] = set()
+    for line in table.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit():
+            found |= command_names(command)
+    return found
+
+
+def names_in_use(records, table: str, alive) -> set[str]:
+    """The session names live ``claude`` processes hold, from both sources.
+
+    ``records`` are Claude Code's per-process records, whose ``name`` counts
+    only while ``alive(pid)`` holds (a record can outlive its process);
+    ``table`` is the process table, whose ``--name`` and Remote Control
+    values count as they stand. ``oracle start-session`` gives a new window
+    a name none of these holds.
+    """
+    recorded = {r.name for r in records if r.name and alive(r.pid)}
+    return recorded | command_names_in_use(table)
 
 
 def successor_pids(table: str, name: str) -> set[int]:
