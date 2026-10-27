@@ -94,6 +94,9 @@ commands:
   test: uv run pytest
   test_one: uv run pytest {selector}
   coverage: uv run pytest --cov --cov-report=term-missing
+  # The scoped form (IDEA_032) arrived later and missed this repair, so
+  # `pipeline coverage --selector` fell back to the bare default and exited 127.
+  coverage_one: uv run pytest --cov --cov-report=term-missing {selector}
 
 privacy:
   enabled: true
