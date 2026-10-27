@@ -452,6 +452,65 @@ amendment's rulings (DN-A1 to DN-A14).
   The domain, every refusal and the command through `main` are tested in
   `tests/test_guidelines_domain.py`.
 
+**As built: A2 increment 4, the managed instruction-file block.** Built to
+D3, ruling 8 and DN-C.
+
+- *The manifest.* `guidelines.instruction_files` is null or a non-empty list
+  of paths, and a bare string is refused. `guidelines.injection` is a mapping
+  whose one key is `max_lines`, default 40, an integer of at least 2. D13's
+  `on_edit` is refused by name until A5 reads it, as are `baseline` and
+  `verdicts`.
+- *The default is the host's.* `hosts/claude_code` names `INSTRUCTION_FILES`
+  (`CLAUDE.md`). A null `instruction_files` means that default. The CLI
+  passes it to the domain, because no domain imports a host. A `host.kind`
+  with no adapter has no default, so only configured files carry a block.
+- *The block.* It has a header line naming the ruleset's path and digest,
+  then one line per rule. The `always` rules come first, each with its
+  statement folded to one line, and then every other rule's id and title in
+  declared order. The cap counts every line between the markers. Past it,
+  the block keeps `max_lines - 2` rule lines and ends with "- N more:
+  `invariant guidelines show`", where N is the rules left out. One rule is
+  one line, so N counts lines and rules alike. Two is the least cap that
+  holds the header and the count, so the manifest refuses less.
+- *The markers are D3's.* `<!-- invariant:begin <name> digest=<12 hex> -->`
+  and `<!-- invariant:end <name> -->`. The digest is `digest_of` the body
+  between them. A marker is a whole line, give or take spaces, so a marker
+  quoted inside a sentence is prose. A line that opens like a marker and is
+  not one is malformed, along with D3's three cases (no end, a second block
+  of one name, a nested pair), an end with no begin and a crossed pair. Each
+  is refused naming the file and line.
+- *The three-way rule.* `block_state` is `classify_installed`'s split, with
+  the begin marker's digest as the witness. A body that no longer matches its
+  digest is `edited`: skipped and named, and `--overwrite-local` takes the
+  rendered text back. A body that matches its digest but not today's
+  rendering is `stale`, and is rewritten. One that matches both is
+  `current`, and is rewritten too. A file with no block is `absent`, and is
+  left alone. `--insert guidelines/index` appends the block after one blank
+  line, creating the file if it is missing, and reports `new`. A block of
+  another name is left alone.
+- *Choices the rulings left open, taken in the strict direction.*
+  - An instruction file must be a `.md` file, because the markers are
+    markdown comments.
+  - An instruction file may not be the ruleset or the checklist.
+  - An instruction file may not be exempt from isolation (ruling 13).
+  - Any refusal writes nothing to any file, the checklist included. Every
+    output is decided, checked and scanned before the first write.
+  - The privacy scan runs on the block with the same reach as the
+    checklist's, whatever `privacy.enabled` and `privacy.scope` say. It
+    refuses only when a block is about to be written. A finding is named by
+    file, block and line within the block, counting the begin marker as
+    line 1.
+- *`guidelines show`, minimal.* The capped block points at it, so it landed
+  here. It prints the checklist text in markdown, without its marker, from
+  the ruleset in the tree in hand, and writes nothing. D7's `--phase` and
+  `--files` arrive with A5.
+- *What is not here.* The drift gate (`generated_current`, increment 5) and
+  the pin (increment 6). invariant's own instruction file carries no block,
+  because this repository configures no ruleset.
+- *Tests.* The block, the markers and the manifest keys are tested in
+  `tests/test_guidelines.py`. The domain, each refusal, `show`, and both
+  commands through `main` are tested in `tests/test_guidelines_domain.py`.
+
 ### D4 — Five check kinds; v1 ships four of them in full and one in part
 
 | Kind | Question it answers | Evaluated by | v1 |

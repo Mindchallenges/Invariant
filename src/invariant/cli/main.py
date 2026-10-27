@@ -3031,24 +3031,84 @@ _RENDER_STATUS = {
 }
 
 
-def cmd_guidelines_render(args) -> int:
-    from ..domains.guidelines import GuidelinesDomain
+_BLOCK_STATUS = {
+    "new": "{verb} the {name} block into {rel}",
+    "current": "{verb} the {name} block in {rel}: it is current",
+    "stale": "{verb} the {name} block in {rel}: it was rendered from an older ruleset",
+    "edited": "{verb} the {name} block in {rel}: its hand edits were replaced; "
+    "change the ruleset instead",
+}
 
+
+def _guidelines_domain(ctx: Context):
+    """The guidelines domain, given the host adapter's instruction files.
+
+    A domain may not import a host, so the default of
+    ``guidelines.instruction_files`` is injected here. A host kind with no
+    adapter has no default, and then only configured files carry a block.
+    """
+    from ..domains.guidelines import GuidelinesDomain
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    defaults = (
+        ClaudeCodeHost.INSTRUCTION_FILES
+        if ctx.manifest.get("host.kind") == "claude_code"
+        else ()
+    )
+    return GuidelinesDomain(ctx.rule_context(), instruction_files=defaults)
+
+
+def _block_line(block, verb: str, overwrite_local: bool) -> str:
+    if block.status == "absent":
+        return (
+            f"no {block.name} block in {block.relpath}; render --insert "
+            f"{block.name} appends one"
+        )
+    if block.status == "edited" and not overwrite_local:
+        skip = "would skip" if verb == "would write" else "skipped"
+        return (
+            f"{skip} the {block.name} block in {block.relpath}: it was edited by "
+            f"hand; move the edit into the ruleset, or render --overwrite-local "
+            f"to replace it"
+        )
+    return _BLOCK_STATUS[block.status].format(verb=verb, name=block.name, rel=block.relpath)
+
+
+def cmd_guidelines_render(args) -> int:
     ctx = Context()
-    result = GuidelinesDomain(ctx.rule_context()).render(dry_run=args.dry_run)
+    result = _guidelines_domain(ctx).render(
+        dry_run=args.dry_run,
+        insert=tuple(args.insert or ()),
+        overwrite_local=args.overwrite_local,
+    )
     if result.status == "no-ruleset":
         text = "no guidelines ruleset configured; nothing to render"
     else:
         verb = "would write" if args.dry_run else "wrote"
         text = _RENDER_STATUS[result.status].format(verb=verb, rel=result.relpath)
         text += f" (ruleset {result.ruleset})"
+        text = "\n".join(
+            [text, *(_block_line(b, verb, args.overwrite_local) for b in result.blocks)]
+        )
     return emit(args, {
         "status": result.status,
         "written": result.written,
         "dry_run": args.dry_run,
         "path": result.relpath,
         "ruleset": result.ruleset,
+        "blocks": [
+            {"path": b.relpath, "block": b.name, "status": b.status, "written": b.written}
+            for b in result.blocks
+        ],
     }, text)
+
+
+def cmd_guidelines_show(args) -> int:
+    shown = _guidelines_domain(Context()).show()
+    text = shown.text.rstrip("\n") if shown.text is not None else (
+        "no guidelines ruleset configured; nothing to show"
+    )
+    return emit(args, {"ruleset": shown.ruleset, "text": shown.text}, text)
 
 
 # -- rules, checks, privacy -------------------------------------------
@@ -4958,7 +5018,23 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="render, scan and report what would be written, and write nothing",
     )
+    q.add_argument(
+        "--insert",
+        action="append",
+        metavar="BLOCK",
+        help="append this managed block to each instruction file that lacks it "
+        "(guidelines/index); render never inserts one unasked",
+    )
+    q.add_argument(
+        "--overwrite-local",
+        action="store_true",
+        help="replace a managed block that was edited by hand, rather than skip it",
+    )
     q.set_defaults(func=cmd_guidelines_render)
+    q = guide.add_parser(
+        "show", help="print the full checklist text from the ruleset, writing nothing"
+    )
+    q.set_defaults(func=cmd_guidelines_show)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

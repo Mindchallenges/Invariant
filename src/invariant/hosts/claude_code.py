@@ -418,7 +418,15 @@ def loadability_problem(text: str, expected_name: str) -> str | None:
     return None
 
 
+#: The files this host reads as standing instructions, project-relative. The
+#: default of ``guidelines.instruction_files`` (ADR-012 D3): which file a host
+#: reads is a host question, not a library constant.
+INSTRUCTION_FILES = ("CLAUDE.md",)
+
+
 class ClaudeCodeHost:
+    INSTRUCTION_FILES = INSTRUCTION_FILES
+
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.claude_dir = self.root / ".claude"

@@ -46,10 +46,12 @@ Nothing reaches the engine another way.
 
   **A third class: generated files the manifest declares** (ADR-012 ruling
   13). The guidelines domain renders files from the project's ruleset, and
-  those files are neither state nor a store: today `guidelines.checklist`,
-  and with later increments `guidelines.instruction_files` and
-  `guidelines.baseline`. Only the commands that generate them write them:
-  `guidelines render` now, and `guidelines baseline --prune` once it lands.
+  those files are neither state nor a store: today `guidelines.checklist`
+  and the managed blocks in `guidelines.instruction_files`, and with a later
+  increment `guidelines.baseline`. Only the commands that generate them write
+  them: `guidelines render` now, and `guidelines baseline --prune` once it
+  lands. In an instruction file the class is only the text between a block's
+  markers; every other line is the project's, and render never rewrites it.
   Unlike a declared store, a generated file is **never exempt from session
   isolation**. A render goes through the session's branch and its review
   like any edit, and `guidelines render` refuses a target that
@@ -289,6 +291,13 @@ Three consequences are load-bearing:
 - **A target that already matches is still rewritten.** It costs nothing, and a
   repair command reporting "installed 0" on a healthy project reads as a
   failure. The one case withheld is the one where writing destroys work.
+
+The managed block `guidelines render` keeps in an instruction file follows the
+same rule (ADR-012 D3). Its begin marker holds the digest of its body, so a
+body that no longer matches is the operator's edit: skipped and named, and
+`--overwrite-local` takes the rendered text back. The generated checklist is
+the exception. The whole file is render's and the ruleset is its only source,
+so its hand edits are replaced and named.
 
 ## Session
 
@@ -871,7 +880,7 @@ The project's coding guidelines live in one YAML ruleset (ADR-012 D3). These
 commands write the generated-file class from Conventions, and nothing else.
 
 ```
-invariant guidelines render [--dry-run]
+invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local]
     Write the human checklist from the ruleset, in docs.format: markdown
     gives a .md file, sphinx a .rst file. The target is guidelines.checklist,
     or with that key null, checklist.<md|rst> beside the ruleset. The
@@ -909,7 +918,59 @@ invariant guidelines render [--dry-run]
 
     With no ruleset configured it reports "nothing to render" and exits 0
     (ADR-012 D3, "No ruleset, no change"). --json carries status, written,
-    dry_run, path and the ruleset digest.
+    dry_run, path, the ruleset digest, and blocks: one entry per instruction
+    file with its path, block, status and written.
+
+    The same render rewrites the managed block in each instruction file:
+    guidelines.instruction_files, or with that key null the host adapter's
+    default (CLAUDE.md for claude_code; none for a host kind with no
+    adapter). There is one block, guidelines/index (ADR-012 DN-C): a header
+    naming the ruleset, then one line per rule, the `always` rules first with
+    their statements, then every other rule's id and title. It is capped at
+    guidelines.injection.max_lines lines, and past the cap its last line is
+    "N more: `invariant guidelines show`". The block sits between two marker
+    lines, and the begin marker holds the digest of the body:
+
+      <!-- invariant:begin guidelines/index digest=<12 hex> -->
+      ...
+      <!-- invariant:end guidelines/index -->
+
+    Only the text between the markers is render's. Each block's status:
+      absent   no block there, and none inserted. Render never inserts one
+               unasked: --insert guidelines/index appends it after the
+               project's text (creating the file if it is missing), and the
+               operator moves it where they want it. After that it is found
+               by name wherever it sits.
+      new      inserted by this render.
+      current  the body matches its digest and what render produces now
+               (still rewritten).
+      stale    the body matches its digest but came from an older ruleset;
+               rewritten.
+      edited   the body no longer matches its digest: a hand edit. Skipped
+               and named, unless --overwrite-local takes the rendered text
+               back. The same three-way rule as an installed asset ("A
+               managed file the operator has edited", above).
+    A block of another name is left alone.
+
+    Refused as well, with nothing written to any file, the checklist
+    included:
+      - a malformed pair (a begin with no end, an end with no begin, a nested
+        or crossed pair, two blocks of one name, a line that opens like a
+        marker and is not one), named by file and line;
+      - an --insert naming a block render does not know;
+      - an instruction file outside the project, not a .md file, exempt from
+        isolation, or the same file as the ruleset or the checklist;
+      - a privacy finding in a block that is about to be written, named by
+        file, block and line within the block. Like the checklist's, the scan
+        always runs, whatever privacy.enabled and privacy.scope say.
+
+invariant guidelines show
+    Print the full checklist text from the ruleset in the tree in hand, in
+    markdown whatever docs.format says, without its marker line. Writes
+    nothing. This is where a capped block points. A ruleset that does not
+    load is refused (exit 1); with none configured it says so and exits 0.
+    --json carries the ruleset digest and the text. Selecting by phase and
+    files (ADR-012 D7) arrives with A5.
 ```
 
 ## Rules and gates

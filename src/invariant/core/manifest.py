@@ -348,13 +348,27 @@ DEFAULTS: dict[str, Any] = {
     # writes the human checklist; null means checklist.<md|rst> beside the
     # ruleset, following docs.format (ruling DN-B). It is a generated file the
     # manifest declares, the CLI's third write class (ruling 13), and never
-    # exempt from isolation. D13's other keys join as the increments that read
-    # them land; until then they are refused rather than ignored.
-    "guidelines": {"ruleset": None, "checklist": None},
+    # exempt from isolation. `instruction_files` lists the files that carry
+    # the managed `guidelines/index` block; null means the host adapter's
+    # default (CLAUDE.md for claude_code), which the CLI supplies because no
+    # domain imports a host. They are generated files too, but only between
+    # their markers. `injection.max_lines` caps that block (ruling DN-C).
+    # D13's other keys join as the increments that read them land; until then
+    # they are refused rather than ignored.
+    "guidelines": {
+        "ruleset": None,
+        "checklist": None,
+        "instruction_files": None,
+        "injection": {"max_lines": 40},
+    },
 }
 
 #: The `guidelines` keys this build reads.
-_GUIDELINES_KEYS = ("ruleset", "checklist")
+_GUIDELINES_KEYS = ("ruleset", "checklist", "instruction_files", "injection")
+#: Those of them that are null or one path.
+_GUIDELINES_PATH_KEYS = ("ruleset", "checklist")
+#: The `guidelines.injection` keys this build reads (D13's `on_edit` is A5's).
+_INJECTION_KEYS = ("max_lines",)
 
 
 @dataclass
@@ -667,10 +681,12 @@ class Manifest:
 
         A key the schema does not know loads, does nothing, and reads in
         `config show` as though it had taken: the BUG_050 shape. D13 names
-        more keys than `ruleset` and `checklist`; each is accepted by the
-        increment that reads it, and refused, by name, before then. Each key
-        read here is null or a non-empty path; where it points is checked by
-        whatever reads it, against the tree in hand.
+        more keys than this build reads (`baseline`, `verdicts`,
+        `injection.on_edit`); each is accepted by the increment that reads it,
+        and refused, by name, before then. `ruleset` and `checklist` are null
+        or a non-empty path, `instruction_files` null or a non-empty list of
+        them, and `injection.max_lines` an integer of at least 2. Where a path
+        points is checked by whatever reads it, against the tree in hand.
         """
         section = self.data.get("guidelines")
         if not isinstance(section, Mapping):
@@ -681,12 +697,39 @@ class Manifest:
                     f"guidelines.{key} is not a key this build reads; it reads "
                     f"{', '.join('guidelines.' + k for k in _GUIDELINES_KEYS)}."
                 )
-        for key in _GUIDELINES_KEYS:
+        for key in _GUIDELINES_PATH_KEYS:
             value = section.get(key)
-            if value is not None and not (isinstance(value, str) and value.strip()):
+            if value is not None and not _is_path(value):
                 raise ManifestError(
                     f"guidelines.{key} must be null or a path, got {value!r}"
                 )
+        files = section.get("instruction_files")
+        if files is not None and not (
+            isinstance(files, list) and files and all(_is_path(f) for f in files)
+        ):
+            # A bare string is refused rather than read as one file: the
+            # AUD-08 precedent for every list a manifest declares.
+            raise ManifestError(
+                f"guidelines.instruction_files must be null or a list of paths, "
+                f"got {files!r}"
+            )
+        injection = section.get("injection")
+        if not isinstance(injection, Mapping):
+            raise ManifestError(f"guidelines.injection must be a mapping, got {injection!r}")
+        for key in injection:
+            if key not in _INJECTION_KEYS:
+                raise ManifestError(
+                    f"guidelines.injection.{key} is not a key this build reads; it "
+                    f"reads {', '.join('guidelines.injection.' + k for k in _INJECTION_KEYS)}."
+                )
+        cap = injection.get("max_lines")
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 2:
+            # Two lines is the least the block can be: its header, and the line
+            # that counts what the cap left out.
+            raise ManifestError(
+                f"guidelines.injection.max_lines must be an integer of at least 2, "
+                f"got {cap!r}"
+            )
 
     def scheduled_gates(self) -> frozenset[str]:
         """The gates a sweep cadence has moved off the per-change path.
@@ -999,3 +1042,8 @@ def _flatten(node: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, A
             yield from _flatten(value, f"{dotted}.")
         else:
             yield dotted, value
+
+
+def _is_path(value: Any) -> bool:
+    """A declared path: a string with something in it."""
+    return isinstance(value, str) and bool(value.strip())

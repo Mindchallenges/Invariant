@@ -387,7 +387,15 @@ class TestManifestKey:
             ("docs/guidelines/ruleset.yaml", "guidelines must be a mapping"),
             ({"ruleset": 3}, "guidelines.ruleset must be null or a path"),
             ({"ruleset": "  "}, "guidelines.ruleset must be null or a path"),
-            ({"instruction_files": ["CLAUDE.md"]}, "guidelines.instruction_files is not a key this build reads"),
+            ({"baseline": "docs/guidelines/baseline.txt"}, "guidelines.baseline is not a key this build reads"),
+            ({"instruction_files": "CLAUDE.md"}, "guidelines.instruction_files must be null or a list of paths"),
+            ({"instruction_files": []}, "guidelines.instruction_files must be null or a list of paths"),
+            ({"instruction_files": ["CLAUDE.md", ""]}, "guidelines.instruction_files must be null or a list of paths"),
+            ({"injection": 40}, "guidelines.injection must be a mapping"),
+            ({"injection": {"on_edit": True}}, "guidelines.injection.on_edit is not a key this build reads"),
+            ({"injection": {"max_lines": "40"}}, "guidelines.injection.max_lines must be an integer of at least 2"),
+            ({"injection": {"max_lines": True}}, "guidelines.injection.max_lines must be an integer of at least 2"),
+            ({"injection": {"max_lines": 1}}, "guidelines.injection.max_lines must be an integer of at least 2"),
             ({"checklist": 3}, "guidelines.checklist must be null or a path"),
             ({"checklist": ""}, "guidelines.checklist must be null or a path"),
         ],
@@ -409,6 +417,26 @@ class TestManifestKey:
         )
         assert manifest.get("guidelines.checklist") == "docs/guidelines/rules.md"
         assert manifest.source_of("guidelines.checklist") == "manifest"
+
+    def test_instruction_files_default_to_null_so_the_host_decides(self, make_manifest):
+        manifest = make_manifest({"version": 1})
+        assert manifest.get("guidelines.instruction_files") is None
+        assert manifest.source_of("guidelines.instruction_files") == "default"
+
+    def test_configured_instruction_files_are_kept_as_written(self, make_manifest):
+        manifest = make_manifest(
+            {"version": 1, "guidelines": {"instruction_files": ["CLAUDE.md", "docs/AGENTS.md"]}}
+        )
+        assert manifest.get("guidelines.instruction_files") == ["CLAUDE.md", "docs/AGENTS.md"]
+
+    def test_the_injection_cap_defaults_to_forty_lines(self, make_manifest):
+        manifest = make_manifest({"version": 1})
+        assert manifest.get("guidelines.injection.max_lines") == 40
+        assert manifest.source_of("guidelines.injection.max_lines") == "default"
+
+    def test_a_configured_injection_cap_is_kept(self, make_manifest):
+        manifest = make_manifest({"version": 1, "guidelines": {"injection": {"max_lines": 12}}})
+        assert manifest.get("guidelines.injection.max_lines") == 12
 
 
 # -- the generated checklist (A2 increment 3, DN-B) -----------------------------------
@@ -542,3 +570,206 @@ class TestTheChecklistBody:
         out = rendered(fmt, text=mutated(edit))
         assert "\n\n\n" not in out
         assert out.endswith("\n") and not out.endswith("\n\n")
+
+
+
+# -- the managed instruction-file block (A2 increment 4, D3, DN-C) ---------------------
+
+
+ALWAYS_RULE = """\
+  - id: tests.never-skip
+    section: tests
+    title: Never skip a failing test.
+    statement: >
+      A failing test is fixed or reported.
+
+      It is never skipped.
+    severity: blocker
+    phases: [always]
+    applies_to: ["**"]
+    check: {kind: engine, rule: test.all_pass}
+"""
+WITH_ALWAYS = RULESET + ALWAYS_RULE
+INDEX = "guidelines/index"
+
+
+def index_body(text=WITH_ALWAYS, max_lines=40):
+    return guidelines.render_index_block(
+        parse(text, registered=REGISTERED), source=SOURCE, max_lines=max_lines
+    )
+
+
+def many_rules(count: int) -> str:
+    extra = "".join(
+        f"""\
+  - id: tests.rule-{n:02d}
+    section: tests
+    title: Rule number {n}
+    statement: Statement {n}.
+    severity: warn
+    phases: [review]
+    applies_to: ["**"]
+    check: {{kind: engine, rule: test.all_pass}}
+"""
+        for n in range(count)
+    )
+    return WITH_ALWAYS + extra
+
+
+class TestTheIndexBlock:
+    """DN-C and ruling 8: one block, the rule index plus the `always` rules,
+    capped by guidelines.injection.max_lines."""
+
+    def test_the_block_is_named_guidelines_index(self):
+        assert guidelines.INDEX_BLOCK == "guidelines/index"
+        assert guidelines.BLOCKS == ("guidelines/index",)
+
+    def test_it_is_deterministic_and_ends_with_one_newline(self):
+        body = index_body()
+        assert body == index_body()
+        assert body.endswith("\n") and not body.endswith("\n\n")
+
+    def test_the_header_names_the_source_digest_and_how_to_change_it(self):
+        header = index_body().split("\n")[0]
+        assert SOURCE in header
+        assert digest_of(WITH_ALWAYS.encode("utf-8")) in header
+        assert "invariant guidelines render" in header
+
+    def test_every_rule_is_one_index_line_of_id_and_title(self):
+        lines = index_body().rstrip("\n").split("\n")[1:]
+        assert lines[1] == "- `di.views-no-concrete-services`: Views never touch concrete services or singletons"
+        assert lines[2] == "- `tests.coverage-floor`: Touched files meet the coverage floor"
+        assert "A view never reaches" not in index_body()
+
+    def test_an_always_rule_comes_first_and_carries_its_statement(self):
+        lines = index_body().rstrip("\n").split("\n")
+        assert lines[1] == (
+            "- `tests.never-skip` (always): Never skip a failing test. "
+            "A failing test is fixed or reported. It is never skipped."
+        )
+        assert len(lines) == 4
+
+    def test_a_ruleset_with_no_rules_is_the_header_alone(self):
+        empty = "version: 1\nsections:\n  - {id: di, title: DI}\nrules: []\n"
+        assert index_body(empty).count("\n") == 1
+
+    def test_at_the_cap_nothing_is_cut(self):
+        body = index_body(many_rules(1), max_lines=5)
+        assert body.count("\n") == 5
+        assert "more:" not in body
+
+    def test_past_the_cap_the_last_line_says_how_many_more_and_where(self):
+        body = index_body(many_rules(10), max_lines=6)
+        lines = body.rstrip("\n").split("\n")
+        assert len(lines) == 6
+        assert lines[-1] == "- 9 more: `invariant guidelines show`"
+        assert lines[1].startswith("- `tests.never-skip` (always)")
+
+    def test_the_smallest_cap_keeps_the_header_and_the_count(self):
+        lines = index_body(max_lines=2).rstrip("\n").split("\n")
+        assert lines == [lines[0], "- 3 more: `invariant guidelines show`"]
+
+    def test_a_cap_below_two_is_refused(self):
+        with pytest.raises(ValueError, match="at least 2"):
+            index_body(max_lines=1)
+
+
+BEGIN_X = "<!-- invariant:begin x digest=0123456789ab -->\n"
+END_X = "<!-- invariant:end x -->\n"
+
+
+def wrapped(body: str, name=INDEX) -> str:
+    return guidelines.block_text(name, body)
+
+
+class TestTheBlockMarkers:
+    """D3: a marker-delimited block whose begin marker holds the digest of the
+    rendered body. Everything outside a pair is the project's."""
+
+    def test_the_markers_are_the_ones_d3_shows(self):
+        text = wrapped("hello\n")
+        digest = digest_of(b"hello\n")
+        assert text == (
+            f"<!-- invariant:begin guidelines/index digest={digest} -->\n"
+            "hello\n"
+            "<!-- invariant:end guidelines/index -->\n"
+        )
+
+    def test_a_block_is_found_by_name_wherever_it_sits(self):
+        text = "# Project\n\nOurs.\n\n" + wrapped("body\n") + "\nAlso ours.\n"
+        (block,) = guidelines.find_blocks(text).values()
+        assert block.name == INDEX
+        assert block.body == "body\n"
+        assert block.digest == digest_of(b"body\n")
+        assert block.begin == 4 and block.end == 6
+
+    def test_markers_may_be_indented_or_trailed_by_spaces(self):
+        text = "  " + wrapped("body\n").replace("-->\n", "-->  \n")
+        assert guidelines.find_blocks(text)[INDEX].body == "body\n"
+
+    def test_an_inline_mention_of_a_marker_is_prose(self):
+        text = "Write `<!-- invariant:begin x digest=abc -->` to start one.\n"
+        assert guidelines.find_blocks(text) == {}
+
+    def test_no_markers_is_no_blocks(self):
+        assert guidelines.find_blocks("# Just ours\n") == {}
+
+    @pytest.mark.parametrize(
+        ("text", "needle"),
+        [
+            ("a\n<!-- invariant:begin guidelines/index digest=0123456789ab -->\nb\n",
+             "line 2: the begin marker of guidelines/index has no end"),
+            ("a\n<!-- invariant:end guidelines/index -->\n",
+             "line 2: an end marker of guidelines/index with no begin"),
+            (BEGIN_X + "<!-- invariant:begin y digest=0123456789ab -->\n",
+             "line 2: the begin marker of y is nested inside x, opened on line 1"),
+            (BEGIN_X + "<!-- invariant:end y -->\n",
+             "line 2: the end marker of y does not close x, opened on line 1"),
+            (BEGIN_X + END_X + BEGIN_X + END_X,
+             "line 3: a second x block; the first begins on line 1"),
+            ("<!-- invariant:begin guidelines/index -->\n<!-- invariant:end guidelines/index -->\n",
+             "line 1: a malformed begin marker"),
+            (BEGIN_X + "<!-- invariant:end -->\n",
+             "line 2: a malformed end marker"),
+        ],
+        ids=["no-end", "no-begin", "nested", "crossed", "duplicate", "bad-begin", "bad-end"],
+    )
+    def test_a_malformed_pair_names_the_line(self, text, needle):
+        with pytest.raises(guidelines.BlockError) as caught:
+            guidelines.find_blocks(text)
+        assert needle in str(caught.value)
+
+    def test_a_current_block(self):
+        block = guidelines.find_blocks(wrapped("body\n"))[INDEX]
+        assert guidelines.block_state(block, "body\n") == "current"
+
+    def test_a_block_rendered_from_an_older_ruleset_is_stale(self):
+        block = guidelines.find_blocks(wrapped("old\n"))[INDEX]
+        assert guidelines.block_state(block, "new\n") == "stale"
+
+    def test_a_body_that_no_longer_matches_its_digest_was_edited(self):
+        text = wrapped("body\n").replace("body\n", "body, edited\n")
+        block = guidelines.find_blocks(text)[INDEX]
+        assert guidelines.block_state(block, "body\n") == "edited"
+        assert guidelines.block_state(block, "body, edited\n") == "edited"
+
+
+class TestPuttingABlock:
+    def test_a_found_block_is_replaced_and_nothing_outside_it_moves(self):
+        before, after = "# Ours\n\nkeep me\n", "\ntrailing, ours\n"
+        text = before + wrapped("old\n") + after
+        block = guidelines.find_blocks(text)[INDEX]
+        out = guidelines.replace_block(text, block, "new\n")
+        assert out == before + wrapped("new\n") + after
+
+    def test_an_end_marker_on_the_last_line_with_no_newline_is_replaced(self):
+        text = "ours\n" + wrapped("old\n").rstrip("\n")
+        block = guidelines.find_blocks(text)[INDEX]
+        assert guidelines.replace_block(text, block, "new\n") == "ours\n" + wrapped("new\n")
+
+    def test_append_leaves_one_blank_line_after_the_project_text(self):
+        assert guidelines.append_block("ours", INDEX, "b\n") == "ours\n\n" + wrapped("b\n")
+        assert guidelines.append_block("ours\n", INDEX, "b\n") == "ours\n\n" + wrapped("b\n")
+
+    def test_append_to_an_empty_file_is_the_block_alone(self):
+        assert guidelines.append_block("", INDEX, "b\n") == wrapped("b\n")

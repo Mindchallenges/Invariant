@@ -174,11 +174,17 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
                                # checklist, in docs.format; null =
                                # checklist.<md|rst> beside the ruleset. A
                                # generated file: never exempt from isolation
+  instruction_files: null      # the .md files carrying the managed
+                               # guidelines/index block; null = the host
+                               # adapter's default (CLAUDE.md for claude_code).
+                               # Generated between the block's markers only
+  injection:
+    max_lines: 40              # cap on the guidelines/index block, at least 2
 ```
 
-D13's other `guidelines` keys (`baseline`, `instruction_files`, `injection`,
-`verdicts`) are accepted by the increment that reads each one. Until then they
-are refused at load, by name, rather than loaded and ignored.
+D13's other `guidelines` keys (`baseline`, `verdicts`, and
+`injection.on_edit`) are accepted by the increment that reads each one. Until
+then they are refused at load, by name, rather than loaded and ignored.
 
 ### Generated files are declared, and never exempt
 
@@ -193,6 +199,16 @@ also refuses a target that is the ruleset itself, a suffix that disagrees
 with `docs.format` (`.md` for markdown, `.rst` for sphinx), and an existing
 file at the target that carries no `invariant-managed` marker, which render
 did not write.
+
+`guidelines.instruction_files` is the second key of that kind, with one
+difference: an instruction file is the project's, and only the managed block
+inside it is generated. Render rewrites the text between the block's markers
+and nothing else, never inserts a block without `--insert`, and skips a block
+edited by hand unless `--overwrite-local` (cli.md, Guidelines). It refuses an
+instruction file that is exempt, outside the project, not markdown, or the
+ruleset or checklist itself. A null value is the host adapter's default. The
+CLI supplies it from the adapter for `host.kind`, because no domain imports a
+host, and a host kind with no adapter has none.
 
 ### A sweep cadence
 
@@ -859,10 +875,14 @@ since they would do nothing. Levels are read resolved — profile, overrides and
 `INVARIANT_DISABLE` — because that is what the gate would do. `sweep.fresh` is
 refused at `block` or `ask`, with or without a cadence: the user ruled that it
 only ever warns, and the engine holds that ruling at load rather than in prose.
-`guidelines` must be a mapping whose keys this build reads (today `ruleset`
-and `checklist`), and each of those null or a non-empty path. Where the
-checklist points is checked by `guidelines render`, against the tree in hand,
-not at load. The ruleset's
+`guidelines` must be a mapping whose keys this build reads (today `ruleset`,
+`checklist`, `instruction_files` and `injection`). `ruleset` and `checklist`
+are each null or a non-empty path, and `instruction_files` is null or a
+non-empty list of them; a bare string is refused, as for every declared list.
+`injection` is a mapping whose only key is `max_lines`, an integer of at least
+2: the block's header and the line that counts what the cap left out. Where
+the checklist and the instruction files point is checked by `guidelines
+render`, against the tree in hand, not at load. The ruleset's
 own contents are not read at load: a manifest is read on every command, and a
 ruleset that does not validate is `guidelines.ruleset_valid`'s verdict, at
 the landing and in `doctor`, naming every problem. A configured path that
