@@ -2,7 +2,7 @@
 id: IDEA_031
 type: idea
 title: invariant owns the format, lifecycle and enforcement of coding guidelines
-status: accepted
+status: in_progress
 residue: []
 history:
 - from: proposed
@@ -12,6 +12,10 @@ history:
   forced: false
   ruling: the user, 2026-10-27 (ADR-012 rulings)
   evidence: 7c5ed6d78ad62ba791721b83abaa7e4f0b837566
+- from: accepted
+  to: in_progress
+  reason: 'First build increment landed: A1 increment 1 in dc48851'
+  forced: false
 priority: high
 effort: XL
 tier: '2'
@@ -123,3 +127,14 @@ in commit 7c5ed6d: all thirteen questions ruled, an always-pure ratchet with
 no Boy-Scout switch. A1 to A8 are unbuilt. The item stays `proposed` until its
 first build increment can cite a ruling commit for the ruled route to
 `in_progress`.
+
+A1 increment 1 landed (dc48851): engine-layer conformance harness, three
+scenarios. A1 increments 2–6 are tracked here, not in a session.
+
+* Increment 2: after A2 (ruleset fixtures, malformed-ruleset scenario).
+* Increment 3: after A3 (seeded pattern, baselined, missing-test scenarios).
+* Increment 4: after A4 (vague-verdict and judgement-fail scenarios), with the
+  model/host permutation test arriving with A7.
+* Increment 5: the scripted CLI driver plus `invariant conformance run|show`,
+  after A4.
+* Increment 6: Claude Code under two or more models, after A4 and A6.
