@@ -231,6 +231,7 @@ graph TD
     CONF -- get_rule --> RULES
     CONF --> CONFDATA
     RULES -- load, the ruleset gate --> CGUIDE
+    CGUIDE -- project_relative --> MANIFEST
     CLI --> GDOM
     GDOM -- render_checklist, split_managed --> CGUIDE
     GDOM -- load_ruleset, the tree in hand, is_exempt_path --> RULES
@@ -424,10 +425,19 @@ coding guidelines as one YAML file, by default `docs/guidelines/ruleset.yaml`,
 named by the manifest's `guidelines.ruleset`. `core/guidelines` holds the
 schema (version 1), the model (`Ruleset`, `Guideline`, `Check`) and the
 validation, which collects every problem and refuses the ruleset whole, and
-the content hash a pipeline will pin. It reads the file and nothing else, and
-it imports nothing from `core/rules`: `RULES --> CGUIDE` is the one arrow, and
+the content hash a pipeline will pin. All five check kinds are validated:
+`engine`, `pattern`, `boundary` (`forbid` or `only`, never both),
+`cochange` (`pair` or `registry`) and `judgement` (ADR-012's check-kind
+amendment). A `registry` cochange names a registry file of invariant's own
+format, which is read and refused with the ruleset, so a missing or invalid
+registry fails the same gate. It reads those files and nothing else, and it
+imports nothing from `core/rules`: `RULES --> CGUIDE` is the one arrow, and
 the registered rule ids an `engine` check must name are handed down as a
-parameter rather than imported back up. `guidelines.ruleset_valid` is the
+parameter rather than imported back up. So is the tree a registry path is
+resolved against, which is the tree in hand. `CGUIDE --> MANIFEST` is one
+name, `project_relative`, so a target glob, a template's derived path, a
+registry path and a registry entry's paths are spelled the way every other
+declared path is, and one that climbs out of the project is refused. `guidelines.ruleset_valid` is the
 rule; it reads the ruleset from the tree in hand, answers N/A with no ruleset
 configured, and fails, never skips, on one that is configured and does not
 load. `core/machines` injects it at the landing state's entry only when a
@@ -880,7 +890,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
-| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, which check kinds and engines this build accepts, and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file, or decide where one goes (`domains/guidelines` does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
+| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file, or decide where one goes (`domains/guidelines` does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`

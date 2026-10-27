@@ -1696,7 +1696,8 @@ def load_ruleset(
                 ),
             ),
         )
-    path = guidelines_tree(ctx) / rel
+    tree = guidelines_tree(ctx)
+    path = tree / rel
     if not path.is_file():
         return None, Verdict.fail(
             f"the configured guidelines ruleset {rel} does not exist",
@@ -1706,8 +1707,11 @@ def load_ruleset(
             fixes=(f"create {rel}", "or clear guidelines.ruleset"),
         )
     try:
+        # The registries a cochange rule names are read from the same tree
+        # (ADR-012 DN-A9), so a registry broken in the session cannot pass
+        # on another checkout's copy either.
         return guidelines_reader.load(
-            path, registered=[spec.id for spec in all_rules()]
+            path, registered=[spec.id for spec in all_rules()], root=tree
         ), None
     except guidelines_reader.RulesetError as exc:
         return None, Verdict.fail(

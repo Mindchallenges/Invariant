@@ -867,7 +867,10 @@ own contents are not read at load: a manifest is read on every command, and a
 ruleset that does not validate is `guidelines.ruleset_valid`'s verdict, at
 the landing and in `doctor`, naming every problem. A configured path that
 names nothing inside the project, or no file in the tree in hand, fails that
-rule rather than reading as "no ruleset".
+rule rather than reading as "no ruleset". The same holds one level down: a
+registry file a `cochange` rule names (ADR-012's check-kind amendment) is
+project content the ruleset points at, not a manifest key. It is read by the
+same rule from the same tree, and a missing or invalid registry fails it.
 Existence is checked at load; whether the file parses as a machine of the
 right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it

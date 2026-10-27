@@ -210,13 +210,20 @@ class TestRefusals:
         problems = problems_of(mutated(edit))
         assert any(needle in p for p in problems), problems
 
-    @pytest.mark.parametrize("kind", ["boundary", "cochange", "judgement"])
-    def test_a_v1_kind_this_build_cannot_validate_is_refused_not_waved_through(self, kind):
-        """Accepting an unvalidated kind would let a malformed rule load as
-        though it had been checked. Refused, and the refusal says why."""
+    @pytest.mark.parametrize(
+        ("kind", "missing"),
+        [
+            ("boundary", "engine"),
+            ("cochange", "form"),
+            ("judgement", "evidence, scope"),
+        ],
+    )
+    def test_a_kind_given_bare_is_refused_naming_what_it_lacks(self, kind, missing):
+        """Every v1 kind is validated (A2 increment 2), so a rule that names a
+        kind and nothing else is refused, never waved through."""
         text = mutated(lambda r: r["rules"][0].update(check={"kind": kind}))
         problems = problems_of(text)
-        assert any(f"kind {kind!r}" in p and "does not validate" in p for p in problems), problems
+        assert any(f"check: missing {missing}" in p for p in problems), problems
 
     def test_every_problem_is_reported_not_only_the_first(self):
         def two(r):
@@ -535,9 +542,3 @@ class TestTheChecklistBody:
         out = rendered(fmt, text=mutated(edit))
         assert "\n\n\n" not in out
         assert out.endswith("\n") and not out.endswith("\n\n")
-
-    def test_a_kind_with_no_summary_yet_is_named_by_its_kind(self):
-        from invariant.core.guidelines import Check, _check_summary
-
-        assert _check_summary(Check(kind="judgement"), str) == "judgement"
-

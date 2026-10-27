@@ -33,7 +33,9 @@ from invariant.core.conformance import (
     status_of,
 )
 
-SHIPPED = ["clean", "docs-first-breach", "malformed-ruleset", "red-first-breach"]
+SHIPPED = [
+    "clean", "docs-first-breach", "malformed-ruleset", "red-first-breach", "valid-ruleset",
+]
 
 
 # -- the known answers ------------------------------------------------------
@@ -53,6 +55,19 @@ def test_a_malformed_ruleset_is_the_one_refusal_at_the_landing(tmp_path):
     assert {k: v for k, v in landing.items() if k != "guidelines.ruleset_valid"} == clean
     assert landing["guidelines.ruleset_valid"] == "block"
     assert outcome.refusals == {"land": ("guidelines.ruleset_valid",)}
+
+
+def test_a_ruleset_using_every_kind_lands_like_the_clean_change(tmp_path):
+    """A1 increment 2, the ruleset fixture for the kinds A2 increment 2
+    validates: engine, pattern, boundary, both cochange forms with the
+    registry a rule names, and judgement. The ruleset gate passes, and every
+    other landing gate answers as it does for the clean change."""
+    outcome = replay(load_named("valid-ruleset"), workdir=tmp_path).outcome
+    clean = load_named("clean").expected.gates["committed"]
+    landing = outcome.gates["committed"]
+    assert {k: v for k, v in landing.items() if k != "guidelines.ruleset_valid"} == clean
+    assert landing["guidelines.ruleset_valid"] == "pass"
+    assert outcome.refusals == {}
 
 
 @pytest.mark.parametrize("name", SHIPPED)
