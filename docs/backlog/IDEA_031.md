@@ -110,3 +110,9 @@ BUG_040 fix and A0.
 High value (every session in every consuming project goes through the
 guidelines; it turns prose rules into gated evidence), XL effort as a
 multi-phase programme with an ADR first. T2 Strategic by the user's call.
+
+**A0 landed** as [ADR-012](../adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract.md)
+in commit 7c5ed6d: all thirteen questions ruled, an always-pure ratchet with
+no Boy-Scout switch. A1 to A8 are unbuilt. The item stays `proposed` until its
+first build increment can cite a ruling commit for the ruled route to
+`in_progress`.
