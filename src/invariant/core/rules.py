@@ -27,6 +27,7 @@ from typing import Any
 
 from ..adapters import Adapter, get_adapter
 from . import git
+from . import guidelines as guidelines_reader
 from . import plan as plan_reader
 from . import sweep as sweep_reader
 from .errors import InvariantError
@@ -1639,6 +1640,80 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
         "replace.",
         fixes=(f"add a {fmt} diagram to the changed doc",),
     )
+
+
+# -- guidelines rules --------------------------------------------------
+
+
+@rule(
+    "guidelines.ruleset_valid",
+    summary="The project's guidelines ruleset loads and validates.",
+    events=(),
+)
+def _guidelines_ruleset_valid(ctx: RuleContext) -> Verdict:
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return failure
+    if ruleset is None:
+        return Verdict.na("no guidelines ruleset configured")
+    return Verdict.clean(
+        f"{len(ruleset.rules)} guideline(s) in {len(ruleset.sections)} section(s), "
+        f"ruleset {ruleset.digest}"
+    )
+
+
+def load_ruleset(
+    ctx: RuleContext,
+) -> tuple[guidelines_reader.Ruleset | None, Verdict | None]:
+    """The project's ruleset, the failure that stands in for it, or neither.
+
+    ``(None, None)`` means no ruleset is configured, and every ``guidelines.*``
+    rule is then N/A (ADR-012 D3). Anything short of a ruleset that validates
+    is ``(None, verdict)``, and the caller FAILS on it: a gate that needs the
+    ruleset fails rather than skips when it does not load, as a pinned machine
+    that cannot load already does. A configured path naming nothing inside the
+    project fails for the same reason; dropping it would read as "no ruleset",
+    which is a gate switched off by a typo.
+
+    The ruleset is read from the tree in hand: the session's worktree when it
+    has one, else the checkout the rule runs in. There is no fallback to
+    another checkout's copy, so a ruleset broken in the session cannot pass on
+    the main checkout's.
+    """
+    configured = ctx.manifest.get("guidelines.ruleset")
+    if not configured:
+        return None, None
+    rel = project_relative(
+        configured, [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
+    )
+    if rel is None or rel == ".":
+        return None, Verdict.fail(
+            f"guidelines.ruleset {configured!r} names nothing inside the project",
+            detail="The ruleset is project content, reviewed like a doc; a path "
+            "outside every checkout of this repository is not this project's.",
+            fixes=("set guidelines.ruleset to a project-relative path, such as "
+                   "docs/guidelines/ruleset.yaml",),
+        )
+    path = (_session_worktree(ctx) or _repo_root(ctx)) / rel
+    if not path.is_file():
+        return None, Verdict.fail(
+            f"the configured guidelines ruleset {rel} does not exist",
+            detail="An absent file is not an empty ruleset: it cannot be told apart "
+            "from one that was never wired, so the gates that need it fail. The "
+            "manifest key and the file belong in the same change.",
+            fixes=(f"create {rel}", "or clear guidelines.ruleset"),
+        )
+    try:
+        return guidelines_reader.load(
+            path, registered=[spec.id for spec in all_rules()]
+        ), None
+    except guidelines_reader.RulesetError as exc:
+        return None, Verdict.fail(
+            f"the guidelines ruleset {rel} does not validate "
+            f"({len(exc.problems)} problem(s))",
+            detail="; ".join(exc.problems),
+            fixes=(f"fix {rel}, then: invariant check guidelines.ruleset_valid",),
+        )
 
 
 # -- test rules --------------------------------------------------------

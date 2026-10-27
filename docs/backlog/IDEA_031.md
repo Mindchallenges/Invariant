@@ -131,7 +131,9 @@ first build increment can cite a ruling commit for the ruled route to
 A1 increment 1 landed (dc48851): engine-layer conformance harness, three
 scenarios. A1 increments 2–6 are tracked here, not in a session.
 
-* Increment 2: after A2 (ruleset fixtures, malformed-ruleset scenario).
+* Increment 2: after A2 (ruleset fixtures, malformed-ruleset scenario). The
+  malformed-ruleset scenario landed with A2 increment 1; the fixtures for the
+  kinds A2 increment 2 validates are still owed.
 * Increment 3: after A3 (seeded pattern, baselined, missing-test scenarios).
 * Increment 4: after A4 (vague-verdict and judgement-fail scenarios), with the
   model/host permutation test arriving with A7.

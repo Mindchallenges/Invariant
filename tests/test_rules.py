@@ -172,13 +172,14 @@ class TestRegistry:
             AGENT_ROLE_GATES,
             DOCS_FIRST_GATES,
             FRESHNESS_GATE,
+            GUIDELINES_GATES,
             load_machine,
             shipped_ids,
         )
 
         reachable = {
             gate
-            for injected in (DOCS_FIRST_GATES, *AGENT_ROLE_GATES.values())
+            for injected in (DOCS_FIRST_GATES, *AGENT_ROLE_GATES.values(), GUIDELINES_GATES)
             for spec in injected.values()
             for gates in spec.values()
             for gate in gates

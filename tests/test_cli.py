@@ -236,6 +236,44 @@ class TestDoctorAndConfig:
         )
         assert "none configured" in row
 
+    def _with_ruleset(self, project, text):
+        path = project / ".claude" / "invariant.yaml"
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body["guidelines"] = {"ruleset": "docs/guidelines/ruleset.yaml"}
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+        ruleset = project / "docs" / "guidelines" / "ruleset.yaml"
+        ruleset.parent.mkdir(parents=True, exist_ok=True)
+        ruleset.write_text(text, encoding="utf-8")
+
+    def test_doctor_guidelines_row_without_a_ruleset(self, project, capsys):
+        """ADR-012 D3: no ruleset, no change. The row passes and says so."""
+        run("init", "--ecosystem", "python")
+        capsys.readouterr()
+        run("doctor")
+        row = next(ln for ln in out(capsys).splitlines() if "guidelines ruleset" in ln)
+        assert "no guidelines ruleset configured" in row
+
+    def test_doctor_rejects_a_malformed_ruleset(self, project, capsys):
+        """IDEA_031's acceptance: `doctor` rejects a malformed ruleset, naming
+        the problem, and exits 1."""
+        run("init", "--ecosystem", "python")
+        self._with_ruleset(project, "version: 1\nsections: []\nrules: [3]\n")
+        capsys.readouterr()
+        code = run("doctor")
+        text = out(capsys)
+        row = next(ln for ln in text.splitlines() if "guidelines ruleset" in ln)
+        assert "does not validate" in row
+        assert "rules[1] must be a mapping" in text
+        assert code == 1
+
+    def test_doctor_accepts_a_valid_ruleset(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        self._with_ruleset(project, "version: 1\nsections: []\nrules: []\n")
+        capsys.readouterr()
+        run("doctor")
+        row = next(ln for ln in out(capsys).splitlines() if "guidelines ruleset" in ln)
+        assert "0 guideline(s)" in row
+
     def test_config_show_reports_provenance(self, project, capsys):
         run("init", "--ecosystem", "python")
         run("config", "show", "--provenance")

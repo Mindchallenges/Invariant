@@ -163,7 +163,18 @@ agents:
 
 host:
   kind: claude_code
+
+guidelines:                    # the project's coding guidelines (ADR-012 D3, D13)
+  ruleset: null                # path of the one YAML ruleset; null = no
+                               # guidelines, every guidelines.* rule N/A. The
+                               # documented location is
+                               # docs/guidelines/ruleset.yaml. Rule content never
+                               # goes in the manifest (D2)
 ```
+
+D13's other `guidelines` keys (`baseline`, `checklist`, `instruction_files`,
+`injection`, `verdicts`) are accepted by the increment that reads each one.
+Until then they are refused at load, by name, rather than loaded and ignored.
 
 ### A sweep cadence
 
@@ -830,6 +841,13 @@ since they would do nothing. Levels are read resolved — profile, overrides and
 `INVARIANT_DISABLE` — because that is what the gate would do. `sweep.fresh` is
 refused at `block` or `ask`, with or without a cadence: the user ruled that it
 only ever warns, and the engine holds that ruling at load rather than in prose.
+`guidelines` must be a mapping whose keys this build reads (today only
+`ruleset`), and `guidelines.ruleset` null or a non-empty path. The ruleset's
+own contents are not read at load: a manifest is read on every command, and a
+ruleset that does not validate is `guidelines.ruleset_valid`'s verdict, at
+the landing and in `doctor`, naming every problem. A configured path that
+names nothing inside the project, or no file in the tree in hand, fails that
+rule rather than reading as "no ruleset".
 Existence is checked at load; whether the file parses as a machine of the
 right *kind* is still the loader's question, and a machine that exists but
 cannot load as a pipeline now **fails** the gates that need it

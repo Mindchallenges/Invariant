@@ -29,6 +29,7 @@ from ..core.rules import (
     apply_acknowledgements,
     coverage_advisory_exception,
     evaluate,
+    get_rule,
     sweep_cadence_summary,
 )
 from ..core.store import InertStore, JsonStore
@@ -877,6 +878,20 @@ def cmd_doctor(args) -> int:
             )
         except InvariantError as exc:
             checks.append(("sweep cadence", True, f"could not be read: {exc}"))
+
+        # The guidelines ruleset (ADR-012 D3): a row, and a failing one when a
+        # configured ruleset does not load or validate. Asked of the rule
+        # itself, so `doctor` and the landing gate cannot disagree; called
+        # directly rather than through `evaluate`, because a diagnosis reports
+        # the ruleset as it is whatever level or stand-down holds the gate.
+        ruleset = get_rule("guidelines.ruleset_valid").fn(ctx.rule_context())
+        checks.append(
+            (
+                "guidelines ruleset",
+                ruleset.ok,
+                ruleset.message + (f": {ruleset.detail}" if not ruleset.ok else ""),
+            )
+        )
 
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()

@@ -33,7 +33,7 @@ from invariant.core.conformance import (
     status_of,
 )
 
-SHIPPED = ["clean", "docs-first-breach", "red-first-breach"]
+SHIPPED = ["clean", "docs-first-breach", "malformed-ruleset", "red-first-breach"]
 
 
 # -- the known answers ------------------------------------------------------
@@ -41,6 +41,18 @@ SHIPPED = ["clean", "docs-first-breach", "red-first-breach"]
 
 def test_the_shipped_scenarios_are_the_first_set():
     assert scenario_names() == SHIPPED
+
+
+def test_a_malformed_ruleset_is_the_one_refusal_at_the_landing(tmp_path):
+    """A1 increment 2 (ADR-012 D3, D11): the ruleset gate rides the landing
+    only where a ruleset is configured, and there it is the gate that stops a
+    change otherwise identical to the clean one."""
+    outcome = replay(load_named("malformed-ruleset"), workdir=tmp_path).outcome
+    clean = load_named("clean").expected.gates["committed"]
+    landing = outcome.gates["committed"]
+    assert {k: v for k, v in landing.items() if k != "guidelines.ruleset_valid"} == clean
+    assert landing["guidelines.ruleset_valid"] == "block"
+    assert outcome.refusals == {"land": ("guidelines.ruleset_valid",)}
 
 
 @pytest.mark.parametrize("name", SHIPPED)

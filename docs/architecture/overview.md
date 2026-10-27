@@ -57,6 +57,7 @@ graph TD
         PLAN[plan]
         CSWEEP["sweep (ADR-010)"]
         CONF["conformance (ADR-012 D11)"]
+        CGUIDE["guidelines (ADR-012 D3)"]
     end
 
     subgraph domains["domains/ — the six state domains"]
@@ -228,6 +229,7 @@ graph TD
     CREPLAY --> CONF
     CONF -- get_rule --> RULES
     CONF --> CONFDATA
+    RULES -- load, the ruleset gate --> CGUIDE
 ```
 
 `CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
@@ -411,6 +413,23 @@ its tests can put a recorder in its place. A replay strips every `INVARIANT_*`
 and `CLAUDE_*` variable, gives the oracle a home of its own, and keeps git
 away from the machine's configuration, so two replays in fresh trees must
 agree. The suite proves they do.
+
+`CGUIDE` is the guidelines ruleset (IDEA_031 A2, ADR-012 D3): a project's
+coding guidelines as one YAML file, by default `docs/guidelines/ruleset.yaml`,
+named by the manifest's `guidelines.ruleset`. `core/guidelines` holds the
+schema (version 1), the model (`Ruleset`, `Guideline`, `Check`) and the
+validation, which collects every problem and refuses the ruleset whole, and
+the content hash a pipeline will pin. It reads the file and nothing else, and
+it imports nothing from `core/rules`: `RULES --> CGUIDE` is the one arrow, and
+the registered rule ids an `engine` check must name are handed down as a
+parameter rather than imported back up. `guidelines.ruleset_valid` is the
+rule; it reads the ruleset from the tree in hand, answers N/A with no ruleset
+configured, and fails, never skips, on one that is configured and does not
+load. `core/machines` injects it at the landing state's entry only when a
+ruleset is configured, so a project that has not opted in sees no change, and
+`doctor` prints the same verdict as a row. The domain that renders from the
+ruleset, `domains/guidelines`, arrives with the generated checklist; ADR-012
+D12 draws where the rest of the family sits.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -840,6 +859,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
+| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, which check kinds and engines this build accepts, and the content hash (`digest_of`, twelve hex) | Import `core/rules` (the registered ids are a parameter); evaluate a check; render anything; decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`

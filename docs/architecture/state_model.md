@@ -1065,6 +1065,15 @@ Details that are load-bearing rather than incidental:
   `pipeline gates` never lists a rule that cannot apply. It warns and never
   blocks; the manifest refuses it at `block` or `ask` (ADR-010 D3 item 5, D6).
 
+- **`guidelines.ruleset_valid` rides the landing entry when a ruleset is
+  configured.** `core/machines` adds it to the `landing` state's entry set
+  (`GUIDELINES_GATES`) only when `guidelines.ruleset` is set, for the reason
+  `sweep.fresh` is injected only under a cadence: with no ruleset the rule is
+  N/A, and a `block`-level skip on every landing would be a change on every
+  project that has not opted in (ADR-012 D3, ruling 7). Like the cadence
+  injection it follows the manifest as it stands; pinning the ruleset's hash
+  on the pipeline at `start` is a later increment of the same deliverable.
+
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —
 no implementation means no test could have failed first, no code means nothing

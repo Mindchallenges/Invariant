@@ -249,6 +249,61 @@ pipeline at `start`, like the methodology (AUD-02, AUD-03). A mid-pipeline
 ruleset edit does not change the running pipeline's obligations, and every
 verdict and finding records the hash it was judged against (A4).
 
+**As built: A2 increment 1, the ruleset core.** A2 is built in six
+increments, recorded on its session's plan: the ruleset core; validation of
+the `boundary`, `cochange` and `judgement` kinds; the generated checklist and
+`guidelines render`; the managed instruction-file sections; the
+`generated_current` gate; and the pin. The first one landed as follows.
+
+- *`core/guidelines`.* The model (`Ruleset`, `Section`, `Guideline`, `Check`,
+  `GuidelineException`, `Amendment`), schema version 1, and the validation.
+  A ruleset is refused whole. Every problem is collected and named, and none
+  is dropped, for the reason the coverage baseline gives. It imports nothing
+  from `core/rules`, which calls it, so the registered ids an `engine` check
+  must name are passed in as a parameter. The content hash is the first
+  twelve hex digits of the SHA-256 of the file's bytes (`digest_of`, the
+  BUG_090 length).
+- *What validates in this increment.* `engine` (its `rule` must be
+  registered, and a near miss is named) and `pattern` with the `regex`
+  engine. `syntax` and `symbols` are refused as deferred (ruling 3).
+  `boundary`, `cochange` and `judgement` are refused with the reason that
+  their schemas are not validated yet. A rule nothing has checked is never
+  accepted. Their sub-schemas need rulings before increment 2 can build
+  them, because the example above does not show them.
+- *Choices the example left open, taken in the strict direction.* Each one
+  can be relaxed later without breaking a ruleset that loads today.
+  - Required on every rule: `id`, `section`, `title`, `statement`,
+    `severity`, `phases`, `applies_to` and `check`. The optional keys are
+    `exceptions`, `rationale`, `links` and `amended`.
+  - A pattern must state `engine` and `in`; neither has a default.
+  - An empty `applies_to` or `phases` is refused, because such a rule
+    applies nowhere.
+  - A rule id may not contain whitespace, because a baseline line and a
+    CLI argument are both split on whitespace (D6).
+  - An exception's `fingerprint` is twelve lowercase hex digits.
+- *YAML 1.1 and `amended[].on`.* PyYAML reads a bare `on:` key as the boolean
+  true. The loader reads that key back as `on`, so the schema keeps D3's
+  spelling.
+- *The manifest.* `guidelines.ruleset` is the only `guidelines` key this build
+  reads. It defaults to null. D13's other keys are refused at load, by name,
+  until the increment that reads each one lands. Rule content stays out of
+  the manifest (D2).
+- *`guidelines.ruleset_valid`.* The rule is graded `block` in all three
+  profiles (D12's table). With no ruleset it is N/A. A configured path that
+  names nothing inside the project, a missing file, and an invalid ruleset
+  all fail; none of them skips. It reads the tree in hand, which is the
+  session's worktree when there is one, and it never falls back to another
+  checkout's copy. `core/machines` injects it at the landing state's entry
+  (`GUIDELINES_GATES`), and only when a ruleset is configured, on the
+  `sweep.fresh` precedent. That way a project that has not opted in sees no
+  change, not a `[skip:BLOCK]` on every landing. `doctor` prints the rule's
+  verdict as the `guidelines ruleset` row.
+- *A1 increment 2, in part.* The `malformed-ruleset` scenario is the clean
+  change in a project whose ruleset gives an unknown severity.
+  `guidelines.ruleset_valid` blocks the advance to `committed`, and every
+  other landing gate passes. Ruleset fixtures for the kinds that increment 2
+  validates are still owed.
+
 ### D4 — Five check kinds; v1 ships four of them in full and one in part
 
 | Kind | Question it answers | Evaluated by | v1 |
@@ -694,7 +749,7 @@ None of this was built in increment 1.
 
 | Increment | Adds | After |
 |---|---|---|
-| 2 | scenarios over the gates A2 adds | A2 |
+| 2 | scenarios over the gates A2 adds; `malformed-ruleset` landed with A2 increment 1 | A2 |
 | 3 | `seeded pattern`, `baselined` and `missing test`, over A3's checkers and baseline | A3 |
 | 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test |
 | 5 | the scripted driver, `conformance run --driver script` and `conformance show` | the engine layer |

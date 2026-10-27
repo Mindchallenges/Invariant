@@ -6,7 +6,8 @@ shipped one, so forking a methodology never means forking the library.
 
 The docs-first gates are injected here rather than written into every
 methodology file, and so is ``sweep.fresh`` beside each gate a sweep cadence
-schedules. ADR-001 D12 makes docs-first core policy, so a methodology
+schedules, and ``guidelines.ruleset_valid`` on the landing state of a project
+with a guidelines ruleset. ADR-001 D12 makes docs-first core policy, so a methodology
 cannot opt out by omission — including a methodology this library has never
 seen, which is why the injection is by state role rather than by state name.
 """
@@ -108,6 +109,18 @@ AGENT_ROLE_GATES: dict[str, dict[str, dict[str, list[str]]]] = {
 FRESHNESS_GATE = "sweep.fresh"
 
 
+#: Attached to the landing state's ENTRY, and only on a project that has
+#: configured a guidelines ruleset (ADR-012 D3, D12, ruling 7). Conditional
+#: for the reason ``sweep.fresh`` is: with no ruleset every ``guidelines.*``
+#: rule is N/A, and a ``block``-level rule that cannot apply renders as
+#: ``[skip:BLOCK]`` on every landing, which would be a change on every project
+#: that has not opted in. With a ruleset, the landing is where a malformed one
+#: stops a change: the gates later increments add read it there.
+GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
+    "landing": {"entry": ["guidelines.ruleset_valid"]},
+}
+
+
 def shipped_ids() -> list[str]:
     return sorted(p.stem for p in MACHINE_DIR.glob("*.yaml"))
 
@@ -156,6 +169,8 @@ def load_pipeline_machine(manifest, machine_id: str | None = None) -> Machine:
     for required_role, by_role in AGENT_ROLE_GATES.items():
         if machine.states_with_role(required_role):
             machine = machine.inject_gates(by_role)
+    if manifest is not None and manifest.get("guidelines.ruleset"):
+        machine = machine.inject_gates(GUIDELINES_GATES)
     scheduled = manifest.scheduled_gates() if manifest is not None else frozenset()
     return machine.inject_beside(scheduled, FRESHNESS_GATE)
 

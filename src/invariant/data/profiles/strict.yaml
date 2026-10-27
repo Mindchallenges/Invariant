@@ -46,6 +46,12 @@ rules:
 
   privacy.clean: block
 
+  # The project's guidelines ruleset loads and validates (ADR-012 D12,
+  # ruling 7). N/A with no ruleset configured, and injected at the landing
+  # state only when one is. Blocks everywhere: a ruleset that does not load
+  # is one every guidelines gate would otherwise answer from in part.
+  guidelines.ruleset_valid: block
+
   memory.schema_valid: block
   memory.index_current: block
   memory.no_dead_links: block

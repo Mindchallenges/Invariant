@@ -339,7 +339,18 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "host": {"kind": "claude_code"},
+    # The project's coding guidelines (ADR-012 D3, D13). `ruleset` is the
+    # path of the one YAML ruleset; null means no guidelines, and every
+    # `guidelines.*` rule is N/A. The documented location is
+    # docs/guidelines/ruleset.yaml (ruling 1). Rule CONTENT never goes here:
+    # the manifest is the operator's enforcement configuration, the ruleset is
+    # the project's content (D2). D13's other keys join as the increments that
+    # read them land; until then they are refused rather than ignored.
+    "guidelines": {"ruleset": None},
 }
+
+#: The `guidelines` keys this build reads.
+_GUIDELINES_KEYS = ("ruleset",)
 
 
 @dataclass
@@ -519,6 +530,7 @@ class Manifest:
                 )
         self._validate_schedule(gates)
         self._validate_freshness_level()
+        self._validate_guidelines()
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -644,6 +656,29 @@ class Manifest:
                 f"enforcement.rules.{rule_id} is {level.value}, but {rule_id} "
                 f"only ever warns: a stale or missing sweep never stops a change "
                 f"(ADR-010 ruling 10).\n  Set it to warn or off."
+            )
+
+    def _validate_guidelines(self) -> None:
+        """Refuse a `guidelines` key this build does not read (ADR-012 D13).
+
+        A key the schema does not know loads, does nothing, and reads in
+        `config show` as though it had taken: the BUG_050 shape. D13 names
+        more keys than `ruleset`; each is accepted by the increment that reads
+        it, and refused, by name, before then.
+        """
+        section = self.data.get("guidelines")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"guidelines must be a mapping, got {section!r}")
+        for key in section:
+            if key not in _GUIDELINES_KEYS:
+                raise ManifestError(
+                    f"guidelines.{key} is not a key this build reads; it reads "
+                    f"{', '.join('guidelines.' + k for k in _GUIDELINES_KEYS)}."
+                )
+        ruleset = section.get("ruleset")
+        if ruleset is not None and not (isinstance(ruleset, str) and ruleset.strip()):
+            raise ManifestError(
+                f"guidelines.ruleset must be null or a path, got {ruleset!r}"
             )
 
     def scheduled_gates(self) -> frozenset[str]:

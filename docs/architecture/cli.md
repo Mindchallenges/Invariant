@@ -145,6 +145,13 @@ invariant doctor
     `sweep.fresh` would warn (ADR-010 D6). A late sweep is that rule's
     warning, never a failed diagnosis.
 
+    The `guidelines ruleset` row is `guidelines.ruleset_valid`'s verdict on
+    the tree in hand: "no guidelines ruleset configured" passes, a ruleset
+    that validates passes naming its guideline count and digest, and one that
+    is configured but missing, outside the project or invalid FAILS, naming
+    every problem (ADR-012 D3). It asks the rule directly, so a level or a
+    stand-down holding the gate does not change what the diagnosis reports.
+
     When the oracle's LaunchAgent is installed, one more row, `oracle agent
     interpreter`, fails if the interpreter its plist names no longer exists:
     an editable install can move, and the agent would then fail at every
