@@ -3,8 +3,10 @@
 - **Status:** Accepted. IDEA_031 deliverable A0. The user ruled on all
   thirteen questions on 2026-10-27 ("Rulings" below), overriding one
   recommendation: the ratchet is always pure, and there is no Boy-Scout switch
-  (ruling 5, D6). Nothing is built yet; A1–A8 build it in the order the
-  consumption table gives.
+  (ruling 5, D6). A1–A8 build it in the order the consumption table gives,
+  and each increment's as-built note records what landed. The check-kind
+  amendment was accepted the same day, with its own rulings table (DN-A1 to
+  DN-A14).
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -236,7 +238,9 @@ an unknown key, a duplicate rule id, an unknown kind, a pattern that does not
 compile, a glob list given as a bare string (the AUD-08 and coverage-glob
 precedent), a `cochange` whose `then` names nothing, a judgement rule with no
 `evidence` declaration, and an `engine` entry naming no registered rule (with
-the nearest real id, as `enforcement.rules` does). It is a `doctor` row. Every
+the nearest real id, as `enforcement.rules` does). The check-kind amendment
+adds the refusals of the three kinds' sub-schemas and of the registry files a
+ruleset names. It is a `doctor` row. Every
 gate that needs the ruleset fails rather than skips when it does not load, as
 a pinned machine that cannot load already does.
 
@@ -308,8 +312,9 @@ the `boundary`, `cochange` and `judgement` kinds; the generated checklist and
 recommendation.
 
 - *DN-A.* The sub-schemas for `boundary`, `cochange` and `judgement` are
-  drafted as an amendment to this record ("Proposed amendment: check-kind
-  sub-schemas", below) and ruled before increment 2 is built.
+  drafted as an amendment to this record and ruled before increment 2 is
+  built. They were ruled on 2026-10-27 ("Amendment: check-kind sub-schemas",
+  below).
 - *DN-B.* The checklist's first line is its marker:
   `<!-- invariant-managed: <digest> -->` in markdown,
   `.. invariant-managed: <digest>` in rst. This replaces the "`#
@@ -325,6 +330,67 @@ recommendation.
   compares it.
 - `guidelines render` takes `--dry-run`. There is no `guidelines check`
   verb, and D12's diagram no longer draws one.
+
+**As built: A2 increment 2, the check-kind sub-schemas.** Built to the
+amendment's rulings (DN-A1 to DN-A14).
+
+- *Every v1 kind validates.* `VALIDATED_KINDS` is all five, and the
+  "does not validate its schema yet" refusal is gone. `Check` gains each
+  kind's fields, with three small value types: `Trigger` (`when`),
+  `Requirement` (`then`) and `NaCondition`. A judgement's `scope` is held as
+  `verdict_scope`, because `scope` already holds a pattern's `in`. The keys
+  are checked per kind, and for a `cochange` per form, so an unknown key is
+  refused as it is anywhere else.
+- *Paths are project-relative.* Boundary targets, `then` globs, a
+  template's derived path, a registry path and a registry entry's paths go
+  through `project_relative`. An absolute path, or one that climbs out of the
+  project, is refused. The value kept is the normalised spelling. A
+  template's derived path is tested by putting `x` for every token. A
+  registry entry's path that holds `*`, `?` or `[` is refused, because a
+  registry names files.
+- *A template is read by Python's format parser.* A malformed template, a
+  token outside the five, and a token with a conversion or a format spec are
+  each refused. Doubled braces are literal braces.
+- *The registry is read with the ruleset (DN-A9).* `load` and `parse` take
+  `root`, the tree a registry path is resolved against. `load_ruleset`
+  passes the tree in hand, so a registry broken in the session cannot pass
+  on another checkout's copy. Each registry is read once, however many rules
+  name it, and its problems are named once. A registry is refused whole:
+  - it is missing;
+  - it cannot be read;
+  - it is not YAML;
+  - its version is not 1;
+  - its envelope or an entry has a bad key or value;
+  - an open entry has a class the naming rule's `outcomes` does not map.
+  A resolved entry needs no outcome, because only an open entry produces a
+  finding. With no `root`, a ruleset that names a registry is refused rather
+  than accepted unread. A loaded ruleset carries its registries
+  (`Ruleset.registries`), each with its digest, ready for A3.
+- *Choices the amendment left open, taken in the strict direction.*
+  - An `only` list must be non-empty, like `forbid`.
+  - `no_executable_change` must be `true`. `false` is refused rather than
+    read as "no condition".
+  - A fix is folded to one line, as rendered text is elsewhere.
+- *The checklist summarises every kind.* `render_checklist` names each
+  boundary's polarity and targets, a pair's trigger and what must change, a
+  registry rule's file, outcomes and fixes, and a judgement's evidence,
+  scope and condition ids. The rst output was checked with docutils and
+  gave no warnings.
+- *A1 increment 2, the rest of the ruleset fixtures.* The `valid-ruleset`
+  scenario is the clean change in a project whose ruleset uses all five
+  kinds: an engine rule, a pattern, a `forbid` boundary, a pair cochange,
+  a registry cochange with its registry file, and a judgement with a
+  mechanical and a claimed N/A condition. `guidelines.ruleset_valid` passes,
+  and every other landing gate answers as it does for `clean`.
+- *What is not here.* No kind is evaluated. A3 evaluates `boundary` and
+  `cochange`, including the check that a configured adapter offers
+  `imports` (DN-A14). A4 evaluates verdicts and the mechanical N/A
+  conditions. The ruleset's digest covers the ruleset's bytes only. A
+  registry is read as it stands after the change (the registry form above),
+  so the pin (increment 6) does not cover it.
+- *Tests.* The kinds, the registry and the rule's reading of it are tested
+  in `tests/test_guidelines_kinds.py`, and the scenario in
+  `tests/test_conformance_engine.py`.
 
 **As built: A2 increment 3, the generated checklist.**
 
@@ -392,7 +458,7 @@ recommendation.
 |---|---|---|---|
 | `engine` | none of its own; it points at an existing registry rule | that rule | yes |
 | `pattern` | does a match exist in the changed files, in scope? | `core/guidelines` with the adapter's lexical mask | regex: yes. Syntax tree: deferred (ruling 3) |
-| `boundary` | does code under A reference code under B? | an adapter dependency question | import graph where the adapter can answer: yes. Symbol index: deferred (ruling 3) |
+| `boundary` | does code under `applies_to` reference a project file its `forbid` list names, or one its `only` list leaves out? | an adapter dependency question | import graph where the adapter can answer: yes. Symbol index: deferred (ruling 3) |
 | `cochange` | if X changed (or is listed in registry R), did Y change too? | `core/guidelines` over the one changed set | yes |
 | `judgement` | does the change honour this rule? | a model, through a cited verdict (D5) | yes |
 
@@ -449,23 +515,29 @@ from `import` statements. This repository's own layering ("nothing in `core/`
 imports `oracle/`", "no `hosts` to `oracle` arrow") is checked today by
 hand-written import scans in the suite; those become ruleset entries, so the
 library uses this kind on itself first (ADR-001, Notes). A Swift module's
-folder-to-type boundary needs `symbols` and is deferred (ruling 3).
+folder-to-type boundary needs `symbols` and is deferred (ruling 3). A rule
+states one polarity: a `forbid` deny-list, or an allow-only `only` list, never
+both and with no carve-out (DN-A3). The amendment below gives its keys.
 
 **`cochange`** is the fourth kind B1 found. Two forms:
 
 - **Pair:** `when` (a touched glob, or a pattern match added in a glob) and
   `then` (globs that must also be touched, or a path template derived from the
-  trigger). It is evaluated over `core/rules._changed_set`, the one answer to
+  trigger). The form is explicit (`form: pair | registry`, DN-A4), and so is
+  the trigger's `when.change` (`any`, `added` or `executable`, DN-A6). It is evaluated over `core/rules._changed_set`, the one answer to
   "what changed" (BUG_012, BUG_047), and an unestablished changed set fails as
   it does for `docs.updated`. "A production edit needs a test diff" uses the
   adapter's `executable_text`, so a comment-only edit owes no test (BUG_026's
   seam).
-- **Registry:** `when` a touched file is listed in a machine-readable registry
-  file the ruleset names (YAML: path, status, scope), the outcome is chosen by
-  the entry's fields, for example open and contained gives blocker, open and
-  advisory gives warn, a scoped refactor gives "stop and ask". The engine does
-  not parse a prose table; a project with its registry in prose converts it
-  once, in the ruleset-edit lane.
+- **Registry:** `when` a touched file is listed in an open entry of a
+  machine-readable registry file the ruleset names, the outcome is chosen by
+  the entry's `class`. The file is invariant's own versioned YAML, with
+  entries `id`, `paths`, `status`, `class` and `note` (DN-A7). A class maps
+  to `blocker` or `warn`, with an optional fix: open and contained gives
+  blocker, open and advisory gives warn, and a scoped refactor gives a blocker
+  whose fix says to stop and ask (DN-A8). The engine does not parse a prose
+  table; a project with its registry in prose converts it once, in the
+  ruleset-edit lane.
 
 **`judgement`** is D5.
 
@@ -831,7 +903,7 @@ None of this was built in increment 1.
 
 | Increment | Adds | After |
 |---|---|---|
-| 2 | scenarios over the gates A2 adds; `malformed-ruleset` landed with A2 increment 1 | A2 |
+| 2 | scenarios over the gates A2 adds; `malformed-ruleset` landed with A2 increment 1, and `valid-ruleset` (all five kinds) with A2 increment 2 | A2 |
 | 3 | `seeded pattern`, `baselined` and `missing test`, over A3's checkers and baseline | A3 |
 | 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test |
 | 5 | the scripted driver, `conformance run --driver script` and `conformance show` | the engine layer |
@@ -971,14 +1043,35 @@ strings, a path that names nothing in the project is dropped rather than
 matched, and a key the schema does not know is refused at load (BUG_050).
 `config show` prints every value with its provenance.
 
-## Proposed amendment: check-kind sub-schemas (for ruling)
+## Amendment: check-kind sub-schemas (accepted 2026-10-27)
 
-**Status: proposed, not ruled.** DN-A asked for concrete schemas for the three
-kinds A2 increment 1 refuses (`boundary`, `cochange`, `judgement`), so that
-A2 increment 2 has something exact to validate. Nothing below is built. Each
-open choice is listed under "Decision needed" at the end, with the
-recommendation first. The keys below are written as if the recommendation
-were taken.
+**Status: accepted.** DN-A asked for concrete schemas for the three kinds A2
+increment 1 refused (`boundary`, `cochange`, `judgement`), so that A2
+increment 2 had something exact to validate. The amendment was drafted with
+fourteen open choices. The user ruled on all of them on 2026-10-27 and took
+the recommendation every time except DN-A3. There, a boundary has two
+polarities and no carve-out. A2 increment 2 validates everything below (D3,
+"As built: A2 increment 2"). A3 evaluates the `boundary` and `cochange`
+kinds, and A4 evaluates `judgement`.
+
+### Rulings (DN-A, 2026-10-27)
+
+| # | Question | Ruling |
+|---|---|---|
+| DN-A1 | Where a boundary's source side is declared | The rule's `applies_to`. The check adds only the target list. |
+| DN-A2 | What a boundary target names | Project-relative path globs only. Third-party imports are outside the kind in v1. |
+| DN-A3 | A boundary's polarity | **Either a `forbid` deny-list or an allow-only `only` list, exactly one of the two per rule**, overriding the recommended deny-list only. There is no carve-out form. |
+| DN-A4 | How a cochange says which form it is | An explicit `form: pair \| registry`, which selects the key set. |
+| DN-A5 | The shapes of a pair's `then` | Exactly one of `all_of`, `any_of` and `each`. `each` is a path template over `{path}`, `{dir}`, `{name}`, `{stem}` and `{suffix}`. |
+| DN-A6 | The trigger's `when.change` | Required, one of `any`, `added` and `executable`. |
+| DN-A7 | The registry file's format | invariant's own versioned YAML, with entries `id`, `paths`, `status` (`open` or `resolved`), `class` and `note`. |
+| DN-A8 | What a registry class can produce | `blocker` or `warn`, plus an optional fix. "Stop and ask" is a blocker whose fix says so. |
+| DN-A9 | When a registry is validated | By `ruleset_valid`. It is read whole or refused, and a missing file fails. |
+| DN-A10 | The judgement `evidence` values | `citation`, `test`, `either` or `both`. |
+| DN-A11 | Judgement `scope` | Required, `diff` or `file`, with no default. |
+| DN-A12 | Mechanical N/A conditions in v1 | `no_added_match: {in, match}` and `no_executable_change`. Claims stay allowed as declared `not_applicable_when` entries (D5). |
+| DN-A13 | A `candidates` hint on judgement | Deferred. Not in v1. |
+| DN-A14 | When `boundary` with `imports` is accepted | A2 increment 2 validates the schema. The check that a configured adapter offers `imports` lands in A3, beside `references`. `symbols` stays refused. |
 
 ### What the schemas must carry
 
@@ -1002,13 +1095,29 @@ cannot disagree with itself about scope.
 
 ### `boundary`
 
-"Does a changed file under `applies_to` reference a file this rule forbids?"
+"Does a changed file under `applies_to` reference a project file this rule
+does not let it reference?" A rule states that in one of two polarities
+(DN-A3), and states exactly one:
+
+- **`forbid`**, a deny-list. A reference to a file matching any of its globs
+  is a finding.
+- **`only`**, an allow-only list. A reference to a project file matching none
+  of its globs is a finding. The list is read as written: a rule whose files
+  may reference their own layer lists that layer, so nothing is allowed
+  implicitly.
+
+There is no carve-out form: no `allow` inside `forbid`, and no `forbid`
+beside `only`. A rule that needs one names the narrower globs instead, or it
+is written as two rules.
 
 | Key | Type | Required | Validation |
 |---|---|---|---|
 | `kind` | `boundary` | yes | |
 | `engine` | string | yes, no default | `imports` only. `symbols` is refused as deferred (ruling 3), and any other value is refused naming the boundary engines. |
-| `forbid` | list of glob strings | yes | Non-empty. A bare string is refused (the AUD-08 precedent). Each glob must be non-empty. A glob identical to one in `applies_to` is refused, because every file would then forbid itself. |
+| `forbid` | list of glob strings | exactly one of `forbid` and `only` | Non-empty. A bare string is refused (the AUD-08 precedent). Each glob must be a non-empty project-relative path glob (DN-A2): an absolute glob, or one whose `..` climbs out of the project, is refused. A glob identical to one in `applies_to` is refused, because every file would then forbid itself. |
+| `only` | list of glob strings | exactly one of `forbid` and `only` | The same as `forbid`, except that a glob may repeat one in `applies_to`, which is how a layer allows references within itself. |
+
+Both keys present, or neither, is refused.
 
 ```yaml
 - id: layers.core-never-imports-oracle
@@ -1024,6 +1133,18 @@ cannot disagree with itself about scope.
     kind: boundary
     engine: imports
     forbid: ["src/invariant/oracle/**"]
+
+- id: layers.core-references-only-core
+  section: layers
+  title: core references nothing above core
+  statement: A module under core imports only other modules under core.
+  severity: blocker
+  phases: [review, landing]
+  applies_to: ["src/invariant/core/**/*.py"]
+  check:
+    kind: boundary
+    engine: imports
+    only: ["src/invariant/core/**"]
 ```
 
 A finding is one (referencing file, referenced file) pair. The adapter's
@@ -1186,7 +1307,9 @@ result (DN-A8).
 ### `judgement`
 
 "Does the change honour this rule?" It is answered by a cited verdict (D5).
-These keys are what D5's validity checks read.
+These keys are what D5's validity checks read. There is no `candidates`
+hint in v1 (DN-A13), so a judgement check carries no regex of its own
+outside a mechanical N/A condition.
 
 | Key | Type | Required | Validation |
 |---|---|---|---|
@@ -1239,101 +1362,40 @@ These keys are what D5's validity checks read.
         mechanical: {no_executable_change: true}
 ```
 
-### Changes this implies elsewhere in the record
+### Changes this makes elsewhere in the record
 
-- **D3, the validation list** gains these refusals: a `boundary` with no
-  `forbid`, or with an engine other than `imports`. A `cochange` with no
-  `form`, or a `then` naming zero or two shapes. A template token outside the
-  five. A registry that is missing or does not validate, or an open class with
-  no outcome. A judgement with no `evidence` or no `scope`. A duplicate
-  condition id. A condition that is neither or both of `claim` and
-  `mechanical`.
-- **D4, `boundary`.** `references` returns each target with its line (above).
+- **D3, the validation list** gains these refusals, which A2 increment 2
+  makes:
+  - a `boundary` with neither or both of `forbid` and `only`, or with an
+    engine other than `imports`;
+  - a `cochange` with no `form`, or a `then` naming zero or two shapes;
+  - a template token outside the five;
+  - a registry that is missing or does not validate, or an open class with
+    no outcome;
+  - a judgement with no `evidence` or no `scope`;
+  - a duplicate condition id, and a condition that is neither or both of
+    `claim` and `mechanical`.
+- **D4, `boundary`.** The table row and the kind's paragraph name both
+  polarities. `references` returns each target with its line (above).
   `ruleset_valid` checks that a configured adapter offers `imports` from A3
   onward (DN-A14).
+- **D4, `cochange`.** The registry form's file format and its outcomes are
+  the ones above (DN-A7, DN-A8).
 - **D10.** A registry a ruleset names is already in the ruleset lane. This
   amendment makes "names" concrete: the `registry` key.
 - **`core/guidelines`.** `Check` gains the fields of the three kinds, and
   `VALIDATED_KINDS` grows to all five.
-
-### Decision needed
-
-Each item lists its options with the recommendation first.
-
-- **DN-A1, where a boundary's source side is declared.**
-  (a) `applies_to` is the source side, and `check` adds only `forbid`.
-  (b) a separate `check.from` glob list.
-  (b) gives two spellings of one scope, which can disagree.
-- **DN-A2, what a boundary target names.**
-  (a) project-relative path globs only. Third-party imports are outside the
-  kind in v1.
-  (b) path globs plus a `forbid_modules` list of module names (for example a
-  UI toolkit).
-  (c) module names only, as the adapter reports them.
-- **DN-A3, a boundary's polarity.**
-  (a) deny-list only (`forbid`) in v1.
-  (b) also an allow-list form (`only`: the source may reference nothing
-  outside these globs).
-  (c) deny-list plus an `allow` carve-out inside `forbid`.
-- **DN-A4, how a cochange says which form it is.**
-  (a) an explicit `form: pair | registry`, which selects the key set.
-  (b) inferred from the keys present (`registry` present means registry).
-- **DN-A5, the shapes of a pair's `then`.**
-  (a) `all_of`, `any_of` and `each` (template), exactly one per rule.
-  (b) `any_of` only. Item 7 is then two rules, one per mock.
-  (c) `all_of` and `any_of`, with no template. The paired-test rule is then
-  not expressible.
-- **DN-A6, the trigger's `when.change`.**
-  (a) required, one of `any`, `added`, `executable`.
-  (b) the same values, defaulting to `executable`.
-  (c) `any` and `executable` only. Item 23 is then judgement.
-- **DN-A7, the registry file's format.**
-  (a) invariant's own versioned YAML (`id`, `paths`, `status`, `class`,
-  `note`).
-  (b) any YAML list, with the rule naming which field holds the path, the
-  status and the class.
-  (c) keep the registry inside the ruleset as a top-level `registries` key.
-- **DN-A8, what a registry class can produce.**
-  (a) `blocker` or `warn`, with an optional fix per class. "Stop and ask"
-  is a blocker whose fix says so.
-  (b) a third result, `ask`, that blocks and routes to the operator with the
-  finding as its reason.
-  (c) a class may map to a judgement rule id, so a model answers it.
-- **DN-A9, when a registry is validated.**
-  (a) by `ruleset_valid`. The file is read whole or refused, and a missing
-  file fails, as a missing ruleset does.
-  (b) only when the mechanical gate evaluates the rule.
-  (c) both, with `ruleset_valid` checking existence only.
-- **DN-A10, the judgement `evidence` values.**
-  (a) `citation | test | either | both`.
-  (b) D5's three (`citation | test | either`), so "cite and test" is not
-  expressible.
-  (c) a list of kinds, each required.
-- **DN-A11, judgement `scope`.**
-  (a) required with no default.
-  (b) defaults to `diff`.
-- **DN-A12, mechanical N/A conditions in v1.**
-  (a) two forms, `no_added_match` and `no_executable_change`.
-  (b) claims only in v1, with mechanical conditions arriving with A4's
-  evaluator.
-  (c) (a) plus a `no_change_in: [globs]` form.
-- **DN-A13, a `candidates` hint on judgement** (a regex whose hits the
-  agent is shown as starting points, for the rules regex cannot decide).
-  (a) defer. Not in v1.
-  (b) include it now, read only by injection and never by a gate.
-- **DN-A14, when `boundary` with `imports` is accepted.**
-  (a) A2 increment 2 validates the schema. The "does a configured adapter
-  offer `imports`" check lands with A3, beside `references`.
-  (b) refuse every `boundary` rule until A3 ships `references`.
+- **The consumption table** below names what A3 and A4 take from this
+  amendment.
 
 ## Increments, and the order in which A1–A8 consume these decisions
 
 | Deliverable | Consumes | Can start when |
 |---|---|---|
 | A1 conformance harness | D1, D11; the scenario fixtures use D3's format and location (rulings 1, 2) and D5's schema (ruling 6); the driven layer's hosts (ruling 12) | A0 accepted. The engine layer grows as A2–A4 land; the driven layer needs A4 |
-| A2 ruleset core | D2, D3 (format, location, validation, rendering, managed sections, drift, pin, the generated-file write class), D13's `guidelines.ruleset`, `checklist`, `instruction_files`; rulings 1, 2, 4 (`severity` in the schema), 8 (managed-block content), 13 | A0 accepted |
-| A3 mechanical checkers | D4 (engine, regex pattern, import-graph boundary, cochange; where regex stops), D6 (baseline, pure ratchet, stale-entry prune), D12's override by guideline id, D13's `guidelines.baseline`; rulings 3, 4, 5, 7, 9, 13 (`baseline --prune`) | A2 |
-| A4 verdict contract | D5 (schema, validity, vagueness, staleness, gate), the ruleset hash from D3; rulings 6, 7 | A3, because mechanical findings share the record shape |
+| A2 ruleset core | D2, D3 (format, location, validation, rendering, managed sections, drift, pin, the generated-file write class), D13's `guidelines.ruleset`, `checklist`, `instruction_files`; rulings 1, 2, 4 (`severity` in the schema), 8 (managed-block content), 13; the check-kind amendment's schemas and the registry file (DN-A1 to DN-A12, and DN-A14's schema half) | A0 accepted |
+| A3 mechanical checkers | D4 (engine, regex pattern, import-graph boundary, cochange; where regex stops), D6 (baseline, pure ratchet, stale-entry prune), D12's override by guideline id, D13's `guidelines.baseline`; rulings 3, 4, 5, 7, 9, 13 (`baseline --prune`); from the check-kind amendment, evaluating `boundary` in both polarities with `references` returning each target's line, the adapter-offers-`imports` check (DN-A1 to DN-A3, DN-A14), and evaluating both `cochange` forms against the registry as it stands after the change (DN-A4 to DN-A9) | A2 |
+| A4 verdict contract | D5 (schema, validity, vagueness, staleness, gate), the ruleset hash from D3; rulings 6, 7; from the check-kind amendment, the judgement keys a verdict is checked against (`evidence`, `scope`, declared claims) and the engine's own answer to the mechanical N/A conditions (DN-A10 to DN-A12) | A3, because mechanical findings share the record shape |
 | A5 phase-scoped injection | D7, D13's `injection`; rulings 8, 9 | after A4 |
 | A6 host-neutral agents and overlays | D8, D13's `agents.overlays` | after A4; the agent bodies switch to `guidelines show` and `guidelines verdict` |
 | A7 capability tiers | D1 item 2 (the no-gate-reads-it test), D9, D13's `agents.tiers` and `host.tier_map`; ruling 10 | after A4; the test can land with A4 |
