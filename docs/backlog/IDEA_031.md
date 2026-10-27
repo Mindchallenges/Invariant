@@ -2,9 +2,16 @@
 id: IDEA_031
 type: idea
 title: invariant owns the format, lifecycle and enforcement of coding guidelines
-status: proposed
+status: accepted
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: A0 landed as ADR-012 (7c5ed6d) with the user's 13 rulings; the user approved
+    building the plan
+  forced: false
+  ruling: the user, 2026-10-27 (ADR-012 rulings)
+  evidence: 7c5ed6d78ad62ba791721b83abaa7e4f0b837566
 priority: high
 effort: XL
 tier: '2'
