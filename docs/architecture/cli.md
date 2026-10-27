@@ -1290,6 +1290,22 @@ invariant hook <event>
     (`invariantDegraded`) and says enforcement is off, instead of an empty
     verdict that read as a pass.
 
+    That manifest is the HOST's project. A tool call (pre-tool-use or
+    post-tool-use) can still be handled in another one: the one its path
+    names, when that path lies in a live session worktree of another
+    invariant project (ADR-011). The path is the call's `file_path`, or the
+    paths its brief names when it has none. The project is the nearest
+    manifest above the path, and it is foreign when its state root differs.
+    The call is re-rooted only when every live-worktree match lands on one
+    session. It is then evaluated and recorded there, standing in that
+    session's worktree, with no host identifier, so no binding is ever
+    learned across roots. A call that reaches into another project and cannot
+    be placed is recorded nowhere, the host's project included. A dispatch,
+    or a read that would have been docs evidence there, says so as
+    PostToolUse additionalContext. The hook still exits zero and never
+    denies on that account. The attention sidecar and the SessionStart
+    registration stay with the host's project.
+
     A payload carrying `invariantProbe: true` is `doctor`'s liveness probe,
     never something a host sends. It is evaluated in full — same rules, same
     response — against a state store that discards every write, so a probe

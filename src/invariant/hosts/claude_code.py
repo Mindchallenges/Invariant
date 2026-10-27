@@ -1316,6 +1316,16 @@ class ClaudeCodeHost:
         # bracketed is very often the subagent's own `session start`, and the
         # binding it makes is what lets every following call from that subagent
         # resolve by host identifier instead of by guess.
+        # A call that reached into another project and could not be placed
+        # there records NOTHING, here or anywhere: not the binding, not the
+        # first edit, not the actor, not the evidence. Recording it in this
+        # project by the host's binding is how a gate here went green on work
+        # done there (BUG_010, ADR-011 D7). Placed calls never get here with
+        # this set; they arrive on a context rooted in the project they name.
+        unplaced = getattr(ctx, "unplaced", None)
+        if unplaced is not None:
+            return self._report_unplaced(tool, payload, unplaced)
+
         if tool == "Bash":
             self._bind_claimed_session(payload, ctx)
         elif tool in EDIT_TOOLS:
@@ -1389,6 +1399,49 @@ class ClaudeCodeHost:
             # than a gate missing one data point.
             pass
         return {}
+
+    @staticmethod
+    def _report_unplaced(tool: str, payload: dict, unplaced) -> dict:
+        """Say that a call into another project was recorded nowhere, if it matters.
+
+        The restraint is `_record_docs_read`'s (BUG_046): only a call that
+        would have been evidence speaks. A dispatch naming an agent always
+        would. A `Read` would only if it is an architecture doc of THAT
+        project, asked through the gate's own helper against that project's
+        manifest. An edit outside a live worktree is nobody's first edit, so
+        nothing any gate waits for was lost and it stays silent (ADR-011 D7).
+        """
+        agent = dispatched_agent(payload) if tool in AGENT_TOOLS else None
+        if agent:
+            what = str(agent)
+        elif tool == "Read" and unplaced.manifest is not None:
+            try:
+                if not is_architecture_doc(
+                    unplaced.manifest, unplaced.project, unplaced.path
+                ):
+                    return {}
+            except InvariantError:  # pragma: no cover - manifest already loaded
+                return {}
+            what = "this read"
+        else:
+            return {}
+
+        if unplaced.reason == "ambiguous":
+            why = (
+                "the paths it names reach more than one session ("
+                + ", ".join(unplaced.sessions)
+                + "), and a call is placed only when every match lands on one"
+            )
+        elif unplaced.reason == "unreadable":
+            why = f"that project's manifest could not be read ({unplaced.detail})"
+        else:
+            why = (
+                "no live session's worktree there contains it (a torn-down or "
+                "stranded session's worktree does not count)"
+            )
+        return _context_response("PostToolUse", _UNPLACED_CALL.format(
+            what=what, path=unplaced.path, project=unplaced.project, why=why
+        ))
 
     def _record_docs_read(self, tool_input: dict, resolution, ctx) -> dict:
         """Record a Read as docs evidence, or say why it was not.
@@ -1573,6 +1626,19 @@ _UNRECORDED_DOCS_READ = (
     "spelling that identifies the reader (`invariant context` names it). A "
     "session with no worktree yet gets one with `invariant session isolate "
     "--execute`."
+)
+
+#: Said for a call that named a path in another project and could not be
+#: placed there (ADR-011 D7). Nothing was recorded anywhere, the host's own
+#: project included, and the turn that made the call is the one told.
+_UNPLACED_CALL = (
+    "invariant — {what} was NOT recorded anywhere. It names {path}, inside the "
+    "invariant project at {project}, but {why}. A call is recorded in another "
+    "project only when its path lies in exactly one live session worktree "
+    "there (ADR-011); recording it in this host's project instead would credit "
+    "a pipeline with work done elsewhere.\n"
+    "  try: name exactly one live session worktree of that project, or drive "
+    "its pipeline from a host session rooted in it"
 )
 
 _UNRECORDED_DISPATCH = (

@@ -904,10 +904,50 @@ that session while several were live — the payload carried the answer and the
 recording pulled the same key out one line later purely to store it (BUG_010,
 narrow half). Both now resolve here. A call carrying no path, which is every
 agent dispatch, simply finds nothing at step 3 and continues; that is the
-order working, not an exception to it. What this does **not** reach is a call
-whose path lies in a *different repository*: the state root is per-repository
-(see "Storage layout"), so a session in another project is not in the registry
-being searched at all. Attribution is within one project by construction.
+order working, not an exception to it.
+
+**Which project, before which session (ADR-011).** The order above runs inside
+one registry, and the state root is per-repository (see "Storage layout"). So
+a session in another project cannot be found by searching the host's registry,
+however the call names it. A host rooted in project A that drove a session in
+project B therefore recorded nothing at all (BUG_040). Before f1396f9 it was
+worse: the call was recorded into A by A's host binding, which greened a gate
+in A on work done in B (BUG_010).
+
+Attribution is now within **the project the call's path names**. That is the
+host's project unless the path lies in another project's live session
+worktree. Before the order runs, the hook asks which project the call's paths
+belong to:
+
+- **Where a path's project comes from.** The project is the nearest manifest
+  above the path, loaded from its repository's main checkout. It is foreign
+  when its state root differs from the host's. Nothing else is consulted, the
+  oracle's index included: the index only knows projects a host has been
+  rooted in, and that is exactly what the failing case lacks.
+- **When the call is re-rooted.** A `file_path` is re-rooted when it lies in a
+  live session worktree of that foreign project. A brief is re-rooted when
+  every live-worktree match among the paths it names, the host project's
+  included, lands on one session, and that session is foreign. The call is
+  then handled whole, PreToolUse and PostToolUse alike, by a context rooted in
+  that project. That context stands in the session's worktree and carries no
+  host identifier. Inside it the order above runs unchanged, and resolves at
+  step 3 (or at `prompt`, for a dispatch).
+- **No binding crosses roots.** `SessionEnd` fires in the host's own project,
+  so a binding learned in a foreign registry could never be marked spent.
+  Step 2 therefore does not operate across roots, and nothing is learned
+  there.
+- **An unplaced call is recorded nowhere.** This is a call that names a path
+  inside another invariant project and fails the test above: no live
+  worktree contains the path (the main checkout, or a torn-down or stranded
+  session's worktree), or its matches span more than one session. It is
+  recorded nowhere, the host's project included. A dispatch, or a read that
+  would have been docs evidence there, says so in its own turn, under the
+  BUG_046 restraint above. An edit stays silent, because nothing a gate waits
+  for was lost.
+- **Explicit identity disables the route.** An explicit `INVARIANT_SESSION_ID`
+  names a session in the project that reads it, so it keeps the call at home.
+- **Ungoverned paths are ignored.** A path in no invariant project changes
+  nothing, as before.
 
 ## Domain: pipeline
 
@@ -1221,8 +1261,10 @@ sequenceDiagram
   dispatch whose brief names another live session's worktree is judged
   against that session, because the rule context resolves through
   `resolution_for_payload`. A dispatch from a host rooted in another
-  repository resolves no session and so stays silent; BUG_040 is that gap, and
-  its fix will reach this rule through the same resolution with no change here.
+  repository is judged in the project its brief names, when the brief places
+  it there (ADR-011). The hook re-roots the whole call before this rule runs,
+  so the rule needed no change. An unplaced dispatch stays in the host's
+  project and resolves as it always did.
 - **Quiet under a stand-down, like any other rule.** The open question was
   whether an advisory should still speak. It does not. A stand-down that holds
   now also holds over the pipeline started next, so the gate the warning is

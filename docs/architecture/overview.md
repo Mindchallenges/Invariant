@@ -945,7 +945,12 @@ reads `tool_input.file_path` and `RuleContext` reads `tool_name`, `tool_input`
 and `target_path`; all are above `hosts/`. The departure was deliberate and a
 shipped fix depends on it — BUG_010's fix (faa4de0) attributes a hook's
 evidence to the right project *by the path the call itself names*, which is
-only available from the payload. Leaving the old sentence standing meant the
+only available from the payload. ADR-011 extends the same reading across
+projects: a call whose path lies in another project's live session worktree
+is handled in that project. The CLI decides that (`Context.for_payload`)
+before the host adapter sees the call. The adapter learns only that a call
+was `unplaced`, which it says out loud and records nowhere. It never resolves
+a second manifest itself. Leaving the old sentence standing meant the
 authoritative map stated a rule a reader enforcing it would have used to
 "correct" a working fix by reverting it (BUG_022). What a host adapter owes is
 now an explicit normalisation obligation rather than an implied one, which is
@@ -1162,11 +1167,21 @@ sequenceDiagram
 
     H->>S: PreToolUse (Edit) + payload on stdin
     S->>C: invariant hook pre-tool-use
+    opt the call's path lies in another project's live session worktree
+        C->>C: re-root manifest + store to that project (ADR-011)
+    end
     C->>ST: read session + pipeline state
     C->>R: evaluate rules bound to this event
     R-->>C: verdicts, each with a level
     C-->>H: hook JSON — deny (block) / context (warn) / silent (off)
 ```
+
+The re-root step is what lets a host rooted in one project govern and record
+work done in another project's session (ADR-011). It happens in the CLI, as
+`Context.for_payload`, and it changes no arrow. The project is found from the
+path itself, through `MANIFEST` and `SESSION`, which the CLI already reads. The
+oracle's index is deliberately not consulted, so no
+`CLI --> OINDEX` read joins the hook's critical path.
 
 A rule at `block` returns a denial the host enforces. The same rule at `warn`
 returns the same reasoning as injected context and lets the call through. This

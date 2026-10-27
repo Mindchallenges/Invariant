@@ -16,6 +16,7 @@ import shlex
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..core import plan as plan_reader
@@ -122,6 +123,67 @@ def verdicts_payload(verdicts) -> list[dict]:
 # -- context assembly --------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Unplaced:
+    """A call that reached into another project and could not be placed there.
+
+    ADR-011 D7. ``reason`` is ``unowned`` (no live session worktree there
+    contains the path), ``ambiguous`` (the paths the call names land on more
+    than one session; ``sessions`` lists them as ``project:id``) or
+    ``unreadable`` (that project's manifest could not be loaded; ``detail``
+    says why). ``manifest`` is the foreign project's, when it loaded, so the
+    host adapter can ask whether a read would have been evidence there.
+    """
+
+    path: Path
+    project: Path
+    reason: str
+    sessions: tuple[str, ...] = ()
+    manifest: Manifest | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class _Foreign:
+    """Another invariant project, and a read-only view of its sessions."""
+
+    root: Path
+    manifest: Manifest | None
+    sessions: SessionDomain | None
+    error: str = ""
+
+
+def _paths_named_by(payload) -> list[Path]:
+    """The absolute paths a tool call names: its ``file_path``, else its brief.
+
+    The same two places :meth:`Context.resolution_for_payload` reads, in the
+    same order: a call that names a destination is about that destination,
+    and only a pathless one is read for the worktrees its prompt names.
+    """
+    tool_input = payload.get("tool_input") if isinstance(payload, Mapping) else None
+    if not isinstance(tool_input, Mapping):
+        return []
+    raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if raw:
+        path = Path(str(raw))
+        return [path] if path.is_absolute() else []
+    return _prompt_paths(tool_input.get("prompt"))
+
+
+def _prompt_paths(prompt) -> list[Path]:
+    """Every absolute path a brief mentions, trailing punctuation stripped."""
+    if not isinstance(prompt, str) or "/" not in prompt:
+        return []
+    return [
+        Path(found.rstrip(".,;:)]}'\"`")) for found in _ABSOLUTE_PATH.findall(prompt)
+    ]
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    resolved = path.resolve()
+    return resolved == root or root in resolved.parents
+
+
 class Context:
     """Everything a command needs, assembled once."""
 
@@ -133,6 +195,7 @@ class Context:
         host_session_id: str | None = None,
         manifest_start: Path | None = None,
         probe: bool = False,
+        crossed_from: Path | None = None,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         #: ``manifest_start`` separates "which project governs this call" from
@@ -155,9 +218,21 @@ class Context:
         #: attribution signal that survives the host resetting cwd between
         #: calls — without it, concurrent sessions are indistinguishable from
         #: the main checkout, which is exactly when attribution matters.
-        self.host_session_id = host_session_id or os.environ.get(
-            "INVARIANT_HOST_SESSION_ID"
+        #:
+        #: A context re-rooted into another project carries none (ADR-011 D5):
+        #: ``SessionEnd`` fires in the host's own project, so a binding learned
+        #: in a foreign registry could never be marked spent.
+        self.host_session_id = None if crossed_from is not None else (
+            host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
         )
+        #: The host's project root when this context was re-rooted into the
+        #: project a call's path names (:meth:`for_payload`); ``None`` otherwise.
+        self.crossed_from = crossed_from
+        #: Set by :meth:`for_payload` when the call reached into another
+        #: project and could not be placed there. Nothing may be recorded for
+        #: such a call, anywhere; the host adapter says so instead (ADR-011 D7).
+        self.unplaced: Unplaced | None = None
+        self._probe = probe
         #: Resolved once and cached, because every transition reads a watermark
         #: through it and rebuilding the reader per property access would
         #: re-scan the transcript directory each time.
@@ -333,6 +408,138 @@ class Context:
         # ownership; "someone asked whether they could" is not.
         return resolution
 
+    def for_payload(self, payload) -> Context:
+        """The context that governs this tool call (ADR-011).
+
+        Itself, unless the call names a path inside ANOTHER invariant project
+        and that path lies in exactly one live session worktree there. Then a
+        context rooted in that project, standing in that worktree, with no host
+        identifier — so enforcement and recording both happen where the work
+        is, against the registry that actually holds the session (BUG_040).
+
+        "Exactly one" is the user's ruling, applied to every path the call
+        names: a ``file_path`` is one path, and a brief may name several, so
+        every live-worktree match — the host project's included — must land on
+        the same session. A call that reaches into another project and fails
+        that test is not re-rooted and is marked :attr:`unplaced`; nothing is
+        recorded for it anywhere, because recording it here by the host's
+        binding is how a gate in this project went green on work done in that
+        one (BUG_010).
+
+        Which project a path belongs to is read off the path itself — the
+        nearest manifest above it — rather than from the oracle's index, which
+        only knows projects a host has been rooted in (ADR-011 D2). A path in
+        no invariant project is ungoverned and changes nothing.
+        """
+        if self.session_id or os.environ.get("INVARIANT_SESSION_ID"):
+            # Step 1 outranks every path, and it names a session in the
+            # project that reads it (ADR-011 D6).
+            return self
+        paths = _paths_named_by(payload)
+        root = self.manifest.root.resolve()
+        if all(_is_within(path, root) for path in paths):
+            return self
+
+        owners: dict[tuple[str, str], tuple[_Foreign | None, object, Path]] = {}
+        reached: list[tuple[Path, _Foreign]] = []
+        projects: dict[Path, _Foreign | None] = {}
+        for path in paths:
+            home = self.sessions.by_worktree_containing(path)
+            if home is not None:
+                owners[("", home.id)] = (None, home, path)
+                continue
+            if _is_within(path, root):
+                continue
+            foreign = self._foreign_project(path, projects)
+            if foreign is None:
+                continue
+            reached.append((path, foreign))
+            if foreign.sessions is None:
+                continue
+            owner = foreign.sessions.by_worktree_containing(path)
+            if owner is not None:
+                owners[(str(foreign.root), owner.id)] = (foreign, owner, path)
+
+        if not reached:
+            return self
+
+        unreadable = next(((p, f) for p, f in reached if f.sessions is None), None)
+        if unreadable is None and len(owners) == 1:
+            foreign, owner, _ = next(iter(owners.values()))
+            if foreign is None:
+                # The only session the call names is this project's own: the
+                # ordinary order already places it.
+                return self
+            return Context(
+                cwd=Path(owner.worktree),
+                manifest_start=foreign.root,
+                probe=self._probe,
+                crossed_from=root,
+            )
+
+        if unreadable is not None:
+            path, foreign = unreadable
+            self.unplaced = Unplaced(
+                path=path, project=foreign.root, reason="unreadable",
+                detail=foreign.error,
+            )
+        elif owners:
+            labels = tuple(
+                f"{(f.root.name if f else root.name)}:{s.id}"
+                for f, s, _ in owners.values()
+            )
+            # Name the foreign side of the ambiguity: a foreign match if there
+            # is one, else the foreign path that matched nothing.
+            path, foreign = next(
+                ((p, f) for f, _, p in owners.values() if f is not None), reached[0]
+            )
+            self.unplaced = Unplaced(
+                path=path, project=foreign.root, reason="ambiguous",
+                sessions=labels, manifest=foreign.manifest,
+            )
+        else:
+            path, foreign = reached[0]
+            self.unplaced = Unplaced(
+                path=path, project=foreign.root, reason="unowned",
+                manifest=foreign.manifest,
+            )
+        return self
+
+    def _foreign_project(
+        self, path: Path, seen: dict[Path, _Foreign | None]
+    ) -> _Foreign | None:
+        """The OTHER invariant project ``path`` lies in, or ``None``.
+
+        ``None`` for a path in no project, and for one whose project shares
+        this context's state root — that registry is the one already being
+        searched. Loaded from the repository's main checkout, so a linked
+        worktree's copy of the manifest cannot move a relative ``paths.state``.
+        Looked up read-only: the question writes nothing (ADR-011 D2).
+        """
+        from ..core import git
+
+        start = Manifest.find_root(path)
+        if start is None:
+            return None
+        main = git.main_checkout(start)
+        project = main if main and Manifest.find_root(main) == main else start
+        if project in seen:
+            return seen[project]
+        found: _Foreign | None
+        try:
+            manifest = Manifest.load(project)
+            if manifest.state_root == self.manifest.state_root:
+                found = None
+            else:
+                found = _Foreign(
+                    project, manifest,
+                    SessionDomain(manifest, InertStore(manifest.state_root)),
+                )
+        except InvariantError as exc:
+            found = _Foreign(project, None, None, str(exc))
+        seen[project] = found
+        return found
+
     def _worktree_named_in_prompt(self, prompt) -> Path | None:
         """The one live session worktree an agent prompt names, if exactly one.
 
@@ -343,13 +550,14 @@ class Context:
         exactly as it did before: ambiguity must fall through to the ordinary
         order rather than pick a winner, because attributing a dispatch to the
         wrong session is worse than not attributing it at all.
-        """
-        if not isinstance(prompt, str) or "/" not in prompt:
-            return None
 
+        It searches THIS context's registry only. A brief naming another
+        project's worktree was placed before this ran: :meth:`for_payload`
+        re-roots the context into that project, whose registry then answers
+        here as its own (ADR-011, BUG_040).
+        """
         found: dict[str, Path] = {}
-        for raw in _ABSOLUTE_PATH.findall(prompt):
-            candidate = Path(raw.rstrip(".,;:)]}'\"`"))
+        for candidate in _prompt_paths(prompt):
             owner = self.sessions.by_worktree_containing(candidate)
             if owner is None:
                 continue
@@ -3991,6 +4199,10 @@ def cmd_oracle_web_revoke(args) -> int:
 # -- host bridge -------------------------------------------------------
 
 
+#: The hook events whose payload names a tool call, and so possibly a path.
+_TOOL_EVENTS = frozenset({"pre-tool-use", "post-tool-use"})
+
+
 def cmd_hook(args) -> int:
     from ..hosts.claude_code import DEGRADED_KEY, ClaudeCodeHost, is_probe
 
@@ -4032,7 +4244,17 @@ def cmd_hook(args) -> int:
     # attention sidecar, whose pid fallback would also read the process table.
     probe = isinstance(ctx.store, InertStore)
     try:
-        response = host.handle(args.event, raw, ctx)
+        # A tool call is handled in the project its path names, when that is
+        # a live session worktree of another project (ADR-011). Everything
+        # else here — the attention sidecar, the SessionStart registration —
+        # stays with `ctx`, the host's own project, because it describes the
+        # host and the host lives where it is rooted.
+        work = (
+            ctx.for_payload(body)
+            if args.event in _TOOL_EVENTS and isinstance(body, dict)
+            else ctx
+        )
+        response = host.handle(args.event, raw, work)
     except Exception as exc:  # noqa: BLE001 - see below
         # The same reasoning as the guard above, extended to the part that does
         # the work. A pre-tool-use hook that exits non-zero is a *deny*, so any

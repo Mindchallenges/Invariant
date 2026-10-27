@@ -39,6 +39,7 @@ adr/ADR-007-a-machine-wide-read-only-oracle
 adr/ADR-008-the-oracle-listens-on-the-tailnet-only
 adr/ADR-009-the-oracle-page-becomes-a-mobile-control-panel
 adr/ADR-010-whole-suite-evidence-moves-to-a-scheduled-sweep
+adr/ADR-011-a-hook-may-record-into-the-project-its-path-names
 ```
 
 ```{toctree}

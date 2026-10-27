@@ -36,7 +36,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
 import yaml
 
 from invariant.cli.main import main
@@ -88,10 +87,6 @@ def _project(root: Path, name: str) -> Path:
     return root
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_040 is live — delete this marker with the fix",
-)
 def test_BUG_040_a_dispatch_from_a_host_rooted_elsewhere_reaches_the_named_pipeline(
     tmp_path, monkeypatch, capsys
 ):
