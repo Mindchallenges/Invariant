@@ -380,7 +380,9 @@ class TestManifestKey:
             ("docs/guidelines/ruleset.yaml", "guidelines must be a mapping"),
             ({"ruleset": 3}, "guidelines.ruleset must be null or a path"),
             ({"ruleset": "  "}, "guidelines.ruleset must be null or a path"),
-            ({"checklist": "docs/guidelines/checklist.md"}, "guidelines.checklist is not a key this build reads"),
+            ({"instruction_files": ["CLAUDE.md"]}, "guidelines.instruction_files is not a key this build reads"),
+            ({"checklist": 3}, "guidelines.checklist must be null or a path"),
+            ({"checklist": ""}, "guidelines.checklist must be null or a path"),
         ],
     )
     def test_it_is_refused_at_load(self, make_manifest, guidelines_value, needle):
@@ -388,3 +390,154 @@ class TestManifestKey:
 
         with pytest.raises(ManifestError, match=needle.replace(".", r"\.")):
             make_manifest({"version": 1, "guidelines": guidelines_value})
+
+    def test_the_checklist_defaults_to_null(self, make_manifest):
+        manifest = make_manifest({"version": 1})
+        assert manifest.get("guidelines.checklist") is None
+        assert manifest.source_of("guidelines.checklist") == "default"
+
+    def test_a_configured_checklist_is_kept_as_written(self, make_manifest):
+        manifest = make_manifest(
+            {"version": 1, "guidelines": {"checklist": "docs/guidelines/rules.md"}}
+        )
+        assert manifest.get("guidelines.checklist") == "docs/guidelines/rules.md"
+        assert manifest.source_of("guidelines.checklist") == "manifest"
+
+
+# -- the generated checklist (A2 increment 3, DN-B) -----------------------------------
+
+
+SOURCE = "docs/guidelines/ruleset.yaml"
+
+
+def rendered(fmt="markdown", text=RULESET):
+    return guidelines.render_checklist(
+        parse(text, registered=REGISTERED), fmt, source=SOURCE
+    )
+
+
+class TestTheManagedMarker:
+    """The first line holds the digest of everything after it, so a hand
+    edit is detectable without re-rendering (ADR-012 D3, ruling DN-B)."""
+
+    def test_markdown_marker_is_an_html_comment_holding_the_body_digest(self):
+        text = rendered("markdown")
+        first, body = text.split("\n", 1)
+        assert first == f"<!-- invariant-managed: {digest_of(body.encode('utf-8'))} -->"
+
+    def test_rst_marker_is_a_comment_followed_by_a_blank_line(self):
+        text = rendered("sphinx")
+        first, second, *_ = text.split("\n")
+        _, body = text.split("\n", 1)
+        assert first == f".. invariant-managed: {digest_of(body.encode('utf-8'))}"
+        assert second == ""
+
+    @pytest.mark.parametrize("fmt", ["markdown", "sphinx"])
+    def test_split_managed_reads_back_the_digest_and_the_body(self, fmt):
+        text = rendered(fmt)
+        digest, body = guidelines.split_managed(text, fmt)
+        assert digest == digest_of(body.encode("utf-8"))
+        assert text.endswith(body)
+
+    @pytest.mark.parametrize(
+        ("fmt", "text"),
+        [
+            ("markdown", "# Hand written\n\nrules\n"),
+            ("markdown", ".. invariant-managed: 3f2a9c1b7e44\n\nbody\n"),
+            ("sphinx", "<!-- invariant-managed: 3f2a9c1b7e44 -->\nbody\n"),
+            ("markdown", "<!-- invariant-managed: not-hex -->\nbody\n"),
+            ("markdown", ""),
+        ],
+    )
+    def test_a_file_without_this_formats_marker_is_unmanaged(self, fmt, text):
+        assert guidelines.split_managed(text, fmt) == (None, text)
+
+    def test_an_unknown_format_is_refused_naming_the_formats(self):
+        with pytest.raises(ValueError, match="markdown, sphinx"):
+            rendered("asciidoc")
+        with pytest.raises(ValueError, match="markdown, sphinx"):
+            guidelines.split_managed("x", "asciidoc")
+
+    def test_the_suffix_follows_the_docs_format(self):
+        assert guidelines.CHECKLIST_SUFFIXES == {"markdown": ".md", "sphinx": ".rst"}
+
+
+class TestTheChecklistBody:
+    def test_rendering_is_deterministic(self):
+        assert rendered() == rendered()
+
+    def test_it_names_its_source_and_the_ruleset_digest(self):
+        text = rendered()
+        assert SOURCE in text
+        assert digest_of(RULESET.encode("utf-8")) in text
+        assert "invariant guidelines render" in text
+
+    @pytest.mark.parametrize("fmt", ["markdown", "sphinx"])
+    def test_every_rule_field_a_reader_relied_on_is_kept(self, fmt):
+        text = rendered(fmt)
+        for needle in (
+            "Clean architecture and dependency injection",
+            "di.views-no-concrete-services",
+            "Views never touch concrete services or singletons",
+            "A view never reaches a concrete service or a shared singleton.",
+            "blocker",
+            "design, review",
+            "App/UI/**/*.swift",
+            "regex",
+            "\\.shared\\b",
+            "App/Composition/LiveDependencies.swift",
+            "the composition root is where concrete services are built",
+            "3f2a9c1b7e44",
+            "The view layer must be previewable without live services.",
+            "docs/architecture/overview.md",
+            "2026-07-07",
+            "widened to cover property wrappers",
+            "docs/adr/ADR-012.md",
+            "tests.coverage-floor",
+            "coverage.meets_floor",
+        ):
+            assert needle in text, needle
+
+    def test_rules_are_listed_under_their_section_in_declared_order(self):
+        text = rendered()
+        assert text.index("Clean architecture") < text.index("di.views-no-concrete")
+        assert text.index("di.views-no-concrete") < text.index("## Testing")
+        assert text.index("## Testing") < text.index("tests.coverage-floor")
+
+    def test_a_section_with_no_rules_says_so(self):
+        text = rendered(text=RULESET.replace("section: tests", "section: di"))
+        testing = text[text.index("## Testing"):]
+        assert "No rules in this section." in testing
+
+    def test_rst_headings_are_underlined_at_least_their_length(self):
+        lines = rendered("sphinx").split("\n")
+        for index, line in enumerate(lines[1:-1], start=1):
+            under = lines[index + 1]
+            if under and set(under) <= set("=-~") and line.strip():
+                assert len(under) >= len(line), line
+
+    def test_markdown_code_holding_a_backtick_stays_one_span(self):
+        text = RULESET.replace("'\\.shared\\b'", "'a`b'")
+        assert "`` a`b ``" in rendered(text=text)
+
+    def test_a_multi_paragraph_statement_keeps_its_paragraphs(self):
+        text = mutated(
+            lambda r: r["rules"][0].update(statement="First line\nwraps.\n\nSecond paragraph.")
+        )
+        out = rendered(text=text)
+        assert "First line wraps.\n\nSecond paragraph." in out
+
+    @pytest.mark.parametrize("fmt", ["markdown", "sphinx"])
+    def test_a_rule_ending_in_a_nested_list_leaves_no_doubled_blank(self, fmt):
+        def edit(raw):
+            for key in ("rationale", "links", "amended"):
+                raw["rules"][0].pop(key)
+        out = rendered(fmt, text=mutated(edit))
+        assert "\n\n\n" not in out
+        assert out.endswith("\n") and not out.endswith("\n\n")
+
+    def test_a_kind_with_no_summary_yet_is_named_by_its_kind(self):
+        from invariant.core.guidelines import Check, _check_summary
+
+        assert _check_summary(Check(kind="judgement"), str) == "judgement"
+

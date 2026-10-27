@@ -60,13 +60,14 @@ graph TD
         CGUIDE["guidelines (ADR-012 D3)"]
     end
 
-    subgraph domains["domains/ — the six state domains"]
+    subgraph domains["domains/ — the seven state domains"]
         SESSION[session]
         PIPELINE[pipeline]
         WORKITEM[workitem]
         MEMDOMAIN[memorystore]
         STATSDOMAIN[stats]
         SWEEPD["sweep (ADR-010)"]
+        GDOM["guidelines (ADR-012 D12)"]
     end
 
     subgraph adapters["adapters/ — ecosystem knowledge"]
@@ -230,6 +231,10 @@ graph TD
     CONF -- get_rule --> RULES
     CONF --> CONFDATA
     RULES -- load, the ruleset gate --> CGUIDE
+    CLI --> GDOM
+    GDOM -- render_checklist, split_managed --> CGUIDE
+    GDOM -- load_ruleset, the tree in hand, is_exempt_path --> RULES
+    GDOM -- scans before it writes --> PRIVACY
 ```
 
 `CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
@@ -427,9 +432,25 @@ rule; it reads the ruleset from the tree in hand, answers N/A with no ruleset
 configured, and fails, never skips, on one that is configured and does not
 load. `core/machines` injects it at the landing state's entry only when a
 ruleset is configured, so a project that has not opted in sees no change, and
-`doctor` prints the same verdict as a row. The domain that renders from the
-ruleset, `domains/guidelines`, arrives with the generated checklist; ADR-012
-D12 draws where the rest of the family sits.
+`doctor` prints the same verdict as a row.
+
+`GDOM` is `domains/guidelines`, the effects the ruleset has on the tree
+(IDEA_031 A2 increment 3, ADR-012 D12). It is not an FSM, like `stats` and
+`sweep`. Today it has one effect, `guidelines render`: the human checklist in
+`docs.format`, whose first line is a managed marker holding the digest of the
+rest (`<!-- invariant-managed: … -->` or `.. invariant-managed: …`). What the
+text is belongs to `core/guidelines` (`GDOM --> CGUIDE`: `render_checklist`,
+and `split_managed` to read an existing file's marker back), which stays pure.
+`GDOM --> RULES` reuses three answers rather than keeping copies of them:
+`load_ruleset`, so render refuses exactly what the gate fails; the tree in
+hand (`guidelines_tree`, `guidelines_relpath`), so the checklist lands in the
+tree its ruleset was read from; and `is_exempt_path`, so a generated file can
+never sit where isolation would let it land unreviewed (ruling 13). `GDOM -->
+PRIVACY` scans the rendered text before anything is written. A finding
+refuses the render whole. The CLI's write scope names this class, generated
+files the manifest declares (cli.md, Conventions). The rest of the family
+(managed instruction-file blocks, the drift gate, the pin) arrives in later
+increments; ADR-012 D12 draws where it sits.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -859,7 +880,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
-| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, which check kinds and engines this build accepts, and the content hash (`digest_of`, twelve hex) | Import `core/rules` (the registered ids are a parameter); evaluate a check; render anything; decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
+| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, which check kinds and engines this build accepts, and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file, or decide where one goes (`domains/guidelines` does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
@@ -890,6 +911,15 @@ advance it. They are the only place where "what a session is" is encoded.
   commit; and what `item new` may set — an explicit id it checks is unspent,
   and the item's own keys it refuses (BUG_074). Persisted through
   `core/items` into whichever backend the project uses.
+- **`guidelines`** — the effects of the project's guidelines ruleset (ADR-012
+  D12). Not an FSM. Today it renders the human checklist
+  (`guidelines render`). It reads the ruleset through `core/rules`'
+  `load_ruleset` from the tree in hand, and writes the checklist into that
+  tree. Before any write it refuses: a target outside the project, the ruleset
+  itself, a suffix that disagrees with `docs.format`, a path exempt from
+  isolation, an existing file without its marker, and rendered text with a
+  privacy finding. It names whether the file it rewrote was current, stale,
+  or hand-edited. It writes only the generated-file class (cli.md).
 - **`memorystore`** — validation, dedup, and index regeneration over the
   memory directory. Not an FSM; a set of invariants plus repair operations.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for

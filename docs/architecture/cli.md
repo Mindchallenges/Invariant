@@ -44,6 +44,23 @@ Nothing reaches the engine another way.
   manifest diff, and exempt from session isolation by the same mechanism that
   already exempts the backlog — instead of quietly widening a guarantee.
 
+  **A third class: generated files the manifest declares** (ADR-012 ruling
+  13). The guidelines domain renders files from the project's ruleset, and
+  those files are neither state nor a store: today `guidelines.checklist`,
+  and with later increments `guidelines.instruction_files` and
+  `guidelines.baseline`. Only the commands that generate them write them:
+  `guidelines render` now, and `guidelines baseline --prune` once it lands.
+  Unlike a declared store, a generated file is **never exempt from session
+  isolation**. A render goes through the session's branch and its review
+  like any edit, and `guidelines render` refuses a target that
+  `session.exempt_paths` or a declared store would exempt. A store is exempt
+  because it holds data every session touches. A generated file is a
+  projection of policy, and an unreviewed write to it is a policy change
+  nobody reviewed. The two other ways to do this were rejected (ADR-012,
+  Alternatives). Printing the text for an agent to write would make fixing
+  drift a model's act. Declaring the files as stores would land them
+  unreviewed.
+
   One store sits outside every repository and so outside this rule: the
   oracle's user-level directory (`$INVARIANT_HOME`, else `~/.invariant`;
   ADR-007). It holds which projects exist, plus the watcher's derived
@@ -847,6 +864,53 @@ the checked-out branch with no session, so a worktree cut before the latest
 sweep still sees it. It warns on no sweep, an unreadable branch, an unreadable
 date, or an age past `cadence_days + grace_days`, and the manifest refuses it
 at `block` or `ask`.
+
+## Guidelines
+
+The project's coding guidelines live in one YAML ruleset (ADR-012 D3). These
+commands write the generated-file class from Conventions, and nothing else.
+
+```
+invariant guidelines render [--dry-run]
+    Write the human checklist from the ruleset, in docs.format: markdown
+    gives a .md file, sphinx a .rst file. The target is guidelines.checklist,
+    or with that key null, checklist.<md|rst> beside the ruleset. The
+    ruleset is read from the tree in hand (the session's worktree when there
+    is one), and the checklist is written into that same tree.
+
+    The first line is a managed marker holding the digest of everything
+    after it: `<!-- invariant-managed: <digest> -->` in markdown,
+    `.. invariant-managed: <digest>` in rst. That marker is how a hand edit
+    is seen without rendering again.
+
+    The rendered text is privacy-scanned BEFORE anything is written, and any
+    finding refuses the whole render. The finding is named by line, pattern
+    and redacted match. --dry-run renders and scans in full and reports what
+    it would write, and writes nothing.
+
+    The status names what was there: new; current (still rewritten, as
+    assets install rewrites a matching file); stale (rendered from an older
+    ruleset); or edited (its body no longer matches its marker). Hand edits
+    are replaced and named, because the ruleset is the source: the fix for
+    drift is to move the change into the ruleset, then render. The file is
+    never exempt from isolation, so the replaced text is still in the
+    branch's diff.
+
+    Refused (exit 1, nothing written, each naming its fix):
+      - a ruleset that does not load or validate (every problem named);
+      - a guidelines.checklist that names nothing inside the project, names
+        the ruleset itself, or has a suffix that disagrees with docs.format;
+      - a docs.format with no checklist renderer;
+      - a target that session.exempt_paths or a declared store exempts from
+        isolation (ruling 13);
+      - an existing file at the target with no managed marker, because
+        render did not write it and the text is the project's;
+      - a privacy finding in the rendered text.
+
+    With no ruleset configured it reports "nothing to render" and exits 0
+    (ADR-012 D3, "No ruleset, no change"). --json carries status, written,
+    dry_run, path and the ruleset digest.
+```
 
 ## Rules and gates
 

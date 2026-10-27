@@ -1683,18 +1683,20 @@ def load_ruleset(
     configured = ctx.manifest.get("guidelines.ruleset")
     if not configured:
         return None, None
-    rel = project_relative(
-        configured, [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
-    )
-    if rel is None or rel == ".":
+    rel = guidelines_relpath(ctx, configured)
+    if rel is None:
         return None, Verdict.fail(
             f"guidelines.ruleset {configured!r} names nothing inside the project",
             detail="The ruleset is project content, reviewed like a doc; a path "
             "outside every checkout of this repository is not this project's.",
-            fixes=("set guidelines.ruleset to a project-relative path, such as "
-                   "docs/guidelines/ruleset.yaml",),
+            fixes=(
+                (
+                    "set guidelines.ruleset to a project-relative path, such as "
+                    "docs/guidelines/ruleset.yaml"
+                ),
+            ),
         )
-    path = (_session_worktree(ctx) or _repo_root(ctx)) / rel
+    path = guidelines_tree(ctx) / rel
     if not path.is_file():
         return None, Verdict.fail(
             f"the configured guidelines ruleset {rel} does not exist",
@@ -1714,6 +1716,29 @@ def load_ruleset(
             detail="; ".join(exc.problems),
             fixes=(f"fix {rel}, then: invariant check guidelines.ruleset_valid",),
         )
+
+
+def guidelines_tree(ctx: RuleContext) -> Path:
+    """The tree the guidelines are read from and rendered into.
+
+    The session's worktree when it has one, else the checkout the call runs
+    in. One answer for the ruleset gate and for `guidelines render`, so the
+    command never writes a checklist into a different tree from the one whose
+    ruleset it read.
+    """
+    return _session_worktree(ctx) or _repo_root(ctx)
+
+
+def guidelines_relpath(ctx: RuleContext, configured: str) -> str | None:
+    """The project-relative spelling of a declared guidelines path.
+
+    ``None`` when it names nothing inside the project: outside every checkout
+    of this repository, or the project root itself.
+    """
+    rel = project_relative(
+        configured, [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
+    )
+    return None if rel in (None, ".") else rel
 
 
 # -- test rules --------------------------------------------------------

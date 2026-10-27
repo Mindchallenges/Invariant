@@ -3020,6 +3020,37 @@ def cmd_sweep_show(args) -> int:
     return emit(args, record.to_dict(), "\n".join(lines))
 
 
+# -- guidelines (ADR-012) ---------------------------------------------
+
+
+_RENDER_STATUS = {
+    "new": "{verb} {rel}",
+    "current": "{verb} {rel}: it is current",
+    "stale": "{verb} {rel}: it was rendered from an older ruleset",
+    "edited": "{verb} {rel}: its hand edits were replaced; change the ruleset instead",
+}
+
+
+def cmd_guidelines_render(args) -> int:
+    from ..domains.guidelines import GuidelinesDomain
+
+    ctx = Context()
+    result = GuidelinesDomain(ctx.rule_context()).render(dry_run=args.dry_run)
+    if result.status == "no-ruleset":
+        text = "no guidelines ruleset configured; nothing to render"
+    else:
+        verb = "would write" if args.dry_run else "wrote"
+        text = _RENDER_STATUS[result.status].format(verb=verb, rel=result.relpath)
+        text += f" (ruleset {result.ruleset})"
+    return emit(args, {
+        "status": result.status,
+        "written": result.written,
+        "dry_run": args.dry_run,
+        "path": result.relpath,
+        "ruleset": result.ruleset,
+    }, text)
+
+
 # -- rules, checks, privacy -------------------------------------------
 
 
@@ -4913,6 +4944,21 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("record", nargs="?", help="a seq, a record file name, or a head prefix")
     q.add_argument("--branch", help="whose sweeps (default: the checked-out branch)")
     q.set_defaults(func=cmd_sweep_show)
+
+    # guidelines (ADR-012)
+    guide = sub.add_parser(
+        "guidelines", help="the project's coding guidelines ruleset"
+    ).add_subparsers(dest="sub", required=True)
+    q = guide.add_parser(
+        "render",
+        help="write the human checklist from the ruleset, in docs.format",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="render, scan and report what would be written, and write nothing",
+    )
+    q.set_defaults(func=cmd_guidelines_render)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

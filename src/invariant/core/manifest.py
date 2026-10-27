@@ -344,13 +344,17 @@ DEFAULTS: dict[str, Any] = {
     # `guidelines.*` rule is N/A. The documented location is
     # docs/guidelines/ruleset.yaml (ruling 1). Rule CONTENT never goes here:
     # the manifest is the operator's enforcement configuration, the ruleset is
-    # the project's content (D2). D13's other keys join as the increments that
-    # read them land; until then they are refused rather than ignored.
-    "guidelines": {"ruleset": None},
+    # the project's content (D2). `checklist` is where `guidelines render`
+    # writes the human checklist; null means checklist.<md|rst> beside the
+    # ruleset, following docs.format (ruling DN-B). It is a generated file the
+    # manifest declares, the CLI's third write class (ruling 13), and never
+    # exempt from isolation. D13's other keys join as the increments that read
+    # them land; until then they are refused rather than ignored.
+    "guidelines": {"ruleset": None, "checklist": None},
 }
 
 #: The `guidelines` keys this build reads.
-_GUIDELINES_KEYS = ("ruleset",)
+_GUIDELINES_KEYS = ("ruleset", "checklist")
 
 
 @dataclass
@@ -663,8 +667,10 @@ class Manifest:
 
         A key the schema does not know loads, does nothing, and reads in
         `config show` as though it had taken: the BUG_050 shape. D13 names
-        more keys than `ruleset`; each is accepted by the increment that reads
-        it, and refused, by name, before then.
+        more keys than `ruleset` and `checklist`; each is accepted by the
+        increment that reads it, and refused, by name, before then. Each key
+        read here is null or a non-empty path; where it points is checked by
+        whatever reads it, against the tree in hand.
         """
         section = self.data.get("guidelines")
         if not isinstance(section, Mapping):
@@ -675,11 +681,12 @@ class Manifest:
                     f"guidelines.{key} is not a key this build reads; it reads "
                     f"{', '.join('guidelines.' + k for k in _GUIDELINES_KEYS)}."
                 )
-        ruleset = section.get("ruleset")
-        if ruleset is not None and not (isinstance(ruleset, str) and ruleset.strip()):
-            raise ManifestError(
-                f"guidelines.ruleset must be null or a path, got {ruleset!r}"
-            )
+        for key in _GUIDELINES_KEYS:
+            value = section.get(key)
+            if value is not None and not (isinstance(value, str) and value.strip()):
+                raise ManifestError(
+                    f"guidelines.{key} must be null or a path, got {value!r}"
+                )
 
     def scheduled_gates(self) -> frozenset[str]:
         """The gates a sweep cadence has moved off the per-change path.

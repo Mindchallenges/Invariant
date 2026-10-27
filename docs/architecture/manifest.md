@@ -170,11 +170,29 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
                                # documented location is
                                # docs/guidelines/ruleset.yaml. Rule content never
                                # goes in the manifest (D2)
+  checklist: null              # where `guidelines render` writes the human
+                               # checklist, in docs.format; null =
+                               # checklist.<md|rst> beside the ruleset. A
+                               # generated file: never exempt from isolation
 ```
 
-D13's other `guidelines` keys (`baseline`, `checklist`, `instruction_files`,
-`injection`, `verdicts`) are accepted by the increment that reads each one.
-Until then they are refused at load, by name, rather than loaded and ignored.
+D13's other `guidelines` keys (`baseline`, `instruction_files`, `injection`,
+`verdicts`) are accepted by the increment that reads each one. Until then they
+are refused at load, by name, rather than loaded and ignored.
+
+### Generated files are declared, and never exempt
+
+`guidelines.checklist` is the first key of a third kind (ADR-012 ruling 13).
+A declared store is writable because it is exempt from session isolation.
+A generated file is writable only by the command that generates it, and it is
+**never** exempt: a render is a policy projection and is reviewed on the
+session's branch like any edit (cli.md, Conventions). `guidelines render`
+therefore refuses a target that `session.exempt_paths` or a declared store
+would exempt, through the same `is_exempt_path` the isolation rules ask. It
+also refuses a target that is the ruleset itself, a suffix that disagrees
+with `docs.format` (`.md` for markdown, `.rst` for sphinx), and an existing
+file at the target that carries no `invariant-managed` marker, which render
+did not write.
 
 ### A sweep cadence
 
@@ -841,8 +859,10 @@ since they would do nothing. Levels are read resolved — profile, overrides and
 `INVARIANT_DISABLE` — because that is what the gate would do. `sweep.fresh` is
 refused at `block` or `ask`, with or without a cadence: the user ruled that it
 only ever warns, and the engine holds that ruling at load rather than in prose.
-`guidelines` must be a mapping whose keys this build reads (today only
-`ruleset`), and `guidelines.ruleset` null or a non-empty path. The ruleset's
+`guidelines` must be a mapping whose keys this build reads (today `ruleset`
+and `checklist`), and each of those null or a non-empty path. Where the
+checklist points is checked by `guidelines render`, against the tree in hand,
+not at load. The ruleset's
 own contents are not read at load: a manifest is read on every command, and a
 ruleset that does not validate is `guidelines.ruleset_valid`'s verdict, at
 the landing and in `doctor`, naming every problem. A configured path that
