@@ -47,6 +47,19 @@ class ManifestError(UsageError):
     exit_code = 2
 
 
+class UnknownRuleError(ManifestError):
+    """``enforcement.rules`` names an id the rule registry does not carry.
+
+    A :class:`ManifestError` like any other; the id is kept so a reader that
+    can tell an older build from a mistyped override can say which it is
+    (the oracle, BUG_089).
+    """
+
+    def __init__(self, message: str, rule_id: str) -> None:
+        super().__init__(message)
+        self.rule_id = rule_id
+
+
 class StateError(InvariantError):
     """The state store is unreadable, unwritable, or wedged.
 

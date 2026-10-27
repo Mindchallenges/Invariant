@@ -1824,8 +1824,16 @@ tick.
 ```json
 {"version": 1, "generated": "<iso>", "watcher_pid": 4242, "interval": 5.0,
  "home": "<oracle home>", "now": 1792640000.0,
+ "build": {"version": "0.1.0", "digest": "<16 hex>", "files": 75},
+ "oracle": {"skew": null, "unread": []},
  "projects": ["<each project entry of oracle list --json>"]}
 ```
+
+`build` and `oracle` were added by BUG_089, within version 1: `build` is the
+stamp of the installed tree the watcher started from, and `oracle` the read's
+own condition, a skew when the watcher is older than the install and the
+projects it left unread for it. A snapshot without `build` was written by a
+watcher older than stamps, which `oracle status` and `doctor` report as older.
 
 ```json
 {"version": 1,
@@ -1854,8 +1862,13 @@ time its state changes:
  "urls": ["https://<host>.<tailnet>.ts.net:7341/"], "since": "<iso>", "error": null,
  "scheme": "https|http",
  "certificate": {"name": "<host>.<tailnet>.ts.net", "not_after": 1800000000.0,
-                 "expires": "<iso>", "error": null}}
+                 "expires": "<iso>", "error": null},
+ "build": {"version": "0.1.0", "digest": "<16 hex>", "files": 75}}
 ```
+
+`build`, the stamp of the installed tree the page started from, was added
+by BUG_089, within version 1; a running page whose report has none is older
+than stamps, and reported so.
 
 `scheme` and `certificate` were added by IDEA_026 (ADR-008 D23), within
 version 1: a reader that does not know them reads the rest as before.

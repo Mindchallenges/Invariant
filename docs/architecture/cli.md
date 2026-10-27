@@ -150,7 +150,11 @@ invariant doctor
     an editable install can move, and the agent would then fail at every
     login without a word. The remedy is `invariant oracle install`. The row
     reads the plist only and asks launchd nothing; with no plist there is no
-    row.
+    row. Beside it, while a fresh snapshot shows a watcher running, `oracle
+    watcher build` fails when that watcher runs an older invariant than the
+    installed one: its stamp differs, it wrote none, or it reports a skew
+    itself (BUG_089). It restarts itself once it notices; `invariant oracle
+    install` restarts it now.
 
     When the web page's LaunchAgent is installed, two more: `oracle web
     interpreter`, the same check on its plist (remedy `invariant oracle
@@ -159,7 +163,8 @@ invariant doctor
     error stands. Its detail is where the page serves (or that it waits for
     Tailscale, which passes), the paired device count and the last action
     from the audit log. Both read files and ask launchd nothing (ADR-008
-    D17). When that report names a certificate, a third row, `oracle web
+    D17). While that process runs, `oracle web build` fails when it runs an
+    older invariant than the installed one, as the watcher's row does. When that report names a certificate, a third row, `oracle web
     certificate`, fails while the page is served over plain HTTP (its detail
     says why: HTTPS Certificates off in the Tailscale admin console, or
     Tailscale not answering) or once fewer than 14 days remain before the
@@ -960,7 +965,14 @@ invariant oracle list [--project NAME] [--json]
     pipeline are evaluated once, read-only, in the session's worktree, and
     the wait for them is bounded by a 10-second timeout; they add detail to
     the recommendation and never raise an alert. Exit 0 whatever the rows
-    say: it is a query. JSON: {"home", "now", "projects": [{"project",
+    say: it is a query. An oracle older than the installed invariant (a
+    profile naming a rule this build lacks, or, for a long-lived process,
+    the installed tree changed since it started) is one line under the
+    table, "oracle OLDER than the installed invariant: <why>; not read:
+    <projects>", and a project it could not read for that reason has no
+    rows and no error row (BUG_089). JSON: {"home", "now", "oracle":
+    {"skew": {"reasons", "started", "installed", "rules", "detail"} | null,
+    "unread": [<project name>]}, "projects": [{"project", "unread",
     "scanned_at", "elapsed", "rows": [{<row>, "signals": [{"kind",
     "severity", "alert", "detail", "key", "cause"}], "recommendation":
     {"label", "argv", "cwd", "kind", "env", "detail"} | null, "gates":
@@ -980,7 +992,12 @@ invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify
     error (exit 3 for a home it cannot write). Without --once it runs until
     interrupted (exit 0), a failed tick is logged to stderr and the next one
     runs, and the text prints only ticks with news; --json prints one line
-    per tick. --stuck-minutes is the threshold for `stuck`. --no-notify posts
+    per tick. Without --once it also restarts itself when invariant changes
+    under it (BUG_089): once the installed tree has changed and held still
+    for 5 s, it runs the same command again in the same process, between two
+    ticks (exit 75 if that exec fails, for launchd to start it again). The
+    snapshot carries "build", the stamp of the tree the watcher started from.
+    --stuck-minutes is the threshold for `stuck`. --no-notify posts
     nothing: the edges it sees are recorded as owed, and a later watcher that
     notifies delivers them. Gates are evaluated as `list` evaluates them, in
     worker threads the loop never waits for; an answer that finishes between
@@ -1116,14 +1133,22 @@ invariant oracle status [--json]
     inside the last 30, a failed renewal; or NONE and why, over plain
     HTTP); the paired device count; and the last action from the audit
     log. With no
-    web agent and no report, one line says how to install it. Exit 0
+    web agent and no report, one line says how to install it. Under a fresh
+    snapshot, `build` says whether the watcher runs the installed invariant
+    (`current (<digest>)`, or OLDER, which a snapshot with no stamp, or one
+    whose document reports a skew, is too); `web build` says the same of a
+    running page (BUG_089). Exit 0
     whatever it finds: it is a query. JSON:
     {"agent": {"plist_path", "installed", "loaded", "interpreter",
     "interpreter_exists", "interval", "error", "label", "port"}, "snapshot":
     {"path", "exists", "age", "interval", "stale", "watcher_pid"}, "web":
     {"agent": <as agent>, "page": {"path", "exists", "state", "pid",
     "running", "addresses", "port", "urls", "since", "error", "unreadable",
-    "scheme", "certificate", "devices", "devices_error", "last_action"}}}.
+    "scheme", "certificate", "devices", "devices_error", "last_action",
+    "build"}}, "build": {"installed": {"version", "digest", "files"},
+    "watcher": {"older", "text"}, "web": {"older", "text"}}}; "older" is
+    null when no process is behind the report. The snapshot also carries
+    "build" and "skew".
 
 invariant oracle web [--port 7341] [--allow-loopback | --wait]
     Serve the dashboard to paired devices, with the TUI's confirm-first
@@ -1179,6 +1204,13 @@ invariant oracle web [--port 7341] [--allow-loopback | --wait]
     every 10 minutes while it has none, and swaps a renewal into the running
     listener with no restart. A first certificate, a lost one or a new name
     makes it listen again, over HTTPS or plain HTTP.
+    Under --wait it also restarts itself when invariant changes under it
+    (BUG_089): once the installed tree has changed and held still for 5 s,
+    new actions and starts are refused (409, "the oracle is restarting to
+    pick up an updated invariant; nothing ran"), the running ones finish,
+    and then it closes, removes its report and runs the same command again
+    in the same process (exit 75 if that exec fails, for launchd to start it
+    again). The report carries "build", the stamp it started from.
 
 invariant oracle web pair [--name device] [--ttl 300] [--port PORT] [--allow-loopback] [--json]
     Issue a one-time pairing code, valid --ttl seconds, and print it with its

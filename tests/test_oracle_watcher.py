@@ -512,7 +512,8 @@ class TestSnapshotStatus:
         status = snapshot_status(oracle_home(), time.time())
         assert status == {
             "path": str(oracle_home() / SNAPSHOT_FILE), "exists": False, "age": None,
-            "interval": None, "stale": True, "watcher_pid": None,
+            "interval": None, "stale": True, "watcher_pid": None, "build": None,
+            "skew": None,
         }
 
     def test_a_snapshot_within_three_intervals_is_fresh(self):
@@ -683,3 +684,78 @@ class TestLayering:
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
                     assert "hosts" not in (node.module or "")
+
+
+# -- an oracle older than the install (BUG_089) --------------------------------
+
+
+def moved_cache(settle: float = 0.0) -> ScanCache:
+    """A scan cache whose installed tree has moved since it was made."""
+    from invariant.oracle.build import BuildWatch, Stamp
+
+    stamps = iter([Stamp("0.1.0", "old", 1)])
+    build = BuildWatch(stamper=lambda root: next(stamps, Stamp("0.1.0", "new", 1)),
+                       settle=settle)
+    return ScanCache(probe=FakeProbe(), build=build)
+
+
+class TestAnOlderWatcher:
+    def test_a_project_it_cannot_read_for_its_age_keeps_its_keys_and_alerts_nothing(
+        self, one_project, monkeypatch
+    ):
+        from invariant.core import rules as rules_module
+
+        put_attention(one_project, "h-1", pid=THE_HOST_PID, turn="running",
+                      waiting=waiting())
+        recorder = RecordingNotifier()
+        watcher = make_watcher(recorder)
+        watcher.tick()
+        monkeypatch.delitem(rules_module._REGISTRY, "sweep.no_full_run")
+        older = watcher.tick()
+        assert older.alerts == []
+        assert older.document["oracle"]["unread"] == ["alpha"]
+        assert any(k.endswith("|waiting|permission@" + SINCE) for k in alert_keys())
+        assert len(recorder.sent) == 1
+
+    def test_the_snapshot_names_the_tree_it_was_made_by(self, one_project):
+        watcher = make_watcher(None)
+        watcher.tick()
+        written = json.loads((oracle_home() / SNAPSHOT_FILE).read_text("utf-8"))
+        assert written["build"] == watcher.cache.build.started.to_dict()
+        assert written["oracle"] == {"skew": None, "unread": []}
+
+    def test_the_loop_returns_to_restart_once_the_tree_has_settled(self, one_project):
+        logged, ticks = [], []
+        watcher = Watcher(ProjectIndex(oracle_home()), None, cache=moved_cache(),
+                          sleep=lambda s: None, log=logged.append)
+        watcher.run(max_ticks=5, on_tick=ticks.append)
+        assert watcher.restarting is True
+        assert len(ticks) == 1
+        assert any("restarting" in line for line in logged)
+
+    def test_a_tree_still_settling_does_not_stop_the_loop(self, one_project):
+        watcher = Watcher(ProjectIndex(oracle_home()), None, cache=moved_cache(settle=3600),
+                          sleep=lambda s: None)
+        watcher.run(max_ticks=3)
+        assert watcher.restarting is False
+
+    def test_once_never_restarts(self, one_project):
+        watcher = Watcher(ProjectIndex(oracle_home()), None, cache=moved_cache(),
+                          sleep=lambda s: None)
+        watcher.run(once=True)
+        assert watcher.restarting is False
+
+
+class TestWatchRestarts:
+    def test_the_command_runs_itself_again_through_the_seam(
+        self, cli_project, monkeypatch, oracle_restarts
+    ):
+        monkeypatch.setattr(cli_main, "_oracle_cache", moved_cache)
+        monkeypatch.setattr(watcher_module.time, "sleep", lambda s: None)
+        assert main(["oracle", "watch"]) == 0
+        assert oracle_restarts == ["restart"]
+
+    def test_the_real_seam_is_reexec(self):
+        from invariant.oracle.build import reexec
+
+        assert cli_main._real_oracle_restart() is reexec

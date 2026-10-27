@@ -25,6 +25,11 @@ browser:
   Working by the name, with its detail. A window that has not appeared a
   minute after the start is a failure with its reason.
 
+* **An older oracle is one problem, not one per project** (BUG_089). When the
+  document says the oracle is older than the installed invariant, the first
+  card under Problems says so once, names the projects it left unread, and
+  says whether it restarts itself; no project is called unreadable for it.
+
 It imports nothing that runs anything: no ``actions``, no ``webactions``, no
 ``hosts/``. The table is the design of record's, in
 ``docs/architecture/oracle-panel.md``, "Wording".
@@ -267,6 +272,28 @@ _TITLES = {
     ROW_ERROR: "A record invariant cannot read",
 }
 _UNNAMED = "Unnamed session"
+
+#: The read's own condition: the oracle is older than the installed invariant
+#: (BUG_089). Its card's row key, which no project row can have.
+ORACLE_ROW = "oracle|build"
+_ORACLE = {
+    "kicker": "Session Oracle",
+    "title": "The oracle is out of date",
+    "restarting": "Restarting",
+    "restart": "Restart needed",
+    "changed": ("invariant was updated on the Mac after the oracle started. The oracle "
+                "restarts itself to catch up, within a minute."),
+    "rules": ("The oracle on the Mac is older than the invariant installed there. "
+              "Restarting it fixes this; Technical details has the command."),
+    "unread_one": "Until then it cannot read 1 project: {names}.",
+    "unread": "Until then it cannot read {n} projects: {names}.",
+    "note": "Not read: {names}",
+    "started": "Started from {started}, installed {installed}",
+    "lacks": "Rules this build lacks: {rules}",
+    "error": "{project}: {error}",
+    "by_hand": ("Restart by hand: invariant oracle install, and invariant oracle install "
+                "--web for this page"),
+}
 
 _WAITING_NOTE = ("Answer it in Claude on your Mac or phone. "
                  "This panel never answers prompts.")
@@ -979,6 +1006,49 @@ def _leftovers(hosts: list[dict[str, Any]], folders: list[dict[str, str]]):
     return screen, card
 
 
+# -- the oracle's own condition (BUG_089) ------------------------------------------------
+
+
+def _oracle_skew(document: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    oracle = document.get("oracle")
+    if not isinstance(oracle, Mapping) or not isinstance(oracle.get("skew"), Mapping):
+        return None, []
+    unread = [str(n) for n in oracle.get("unread") or []]
+    return dict(oracle["skew"]), unread
+
+
+def _oracle_card(document: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The card and detail saying the oracle is older than the install, if it is."""
+    skew, unread = _oracle_skew(document)
+    if skew is None:
+        return None
+    restarts = "changed" in (skew.get("reasons") or [])
+    chips = [{"text": _ORACLE["restarting" if restarts else "restart"], "tone": TONE_PROBLEM}]
+    names = ", ".join(unread)
+    going_on = [_ORACLE["changed" if restarts else "rules"]]
+    if unread:
+        going_on.append(_ORACLE["unread_one"].format(names=names) if len(unread) == 1
+                        else _ORACLE["unread"].format(n=len(unread), names=names))
+    started = (skew.get("started") or {}).get("digest")
+    installed = (skew.get("installed") or {}).get("digest")
+    lines = [_ORACLE["started"].format(started=started, installed=installed)]
+    if skew.get("rules"):
+        lines.append(_ORACLE["lacks"].format(rules=", ".join(skew["rules"])))
+    for project in document.get("projects", []):
+        if project.get("unread") is not None:
+            lines.append(_ORACLE["error"].format(
+                project=(project.get("project") or {}).get("name", ""), error=project["unread"]))
+    lines.append(_ORACLE["by_hand"])
+    card = {"row": ORACLE_ROW, "project": _ORACLE["kicker"], "title": _ORACLE["title"],
+            "chips": chips, "age": "",
+            "note": _ORACLE["note"].format(names=names) if unread else None,
+            "button": None, "tap": False}
+    detail = {"row": ORACLE_ROW, "kicker": _ORACLE["kicker"], "title": _ORACLE["title"],
+              "chips": chips, "going_on": going_on, "step": None, "recent": [],
+              "technical": {"lines": lines, "path": None}}
+    return card, detail
+
+
 # -- the view --------------------------------------------------------------------------
 
 
@@ -1003,6 +1073,10 @@ def view(document: Mapping[str, Any], acting: bool = False,
     hosts: list[dict[str, Any]] = []
     folders: list[dict[str, str]] = []
     position = 0
+    oracle = _oracle_card(document)
+    if oracle is not None:
+        placed[PROBLEMS].append((-1, -math.inf, 0, oracle[0]))
+        details[ORACLE_ROW] = oracle[1]
     for project in document.get("projects", []):
         name = (project.get("project") or {}).get("name", "")
         for row in project.get("rows", []):

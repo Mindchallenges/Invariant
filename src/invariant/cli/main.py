@@ -689,9 +689,26 @@ def cmd_doctor(args) -> int:
     agent = _oracle_installer().interpreter_check()
     if agent is not None:
         checks.append(("oracle agent interpreter", *agent))
+        checks.extend(_oracle_watcher_build_check())
     checks.extend(_oracle_web_checks())
 
     return _report_checks(args, checks)
+
+
+def _oracle_watcher_build_check() -> list[tuple[str, bool, str]]:
+    """``doctor``'s ``oracle watcher build`` row, while a watcher is writing.
+
+    Fails when the watcher behind a fresh snapshot runs an older invariant
+    than the installed one (BUG_089). Reads the snapshot; asks launchd nothing.
+    """
+    from ..oracle.build import stamp
+    from ..oracle.home import oracle_home
+    from ..oracle.watcher import snapshot_status
+
+    build = _watcher_build(snapshot_status(oracle_home(), time.time()), stamp())
+    if build["text"] is None:
+        return []
+    return [("oracle watcher build", not build["older"], build["text"])]
 
 
 def _oracle_web_checks() -> list[tuple[str, bool, str]]:
@@ -700,6 +717,7 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
     Like the watcher's row, it reads files and asks launchd nothing: the
     plist, and the report the serving loop keeps, whose pid is checked alive.
     """
+    from ..oracle.build import stamp
     from ..oracle.home import oracle_home
     from ..oracle.webservice import (
         cert_ok,
@@ -721,6 +739,9 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
     detail = (f"{page_text(status)}; {devices}; "
               f"last action {last_action_text(status['last_action'])}")
     rows = [("oracle web interpreter", *interpreter), ("oracle web page", page_ok(status), detail)]
+    build = _web_build(status, stamp())
+    if build["text"] is not None:
+        rows.append(("oracle web build", not build["older"], build["text"]))
     if status["certificate"] is not None:
         now = time.time()
         rows.append(("oracle web certificate", cert_ok(status, now), cert_text(status, now)))
@@ -2985,6 +3006,11 @@ def cmd_oracle_list(args) -> int:
     source = next((p.get("host_processes") for p in document["projects"]), None)
     if source and not source.get("used"):
         lines.append(f"host process records: {source.get('detail')}")
+    skew = document["oracle"]["skew"]
+    if skew is not None:
+        unread = ", ".join(document["oracle"]["unread"]) or "none"
+        lines.append(f"oracle OLDER than the installed invariant: {skew['detail']}; "
+                     f"not read: {unread}")
     text = "\n".join(lines) or f"  no projects registered in {index.home}"
     return emit(args, document, text)
 
@@ -3371,8 +3397,28 @@ def cmd_oracle_watch(args) -> int:
     try:
         watcher.run(on_tick=report)
     except KeyboardInterrupt:
-        pass
+        return EXIT_OK
+    if watcher.restarting:
+        return _oracle_restart()()
     return EXIT_OK
+
+
+def _real_oracle_restart():
+    from ..oracle.build import reexec
+
+    return reexec
+
+
+def _oracle_restart():
+    """How ``oracle watch`` and ``oracle web --wait`` run themselves again.
+
+    ``() -> exit status``: the real one replaces this process with the same
+    command from the installed code, and returns only when it could not, with
+    the status that has launchd's ``KeepAlive`` start the agent again
+    (BUG_089). A seam: the suite replaces it with a recorder, so no test
+    replaces the test runner.
+    """
+    return _real_oracle_restart()
 
 
 def _real_oracle_installer():
@@ -3529,6 +3575,7 @@ def cmd_oracle_uninstall(args) -> int:
 
 def cmd_oracle_status(args) -> int:
     """Whether the agent is installed and loaded, and how old the snapshot is."""
+    from ..oracle.build import stamp
     from ..oracle.home import oracle_home
     from ..oracle.watcher import STALE_INTERVALS, snapshot_status
 
@@ -3551,9 +3598,46 @@ def cmd_oracle_status(args) -> int:
             f"  snapshot     {freshness}; written {snapshot['age']:.0f}s ago, "
             f"interval {snapshot['interval']:g}s ({snapshot['path']})"
         )
-    web, web_lines = _oracle_web_status()
-    return emit(args, {"agent": agent.to_dict(), "snapshot": snapshot, "web": web},
+    installed = stamp()
+    watcher_build = _watcher_build(snapshot, installed)
+    if watcher_build["text"] is not None:
+        lines.append(f"  build        {watcher_build['text']}")
+    web, web_lines = _oracle_web_status(installed)
+    build = {"installed": installed.to_dict(), "watcher": watcher_build, "web": web.pop("build")}
+    return emit(args, {"agent": agent.to_dict(), "snapshot": snapshot, "web": web,
+                       "build": build},
                 "\n".join(lines + web_lines))
+
+
+def _watcher_build(snapshot: dict, installed) -> dict:
+    """Whether the watcher behind a fresh snapshot runs the installed invariant.
+
+    ``older`` is ``None`` when no watcher is behind the snapshot: a stale one
+    says nothing about a running process. A fresh snapshot with no stamp was
+    written by a build older than stamps, so it is older (BUG_089).
+    """
+    from ..oracle.build import behind, build_text
+
+    if not snapshot["exists"] or snapshot["stale"]:
+        return {"older": None, "text": None}
+    reported = snapshot["build"] if snapshot["build"] is not None else {}
+    skew = snapshot["skew"]
+    if behind(reported, installed) or not isinstance(skew, dict):
+        return {"older": bool(behind(reported, installed)),
+                "text": build_text(reported, installed, "the watcher")}
+    return {"older": True, "text": (f"OLDER than the installed invariant: {skew.get('detail')}; "
+                                    f"'invariant oracle install' restarts it")}
+
+
+def _web_build(page: dict, installed) -> dict:
+    """Whether the process serving the page runs the installed invariant."""
+    from ..oracle.build import behind, build_text
+
+    if not page["running"]:
+        return {"older": None, "text": None}
+    reported = page["build"] if page["build"] is not None else {}
+    return {"older": bool(behind(reported, installed)),
+            "text": build_text(reported, installed, "the page")}
 
 
 def _agent_lines(agent, label: str) -> list[str]:
@@ -3566,14 +3650,18 @@ def _agent_lines(agent, label: str) -> list[str]:
     return lines
 
 
-def _oracle_web_status() -> tuple[dict, list[str]]:
-    """``oracle status``'s web half: the agent, the page, the devices, the last action."""
+def _oracle_web_status(installed) -> tuple[dict, list[str]]:
+    """``oracle status``'s web half: the agent, the page, the devices, the last action.
+
+    The body's ``build`` is the page's build line; the caller moves it out.
+    """
     from ..oracle.home import oracle_home
     from ..oracle.webservice import cert_text, last_action_text, page_text, web_status
 
     agent = _oracle_web_installer().status()
     page = web_status(oracle_home())
-    body = {"agent": agent.to_dict(), "page": page}
+    web_build = _web_build(page, installed)
+    body = {"agent": agent.to_dict(), "page": page, "build": web_build}
     if not agent.installed and not page["exists"]:
         return body, [(f"  web agent    not installed ({agent.plist_path}); "
                        f"'invariant oracle install --web' serves the page on the tailnet")]
@@ -3587,6 +3675,8 @@ def _oracle_web_status() -> tuple[dict, list[str]]:
         else f"cannot read: {page['devices_error']}"
     )
     lines.append(f"  web page     {page_text(page)}")
+    if web_build["text"] is not None:
+        lines.append(f"  web build    {web_build['text']}")
     if page["certificate"] is not None:
         lines.append(f"  certificate  {cert_text(page, time.time())}")
     lines += [
@@ -3738,7 +3828,7 @@ def cmd_oracle_web(args) -> int:
         return _oracle_web_server()(app, bound, port, served=served)
 
     if args.wait:
-        return _serve_always(listener, index.home, port, certificates)
+        return _serve_always(listener, index.home, port, certificates, cache.build, remote)
     served = None if addresses == [LOOPBACK] else _served_once(certificates)
     server = listener(addresses, served)
     urls = server.start()
@@ -3787,16 +3877,23 @@ def _served_once(certificates):
         return None
 
 
-def _serve_always(listener, home, port: int, certificates) -> int:
-    """``oracle web --wait``: serve whenever there is a tailnet, under the agent."""
+def _serve_always(listener, home, port: int, certificates, build, remote) -> int:
+    """``oracle web --wait``: serve whenever there is a tailnet, under the agent.
+
+    It runs itself again once invariant changes under it and the page's
+    running actions have finished (BUG_089).
+    """
     from ..oracle.webservice import WebService
 
     service = WebService(_oracle_web_addresses(), listener, home, port=port,
-                         wait=_oracle_web_wait(), certificates=certificates)
+                         wait=_oracle_web_wait(), certificates=certificates,
+                         build=build, remote=remote)
     try:
         service.run()
     except KeyboardInterrupt:
-        pass
+        return EXIT_OK
+    if service.restarting:
+        return _oracle_restart()()
     return EXIT_OK
 
 

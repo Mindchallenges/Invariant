@@ -25,6 +25,16 @@ does. One exception to dropping: a project that could not be read this tick
 keeps its keys, because "cannot read" is not "cleared", and a parse error
 must not re-alert everything in the project once it is fixed.
 
+**It restarts itself when invariant changes under it** (BUG_089). The scan
+cache's :class:`~invariant.oracle.build.BuildWatch` holds the installed tree
+this process started from, and every tick's scan compares it again. Once the
+tree has moved and held still, :meth:`Watcher.run` returns between two ticks
+with :attr:`Watcher.restarting` set, and the command runs itself again from
+the installed code. Nothing is lost: the snapshot and the ledger are on disk,
+written whole inside a tick, and the gate cache is evaluated again, as after
+any restart. The snapshot names the tree it was made by, under ``build``, so
+``oracle status`` and ``doctor`` can say when a watcher is behind.
+
 Only alerts notify; markers never do. The read-modify-write runs under the
 home's lock, so two watchers — the daemon and a ``watch --once`` — cannot both
 announce one edge. Both files are derived: deleting them costs at most one
@@ -74,15 +84,17 @@ def snapshot_status(home: Path, now: float) -> dict[str, Any]:
     every tick. A snapshot older than :data:`STALE_INTERVALS` of its own
     ``interval`` is stale: the watcher that wrote it has stopped, or is stuck.
     No snapshot at all is stale too. A body that cannot be read still has an
-    age; its interval falls back to :data:`DEFAULT_INTERVAL`.
+    age; its interval falls back to :data:`DEFAULT_INTERVAL`. ``build`` is the
+    installed tree the watcher was started from, and ``skew`` its own word on
+    being older than the install (BUG_089); each ``None`` when not written.
     """
     path = home / SNAPSHOT_FILE
     try:
         written = path.stat().st_mtime
     except OSError:
         return {"path": str(path), "exists": False, "age": None, "interval": None,
-                "stale": True, "watcher_pid": None}
-    interval, pid = DEFAULT_INTERVAL, None
+                "stale": True, "watcher_pid": None, "build": None, "skew": None}
+    interval, pid, build, skew = DEFAULT_INTERVAL, None, None, None
     try:
         document = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
@@ -92,9 +104,13 @@ def snapshot_status(home: Path, now: float) -> dict[str, Any]:
         if isinstance(recorded, (int, float)) and not isinstance(recorded, bool) and recorded > 0:
             interval = float(recorded)
         pid = document.get("watcher_pid")
+        build = document.get("build")
+        oracle = document.get("oracle")
+        skew = oracle.get("skew") if isinstance(oracle, dict) else None
     age = max(0.0, now - written)
     return {"path": str(path), "exists": True, "age": age, "interval": interval,
-            "stale": age > STALE_INTERVALS * interval, "watcher_pid": pid}
+            "stale": age > STALE_INTERVALS * interval, "watcher_pid": pid,
+            "build": build, "skew": skew}
 
 
 def _stderr(message: str) -> None:
@@ -163,6 +179,8 @@ class Watcher:
         self.gates = gates
         self.gate_wait = gate_wait
         self.store = HomeStore(index.home)
+        #: Set when :meth:`run` returned because invariant changed under it.
+        self.restarting = False
 
     @property
     def snapshot_path(self) -> Path:
@@ -190,6 +208,7 @@ class Watcher:
             generated=_iso(now),
             watcher_pid=os.getpid(),
             interval=self.interval,
+            build=self.cache.build.started.to_dict(),
         )
         self.store.write(SNAPSHOT_FILE, document)
         alerts = self._announce(document, now)
@@ -251,7 +270,12 @@ class Watcher:
         max_ticks: int | None = None,
         on_tick: Callable[[TickResult], None] | None = None,
     ) -> None:
-        """Tick until stopped. A tick that raises is logged and the loop goes on."""
+        """Tick until stopped. A tick that raises is logged and the loop goes on.
+
+        Returns early, with :attr:`restarting` set, once invariant has changed
+        under this process and held still (BUG_089): between ticks, never
+        inside one.
+        """
         ticks = 0
         while True:
             started = time.monotonic()
@@ -265,16 +289,27 @@ class Watcher:
             ticks += 1
             if once or (max_ticks is not None and ticks >= max_ticks):
                 return
+            if self.cache.build.restart_due():
+                self.log("oracle watch: invariant changed under this watcher; restarting "
+                         "to run the installed code")
+                self.restarting = True
+                return
             pause = max(0.0, self.interval - (time.monotonic() - started))
             (self._sleep or time.sleep)(pause)
 
 
 def _alerts_in(document: dict[str, Any]) -> tuple[dict[str, tuple], set[str]]:
-    """Every alert in ``document`` by key, and the projects that could not be read."""
+    """Every alert in ``document`` by key, and the projects that could not be read.
+
+    A project left unread by an older oracle (BUG_089) is one that could not be
+    read: its keys are kept, not cleared.
+    """
     current: dict[str, tuple] = {}
     unreadable: set[str] = set()
     for project in document["projects"]:
         name = project["project"]["name"]
+        if project.get("unread") is not None:
+            unreadable.add(project["project"]["key"])
         for row in project["rows"]:
             if row["kind"] == ROW_ERROR and not row.get("session_id"):
                 unreadable.add(row["project"])

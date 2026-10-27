@@ -299,6 +299,11 @@ def assess(
     each row carries its own under ``gates``, or ``null``. ``turn_state`` is
     whether the row's current host is mid-turn (:func:`turn_state`), the
     answer the panel's "working" reads so it cannot disagree with the signals.
+
+    ``oracle`` is the read's own condition, not any project's: ``skew`` when
+    this process is older than the installed invariant (BUG_089), and
+    ``unread``, the projects it therefore did not read, each of which also
+    carries its ``unread`` error and no rows.
     """
     gates = gates or {}
     mark_claims(snapshots)
@@ -323,10 +328,16 @@ def assess(
                 "scanned_at": snapshot.scanned_at,
                 "elapsed": snapshot.elapsed,
                 "host_processes": dict(snapshot.host_processes),
+                "unread": snapshot.unread,
                 "rows": rows,
             }
         )
-    return {"now": now, "projects": projects}
+    skew = next((s.skew for s in snapshots if s.skew is not None), None)
+    oracle = {
+        "skew": skew.to_dict() if skew is not None else None,
+        "unread": [s.project.name for s in snapshots if s.unread is not None],
+    }
+    return {"now": now, "oracle": oracle, "projects": projects}
 
 
 def row_label(row: dict[str, Any]) -> str:

@@ -270,6 +270,26 @@ def _no_real_oracle_runner(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def oracle_restarts(monkeypatch):
+    """No test replaces the test runner with a restarted oracle (BUG_089).
+
+    ``oracle watch`` and ``oracle web --wait`` run themselves again through
+    one seam, ``_oracle_restart``, replaced here suite-wide by a recorder
+    that counts the restarts asked for and answers 0.
+    """
+    restarts: list[str] = []
+
+    def restart() -> int:
+        restarts.append("restart")
+        return 0
+
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_restart", lambda: restart, raising=False
+    )
+    return restarts
+
+
+@pytest.fixture(autouse=True)
 def oracle_web(monkeypatch):
     """No test binds a Tailscale address or asks the real ``tailscale`` (IDEA_023).
 

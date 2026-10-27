@@ -753,12 +753,6 @@ class TestLayering:
 
 class TestVersionSkew:
     # Repro for BUG_089 — see docs/backlog/BUG_089.md.
-    # Fails while the defect is live. When the fix lands, delete the
-    # expected-failure wrapper; the assertion must then pass unchanged.
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_089 is live — delete this marker with the fix",
-    )
     def test_BUG_089_a_stale_rule_registry_is_not_every_project_unreadable(
         self, tmp_path, monkeypatch
     ):
@@ -795,3 +789,89 @@ class TestVersionSkew:
             "a stale oracle reported every project as unreadable: "
             f"{unreadable}"
         )
+
+    @staticmethod
+    def drop_rule(monkeypatch, rule_id="sweep.no_full_run"):
+        from invariant.core import rules as rules_module
+
+        monkeypatch.delitem(rules_module._REGISTRY, rule_id)
+
+    def test_the_skew_is_said_once_for_the_read_with_the_projects_it_left(
+        self, tmp_path, monkeypatch
+    ):
+        from invariant.oracle.recommend import assess
+
+        make_project(tmp_path, "one")
+        make_project(tmp_path, "two")
+        self.drop_rule(monkeypatch)
+        snapshots = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=ScanCache())
+        assert all(s.rows == [] for s in snapshots)
+        assert all("sweep.no_full_run" in s.unread for s in snapshots)
+        document = assess(snapshots, NOW)
+        assert document["oracle"]["skew"]["reasons"] == ["rules"]
+        assert document["oracle"]["skew"]["rules"] == ["sweep.no_full_run"]
+        assert sorted(document["oracle"]["unread"]) == ["one", "two"]
+        assert all(p["unread"] for p in document["projects"])
+
+    def test_a_read_with_no_skew_says_so(self, tmp_path):
+        from invariant.oracle.recommend import assess
+
+        make_project(tmp_path, "one")
+        snapshots = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=ScanCache())
+        document = assess(snapshots, NOW)
+        assert document["oracle"] == {"skew": None, "unread": []}
+        assert document["projects"][0]["unread"] is None
+
+    def test_a_root_with_no_manifest_is_still_the_projects_own_error(
+        self, tmp_path, monkeypatch
+    ):
+        manifest = make_project(tmp_path, "gone")
+        (manifest.root / MANIFEST_RELPATH).unlink()
+        self.drop_rule(monkeypatch)
+        [snapshot] = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=ScanCache())
+        assert snapshot.unread is None
+        assert [r.kind for r in snapshot.rows] == [ROW_ERROR]
+        assert "no manifest" in snapshot.rows[0].error
+
+    def test_a_mistyped_override_is_still_the_projects_own_error(self, tmp_path):
+        from invariant.oracle.build import RULES, Skew, Stamp
+
+        manifest = make_project(tmp_path, "typo")
+        path = manifest.root / MANIFEST_RELPATH
+        path.write_text(yaml.safe_dump({
+            "version": 1, "project": {"name": "typo"},
+            "enforcement": {"rules": {"test.all_pas": "warn"}}}), "utf-8")
+        same = Stamp("0.1.0", "same", 1)
+        skew = Skew((RULES,), same, same, ("sweep.no_full_run",))
+        [entry] = ProjectIndex(oracle_home()).list()
+        snapshot = scan_project(entry, clock=lambda: NOW, cache=ScanCache(), skew=skew)
+        assert snapshot.unread is None
+        assert [r.kind for r in snapshot.rows] == [ROW_ERROR]
+        assert "test.all_pas" in snapshot.rows[0].error
+
+    def test_once_the_install_moved_any_failed_load_waits_for_the_restart(self, tmp_path):
+        from invariant.oracle.build import BuildWatch, Stamp
+
+        manifest = make_project(tmp_path, "broken")
+        (manifest.root / MANIFEST_RELPATH).write_text("project: [\n", "utf-8")
+        stamps = iter([Stamp("0.1.0", "old", 1), Stamp("0.1.0", "new", 1)])
+        cache = ScanCache(build=BuildWatch(stamper=lambda root: next(stamps)))
+        [snapshot] = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=cache)
+        assert snapshot.rows == []
+        assert "not valid YAML" in snapshot.unread
+        assert snapshot.skew.reasons == ("changed",)
+
+    def test_without_a_skew_a_broken_manifest_is_an_error_row(self, tmp_path):
+        manifest = make_project(tmp_path, "broken")
+        (manifest.root / MANIFEST_RELPATH).write_text("project: [\n", "utf-8")
+        [snapshot] = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=ScanCache())
+        assert snapshot.unread is None and snapshot.skew is None
+        assert [r.kind for r in snapshot.rows] == [ROW_ERROR]
+
+    def test_scan_project_on_its_own_knows_no_skew(self, tmp_path, monkeypatch):
+        make_project(tmp_path, "one")
+        self.drop_rule(monkeypatch)
+        [entry] = ProjectIndex(oracle_home()).list()
+        snapshot = scan_project(entry, clock=lambda: NOW, cache=ScanCache())
+        assert [r.kind for r in snapshot.rows] == [ROW_ERROR]
+        assert snapshot.to_dict()["unread"] is None

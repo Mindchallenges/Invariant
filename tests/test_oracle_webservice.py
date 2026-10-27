@@ -1034,3 +1034,114 @@ class TestCertificateCommands:
         (server,) = oracle_web.servers
         assert server.served is None
         assert "no certificate in the test suite" in server.app.insecure
+
+
+# -- an older page restarts itself (BUG_089) ------------------------------------------
+
+
+class Moving:
+    """A build watch a test moves: whether the tree moved, and whether it settled."""
+
+    def __init__(self) -> None:
+        from invariant.oracle.build import Stamp
+
+        self.started = Stamp("0.1.0", "old", 1)
+        self.pending = False
+        self.due = False
+        self.checks = 0
+
+    def check(self):
+        self.checks += 1
+
+    def restart_due(self) -> bool:
+        return self.due
+
+
+class Remote:
+    def __init__(self, running: int = 0) -> None:
+        self.left = running
+        self.closed: list[str] = []
+
+    def close(self, reason: str) -> int:
+        self.closed.append(reason)
+        return self.left
+
+
+def build_world(tmp_path, remote: Remote | None = None) -> tuple[World, Moving]:
+    built = World(tmp_path / "home")
+    moving = Moving()
+    built.service.build, built.service.remote = moving, remote
+    return built, moving
+
+
+class TestTheServiceRestarts:
+    def test_the_report_names_the_tree_the_page_was_started_from(self, tmp_path):
+        built, moving = build_world(tmp_path)
+        built.found = [TS4]
+        assert built.service.step() == webservice.RECHECK_SECONDS
+        assert built.state()["build"] == moving.started.to_dict()
+        assert moving.checks == 1 and built.service.restarting is False
+
+    def test_without_a_build_watch_the_report_has_no_build(self, world):
+        world.service.step()
+        assert world.state()["build"] is None
+
+    def test_while_the_tree_moves_it_looks_again_sooner(self, tmp_path):
+        built, moving = build_world(tmp_path)
+        built.found = [TS4]
+        moving.pending = True
+        assert built.service.step() == webservice.BUILD_SECONDS
+        assert built.servers[0].background
+
+    def test_once_settled_with_nothing_running_it_restarts(self, tmp_path):
+        remote = Remote()
+        built, moving = build_world(tmp_path, remote)
+        built.found = [TS4]
+        built.service.step()
+        moving.due = True
+        built.service.run()
+        assert built.service.restarting is True
+        assert remote.closed == [webservice.CLOSING]
+        assert built.servers[0].closed and built.state() is None
+        assert "restarting to run the installed code" in built.logged[-1]
+
+    def test_running_actions_finish_before_the_restart(self, tmp_path):
+        remote = Remote(running=2)
+        built, moving = build_world(tmp_path, remote)
+        built.found = [TS4]
+        built.service.step()
+        moving.due = True
+        assert built.service.step() == webservice.BUILD_SECONDS
+        assert built.service.step() == webservice.BUILD_SECONDS
+        assert built.service.restarting is False
+        assert not built.servers[0].closed
+        assert [line for line in built.logged if "2 running actions" in line] != []
+        assert len([line for line in built.logged if "running action" in line]) == 1
+        remote.left = 1
+        built.service.step()
+        assert any("1 running action finish" in line for line in built.logged)
+        remote.left = 0
+        built.service.step()
+        assert built.service.restarting is True
+
+    def test_with_no_actions_at_all_it_restarts_once_settled(self, tmp_path):
+        built, moving = build_world(tmp_path)
+        moving.due = True
+        built.service.step()
+        assert built.service.restarting is True and built.servers == []
+
+    def test_web_wait_runs_itself_again_through_the_seam(self, oracle_web, monkeypatch,
+                                                         oracle_restarts, capsys):
+        from invariant.oracle.build import BuildWatch, Stamp
+        from invariant.oracle.scan import ScanCache
+
+        stamps = iter([Stamp("0.1.0", "old", 1)])
+        moved = BuildWatch(stamper=lambda root: next(stamps, Stamp("0.1.0", "new", 1)),
+                           settle=0.0)
+        monkeypatch.setattr(cli_main, "_oracle_cache", lambda: ScanCache(build=moved))
+        oracle_web.addresses = [TS4]
+        oracle_web.script = [lambda: None]
+        assert main(["oracle", "web", "--wait"]) == 0
+        assert oracle_restarts == ["restart"]
+        assert oracle_web.servers == []
+        assert "restarting" in capsys.readouterr().out

@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from .errors import ManifestError
+from .errors import ManifestError, UnknownRuleError
 from .privacy import DEFAULT_PATTERNS
 
 MANIFEST_RELPATH = Path(".claude") / "invariant.yaml"
@@ -490,12 +490,13 @@ class Manifest:
         for rule_id, level in self.data["enforcement"]["rules"].items():
             Level.parse(level)  # raises with a useful message
             if _unknown_rule(rule_id):
-                raise ManifestError(
+                raise UnknownRuleError(
                     f"enforcement.rules names {rule_id!r}, which is not a rule "
                     f"this build carries{_did_you_mean(rule_id)}.\n"
                     f"  An override that names nothing is silently discarded, "
                     f"and the rule you meant keeps enforcing.\n"
-                    f"  'invariant rules list' shows every id."
+                    f"  'invariant rules list' shows every id.",
+                    rule_id,
                 )
         scope = self.data["privacy"]["scope"]
         if not isinstance(scope, list):

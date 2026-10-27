@@ -1791,3 +1791,37 @@ class TestStartThroughTheCommand:
         shown = json.loads(_get(app, _start_confirm_path(str(tmp_path)), token).body)
         assert "no registered project" in shown["refused"]
         assert _no_real_terminal_launch.plans == []
+
+
+# -- draining before a restart (BUG_089) ------------------------------------------
+
+
+class TestDrainingForARestart:
+    def test_running_counts_only_the_actions_still_running(self, world):
+        world.defer()
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        assert world.remote.act(PHONE, world.key(), nonce).status == 202
+        assert world.remote.running() == 1
+        world.deferred.pop()()
+        assert world.remote.running() == 0
+
+    def test_close_takes_no_new_action_and_counts_the_running_ones(self, world):
+        world.defer()
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        world.remote.act(PHONE, world.key(), nonce)
+        assert world.remote.close("restarting") == 1
+        world.document = _doc(_row(cwd=str(world.cwd)),
+                              _row(session_id="s2", cwd=str(world.cwd)))
+        second = world.remote.confirm(PHONE, world.key(1)).body["nonce"]
+        answer = world.remote.act(PHONE, world.key(1), second)
+        assert answer.status == 409 and answer.body["error"] == "restarting"
+        assert len(world.audit()) == 1
+        world.deferred.pop()()
+        assert world.remote.running() == 0 and len(world.audit()) == 2
+
+    def test_a_start_is_refused_too(self, starting):
+        starting.remote.close("restarting")
+        nonce = _start_nonce(starting)
+        answer = starting.remote.start(PHONE, "K", nonce)
+        assert answer.status == 409 and answer.body["error"] == "restarting"
+        assert starting.starter.launched == []

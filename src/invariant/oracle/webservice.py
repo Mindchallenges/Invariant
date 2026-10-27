@@ -24,6 +24,15 @@ by launchd in a loop. :class:`WebService` waits instead (D16):
   for a new name means listening again, over HTTPS or, without one, over
   plain HTTP with a warning.
 
+* **It restarts itself when invariant changes under it** (BUG_089). With a
+  :class:`~invariant.oracle.build.BuildWatch`, each step first compares the
+  installed tree with the one this process started from. Once it has moved
+  and held still, the page takes no new action (:meth:`RemoteActions.close`),
+  waits for the running ones to finish, and :meth:`WebService.run` returns
+  with :attr:`WebService.restarting` set, so the command runs itself again
+  from the installed code. Paired devices, the audit log and the certificate
+  are files and survive it; a confirm not yet acted on is asked again.
+
 It says what it is doing in ``<oracle home>/oracle/web.json`` (D17), the
 watcher's derived directory: a report, not a record, removed when the loop
 stops and safe to delete. :func:`web_status` reads it, with the paired-device
@@ -41,6 +50,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..core.errors import InvariantError, StateError
+from .build import BuildWatch
 from .devices import DeviceStore
 from .index import HomeStore
 from .scan import pid_exists
@@ -53,7 +63,7 @@ from .tls import (
     expires_text,
 )
 from .web import WebError, tailnet_addresses
-from .webactions import AuditLog
+from .webactions import AuditLog, RemoteActions
 
 #: The report of the loop that serves the page, under the oracle home.
 WEB_STATE_FILE = "oracle/web.json"
@@ -64,6 +74,14 @@ WAIT_SECONDS = 10.0
 
 #: While serving, compare the tailnet's addresses with the bound ones this often.
 RECHECK_SECONDS = 30.0
+
+#: While the installed tree is moving, or running actions drain before a
+#: restart, look again this often.
+BUILD_SECONDS = 5.0
+
+#: Why an action is refused while the page drains to restart.
+CLOSING = ("the oracle is restarting to pick up an updated invariant; nothing ran. "
+           "Try again in a minute")
 
 WAITING = "waiting"
 SERVING = "serving"
@@ -94,6 +112,8 @@ class WebService:
     listener for a set of them, over HTTPS when ``served`` is a certificate;
     ``wait(seconds)`` pauses and answers ``True`` to stop. Without
     ``certificates`` the page is plain HTTP and nothing is asked of Tailscale.
+    With ``build``, it restarts once invariant changes under it, after
+    ``remote``'s running actions have finished.
     """
 
     def __init__(
@@ -108,6 +128,8 @@ class WebService:
         clock: Callable[[], float] = time.time,
         pid: int | None = None,
         certificates: Certificates | None = None,
+        build: BuildWatch | None = None,
+        remote: RemoteActions | None = None,
     ) -> None:
         self.discover = discover
         self.serve = serve
@@ -128,18 +150,53 @@ class WebService:
         self._said: tuple[Any, ...] | None = None
         self._reported: tuple[Any, ...] | None = None
         self._cert_said: str | None = None
+        self.build = build
+        self.remote = remote
+        #: Set when :meth:`run` returned because invariant changed under it.
+        self.restarting = False
+        self._draining: int | None = None
 
     def run(self) -> None:
-        """Step, then wait, until ``wait`` says stop; close on the way out."""
+        """Step, then wait, until ``wait`` says stop or a restart is due.
+
+        The listener is closed and the report removed on the way out.
+        """
         try:
             while True:
-                if self.wait(self.step()):
+                pause = self.step()
+                if self.restarting or self.wait(pause):
                     return
         finally:
             self.close()
 
     def step(self) -> float:
         """One look at the tailnet and the certificate; the seconds until the next."""
+        if self._restart_due():
+            return BUILD_SECONDS
+        pause = self._look()
+        if self.build is not None and self.build.pending:
+            return min(pause, BUILD_SECONDS)
+        return pause
+
+    def _restart_due(self) -> bool:
+        """Whether invariant changed under this process: drain, then restart."""
+        if self.build is None:
+            return False
+        self.build.check()
+        if not self.build.restart_due():
+            return False
+        running = self.remote.close(CLOSING) if self.remote is not None else 0
+        if running:
+            if running != self._draining:
+                self.log(f"invariant changed under this page; restarting once {running} "
+                         f"running action{'s' if running != 1 else ''} finish")
+            self._draining = running
+            return True
+        self.log("invariant changed under this page; restarting to run the installed code")
+        self.restarting = True
+        return True
+
+    def _look(self) -> float:
         found = self._addresses()
         if found:
             self._certificate()
@@ -261,6 +318,7 @@ class WebService:
             "since": _iso(self.clock()), "error": error,
             "scheme": "https" if self.listening is not None else "http",
             "certificate": tls,
+            "build": self.build.started.to_dict() if self.build is not None else None,
         }
         try:
             self.store.write(WEB_STATE_FILE, report)
@@ -278,7 +336,7 @@ def web_status(home: Path, alive: Callable[[int | None], bool] = pid_exists) -> 
         "path": str(home / WEB_STATE_FILE), "exists": (home / WEB_STATE_FILE).is_file(),
         "state": None, "pid": None, "running": False, "addresses": [], "port": None,
         "urls": [], "since": None, "error": None, "unreadable": None,
-        "scheme": None, "certificate": None,
+        "scheme": None, "certificate": None, "build": None,
     }
     try:
         report = HomeStore(home).read(WEB_STATE_FILE)
@@ -288,7 +346,7 @@ def web_status(home: Path, alive: Callable[[int | None], bool] = pid_exists) -> 
         status["unreadable"] = f"{WEB_STATE_FILE} is not an object"
     elif isinstance(report, dict):
         for key in ("state", "pid", "addresses", "port", "urls", "since", "error", "scheme",
-                    "certificate"):
+                    "certificate", "build"):
             if key in report:
                 status[key] = report[key]
         status["running"] = bool(alive(status["pid"]))

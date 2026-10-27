@@ -60,6 +60,7 @@ graph TD
         DEVICES[devices]
         CLOSEHOST["closehost (IDEA_027 inc 6)"]
         START["startsession (IDEA_030; inc 2: Starter, find_started; inc 3: Starter.again)"]
+        BUILD["build (BUG_089)"]
     end
 
     subgraph core["core/"]
@@ -162,6 +163,11 @@ graph TD
     CLI -. "injects a Starter (its own prepare and launch) into" .-> WEBACT
     TUI --> START
     CLI -. "injects the same Starter into" .-> TUI
+    SCAN -- "ScanCache.build: is this process older than the install?" --> BUILD
+    BUILD --> RULES
+    BUILD --> MANIFEST
+    WEBSVC --> BUILD
+    CLI -- "stamp for status and doctor; reexec through _oracle_restart" --> BUILD
 ```
 
 **The dependency rule.** `oracle/` is a layer above `domains/` and below the
@@ -310,7 +316,52 @@ file under every state root and the oracle home before and after two scans
 | `session` | A live session: any state the project's session machine does not call terminal or abandoned. The registry is not consulted; `sessions/*.json` is enumerated, because the registry can lag the records. Its hosts are nested under it, the current binding first and then `hosts`, oldest first. |
 | `host` | An orphan host: an attention record or a transcript that no live session claims, shown while the host is alive or for 24 hours after its last sign of life. A host bound only to an ended session counts, and the row names that session. A record whose host said `SessionEnd` does not. The row lists the project's live, not-stranded sessions with no live binding as `adoptable`. |
 | `worktree` | A linked worktree on disk that no live session records. |
-| `error` | A project that cannot be read (no manifest at the root, a manifest that does not parse, a machine that does not load), or one session record that cannot be. One error row never hides another row. |
+| `error` | A project that cannot be read (no manifest at the root, a manifest that does not parse, a machine that does not load), or one session record that cannot be. One error row never hides another row. A project an older oracle cannot read is not one ("An older oracle" below). |
+
+**An older oracle** (BUG_089). The watcher and the web page are long-lived,
+and the install is usually editable, so a merge on the main checkout changes
+the code and data files under them while they keep the modules they started
+with. An older rule registry then reads a newer shipped profile, the manifest
+refuses it, correctly, as naming a rule "this build" does not carry, and
+every project used to become an `error` row: "Cannot read this project", on
+every card. `oracle/build` tells the two apart:
+
+| Signal | How | Cost |
+|---|---|---|
+| The stamp | `BuildWatch` hashes the relative path, size and modification time of every file under the installed package, code and `data/` (`__pycache__` left out), when it is made, which is when `ScanCache` is: a long-lived command makes its cache when it starts. Each `scan_all` stamps the tree again; a different digest is `changed`. | About 75 files, under 1 ms |
+| The rule gaps | The rule ids the shipped profiles on disk name that this process's registry does not carry: `rules`. Needs no start stamp, so it holds for any process. | Three small YAML files, parsed again only when one changes |
+
+The package version is no signal: `__version__` is a constant in the source
+and a merge does not move it. A build stamp would need a build step, and an
+editable install has none.
+
+With either signal, `scan_all` hands the `Skew` to every project's read. A
+project whose load failed the way an older build fails is then `unread`, with
+the load's error, and has no rows: under `rules` alone, a manifest refusing
+one of the gap ids (`UnknownRuleError`, a `ManifestError` that keeps the id);
+once the tree has `changed`, any failed load, because an older build cannot
+tell a manifest it cannot read from one it reads wrongly, and the restarted
+oracle reports the project's own errors. A root with no manifest stays an
+error row, and so does a session record that cannot be read. `assess` says
+the skew once, as the document's `oracle`: `{skew, unread}`, the skew's
+reasons, both stamps, the gap ids and a detail, and the names of the projects
+left unread. It raises no signal, so nothing notifies; the watcher keeps an
+unread project's ledger keys, as for any project it could not read; the panel
+shows one Problems card ([oracle-panel.md](oracle-panel.md), "States");
+`oracle list` prints one line under its table.
+
+```mermaid
+flowchart TD
+    S["scan_all"] --> C{"cache.build.check()"}
+    C -- "same stamp, no gap" --> N["skew none: a failed load is an error row"]
+    C -- "rules only" --> R{"UnknownRuleError naming a gap id?"}
+    C -- "changed" --> M{"no manifest at the root?"}
+    R -- "yes" --> U["project unread, no rows"]
+    R -- "no" --> E["error row"]
+    M -- "yes" --> E
+    M -- "no" --> U
+    U --> A["assess: document oracle.skew and oracle.unread, said once"]
+```
 
 **Stages, not state names.** A project may shadow the session machine, so the
 scan never names a state. `session_stages(machine)` derives where each state
@@ -588,7 +639,9 @@ would otherwise be told to adopt the same session. The suite parses every
 
 `assess(snapshots, now, thresholds, gates)` joins each row with its signals
 and its recommendation, with the gate cache's answer for it under `gates`
-(`null` when there is none), and with its current host's `turn_state`. It is the `invariant oracle list --json`
+(`null` when there is none), and with its current host's `turn_state`. Each
+project carries `unread`, and the document `oracle`, the read's own condition
+("An older oracle" above). It is the `invariant oracle list --json`
 document, and the body of the watcher's snapshot. How the gate answer changes
 a recommendation is in "Shipped: the gate cache" below.
 
@@ -619,6 +672,21 @@ at a time. A tick does four things in order:
 start one `interval` apart. A tick that raises is logged to stderr, and the
 loop goes on. `watch --once` calls one tick directly, so a failure there is the
 command's error.
+
+**It restarts itself when invariant changes under it** (BUG_089). Each tick's
+scan compares the installed tree with the one the watcher started from ("An
+older oracle" above). Once it has changed and then held still for 5 seconds
+(`build.SETTLE_SECONDS`, so a checkout still writing files is not restarted
+into), `run` returns between two ticks with `restarting` set, and `oracle
+watch` runs itself again through the `_oracle_restart` seam:
+`build.reexec`, the same interpreter and arguments in the same process, so
+launchd keeps the job and its pid. An exec that fails exits 75 instead, and
+`KeepAlive` starts the agent again. Nothing is lost: the snapshot and the
+ledger are on disk and written whole inside a tick, and the gate cache is
+evaluated again, as after any restart. A rule gap alone never restarts it:
+the restarted process would carry the same registry, and an install that
+disagrees with itself would restart for ever. `--once` never restarts. The
+snapshot carries `build`, the stamp the watcher started from.
 
 **The ledger makes "once" true.** It maps each alert's signal key
 (`project|subject|kind|discriminator`, see "oracle/signals") to `{since,
@@ -796,6 +864,17 @@ is older than three of its own intervals, or missing. `doctor` adds one row
 when the plist exists: `oracle agent interpreter`, failing when the
 interpreter has moved. See [cli.md](cli.md), "Oracle".
 
+Both also say whether the processes run the installed invariant (BUG_089).
+`status` stamps the installed tree (`build.stamp`) and compares it with the
+`build` a fresh snapshot carries, and with the page's report: `build
+current (<digest>)`, or `OLDER than the installed invariant`, which a fresh
+snapshot with no stamp is too, since every build that writes snapshots stamps
+them, and so is one whose own document carries a skew. `doctor` adds `oracle
+watcher build` when the watcher's plist exists and a fresh snapshot is behind
+it, and `oracle web build` beside the page's rows; each fails while the
+process is older. A stale snapshot or a page whose process is gone says
+nothing about a running build, so there is no line and no row.
+
 The CLI reaches the installer through the `_oracle_installer` seam. The suite
 replaces it for every test with a recording installer over a temporary
 `LaunchAgents` directory, and the `conftest.py` guard makes `subprocess.Popen`
@@ -913,7 +992,7 @@ ADR-008's. The person-facing setup is the guide's
 | `webactions` | The remote confirm on top of `actions`: `RemoteActions` (the confirm view, with the sheet's words from `panel`, the action, the job with its result's words, and its polling), `Confirms` (the nonce book), `AuditLog` (`web/actions.log`), `find_row`; the failure summary (`evidence`, `summarise`): a failed job's invariant-written line and last meaningful line, worded by `panel.why_words` | Run a step the server did not derive itself; add a refusal of its own; read anything a client sends but the row key and the nonce; import `hosts/`; name a cause the output does not state |
 | `webpage` | The HTML: the self-contained control panel with its token CSS and its script (the overview, detail and leftovers screens, the confirm and result bottom sheets, copy), `WORDS` embedded from `panel`, and the "not paired", pairing-form and message pages; the home-screen app's `<head>`, its manifest (`manifest`) and its icons (`icon`, PNGs drawn from the tokens) | Fetch anything from another origin; build an element from markup; post anything but a row key and a nonce; hold a word of its own |
 | `devices` | `<oracle home>/web/devices.json`: one-time pairing codes and paired devices' token hashes; issue, redeem, verify, list, revoke | Keep a token or a code in the clear; let a device in when the file cannot be read; create the file readable by anyone else |
-| `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; keep the certificate due, swap a renewal into the listener, listen again over HTTPS or plain HTTP when that changes; its report, `oracle/web.json`; `web_status`, `cert_text` and their wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything |
+| `webservice` | `WebService`, the loop behind `oracle web --wait`: wait for a tailnet address, bind it, follow it, retry a failed bind; keep the certificate due, swap a renewal into the listener, listen again over HTTPS or plain HTTP when that changes; restart once invariant changes under it, after the running actions finish (BUG_089); its report, `oracle/web.json`; `web_status`, `cert_text` and their wording, which `oracle status` and `doctor` read | Bind an address outside Tailscale's ranges; exit for a missing tailnet; ask launchd anything; cut off a running action to restart |
 | `tls` | The page's certificate (IDEA_026): `issue`, Tailscale's CLI asked through stdout; `split_pem` and `cert_info`, the chain, the key, the names and the expiry, read with the standard library; `Certificates`, the kept `web/tls/oracle.pem` and when to ask again; `Served`, the certificate and context a listener serves, swapped together; `RecordingIssuer` for tests | Run `tailscale` except through its injected runner; write the key anywhere but its owner-only file; replace a good pair with one that does not load |
 
 ### Where it listens
@@ -1164,6 +1243,32 @@ audit log's last line (`AuditLog.last`, the last 8 KiB only). `oracle status`
 prints that under the watcher's lines, and `doctor` adds `oracle web
 interpreter` and `oracle web page` when the web plist exists, asking launchd
 nothing (ADR-008 D17).
+
+**A restart when invariant changes** (BUG_089). The loop is handed the scan
+cache's `BuildWatch` and the page's `RemoteActions`. Each step first checks
+the installed tree; while it is moving the loop looks again every 5 seconds
+(`BUILD_SECONDS`) instead of 30. Once it has held still, the page drains:
+`RemoteActions.close` makes every new action and start a 409, "the oracle is
+restarting to pick up an updated invariant; nothing ran", and the loop
+restarts only when `RemoteActions.running()` is zero, so a confirmed action
+already running is never cut off; each action has the runner's 600-second
+limit, so the wait is bounded. Then `run` returns with `restarting` set, the
+listener closes and the report is removed, and `oracle web --wait` runs
+itself again through `_oracle_restart`, as the watcher does. Paired devices,
+the audit log and the certificate are files and survive it. A confirm not yet
+acted on is lost with the process's nonces and is asked again ("Look again"),
+and a job's result is the audit log's, as after any restart (D18). The
+report carries `build`, the stamp the page started from.
+
+```mermaid
+stateDiagram-v2
+    serving --> serving: tree unchanged (look again in 30 s)
+    serving --> settling: tree changed (look again in 5 s)
+    settling --> settling: still changing
+    settling --> draining: held still 5 s, new actions refused
+    draining --> draining: actions still running (look again in 5 s)
+    draining --> [*]: none running, so close, remove the report, re-exec
+```
 
 **The certificate, inside the loop** (IDEA_026, ADR-008 D19–D23). With the
 tailnet up, each look also calls `Certificates.ensure`: it reads the kept

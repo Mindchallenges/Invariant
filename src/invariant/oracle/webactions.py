@@ -44,6 +44,12 @@ that changed in between (another window took it) is not started. A start is a
 job like any other, audited, one per project at a time; :meth:`observe` marks
 it once a scan sees its window, so the panel can end its "Starting…" card.
 
+**Before a restart, the actions drain** (BUG_089). When invariant changes
+under the serving process, :meth:`RemoteActions.close` is called: from then
+on no action or start is reserved, and the service restarts only once
+:meth:`RemoteActions.running` is zero, so a confirmed action already running
+is never cut off.
+
 The oracle never answers a permission prompt, and neither does this: there is
 no route to one, and ``refusal`` refuses a step on a row that waits on one.
 """
@@ -404,6 +410,19 @@ class RemoteActions:
         self.confirms = Confirms(clock, self.token, ttl)
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        #: Why no new action is taken, once the service is draining to restart.
+        self.closing: str | None = None
+
+    def close(self, reason: str) -> int:
+        """Take no new action from now on; the number still running."""
+        with self._lock:
+            self.closing = reason
+            return sum(1 for j in self._jobs.values() if j.state == RUNNING)
+
+    def running(self) -> int:
+        """How many actions and starts are still running."""
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j.state == RUNNING)
 
     def _document(self) -> tuple[dict[str, Any] | None, str | None]:
         try:
@@ -496,6 +515,8 @@ class RemoteActions:
                  argv: tuple[str, ...], cwd: str | None, remote_control: str | None = None,
                  project: str | None = None) -> Job | str:
         with self._lock:
+            if self.closing:
+                return self.closing
             running = [j for j in self._jobs.values() if j.state == RUNNING]
             if any(j.row == key for j in running):
                 return "an action on this row is already running; wait for its result"

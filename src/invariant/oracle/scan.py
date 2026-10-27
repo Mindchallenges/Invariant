@@ -20,6 +20,18 @@ or not it is watched (ADR-007 D1).
 * ``error`` — a project, or one session record, that could not be read. One
   broken project becomes one error row and never hides the others.
 
+**An older oracle is not an unreadable project** (BUG_089). Each
+:func:`scan_all` asks the cache's :class:`~invariant.oracle.build.BuildWatch`
+whether this process is older than the invariant installed under it. When it
+is, a project whose load failed the way an older build fails is not an error
+row: the snapshot is ``unread``, with the load's error, and the skew is said
+once, for the whole read, by ``assess``. With only the rule-gap signal, that is
+a manifest refusing a rule id the installed profiles name and this build
+lacks; once the installed tree has moved, it is any failed load, because an
+older build cannot tell a manifest it cannot read from one it reads wrongly.
+A root with no manifest is the project's own, and stays an error row, and so
+does a session record that cannot be read.
+
 **No state name is written here.** Projects may shadow the session machine, so
 where a session is in its life is derived from the machine's structure
 (:func:`session_stages`): the merge is the state whose entry gates include
@@ -47,7 +59,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..core import git
-from ..core.errors import InvariantError, ManifestError
+from ..core.errors import InvariantError, ManifestError, UnknownRuleError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE
 from ..core.manifest import MANIFEST_RELPATH, Manifest
@@ -55,6 +67,7 @@ from ..core.store import InertStore
 from ..domains.pipeline import PipelineDomain
 from ..domains.session import Session, SessionDomain
 from .attention import ATTENTION_DIR, AttentionStore
+from .build import CHANGED, BuildWatch, Skew
 from .index import ProjectEntry, ProjectIndex
 
 ROW_SESSION = "session"
@@ -171,8 +184,12 @@ class ScanCache:
         ttl: float = CACHE_TTL_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
         pid_alive: Callable[[int | None], bool] = pid_exists,
+        build: BuildWatch | None = None,
     ) -> None:
         self.probe = probe
+        #: The installed tree this process started from: made with the cache,
+        #: which a long-lived command makes when it starts (BUG_089).
+        self.build = build if build is not None else BuildWatch()
         self.ttl = ttl
         self.monotonic = monotonic
         self.pid_alive = pid_alive
@@ -445,6 +462,12 @@ class ProjectSnapshot:
     #: Whether the host's per-process records were used for this read:
     #: ``{used, records, detail}``.
     host_processes: dict[str, Any] = field(default_factory=dict)
+    #: The skew this read was made under, if this process is older than the
+    #: installed invariant; the same for every project of one read.
+    skew: Skew | None = None
+    #: Why the project was not read, when the skew is the likelier cause: the
+    #: load's error. An unread project has no rows, and no error row.
+    unread: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -453,6 +476,7 @@ class ProjectSnapshot:
             "scanned_at": self.scanned_at,
             "elapsed": self.elapsed,
             "host_processes": dict(self.host_processes),
+            "unread": self.unread,
         }
 
 
@@ -514,16 +538,25 @@ def scan_project(
     entry: ProjectEntry,
     clock: Callable[[], float] = time.time,
     cache: ScanCache | None = None,
+    skew: Skew | None = None,
 ) -> ProjectSnapshot:
-    """One project's rows. Anything that stops the read is one error row."""
+    """One project's rows. Anything that stops the read is one error row.
+
+    Under ``skew``, a load that failed the way an older build fails leaves the
+    project ``unread`` instead (:func:`_older_build_failure`).
+    """
     cache = cache if cache is not None else ScanCache()
     started = time.perf_counter()
     now = clock()
-    snapshot = ProjectSnapshot(project=entry, scanned_at=now)
+    snapshot = ProjectSnapshot(project=entry, scanned_at=now, skew=skew)
     try:
         snapshot.rows = _ProjectReader(entry, now, cache).rows()
         snapshot.host_processes = dict(cache.host_process_status)
     except Exception as exc:  # noqa: BLE001 - one broken project must not hide the rest
+        if _older_build_failure(exc, skew):
+            snapshot.unread = _describe(exc)
+            snapshot.elapsed = time.perf_counter() - started
+            return snapshot
         snapshot.rows = [
             Row(
                 kind=ROW_ERROR,
@@ -546,7 +579,27 @@ def scan_all(
     """Every registered project, or the one ``select`` names (key, root or name)."""
     entries = [index.match(select)] if select else index.list()
     cache = cache if cache is not None else ScanCache()
-    return [scan_project(entry, clock, cache) for entry in entries]
+    skew = cache.build.check()
+    return [scan_project(entry, clock, cache, skew) for entry in entries]
+
+
+class _NoManifest(ManifestError):
+    """The recorded root has no manifest: the project's own, whatever the build."""
+
+
+def _older_build_failure(exc: BaseException, skew: Skew | None) -> bool:
+    """Whether a failed load is likelier the oracle's age than the project's.
+
+    Never without a skew, and never for a root with no manifest. Once the
+    installed tree has moved, any other failure: the restarted oracle reads
+    the project again and reports its own errors. With only the rule gaps, a
+    manifest refusing one of those ids.
+    """
+    if skew is None or isinstance(exc, _NoManifest):
+        return False
+    if CHANGED in skew.reasons:
+        return True
+    return isinstance(exc, UnknownRuleError) and exc.rule_id in skew.gaps
 
 
 # -- reading one project ------------------------------------------------------
@@ -560,7 +613,7 @@ class _ProjectReader:
         # Loaded from the recorded root only: walking upward from a root that
         # lost its manifest would read some enclosing project's instead.
         if not (root / MANIFEST_RELPATH).is_file():
-            raise ManifestError(
+            raise _NoManifest(
                 f"no manifest at {root}; 'invariant oracle projects prune' drops it"
             )
         self.entry = entry

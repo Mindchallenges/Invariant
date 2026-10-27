@@ -408,7 +408,7 @@ with "…". A button that acts is named for the deed.
 | Group | Heading | Tile label | Who is in it |
 |---|---|---|---|
 | needs | Needs you | Need you | `waiting` (permission, question, input); `finished` (reviewed, ready) |
-| problems | Problems | Problems | `error` (tests, degraded, scan); `gate_blocked`; `stuck`; `host_gone`; `stranded` |
+| problems | Problems | Problems | the oracle itself when it is older than the installed invariant (one card, first, BUG_089); `error` (tests, degraded, scan); `gate_blocked`; `stuck`; `host_gone`; `stranded` |
 | working | Working | Working | the row's `turn_state` is `busy` (the current host is mid-turn and working, `signals.turn_state`, BUG_087), nothing above |
 | idle | Idle | (no tile) | every other live session: `your_turn`, `parked`, `teardown_pending`, no signal |
 | leftovers | Leftovers | Leftovers | `orphan_host` and `leaked_worktree` rows with no alert |
@@ -427,6 +427,8 @@ with "…". A button that acts is named for the deed.
 | `stuck` | No progress for N min | problem | Claude has been working for N min with no sign of progress. |
 | `error`, degraded | A hook failed | problem | One of invariant's hooks failed in this session. |
 | `error`, scan | Cannot read this project | problem | invariant cannot read this project's settings. |
+| the oracle older than the install, `changed` (BUG_089) | Restarting | problem | invariant was updated on the Mac after the oracle started. The oracle restarts itself to catch up, within a minute. Then: Until then it cannot read N projects: <names>. (1 project) |
+| the oracle older than the install, `rules` only | Restart needed | problem | The oracle on the Mac is older than the invariant installed there. Restarting it fixes this; Technical details has the command. Then the same "Until then" sentence |
 | `host_gone` | Paused | idle | Its Claude window closed without saying so, N ago, so nothing is happening until you resume it. |
 | `stranded` | Its folder is gone | problem | The session's folder no longer exists. |
 | `turn_state` `busy` | Claude is working | working | Claude is working on it; active N min ago. |
@@ -494,6 +496,7 @@ re-dispatch a stuck agent, each with its "This deletes" lines.
 | Starting card (IDEA_030) | Starting… · Did not start · The window did not appear on the Mac within a minute; check the Mac (a trust prompt or a login may be waiting). · Claude is running in a new window on the Mac. Pick it up from Remote Control on your phone as <name>. |
 | Back | Sessions |
 | Technical details | Session <id> · state <state> · lane <methodology>:<phase>; Host <id> · process id <pid> / process id not recorded / process ids disagree: <source> <pid> (<alive, gone or unknown>), … |
+| The oracle out of date (BUG_089) | Card: kicker Session Oracle · The oracle is out of date · Not read: <names>. Technical details: Started from <digest>, installed <digest> · Rules this build lacks: <ids> · <project>: <load error> · Restart by hand: invariant oracle install, and invariant oracle install --web for this page |
 
 ### Times
 
@@ -631,6 +634,22 @@ what this page and IDEA_030 left open:
 | How long a failure stays | `panel.START_FAILURE_SHOWN`, an hour from the start; after it the audit log has it |
 | Where the starts are kept | With every action's result, in `RemoteActions`' memory (the last 20 per server), so a pending start survives a page refresh and a reload, and is listed for its device only. A restart of the server forgets it, as it forgets any result (the audit log keeps both lines) |
 | A launch that failed | The job's own "Why", quoting invariant's sentence ("invariant said: the launch did not start a successor: …"); the card's line is the same sentence |
+
+## As built for BUG_089: the oracle out of date
+
+When the document's `oracle.skew` is set, the oracle running the page is
+older than the invariant installed under it ([oracle.md](oracle.md), "An older
+oracle"). `panel.view` then puts one card first under Problems, with the row
+key `oracle|build`, which no project row can have, and a detail under the same
+key; the page draws both with the components it has, so the script is
+unchanged.
+
+| Element | Rule |
+|---|---|
+| The card | Kicker "Session Oracle", title "The oracle is out of date", one problem chip ("Restarting" when the installed tree changed, so the oracle restarts itself; "Restart needed" when only a rule gap shows it), the note "Not read: <names>" when it left projects unread, no button, not a tap card |
+| The count | It counts once on the Problems tile and in the document title, however many projects it left unread |
+| No project blamed | A project left unread has no card at all: never "Cannot read this project" for the oracle's own age |
+| The detail | "What is going on" says what happened and whether it restarts itself, then which projects it cannot read until then; no step; "Technical details" carries both stamps, the rule ids this build lacks, each unread project's load error, and the commands that restart it by hand |
 
 ## Increment plan
 

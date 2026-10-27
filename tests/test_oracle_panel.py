@@ -1051,3 +1051,92 @@ class TestStartWords:
                     "prompt_hint", "exact_start", "checked_now"):
             assert panel.WORDS[key], key
         assert panel.WORDS["new_session"] == "New session…"
+
+
+# -- an oracle older than the install (BUG_089) --------------------------------------
+
+
+def skewed(reasons=("rules",), unread=("Heap",), rules=("sweep.no_full_run",)):
+    shown = doc()
+    shown["projects"][0]["unread"] = "enforcement.rules names 'sweep.no_full_run'"
+    shown["oracle"] = {
+        "skew": {"reasons": list(reasons), "rules": list(rules),
+                 "started": {"digest": "aaaa"}, "installed": {"digest": "bbbb"},
+                 "detail": "d"},
+        "unread": list(unread),
+    }
+    return shown
+
+
+class TestAnOlderOracle:
+    def test_it_is_one_problem_first_naming_the_projects_it_left(self):
+        shown = panel.view(skewed())
+        [card] = cards(shown, panel.PROBLEMS)
+        assert card["row"] == panel.ORACLE_ROW
+        assert card["title"] == "The oracle is out of date"
+        assert card["project"] == "Session Oracle"
+        assert card["chips"] == [{"text": "Restart needed", "tone": "problem"}]
+        assert card["note"] == "Not read: Heap"
+        assert card["button"] is None and card["tap"] is False
+        assert shown["summary"][panel.PROBLEMS] == 1
+        assert "Cannot read this project" not in json.dumps(shown)
+
+    def test_it_comes_before_every_project_problem(self):
+        shown = skewed()
+        shown["projects"][0]["rows"] = [session(signals=[sig("error", "tests")])]
+        first, second = cards(panel.view(shown), panel.PROBLEMS)
+        assert first["row"] == panel.ORACLE_ROW and second["row"] != panel.ORACLE_ROW
+
+    def test_its_detail_says_what_happened_and_how_to_restart_it(self):
+        detail = panel.view(skewed())["details"][panel.ORACLE_ROW]
+        assert detail["kicker"] == "Session Oracle" and detail["step"] is None
+        assert detail["going_on"] == [
+            ("The oracle on the Mac is older than the invariant installed there. "
+             "Restarting it fixes this; Technical details has the command."),
+            "Until then it cannot read 1 project: Heap.",
+        ]
+        assert detail["technical"]["lines"] == [
+            "Started from aaaa, installed bbbb",
+            "Rules this build lacks: sweep.no_full_run",
+            "Heap: enforcement.rules names 'sweep.no_full_run'",
+            ("Restart by hand: invariant oracle install, and invariant oracle install --web "
+             "for this page"),
+        ]
+
+    def test_a_moved_install_says_it_restarts_itself(self):
+        shown = skewed(reasons=("changed",), unread=("Heap", "Other"), rules=())
+        detail = panel.view(shown)["details"][panel.ORACLE_ROW]
+        assert detail["chips"] == [{"text": "Restarting", "tone": "problem"}]
+        assert detail["going_on"] == [
+            ("invariant was updated on the Mac after the oracle started. The oracle "
+             "restarts itself to catch up, within a minute."),
+            "Until then it cannot read 2 projects: Heap, Other.",
+        ]
+        assert not any(line.startswith("Rules") for line in detail["technical"]["lines"])
+
+    def test_with_every_project_read_there_is_no_note(self):
+        shown = skewed(reasons=("changed",), unread=(), rules=())
+        del shown["projects"][0]["unread"]
+        [card] = cards(panel.view(shown), panel.PROBLEMS)
+        assert card["note"] is None
+        assert len(panel.view(shown)["details"][panel.ORACLE_ROW]["going_on"]) == 1
+
+    @pytest.mark.parametrize("oracle", [None, {"skew": None, "unread": []}, {"skew": "x"}])
+    def test_no_skew_no_card(self, oracle):
+        shown = doc()
+        if oracle is not None:
+            shown["oracle"] = oracle
+        view = panel.view(shown)
+        assert panel.ORACLE_ROW not in view["details"]
+        assert cards(view, panel.PROBLEMS) == []
+
+    def test_a_real_stale_scan_reads_as_one_problem(self, tmp_path, monkeypatch):
+        from invariant.core import rules as rules_module
+
+        test_oracle_scan.make_project(tmp_path, "one")
+        test_oracle_scan.make_project(tmp_path, "two")
+        monkeypatch.delitem(rules_module._REGISTRY, "sweep.no_full_run")
+        snapshots = scan_all(ProjectIndex(oracle_home()), clock=lambda: NOW, cache=ScanCache())
+        shown = panel.view(assess(snapshots, NOW))
+        [card] = cards(shown, panel.PROBLEMS)
+        assert card["row"] == panel.ORACLE_ROW and card["note"] == "Not read: one, two"
