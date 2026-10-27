@@ -6,6 +6,7 @@ assertion is about what the sweep does with a run, not about pytest.
 """
 
 import json
+import re
 import subprocess
 from datetime import date
 
@@ -171,7 +172,7 @@ class TestTheFirstSweep:
         assert report.filed == []
         assert items(proj) == {}
         rec = report.record
-        assert rec.seq == 1 and rec.previous is None and rec.head == head
+        assert rec.seq == 1 and rec.previous is None and rec.head == head[:12]
         assert rec.failing == ["tests/t.py::test_x"]
         assert rec.files == {"src/a.py": 50.0}
         assert report.current == ["floor:src/a.py", "test:tests/t.py::test_x"]
@@ -214,7 +215,8 @@ class TestTheCommitRange:
         assert len(filed) == 2
         for item in filed.values():
             assert item.type == "bug" and item.status == "filed"
-            assert item.fields["sweep_range"] == f"{first.record.head}..{head}"
+            assert item.fields["sweep_range"] == f"{first.record.head}..{head[:12]}"
+            assert f"`{first.record.head}..{head[:12]}`" in item.body
         floor = next(i for i in filed.values() if i.fields["sweep_key"] == "floor:src/a.py")
         assert "60%" in floor.body and "85%" in floor.body
         assert "1 failing" in floor.body, "a drop measured on a red run says so"
@@ -518,12 +520,6 @@ class TestTheItemBody:
 
 
 # Repro for BUG_090 — see the work-item entry.
-# Fails while the defect is live. When the fix lands, delete the
-# expected-failure wrapper; the assertion must then pass unchanged.
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_090 is live — delete this marker with the fix",
-)
 def test_BUG_090_a_sweep_commits_on_a_project_with_device_ids_enabled(proj):
     from invariant.core.privacy import DEFAULT_PATTERNS
 
@@ -542,3 +538,86 @@ def test_BUG_090_a_sweep_commits_on_a_project_with_device_ids_enabled(proj):
     assert second.committed and second.privacy == [], (
         f"filing sweep NOT committed: {second.commit_error}; findings: {second.privacy}"
     )
+
+
+# -- the hashes a sweep writes, and the records it reads (BUG_090) -----------
+
+FULL_HEX = re.compile(r"\b[0-9a-f]{40}\b")
+
+
+def commit_old_record(root, seq, head, previous=None, ran_on="2026-10-12"):
+    """A record as a sweep before BUG_090 committed it: full hashes."""
+    from invariant.core.sweep import SweepRecord
+
+    rec = SweepRecord(
+        seq=seq, ran_on=ran_on, branch="main", head=head, previous=previous,
+        command="coverage", executed=10, failed=0, passed=True, failing=[],
+        files={"src/a.py": 90.0}, floor=85.0,
+    )
+    path = root / "docs" / "sweeps" / f"{ran_on}-{seq}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(rec.to_json(), encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", f"old sweep {seq}")
+    return rec
+
+
+class TestShortHashes:
+    def test_nothing_the_sweep_writes_carries_a_full_hash(self, proj):
+        domain(proj, Suite()).run()
+        commit_change(proj)
+        second = domain(proj, Suite(failing=["tests/t.py::test_x"])).run()
+        assert second.committed
+        written = git(proj, "show", "--format=%B", "HEAD")
+        assert not FULL_HEX.search(written), written
+        assert len(second.record.head) == 12 and len(second.record.previous) == 12
+
+    def test_a_sweep_after_an_old_full_hash_record_writes_previous_short(self, proj):
+        old_head = git(proj, "rev-parse", "HEAD")
+        commit_old_record(proj, 1, old_head)
+        commit_change(proj)
+        head = git(proj, "rev-parse", "HEAD")
+        report = domain(proj, Suite(failing=["tests/t.py::test_x"])).run()
+        assert not report.baseline and report.record.seq == 2
+        assert report.record.previous == old_head[:12]
+        (item,) = items(proj).values()
+        assert item.fields["sweep_range"] == f"{old_head[:12]}..{head[:12]}"
+        assert report.committed and report.privacy == []
+
+    def test_show_matches_old_full_and_new_short_heads_either_way(self, proj):
+        old_head = git(proj, "rev-parse", "HEAD")
+        commit_old_record(proj, 1, old_head)
+        commit_change(proj)
+        new_head = git(proj, "rev-parse", "HEAD")
+        domain(proj, Suite()).run()
+        d = domain(proj, Suite())
+        assert d.show(old_head[:12]).seq == 1, "a short name, an old full head"
+        assert d.show(old_head).seq == 1
+        assert d.show(new_head).seq == 2, "a full name pasted from git log, a short head"
+        assert d.show(new_head[:7]).seq == 2
+
+    def test_a_prefix_naming_two_swept_commits_is_refused_with_their_seqs(self, proj):
+        commit_old_record(proj, 1, "abcdef1" + "1" * 33)
+        commit_old_record(proj, 2, "abcdef1" + "2" * 33, ran_on="2026-10-19")
+        d = domain(proj, Suite())
+        with pytest.raises(UsageError, match=r"more than one swept commit.*sweeps 1, 2"):
+            d.show("abcdef1")
+        assert d.show("abcdef11").seq == 1
+
+    def test_one_commit_swept_twice_answers_its_latest(self, proj):
+        head = "abcdef1" + "1" * 33
+        commit_old_record(proj, 1, head)
+        commit_old_record(proj, 2, head[:12], ran_on="2026-10-19")
+        assert domain(proj, Suite()).show(head).seq == 2
+
+
+class TestFindingsAreProjectRelative:
+    def test_a_finding_in_a_filed_item_names_it_relative_to_the_project(self, proj):
+        m = manifest(proj, privacy__extra=["Filed by"])
+        domain(proj, Suite(), m=m).run()
+        commit_change(proj)
+        report = domain(proj, Suite(failing=["tests/t.py::test_x"]), m=m).run()
+        assert not report.committed
+        assert report.privacy
+        assert all(f.startswith("docs/backlog/") for f in report.privacy), report.privacy
+        assert str(proj) not in " ".join(report.privacy)

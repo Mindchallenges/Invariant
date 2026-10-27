@@ -797,15 +797,19 @@ invariant sweep run [--dry-run]
     20 new reds files one suite:red instead; a held file under the floor
     that was not under it last time files floor:<path>, judged by the
     floor's own non_source, coverage_exclude and baseline policy. Each is a
-    bug carrying sweep_key and sweep_range (<last head>..<this head>), and a
+    bug carrying sweep_key and sweep_range (<last head>..<this head>, both
+    the first 12 hex digits, as every hash the sweep writes is), and a
     key an OPEN item holds (fixed and verified count) is reported as still
     broken instead, a fixed one flagged as a regression. Recovered keys are
     reported, never closed. The first sweep on a branch is a baseline and
     files nothing. Then the record is written to paths.sweeps, scanned with
     the project's privacy patterns together with the commit message and the
     filed items, and committed with `git commit --only` over exactly those
-    paths. Never pushed. A privacy finding or a failed commit leaves them in
-    the working tree and exits 1. A lock under the state root refuses a
+    paths. Never pushed. No full commit hash is written anywhere, so the
+    opt-in device_ids pattern passes the sweep's own output (BUG_090). A
+    privacy finding or a failed commit leaves them in the working tree and
+    exits 1, each finding named by its project-relative path. A lock under
+    the state root refuses a
     second concurrent sweep (exit 3).
 
     --dry-run runs and diffs, and writes no record, files nothing and
@@ -818,7 +822,11 @@ invariant sweep status [--branch <b>]
     `status` and the gates cannot disagree about whether the sweep is stale.
 
 invariant sweep show [<seq> | <record file name> | <head prefix>] [--branch <b>]
-    One record, the latest by default.
+    One record, the latest by default. A head is matched by prefix either
+    way, at least 7 digits, so a short name finds a record written before
+    BUG_090 with a full head and a full hash finds a short one. A prefix
+    matching records of more than one commit is refused with their seqs; one
+    commit swept twice answers its latest record.
 ```
 
 Freshness (`sweep.fresh`, ADR-010 D6) is not a command of its own. It is a

@@ -358,7 +358,8 @@ gives.
   two sweeps never write one file and a merge of two clones' records never
   conflicts. Version 1 fields: `version`, `seq` (one more than the previous
   record on the branch, 1 for the first), `ran_on` (bare date), `branch`,
-  `head` and `previous` (full hashes; `previous` null on a first sweep),
+  `head` and `previous` (short hashes, the first twelve hex digits, amended
+  by BUG_090; `previous` null on a first sweep),
   `command` (the manifest key that ran, `coverage` or `test`, never the
   resolved command), `executed`, `failed`, `passed` (added in
   implementation: an adapter that counts nothing reports `failed` null for a
@@ -366,9 +367,10 @@ gives.
   adapter cannot read them), `flaky`, `files` (`{project-relative path: pct}`),
   `floor`, `hazards` (ids), `filed` (`[{key, item}]`), `still_broken`
   (`[{key, item, status}]`) and `recovered` (keys).
-- **Privacy-clean by construction, then checked.** The record holds hashes, a
-  bare date, project-relative paths, test identifiers and a manifest key: no
-  clock time, no host or session identifier, no absolute path. The resolved
+- **Privacy-clean by construction, then checked.** The record holds short
+  hashes, a bare date, project-relative paths, test identifiers and a manifest
+  key: no clock time, no host or session identifier, no absolute path, and no
+  full commit hash. The resolved
   command is excluded deliberately, because it carries the per-run result
   bundle under the state root, which is a home path. Before committing, the
   sweep scans the record and the commit message with the project's own
@@ -377,6 +379,27 @@ gives.
   redacted. The engine runs the scan itself because the commit is a
   subprocess, not a host tool call, so no hook sees it and `privacy.clean`'s
   commit route is never consulted.
+- **Amendment (BUG_090): every hash the sweep writes is short.** As first
+  shipped, `head` and `previous` were full hashes, and so was the
+  `sweep_range` (`<last head>..<this head>`) each filed bug carries in its
+  frontmatter and its body. The opt-in `device_ids` pattern matches any forty
+  hex digits by design, so on a project that enables it the scan refused the
+  engine's own record, every sweep, and "clean by construction" was false
+  under a pattern the engine ships. Every hash the sweep persists — the two
+  record fields, `sweep_range` and the body's commit-range line, beside the
+  file name and the commit message that were already short — is now the first
+  twelve hex digits (`core.sweep.short_hash`). The scan of the filed items
+  names each finding by its project-relative path, as the record's findings
+  are named, rather than by an absolute one. Records committed before the
+  amendment keep their full hashes and are read as they are, with no version
+  bump: nothing resolves a recorded hash back through git, the last record is
+  found by `seq`, and a new sweep shortens the `previous` it copies forward. A
+  reader that matches a head does so by prefix in either direction
+  (`core.sweep.same_commit`, seven digits at least), so a short name finds an
+  old full head and a full hash pasted from `git log` finds a new short one.
+  Twelve digits cannot collide in practice, and `sweep show` refuses a prefix
+  that matches records of more than one commit, naming their seqs, rather
+  than answering with the first.
 - **An engine-owned commit, after the run.** Once the run, the re-runs and the
   filing are done, the sweep stages exactly the record and the work-item files
   its filing changed (read as the store's `git status` before and after

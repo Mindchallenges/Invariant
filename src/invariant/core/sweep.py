@@ -105,19 +105,51 @@ class SweepRecordError(ValueError):
     """A committed sweep record that does not have the version 1 shape."""
 
 
+#: How many hex digits of a commit hash a sweep persists (BUG_090). A full
+#: forty-digit hash is exactly what the opt-in ``device_ids`` privacy pattern
+#: matches, so a record, a filed item or a commit message carrying one is
+#: refused by the scan a project with that pattern runs on the sweep's output.
+SHORT_HASH = 12
+
+#: The shortest prefix a reader takes as naming a commit, git's own default.
+MIN_PREFIX = 7
+
+
+def short_hash(commit: str) -> str:
+    """The first :data:`SHORT_HASH` hex digits: the one spelling a sweep writes."""
+    return commit[:SHORT_HASH]
+
+
+def same_commit(recorded: str, named: str) -> bool:
+    """Whether ``named`` names the commit a record holds, by prefix either way.
+
+    Records written before BUG_090 hold full hashes and later ones hold short
+    hashes, so neither side is assumed to be the longer: a short name matches
+    an old full hash, and a full one pasted from ``git log`` matches a new short
+    hash. Fewer than :data:`MIN_PREFIX` digits on either side names nothing.
+    """
+    recorded, named = recorded.strip().lower(), named.strip().lower()
+    if min(len(recorded), len(named)) < MIN_PREFIX:
+        return False
+    return recorded.startswith(named) or named.startswith(recorded)
+
+
 def record_name(ran_on: str, head: str) -> str:
-    """``<date>-<first twelve hex digits of head>.json``: one file per sweep."""
-    return f"{ran_on}-{head[:12]}.json"
+    """``<date>-<short head>.json``: one file per sweep."""
+    return f"{ran_on}-{short_hash(head)}.json"
 
 
 @dataclass(frozen=True)
 class SweepRecord:
     """One sweep, as committed (ADR-010 D9).
 
-    Hashes, a bare date, project-relative paths, test identities and a manifest
-    command key: nothing that is a clock time, a host, a session or an absolute
-    path, so the record is privacy-clean by construction (and scanned anyway
-    before it is committed).
+    Short hashes, a bare date, project-relative paths, test identities and a
+    manifest command key: nothing that is a clock time, a host, a session, an
+    absolute path or a full commit hash, so the record is privacy-clean by
+    construction under every shipped pattern (and scanned anyway before it is
+    committed). ``head`` and ``previous`` are written short; a record committed
+    before BUG_090 holds full hashes and is read as it is, so a reader compares
+    them through :func:`same_commit`.
     """
 
     seq: int

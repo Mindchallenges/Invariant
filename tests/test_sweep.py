@@ -117,6 +117,48 @@ class TestTheRecord:
         with pytest.raises(sweep.SweepRecordError):
             sweep.SweepRecord.from_dict([])
 
+    def test_a_record_written_before_bug_090_with_full_hashes_still_reads(self):
+        old = record(head=HEAD_B, previous=HEAD_A).to_dict()
+        again = sweep.SweepRecord.from_dict(old)
+        assert again.head == HEAD_B and again.previous == HEAD_A
+        assert again.name == f"2026-10-19-{'b' * 12}.json"
+
+
+# -- the hashes a sweep writes, and how a reader matches them (BUG_090) -------
+
+
+class TestShortHashes:
+    def test_a_full_hash_is_written_as_its_first_twelve_digits(self):
+        assert sweep.short_hash(HEAD_A) == "a" * 12
+        assert sweep.SHORT_HASH == 12
+
+    def test_a_short_hash_is_written_unchanged(self):
+        assert sweep.short_hash("abc123def456") == "abc123def456"
+
+    @pytest.mark.parametrize(
+        ("recorded", "named"),
+        [
+            ("abc123def456", "abc123d"),  # a short name against a short head
+            ("abc123def456", "abc123def456" + "0" * 28),  # a full name, short head
+            ("abc123def456" + "0" * 28, "abc123def456"),  # a short name, an old full head
+            ("ABC123DEF456", "abc123d"),  # case is not identity
+        ],
+    )
+    def test_a_commit_is_matched_by_prefix_either_way(self, recorded, named):
+        assert sweep.same_commit(recorded, named)
+
+    @pytest.mark.parametrize(
+        ("recorded", "named"),
+        [
+            ("abc123def456", "abc123"),  # under seven digits names nothing
+            ("abc123", "abc123def456"),
+            ("abc123def456", "abc123e"),
+            ("abc123def456", "abc124def4567"),  # longer and not an extension
+        ],
+    )
+    def test_anything_else_is_not_the_same_commit(self, recorded, named):
+        assert not sweep.same_commit(recorded, named)
+
 
 # -- reading committed records ----------------------------------------------
 

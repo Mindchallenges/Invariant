@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
 
@@ -127,7 +127,14 @@ class SweepDomain:
         }
 
     def show(self, which: str | None, branch: str | None = None) -> core.SweepRecord:
-        """One record: the latest, or one named by seq, file name or head prefix."""
+        """One record: the latest, or one named by seq, file name or head prefix.
+
+        A seq or a file name names one record. A head is matched by prefix
+        either way (``core.same_commit``), because records before BUG_090 hold
+        full hashes and later ones short hashes; a prefix that matches records
+        of more than one commit is refused with their seqs rather than
+        answered with the first, and one commit swept twice answers its latest.
+        """
         branch = branch or git.current_branch(self.root)
         records, _ = self.records()
         mine = [r for r in records if r.branch == branch]
@@ -136,12 +143,23 @@ class SweepDomain:
         if not which:
             return core.latest(mine, branch)
         wanted = which.strip().removesuffix(".json")
-        for rec in mine:
-            if (wanted.isdigit() and rec.seq == int(wanted)) or rec.name.removesuffix(
-                ".json"
-            ) == wanted or (len(wanted) >= 7 and rec.head.startswith(wanted)):
-                return rec
-        raise UsageError(f"no sweep record on {branch} matches {which!r}")
+        exact = [
+            r
+            for r in mine
+            if (wanted.isdigit() and r.seq == int(wanted)) or r.name.removesuffix(".json") == wanted
+        ]
+        by_head = [r for r in mine if core.same_commit(r.head, wanted)]
+        found = exact or by_head
+        if not found:
+            raise UsageError(f"no sweep record on {branch} matches {which!r}")
+        heads = {core.short_hash(r.head).lower() for r in found}
+        if len(heads) > 1:
+            seqs = ", ".join(str(r.seq) for r in sorted(found, key=lambda r: r.seq))
+            raise UsageError(
+                f"{which!r} names more than one swept commit on {branch} "
+                f"(sweeps {seqs}); name one by seq or file name"
+            )
+        return core.latest(found, branch)
 
     # -- the sweep -----------------------------------------------------
 
@@ -198,7 +216,7 @@ class SweepDomain:
         return branch
 
     def _sweep(self, branch: str, dry_run: bool) -> SweepReport:
-        head = git.resolve_commit(self.root, "HEAD") or ""
+        head = core.short_hash(git.resolve_commit(self.root, "HEAD") or "")
         records, unreadable = self.records()
         previous = core.latest(records, branch)
         notes = [f"unreadable sweep record skipped: {p}" for p in unreadable]
@@ -248,7 +266,11 @@ class SweepDomain:
             if k not in known_keys
         ]
 
-        rng = f"{previous.head if previous else ''}..{head}"
+        # Every hash below is written short, the previous one included: a
+        # record committed before BUG_090 holds a full one, and copying it
+        # forward would put forty hex digits back in the record and the items.
+        last = core.short_hash(previous.head) if previous else None
+        rng = f"{last or ''}..{head}"
         context = _Context(self.today.isoformat(), key, outcome, rng, floor, below_now)
         filed, item_paths = self._file(to_file, context, settled, dry_run)
 
@@ -260,7 +282,7 @@ class SweepDomain:
             ran_on=self.today.isoformat(),
             branch=branch,
             head=head,
-            previous=previous.head if previous else None,
+            previous=last,
             command=key,
             executed=outcome.total,
             failed=outcome.failed,
@@ -400,7 +422,7 @@ class SweepDomain:
         target.write_text(text, encoding="utf-8")
 
         message = (
-            f"Sweep: {report.record.ran_on} {report.record.head[:12]} "
+            f"Sweep: {report.record.ran_on} {core.short_hash(report.record.head)} "
             f"({len(report.filed)} filed)"
         )
         if self.manifest.get("privacy.enabled", True):
@@ -408,7 +430,11 @@ class SweepDomain:
             findings = scanner.scan_text(text, path=Path(report.record_path))
             findings += scanner.scan_text(message, path=Path("commit message"))
             for rel in item_paths:
-                findings += scanner.scan_file(self.root / rel)
+                # Named project-relative, like the record: a finding is printed,
+                # and the absolute spelling would print a home path.
+                findings += [
+                    replace(f, path=Path(rel)) for f in scanner.scan_file(self.root / rel)
+                ]
             report.privacy = [f.describe() for f in findings]
         if report.privacy:
             report.commit_error = (

@@ -1574,8 +1574,8 @@ warns, which is the right answer for evidence it does not hold.
 One JSON file per sweep, `<paths.sweeps>/<date>-<first 12 hex of head>.json`,
 committed by the sweep itself with the items it filed. Version 1 fields:
 `version`, `seq` (one more than the last on the branch), `ran_on` (bare UTC
-date), `branch`, `head` and `previous` (full hashes; `previous` null on a
-baseline), `command` (the manifest key, `coverage` or `test`, never the
+date), `branch`, `head` and `previous` (the first 12 hex digits; `previous` null on
+a baseline), `command` (the manifest key, `coverage` or `test`, never the
 resolved command, which names a bundle under the state root), `executed`,
 `failed`, `passed`, `failing` (test identities, null where the adapter cannot
 read them; flaky ones excluded), `flaky`, `files` (`{project-relative path:
@@ -1584,12 +1584,25 @@ pct}`; rows outside the project dropped), `floor`, `hazards` (ids), `filed`
 (keys). `passed` is beside `failed` because an adapter that counts nothing
 reports `None` for a green run and a red one alike.
 
-No clock time, host, session or absolute path is in it, so it is
-privacy-clean by construction, and checked anyway: the engine scans the record,
-the commit message and the filed items with the project's own patterns before
-committing, because its commit is a subprocess no hook sees. A finding leaves
-all three uncommitted and exits 1; the record is untracked, so it blocks
-nothing and is never read as a baseline.
+No clock time, host, session, absolute path or full commit hash is in it, so
+it is privacy-clean by construction, and checked anyway: the engine scans the
+record, the commit message and the filed items with the project's own patterns
+before committing, because its commit is a subprocess no hook sees. A finding
+leaves all three uncommitted and exits 1, naming each by its project-relative
+path; the record is untracked, so it blocks nothing and is never read as a
+baseline.
+
+Every hash the sweep writes is short — `head`, `previous`, the file name, the
+commit message, and the `sweep_range` and commit-range line of each filed bug
+— because the opt-in `device_ids` pattern matches any forty hex digits, and a
+full hash there made the scan refuse every sweep on a project that enables it
+(BUG_090, ADR-010 D9's amendment). Records committed before that keep their
+full hashes and load unchanged under version 1. Nothing reads a recorded hash
+back through git and the last record is chosen by `seq`, so the one place two
+spellings meet is a match on a head: `core.sweep.same_commit` compares by
+prefix in either direction, seven digits at least, a new sweep shortens the
+`previous` it copies from an old record, and `sweep show` refuses a prefix
+that names more than one swept commit.
 
 ## Storage layout
 
