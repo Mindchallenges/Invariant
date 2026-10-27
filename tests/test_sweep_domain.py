@@ -515,3 +515,30 @@ class TestTheItemBody:
         domain(proj, Suite(failing=["tests/t.py::test_x"], extra="ERROR collecting tests/t.py")).run()
         (item,) = [i for i in items(proj).values() if "test_x" in i.fields["sweep_key"]]
         assert "pytest.import_error_masquerades_as_collection_error" in item.body
+
+
+# Repro for BUG_090 — see the work-item entry.
+# Fails while the defect is live. When the fix lands, delete the
+# expected-failure wrapper; the assertion must then pass unchanged.
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG_090 is live — delete this marker with the fix",
+)
+def test_BUG_090_a_sweep_commits_on_a_project_with_device_ids_enabled(proj):
+    from invariant.core.privacy import DEFAULT_PATTERNS
+
+    m = manifest(proj, privacy__patterns=[*DEFAULT_PATTERNS, "device_ids"])
+
+    # The baseline sweep: the record alone must commit.
+    first = domain(proj, Suite(), m=m).run()
+    assert first.committed and first.privacy == [], (
+        f"baseline sweep NOT committed: {first.commit_error}; findings: {first.privacy}"
+    )
+
+    # A later sweep that files a bug: the record and the filed item must commit.
+    commit_change(proj)
+    second = domain(proj, Suite(failing=["tests/t.py::test_x"]), m=m).run()
+    assert [f["key"] for f in second.filed] == ["test:tests/t.py::test_x"]
+    assert second.committed and second.privacy == [], (
+        f"filing sweep NOT committed: {second.commit_error}; findings: {second.privacy}"
+    )
