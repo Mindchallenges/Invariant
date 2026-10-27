@@ -304,6 +304,88 @@ the `boundary`, `cochange` and `judgement` kinds; the generated checklist and
   other landing gate passes. Ruleset fixtures for the kinds that increment 2
   validates are still owed.
 
+**Rulings after increment 1 (DN-A to DN-D).** The user took each
+recommendation.
+
+- *DN-A.* The sub-schemas for `boundary`, `cochange` and `judgement` are
+  drafted as an amendment to this record ("Proposed amendment: check-kind
+  sub-schemas", below) and ruled before increment 2 is built.
+- *DN-B.* The checklist's first line is its marker:
+  `<!-- invariant-managed: <digest> -->` in markdown,
+  `.. invariant-managed: <digest>` in rst. This replaces the "`#
+  invariant-managed:`" shape above, which is not a comment in either format.
+  A null `guidelines.checklist` is `checklist.<md|rst>` beside the ruleset,
+  following `docs.format`.
+- *DN-C.* There is one managed block, `guidelines/index`, holding the index
+  and the `always` rules. It is capped by `guidelines.injection.max_lines`
+  (default 40), and past the cap it ends with "N more: invariant guidelines
+  show".
+- *DN-D.* An unloadable ruleset is recorded at pipeline start and fails at
+  landing through `ruleset_valid`. Increment 6 records the hash only, and A4
+  compares it.
+- `guidelines render` takes `--dry-run`. There is no `guidelines check`
+  verb, and D12's diagram no longer draws one.
+
+**As built: A2 increment 3, the generated checklist.**
+
+- *`guidelines.checklist`.* It is the second `guidelines` key the manifest
+  reads: null or a non-empty path, refused at load otherwise. Null means
+  `checklist.md` (markdown) or `checklist.rst` (sphinx) in the ruleset's
+  directory. `instruction_files`, `baseline`, `injection` and `verdicts` are
+  still refused by name.
+- *`core/guidelines` renders, and stays pure.* `render_checklist(ruleset,
+  fmt, source=)` returns the whole file. The marker line holds `digest_of`
+  of every byte after it. `split_managed(text, fmt)` reads the digest and
+  body back, and answers `(None, text)` for a file that does not open with
+  this format's marker. That is all a drift check needs (increment 5).
+  - The body has a title, a header naming the ruleset's path and digest,
+    then each section in declared order, and each rule under it: id and
+    title as a heading, the statement's paragraphs, then severity, phases,
+    `applies_to`, a summary of the check, the exceptions with their
+    fingerprints, the rationale, the links and the amendments.
+  - A section with no rules says so.
+  - An unknown format raises naming the formats.
+  - The rst output parses with docutils and no warnings.
+- *`domains/guidelines`, the seventh domain.* It is not an FSM. `render`
+  reuses `core/rules`' answers rather than copying them. `load_ruleset`
+  means render refuses exactly what `ruleset_valid` fails.
+  `guidelines_tree` and `guidelines_relpath` were lifted out of
+  `load_ruleset` for it, so the checklist is written into the tree its
+  ruleset was read from. `is_exempt_path` means a generated file can never
+  sit on an exempt path. Refusals are `RenderRefused`, exit 1, and each
+  names its fix. Nothing is written when render refuses:
+  - a ruleset that does not load;
+  - a checklist path outside the project, equal to the ruleset, or with a
+    suffix that disagrees with `docs.format`;
+  - a `docs.format` with no renderer;
+  - an exempt target;
+  - an existing file with no marker (render did not write it, so it is the
+    project's);
+  - a privacy finding in the rendered text. The scan runs before the status
+    is decided, so `--dry-run` refuses it too. It always runs, whatever
+    `privacy.scope` says, because the file is about to be written into the
+    tree.
+- *What is rewritten.* A file render wrote is rewritten in every state, and
+  the state is named. It is `current`; `stale`, rendered from an older
+  ruleset; or `edited`, where the body no longer matches the marker. Hand
+  edits are replaced rather than skipped, unlike an edited library asset.
+  The checklist has no other source than the ruleset. D3's fix for drift is
+  "move the change into the ruleset, then render", and a render that skipped
+  the edited file could never apply that fix. The file is never exempt from
+  isolation, so the replaced text stays visible in the branch's diff.
+  Managed blocks in an instruction file are different. Text outside them is
+  the project's, so increment 4 keeps the three-way skip and
+  `--overwrite-local` there.
+- *The write class (ruling 13).* cli.md's Conventions name it: generated
+  files the manifest declares, written only by the commands that generate
+  them, never exempt from isolation. manifest.md says the same beside the
+  key.
+- *No ruleset.* `guidelines render` reports "nothing to render" and exits
+  0, with status `no-ruleset`.
+- *Tests.* Rendering and the marker are tested in `tests/test_guidelines.py`.
+  The domain, every refusal and the command through `main` are tested in
+  `tests/test_guidelines_domain.py`.
+
 ### D4 — Five check kinds; v1 ships four of them in full and one in part
 
 | Kind | Question it answers | Evaluated by | v1 |
@@ -764,7 +846,7 @@ graph TD
         CCREN["agent rendering + injection transport (A5, A6)"]
     end
     subgraph cli["cli/"]
-        CLI["invariant CLI<br/>guidelines render | show | verdict | baseline | check"]
+        CLI["invariant CLI<br/>guidelines render | show | verdict | baseline"]
     end
     subgraph domains["domains/ (seven)"]
         GDOM["guidelines (NEW, not an FSM)"]
@@ -888,6 +970,361 @@ Validation follows the manifest's existing rules: glob lists must be lists of
 strings, a path that names nothing in the project is dropped rather than
 matched, and a key the schema does not know is refused at load (BUG_050).
 `config show` prints every value with its provenance.
+
+## Proposed amendment: check-kind sub-schemas (for ruling)
+
+**Status: proposed, not ruled.** DN-A asked for concrete schemas for the three
+kinds A2 increment 1 refuses (`boundary`, `cochange`, `judgement`), so that
+A2 increment 2 has something exact to validate. Nothing below is built. Each
+open choice is listed under "Decision needed" at the end, with the
+recommendation first. The keys below are written as if the recommendation
+were taken.
+
+### What the schemas must carry
+
+The schemas are fitted to the downstream project's 39 items as B1 sorted them,
+and to this repository's own layering scans:
+
+| B1 kind | Items | How each is written under this amendment |
+|---|---|---|
+| Owned by the engine (4) | 0a Boy-Scout scope, 0b coverage floor, 2 risk assessment, 26 simulator destination | `engine`. Under the pure ratchet 0a has no engine gate, so the project decides whether to keep it as `judgement` (Consequences). |
+| Pattern, regex (7) | 4, 8, 18, 27, 28, 31, 33 | `pattern`, as built in increment 1. |
+| Pattern, syntax tree (5) | 5, 6, 19, 20, 25 | `judgement` over the same `applies_to` until a syntax engine ships (ruling 3). |
+| Co-change or registry (5) | 1 docs, 7 two mocks, 23 design handoff, 24 test diff, 35 duplication registry | 1 is better written as `engine: docs.updated`, which already asks it. 7, 23 and 24 are the `cochange` pair form. 35 is the registry form. |
+| Judgement (18) | 3, 9–17, 21, 22, 29, 30, 32, 34, 36, 37 | `judgement`. 36 and 37 each bundle several obligations. One verdict answers one rule, so they are written as several rules (for example 36a–36d), each with its own evidence. |
+| Boundary | 5 and 37's structural half | A single-module Swift app's layers are folder-to-type references, which need `symbols`. In v1 they are `judgement`. The first user of `boundary` is this repository: "nothing in `core/` imports `oracle/`" and "no `hosts` to `oracle` arrow", which the suite checks today with hand-written import scans. |
+
+Every kind keeps the common rule keys exactly as increment 1 validates them.
+In particular, `applies_to` is always the set of files the rule is *about*. The
+schemas below reuse it instead of adding a second "source" glob. One spelling
+of "which files" goes through `project_relative` and one matcher, so a rule
+cannot disagree with itself about scope.
+
+### `boundary`
+
+"Does a changed file under `applies_to` reference a file this rule forbids?"
+
+| Key | Type | Required | Validation |
+|---|---|---|---|
+| `kind` | `boundary` | yes | |
+| `engine` | string | yes, no default | `imports` only. `symbols` is refused as deferred (ruling 3), and any other value is refused naming the boundary engines. |
+| `forbid` | list of glob strings | yes | Non-empty. A bare string is refused (the AUD-08 precedent). Each glob must be non-empty. A glob identical to one in `applies_to` is refused, because every file would then forbid itself. |
+
+```yaml
+- id: layers.core-never-imports-oracle
+  section: layers
+  title: Nothing in core imports the oracle
+  statement: >
+    The engine works whether or not the oracle is ever used, so no module
+    under core reaches into oracle.
+  severity: blocker
+  phases: [review, landing]
+  applies_to: ["src/invariant/core/**/*.py"]
+  check:
+    kind: boundary
+    engine: imports
+    forbid: ["src/invariant/oracle/**"]
+```
+
+A finding is one (referencing file, referenced file) pair. The adapter's
+`references` answer names project-relative files, and an import the adapter
+resolves to nothing in the project (a third-party package) is outside the
+kind. A file the adapter cannot answer for fails as unanswerable. It does not
+pass, as with a pattern rule whose adapter has no mask (D4). Rule-level
+`exceptions` exempt a *referencing* path, and they stay the only escape.
+Fingerprinting a finding needs the referencing line's text (D6), so A3 refines
+D4's `Adapter.references(path) -> set[str] | None` to return the line beside
+each target.
+
+### `cochange`, pair form
+
+"If a file under `applies_to` changed in this way, did the files `then` names
+change too?" It is evaluated over `core/rules._changed_set`, and an
+unestablished changed set fails, as it does for `docs.updated`.
+
+| Key | Type | Required | Validation |
+|---|---|---|---|
+| `kind` | `cochange` | yes | |
+| `form` | `pair` | yes | `pair` or `registry`, and it selects the key set, so an unknown key is refused per form. |
+| `when` | mapping | yes | Keys `change`, `match`, `in`. Unknown keys are refused. |
+| `when.change` | string | yes, no default | `any` (the file is in the changed set), `added` (the file is new on the branch), or `executable` (the adapter's `executable_text` differs, so a comment-only edit triggers nothing: BUG_026's seam). |
+| `when.match` | regex string | no | It narrows the trigger to a file where a line the diff adds matches. It must compile. Given with `in`, or not at all. |
+| `when.in` | string | with `match` | `code`, `comments`, `strings` or `any`, as for `pattern`. |
+| `then` | mapping | yes | Exactly one of `all_of`, `any_of`, `each`. None, or two, is refused: this is D3's "a `cochange` whose `then` names nothing". |
+| `then.all_of` | list of glob strings | one of three | Non-empty, and not a bare string. Every glob must match at least one changed file. |
+| `then.any_of` | list of glob strings | one of three | Non-empty, and not a bare string. At least one changed file must match one of them. |
+| `then.each` | path template string | one of three | It is evaluated once per trigger file, and the derived path must be in the changed set. The tokens are `{path}`, `{dir}`, `{name}`, `{stem}` and `{suffix}`. An unknown token is refused, and so is a template with no token. |
+
+```yaml
+# Item 24: a behaviour change needs a test diff.
+- id: tests.behaviour-change-has-test-diff
+  section: tests
+  title: Every behaviour change carries a test diff
+  statement: A change to executable Swift code under App/ comes with a change under AppTests/.
+  severity: blocker
+  phases: [design, review, landing]
+  applies_to: ["App/**/*.swift"]
+  check:
+    kind: cochange
+    form: pair
+    when: {change: executable}
+    then: {any_of: ["AppTests/**/*.swift"]}
+
+# Item 7: a container member needs its two mocks.
+- id: di.container-member-updates-mocks
+  section: di
+  title: A new container member updates both mock containers
+  statement: >
+    When the dependency container gains a member, the dummy and the mock
+    container gain it in the same change.
+  severity: blocker
+  phases: [design, review, landing]
+  applies_to: ["App/Composition/PreviewDependencies.swift"]
+  check:
+    kind: cochange
+    form: pair
+    when: {change: any, in: code, match: '^\s*(var|let|func)\s'}
+    then:
+      all_of:
+        - App/Composition/DummyPreviewDependencies.swift
+        - App/Composition/MockPreviewDependencies.swift
+
+# Item 23: a new screen needs a design handoff.
+- id: ui.new-screen-has-handoff
+  section: ui
+  title: A new screen or sheet has a design handoff
+  statement: A new screen or sheet lands with its handoff under design/.
+  severity: blocker
+  phases: [design, review, landing]
+  applies_to: ["App/UI/**/*Screen.swift", "App/UI/**/*Sheet.swift"]
+  check:
+    kind: cochange
+    form: pair
+    when: {change: added}
+    then: {any_of: ["design/**"]}
+
+# This repository: a core module and its paired test move together.
+- id: tests.core-module-has-paired-test
+  section: tests
+  title: A core module change touches its paired test file
+  statement: A change to src/invariant/core/X.py touches tests/test_X.py.
+  severity: warn
+  phases: [landing]
+  applies_to: ["src/invariant/core/*.py"]
+  check:
+    kind: cochange
+    form: pair
+    when: {change: executable}
+    then: {each: "tests/test_{stem}.py"}
+```
+
+### `cochange`, registry form
+
+"Is a changed file under `applies_to` listed in an open entry of a registry,
+as the registry stands after this change?" Reading the registry *after* the
+change makes it a co-change. The same change that fixes a file strikes it from
+its entry, or marks the entry resolved, which clears the finding. That is the
+downstream rule's own instruction ("update the registry in the same change").
+
+| Key | Type | Required | Validation |
+|---|---|---|---|
+| `kind` | `cochange` | yes | |
+| `form` | `registry` | yes | |
+| `registry` | path string | yes | Project-relative, inside the project, never a bare `.`. The file must exist and validate, and `ruleset_valid` reads it (DN-A9). Its edits take the ruleset lane (D10). |
+| `outcomes` | mapping, class to result | yes | Non-empty. Each value is `blocker` or `warn`. Every `class` an open entry carries must have an outcome. An entry with no outcome is refused, never read as passing. |
+| `fixes` | mapping, class to string | no | It is shown as the finding's fix, for example "scope a refactor session; do not rewrite the family at commit". Each key must also be a key of `outcomes`. |
+
+The registry file's format is owned by invariant (D2) and is versioned:
+
+| Key | Type | Required | Validation |
+|---|---|---|---|
+| `version` | integer | yes | `1` |
+| `entries` | list | yes | May be empty. |
+| `entries[].id` | string | yes | Unique, no whitespace. |
+| `entries[].paths` | list of path strings | yes | Non-empty, project-relative paths, not globs. A registry names files. |
+| `entries[].status` | string | yes | `open` or `resolved`. Only `open` entries produce findings. |
+| `entries[].class` | string | yes | Project-chosen, such as `contained`. It is mapped by the rule's `outcomes`. |
+| `entries[].note` | string | no | Inert. It is rendered and read by no gate. |
+
+```yaml
+# In the ruleset. Item 35.
+- id: quality.duplication-registry
+  section: quality
+  title: A touched file is not left in an open duplication entry
+  statement: >
+    A touched file listed in an open entry of the duplication registry is
+    resolved in the same change, and struck from the entry.
+  severity: blocker          # the ceiling; outcomes choose per class
+  phases: [design, review, landing]
+  applies_to: ["App/**/*.swift"]
+  check:
+    kind: cochange
+    form: registry
+    registry: docs/guidelines/duplication.yaml
+    outcomes: {contained: blocker, scoped-refactor: blocker, advisory: warn}
+    fixes:
+      scoped-refactor: stop and scope a refactor session; do not rewrite the family at commit
+```
+
+```yaml
+# docs/guidelines/duplication.yaml
+version: 1
+entries:
+  - id: DUP-07
+    paths: [App/Storage/MediaStore.swift, App/Storage/ThumbnailStore.swift]
+    status: open
+    class: contained
+    note: two copies of the suffix-normalising reader; adopt the shared one
+```
+
+An outcome may not exceed the rule's `severity`. A `blocker` outcome under a
+`warn` rule is refused, so one value still gives a rule's ceiling. A
+`scoped-refactor` class maps to `blocker` with a fix that says to stop.
+"Stop and ask" is a fix the finding states. It is not a separate engine
+result (DN-A8).
+
+### `judgement`
+
+"Does the change honour this rule?" It is answered by a cited verdict (D5).
+These keys are what D5's validity checks read.
+
+| Key | Type | Required | Validation |
+|---|---|---|---|
+| `kind` | `judgement` | yes | |
+| `evidence` | string | yes, no default | `citation`, `test`, `either` or `both`. It sets what a `pass` or `fail` must rest on (D5, check 2). Its absence is D3's refusal of "a judgement rule with no `evidence` declaration". |
+| `scope` | string | yes, no default | `diff` (at least one cited range must meet a line the diff adds or changes) or `file` (a cited range may lie anywhere in a touched file) (D5, check 3). |
+| `not_applicable_when` | list of conditions | no | Absent or empty means `na` is not available, and the verdict must be `pass` or `fail` (D5, check 5). |
+| `[].id` | string | yes | Unique within the rule, with no whitespace, because `--na-condition` takes it as one argument. |
+| `[].claim` | string | one of two | A sentence the project wrote. The agent picks its id, and the pick is recorded for audit and the harness. |
+| `[].mechanical` | mapping | one of two | The engine answers it, and no verdict is asked for. Exactly one of: `no_added_match: {in, match}` (no line the diff adds in the rule's files matches; the regex must compile), or `no_executable_change: true` (no rule file's `executable_text` changed). |
+
+```yaml
+# Item 13, the cardinality invariant.
+- id: data.single-open-library
+  section: data
+  title: Only one library is open at a time
+  statement: >
+    No code path holds two per-library database or blob-root handles at once.
+    A switch closes the current library before it opens the next.
+  severity: blocker
+  phases: [design, review]
+  applies_to: ["App/Storage/**/*.swift", "App/Library/**/*.swift"]
+  check:
+    kind: judgement
+    evidence: both            # cite where it holds, and name the test that proves it
+    scope: diff
+    not_applicable_when:
+      - id: no-handle-code
+        mechanical:
+          no_added_match: {in: code, match: '\b(openLibrary|DatabaseQueue|blobRoot)\b'}
+      - id: read-only-path
+        claim: The change only reads through an already-open library and opens nothing.
+
+# Item 5 while the syntax engine is deferred: the regex rule, written as cited judgement.
+- id: di.views-no-concrete-services
+  section: di
+  title: Views never touch concrete services or singletons
+  statement: >
+    A view never reaches a concrete service or a shared singleton. It takes
+    what it needs through the injected dependency container.
+  severity: blocker
+  phases: [design, review]
+  applies_to: ["App/UI/**/*.swift"]
+  check:
+    kind: judgement
+    evidence: citation
+    scope: diff
+    not_applicable_when:
+      - id: no-executable-change
+        mechanical: {no_executable_change: true}
+```
+
+### Changes this implies elsewhere in the record
+
+- **D3, the validation list** gains these refusals: a `boundary` with no
+  `forbid`, or with an engine other than `imports`. A `cochange` with no
+  `form`, or a `then` naming zero or two shapes. A template token outside the
+  five. A registry that is missing or does not validate, or an open class with
+  no outcome. A judgement with no `evidence` or no `scope`. A duplicate
+  condition id. A condition that is neither or both of `claim` and
+  `mechanical`.
+- **D4, `boundary`.** `references` returns each target with its line (above).
+  `ruleset_valid` checks that a configured adapter offers `imports` from A3
+  onward (DN-A14).
+- **D10.** A registry a ruleset names is already in the ruleset lane. This
+  amendment makes "names" concrete: the `registry` key.
+- **`core/guidelines`.** `Check` gains the fields of the three kinds, and
+  `VALIDATED_KINDS` grows to all five.
+
+### Decision needed
+
+Each item lists its options with the recommendation first.
+
+- **DN-A1, where a boundary's source side is declared.**
+  (a) `applies_to` is the source side, and `check` adds only `forbid`.
+  (b) a separate `check.from` glob list.
+  (b) gives two spellings of one scope, which can disagree.
+- **DN-A2, what a boundary target names.**
+  (a) project-relative path globs only. Third-party imports are outside the
+  kind in v1.
+  (b) path globs plus a `forbid_modules` list of module names (for example a
+  UI toolkit).
+  (c) module names only, as the adapter reports them.
+- **DN-A3, a boundary's polarity.**
+  (a) deny-list only (`forbid`) in v1.
+  (b) also an allow-list form (`only`: the source may reference nothing
+  outside these globs).
+  (c) deny-list plus an `allow` carve-out inside `forbid`.
+- **DN-A4, how a cochange says which form it is.**
+  (a) an explicit `form: pair | registry`, which selects the key set.
+  (b) inferred from the keys present (`registry` present means registry).
+- **DN-A5, the shapes of a pair's `then`.**
+  (a) `all_of`, `any_of` and `each` (template), exactly one per rule.
+  (b) `any_of` only. Item 7 is then two rules, one per mock.
+  (c) `all_of` and `any_of`, with no template. The paired-test rule is then
+  not expressible.
+- **DN-A6, the trigger's `when.change`.**
+  (a) required, one of `any`, `added`, `executable`.
+  (b) the same values, defaulting to `executable`.
+  (c) `any` and `executable` only. Item 23 is then judgement.
+- **DN-A7, the registry file's format.**
+  (a) invariant's own versioned YAML (`id`, `paths`, `status`, `class`,
+  `note`).
+  (b) any YAML list, with the rule naming which field holds the path, the
+  status and the class.
+  (c) keep the registry inside the ruleset as a top-level `registries` key.
+- **DN-A8, what a registry class can produce.**
+  (a) `blocker` or `warn`, with an optional fix per class. "Stop and ask"
+  is a blocker whose fix says so.
+  (b) a third result, `ask`, that blocks and routes to the operator with the
+  finding as its reason.
+  (c) a class may map to a judgement rule id, so a model answers it.
+- **DN-A9, when a registry is validated.**
+  (a) by `ruleset_valid`. The file is read whole or refused, and a missing
+  file fails, as a missing ruleset does.
+  (b) only when the mechanical gate evaluates the rule.
+  (c) both, with `ruleset_valid` checking existence only.
+- **DN-A10, the judgement `evidence` values.**
+  (a) `citation | test | either | both`.
+  (b) D5's three (`citation | test | either`), so "cite and test" is not
+  expressible.
+  (c) a list of kinds, each required.
+- **DN-A11, judgement `scope`.**
+  (a) required with no default.
+  (b) defaults to `diff`.
+- **DN-A12, mechanical N/A conditions in v1.**
+  (a) two forms, `no_added_match` and `no_executable_change`.
+  (b) claims only in v1, with mechanical conditions arriving with A4's
+  evaluator.
+  (c) (a) plus a `no_change_in: [globs]` form.
+- **DN-A13, a `candidates` hint on judgement** (a regex whose hits the
+  agent is shown as starting points, for the rules regex cannot decide).
+  (a) defer. Not in v1.
+  (b) include it now, read only by injection and never by a gate.
+- **DN-A14, when `boundary` with `imports` is accepted.**
+  (a) A2 increment 2 validates the schema. The "does a configured adapter
+  offer `imports`" check lands with A3, beside `references`.
+  (b) refuse every `boundary` rule until A3 ships `references`.
 
 ## Increments, and the order in which A1–A8 consume these decisions
 
