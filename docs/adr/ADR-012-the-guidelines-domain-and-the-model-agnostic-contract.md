@@ -611,6 +611,95 @@ scenario's brief, which proves the engine reaches the same outcomes with no
 host-specific path. A second real host adapter can join later and is not a
 precondition for A1.
 
+**As built: A1 increment 1, the engine layer over today's gates.**
+
+- *Where it lives (ruling DN1).* Scenarios ship as package data at
+  `src/invariant/data/conformance/<scenario>/`: a `scenario.yaml` and a
+  `tree/`. The hatch wheel and sdist already carry everything under
+  `src/invariant`, so no packaging key changed. A scenario's manifest lives in
+  `scenario.yaml`, not in `tree/`. A replay writes it into the seeded
+  repository, so no nested project manifest sits inside this repository for a
+  hook to resolve a path against.
+- *The split.* `core/conformance` holds the scenario model (`Scenario`,
+  `Step`, `Expected`), the loader and its refusals, the reduction of what a
+  replay printed to an `Outcome`, the comparison and the rendering. It reads
+  files and does nothing else. It never evaluates a rule: every status it
+  sees comes from the `--json` payloads of `pipeline gates` and
+  `pipeline advance`, so the gates are still evaluated in `PipelineDomain`
+  alone. The replay drives the CLI in-process, and `core/` may not import the
+  CLI, so the replay lives in `cli/conformance`, with the CLI entry point
+  passed in as a parameter.
+- *A replay.* The replay copies `tree/` into a fresh directory, writes the
+  manifest and a `.gitignore` for the state root, runs `git init` and
+  commits. It then runs the steps in order: `cli` (argv through
+  `invariant.cli.main.main`, with `--json` added), `hook` (an event and a
+  payload through `invariant hook <event>`), `write` and `commit`. A step
+  runs `in: root` or `in: worktree`, the one linked worktree that a
+  `session isolate --execute` step made. Payload strings may name `{root}`
+  and `{worktree}`. The outcome is `{destination: {rule_id:
+  pass|block|warn|skip}}`, plus the steps that were refused and the blocking
+  rules each one named. `ask` reads as `block`. Each destination keeps its
+  last observation. A known answer is compared exactly for every destination
+  it names, and its refusals are compared whole.
+- *Isolation.* For the replay's duration, every `INVARIANT_*` and `CLAUDE_*`
+  variable is stripped. That covers `INVARIANT_HOST_SESSION_ID` and
+  `INVARIANT_HANDOFF` (stripped for the same reason `child_env` strips
+  them), `INVARIANT_STATE_ROOT`, and the host's markers. `INVARIANT_HOME`
+  points into the replay's own directory, and git reads no global or system
+  configuration. The caller's environment, working directory and stdin are
+  restored afterwards, even when a step raises.
+- *The first set.* Three scenarios are real against today's gates:
+  - `clean` lands through every gate on `committed`. That set is seven gates,
+    not six: `docs.diagrams_current` rides beside `docs.updated` in the
+    landing role.
+  - `docs-first-breach`: `docs.read_architecture` blocks designing to red,
+    and the advance is refused.
+  - `red-first-breach`: `test.new_test_fails` warns on the way to green. The
+    standard profile holds it at warn, so the advance goes through.
+
+  The fixture suite is a shell script that prints pytest's summary words, so
+  the python adapter reads it. The change adds the fixture's only `.py` file
+  through a `write` step, so the package data carries no Python source for
+  this repository's own coverage floor to ask about.
+- *Wording, against the table above.* The docs-first seed is really "no
+  read". The scenario reads nothing, and makes no edit before the advance.
+  The D1 permutation test belongs in the engine-layer module
+  (`tests/test_conformance_engine.py`) from A4 or A7 onward, whichever lands
+  it, because only then is there a recorded model or host field to permute.
+- *Tests.* `tests/test_conformance_engine.py` holds:
+  - a known-answer test per scenario;
+  - the determinism test, which replays each scenario in two fresh trees and
+    requires identical outcomes;
+  - the loader's refusals (unknown key, unknown step kind, an expect naming
+    an unregistered rule, among others);
+  - the reduction, the comparison and the rendering.
+
+  It runs in the ordinary suite.
+
+**Rulings for the driven layer (DN2, DN2b, DN3).** The driven layer gets its
+own command group: `invariant conformance run [--scenario …] --driver
+script|claude_code [--model …] [--runs N]` and `invariant conformance show`.
+The operator names the model, and no shipped asset names one (D1 item 3).
+Driven-run reports are written under the machine-local state root and are
+never committed. In v1 it runs on demand only:
+
+- 3 runs per scenario per model;
+- two models, named by the operator;
+- a turn cap per run;
+- divergences reported, never filed.
+
+None of this was built in increment 1.
+
+**Increments 2–6** are tracked on IDEA_031, not in a session plan:
+
+| Increment | Adds | After |
+|---|---|---|
+| 2 | scenarios over the gates A2 adds | A2 |
+| 3 | `seeded pattern`, `baselined` and `missing test`, over A3's checkers and baseline | A3 |
+| 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test |
+| 5 | the scripted driver, `conformance run --driver script` and `conformance show` | the engine layer |
+| 6 | Claude Code as the driver under at least two models | A4 and A6 |
+
 ### D12 — Where the domain sits
 
 ```mermaid

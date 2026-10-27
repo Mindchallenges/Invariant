@@ -1,0 +1,46 @@
+description: >
+  Red-first breached. The architecture doc is read and the pipeline reaches
+  red, but app.py is written and run green with no failing run recorded
+  first, so test.new_test_fails speaks on the way to green. The standard
+  profile holds it at warn, so the advance goes through.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+
+steps:
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: warn}
+  refusals: {}

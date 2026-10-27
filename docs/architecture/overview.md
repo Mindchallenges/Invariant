@@ -19,6 +19,7 @@ graph TD
 
     subgraph cli["cli/ — entrypoint"]
         CLI[invariant CLI]
+        CREPLAY["conformance replay"]
     end
 
     subgraph oracle["oracle/ — machine-wide view (ADR-007)"]
@@ -55,6 +56,7 @@ graph TD
         GIT[git]
         PLAN[plan]
         CSWEEP["sweep (ADR-010)"]
+        CONF["conformance (ADR-012 D11)"]
     end
 
     subgraph domains["domains/ — the six state domains"]
@@ -78,6 +80,7 @@ graph TD
         PROF[profiles/*.yaml]
         AGENTS[agents/*.md]
         SCAFFOLD[scaffold/*.md]
+        CONFDATA["conformance/*/"]
     end
 
     CC --> CLI
@@ -221,6 +224,10 @@ graph TD
     PIPELINE --> adapters
     CC --> AGENTS
     CLI --> SCAFFOLD
+    CREPLAY -- drives in-process --> CLI
+    CREPLAY --> CONF
+    CONF -- get_rule --> RULES
+    CONF --> CONFDATA
 ```
 
 `CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
@@ -386,6 +393,24 @@ the address discovery's own lookup for Tailscale's CLI and its runner, and
 keeps the certificate due and swaps a renewal into the listener, and `CLI -->
 OTLS` is the foreground's certificate, `oracle web pair`'s https link, and
 the `_oracle_web_certificates` seam the suite replaces.
+
+`CONF` and `CREPLAY` are the conformance harness's engine layer (IDEA_031 A1,
+ADR-012 D11). A scenario is package data under `CONFDATA`: a `scenario.yaml`
+(the manifest the replay runs under, its steps and its known answer) and a
+`tree/` that seeds a fresh repository. `core/conformance` loads and validates
+one (`CONF --> CONFDATA`), reduces what a replay printed to a gate status per
+rule per destination, compares that with the known answer and renders the
+difference. Its one arrow into the engine, `CONF --> RULES`, is `get_rule`: a
+known answer naming an unregistered rule is refused at load. It never
+evaluates a rule. Every status it reads is one the CLI reported through
+`pipeline gates --json` and `pipeline advance --json`, so the harness cannot
+answer differently from the engine. The replay drives the CLI, and `core/`
+knows nothing about the CLI, so it sits in `cli/conformance`
+(`CREPLAY -- drives in-process --> CLI`). It takes `main` as a parameter, so
+its tests can put a recorder in its place. A replay strips every `INVARIANT_*`
+and `CLAUDE_*` variable, gives the oracle a home of its own, and keeps git
+away from the machine's configuration, so two replays in fresh trees must
+agree. The suite proves they do.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -814,6 +839,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, and the commit a revision names — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
+| `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
