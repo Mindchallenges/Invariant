@@ -207,8 +207,12 @@ and nothing else, never inserts a block without `--insert`, and skips a block
 edited by hand unless `--overwrite-local` (cli.md, Guidelines). It refuses an
 instruction file that is exempt, outside the project, not markdown, or the
 ruleset or checklist itself. A null value is the host adapter's default. The
-CLI supplies it from the adapter for `host.kind`, because no domain imports a
-host, and a host kind with no adapter has none.
+CLI supplies it from the adapter for `host.kind`, on the rule context, to the
+pipeline domain and to the oracle's gate cache, because nothing below the CLI
+imports a host, and a host kind with no adapter has none. The drift rule,
+`guidelines.generated_current`, reads both keys through the same render plan
+`guidelines render` writes from, so it judges exactly the outputs render
+would write.
 
 ### A sweep cadence
 

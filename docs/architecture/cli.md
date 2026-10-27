@@ -141,7 +141,8 @@ invariant uninstall [--remove-assets] [--remove-manifest] [--dry-run]
 invariant doctor
     Check the installation: manifest valid, shims present and executable, host
     settings wired, state root writable, adapter commands resolvable, memory
-    index current. One line per check, exit 1 if any fails.
+    index current. One line per check, exit 1 if any fails. A row that
+    warns passes: it prints `warn` and never sets the exit code.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -170,6 +171,19 @@ invariant doctor
     is configured but missing, outside the project or invalid FAILS, naming
     every problem (ADR-012 D3). It asks the rule directly, so a level or a
     stand-down holding the gate does not change what the diagnosis reports.
+
+    The `guidelines generated` row is `guidelines.generated_current`'s
+    verdict, asked the same way: "no guidelines ruleset configured" passes,
+    every generated output current passes naming the count and the ruleset
+    digest, and drift WARNS, naming each output (a checklist missing, stale
+    or edited by hand; a block stale or edited by hand) and the command that
+    fixes it. It never fails, so drift alone never makes `doctor` exit 1: the
+    row warns as the gate does at the landing (ADR-012, A2 increment 5, by
+    user ruling). A plan refusal warns here as well, naming the refusal and
+    its fix; a ruleset that does not load is the `guidelines ruleset` row's
+    failure, not this one's. A warned row prints `warn` in the status column
+    and carries `"warn": true` beside `"ok": true` in `--json`; every other
+    row carries `"warn": false`.
 
     When the oracle's LaunchAgent is installed, one more row, `oracle agent
     interpreter`, fails if the interpreter its plist names no longer exists:
@@ -916,6 +930,16 @@ invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local
         render did not write it and the text is the project's;
       - a privacy finding in the rendered text.
 
+    Drift is reported without rendering by `guidelines.generated_current`
+    (ADR-012 D3), at the landing and as a `doctor` row. It asks the same plan
+    this command writes from (`core.rules.plan_render`), so it calls an
+    output current exactly when --dry-run does: a checklist that is new
+    (missing), stale or edited, and a block that is stale or edited, are its
+    findings, each named by file with `invariant guidelines render` as the
+    fix, and `--overwrite-local` for an edited block. An absent block is not
+    a finding. Anything this command refuses fails the rule as well. The
+    rule warns in every profile and never renders.
+
     With no ruleset configured it reports "nothing to render" and exits 0
     (ADR-012 D3, "No ruleset, no change"). --json carries status, written,
     dry_run, path, the ruleset digest, and blocks: one entry per instruction
@@ -924,7 +948,8 @@ invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local
     The same render rewrites the managed block in each instruction file:
     guidelines.instruction_files, or with that key null the host adapter's
     default (CLAUDE.md for claude_code; none for a host kind with no
-    adapter). There is one block, guidelines/index (ADR-012 DN-C): a header
+    adapter), which the CLI supplies on the rule context, so the drift rule
+    reads the same files. There is one block, guidelines/index (ADR-012 DN-C): a header
     naming the ruleset, then one line per rule, the `always` rules first with
     their statements, then every other rule's id and title. It is capped at
     guidelines.injection.max_lines lines, and past the cap its last line is

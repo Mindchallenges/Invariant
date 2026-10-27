@@ -17,6 +17,7 @@ from __future__ import annotations
 import codecs
 import fnmatch
 import os
+import posixpath
 import re
 import shlex
 import time
@@ -278,6 +279,12 @@ class RuleContext:
     #: to name one of them, and telling the caller to start another makes the
     #: ambiguity permanently worse.
     ambiguous: list[dict] = field(default_factory=list)
+    #: The host adapter's instruction files: the default of
+    #: ``guidelines.instruction_files`` (ADR-012 D3). Which file a host reads
+    #: as standing instructions is the host's answer, and nothing below the
+    #: CLI imports a host, so the CLI supplies it. Empty means the host names
+    #: none, and then only configured files carry a block.
+    host_instruction_files: tuple[str, ...] = ()
 
     # -- convenience --------------------------------------------------
 
@@ -1645,6 +1652,21 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
 # -- guidelines rules --------------------------------------------------
 
 
+class RenderRefused(InvariantError):
+    """A render that would write somewhere it may not, or text it may not.
+
+    Raised while the render is planned, before anything is written, so the
+    command and ``guidelines.generated_current`` refuse the same things.
+    """
+
+    exit_code = 1
+
+    def __init__(self, message: str, fix: str) -> None:
+        super().__init__(f"{message}\n  {fix}")
+        self.reason = message
+        self.fix = fix
+
+
 @rule(
     "guidelines.ruleset_valid",
     summary="The project's guidelines ruleset loads and validates.",
@@ -1743,6 +1765,336 @@ def guidelines_relpath(ctx: RuleContext, configured: str) -> str | None:
         configured, [ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
     )
     return None if rel in (None, ".") else rel
+
+
+# -- what `guidelines render` would write --------------------------------------
+#
+# The render plan: every generated output of the guidelines domain decided,
+# checked and privacy-scanned, with nothing written. `domains/guidelines`
+# writes what it plans; `guidelines.generated_current` reads its statuses. It
+# lives here rather than in the domain because a rule asks it, and `core/`
+# may not import a domain (overview.md, dependency rule). One plan is why the
+# drift gate and `render --dry-run` cannot disagree about "current".
+
+
+@dataclass(frozen=True)
+class BlockRendered:
+    """What one render did, or would do, to one managed block in one file."""
+
+    relpath: str
+    name: str
+    #: ``new`` (inserted), ``current``, ``stale``, ``edited`` (written only
+    #: with ``overwrite_local``), or ``absent`` (no block, and none inserted).
+    status: str
+    written: bool
+
+
+@dataclass(frozen=True)
+class BlockPlan:
+    """A block decided and checked, not yet written."""
+
+    result: BlockRendered
+    path: Path
+    #: The whole file as it will be written, or ``None`` when it is not.
+    text: str | None
+
+
+@dataclass(frozen=True)
+class RenderPlan:
+    """Everything one render would write, decided before the first write."""
+
+    #: The checklist's state: ``new``, ``current``, ``stale`` or ``edited``.
+    status: str
+    path: Path
+    relpath: str
+    #: The ruleset digest the text is rendered from.
+    ruleset: str
+    #: The checklist as it will be written.
+    text: str
+    blocks: tuple[BlockPlan, ...] = ()
+
+
+def plan_render(
+    ctx: RuleContext, *, insert: tuple[str, ...] = (), overwrite_local: bool = False
+) -> RenderPlan | None:
+    """What ``guidelines render`` would write, with nothing written.
+
+    ``None`` with no ruleset configured. Every refusal is a
+    :class:`RenderRefused` raised before anything could be written: a ruleset
+    that does not load, a target that may not take generated text (outside
+    the project, the ruleset itself, a suffix ``docs.format`` disagrees with,
+    exempt from isolation, a file render did not write), a malformed block
+    pair, and a privacy finding in text that is about to be written. The
+    tree is the tree in hand, the one the ruleset is read from.
+    """
+    unknown = [name for name in insert if name not in guidelines_reader.BLOCKS]
+    if unknown:
+        raise RenderRefused(
+            f"no managed block is named {', '.join(unknown)}",
+            f"--insert takes {', '.join(guidelines_reader.BLOCKS)}",
+        )
+    ruleset = ruleset_or_refuse(ctx)
+    if ruleset is None:
+        return None
+
+    manifest = ctx.manifest
+    source = guidelines_relpath(ctx, manifest.get("guidelines.ruleset"))
+    fmt = _checklist_format(manifest)
+    rel = _checklist_target(ctx, source, fmt)
+    tree = guidelines_tree(ctx)
+    path = tree / rel
+    if is_exempt_path(manifest, tree, path):
+        raise RenderRefused(
+            f"the checklist {rel} is exempt from session isolation, and a "
+            f"generated file never is (ADR-012 ruling 13)",
+            "set guidelines.checklist to a path outside session.exempt_paths "
+            "and the declared stores",
+        )
+
+    scanner = PrivacyScanner.from_manifest(manifest)
+    text = guidelines_reader.render_checklist(ruleset, fmt, source=source)
+    findings = scanner.scan_text(text)
+    if findings:
+        named = ", ".join(f"{rel}:{f.line} {f.pattern} {f.redacted}" for f in findings)
+        raise RenderRefused(
+            f"the rendered checklist fails the privacy scan ({named}); "
+            f"nothing was written",
+            f"remove it from {source}, then render again",
+        )
+    status = _checklist_status(path, rel, fmt, text)
+
+    body = guidelines_reader.render_index_block(
+        ruleset, source=source, max_lines=manifest.get("guidelines.injection.max_lines")
+    )
+    blocks = [
+        _plan_block(tree, target, body, insert, overwrite_local)
+        for target in _instruction_files(ctx, source, rel, tree)
+    ]
+    writing = [block for block in blocks if block.text is not None]
+    name = guidelines_reader.INDEX_BLOCK
+    findings = scanner.scan_text(guidelines_reader.block_text(name, body))
+    if findings and writing:
+        named = ", ".join(
+            f"{block.result.relpath} ({name} block, line {f.line}) {f.pattern} {f.redacted}"
+            for block in writing for f in findings
+        )
+        raise RenderRefused(
+            f"the rendered block fails the privacy scan ({named}); nothing was written",
+            f"remove it from {source}, then render again",
+        )
+    return RenderPlan(
+        status=status, path=path, relpath=rel, ruleset=ruleset.digest, text=text,
+        blocks=tuple(blocks),
+    )
+
+
+def ruleset_or_refuse(ctx: RuleContext) -> guidelines_reader.Ruleset | None:
+    """The ruleset a guidelines command works from, ``None`` with none configured.
+
+    A ruleset that does not load is :class:`RenderRefused`, carrying the
+    failure ``guidelines.ruleset_valid`` reports, so every command refuses
+    exactly what the gate fails.
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        fixes = "; ".join(failure.fixes) or "fix the ruleset"
+        detail = f": {failure.detail}" if failure.detail else ""
+        raise RenderRefused(f"{failure.message}{detail}", fixes)
+    return ruleset
+
+
+def _checklist_format(manifest: Manifest) -> str:
+    fmt = manifest.get("docs.format")
+    if fmt not in guidelines_reader.CHECKLIST_SUFFIXES:
+        raise RenderRefused(
+            f"docs.format {fmt!r} has no checklist renderer",
+            f"set docs.format to one of {', '.join(guidelines_reader.CHECKLIST_SUFFIXES)}",
+        )
+    return fmt
+
+
+def _checklist_target(ctx: RuleContext, source: str, fmt: str) -> str:
+    suffix = guidelines_reader.CHECKLIST_SUFFIXES[fmt]
+    configured = ctx.manifest.get("guidelines.checklist")
+    if configured is None:
+        return posixpath.join(posixpath.dirname(source), f"checklist{suffix}")
+    rel = guidelines_relpath(ctx, configured)
+    if rel is None:
+        raise RenderRefused(
+            f"guidelines.checklist {configured!r} names nothing inside the project",
+            "set it to a project-relative path, or null for one beside the ruleset",
+        )
+    if rel == source:
+        raise RenderRefused(
+            f"guidelines.checklist {rel} is the ruleset; rendering would "
+            f"overwrite the source with its own rendering",
+            "point guidelines.checklist somewhere else, or set it to null",
+        )
+    if PurePosixPath(rel).suffix != suffix:
+        raise RenderRefused(
+            f"guidelines.checklist {rel} does not end in {suffix}, and "
+            f"docs.format is {fmt}",
+            f"name a {suffix} file, or set guidelines.checklist to null",
+        )
+    return rel
+
+
+def _instruction_files(
+    ctx: RuleContext, source: str, checklist: str, tree: Path
+) -> list[str]:
+    """The instruction files' project-relative paths, each checked, once each.
+
+    ``guidelines.instruction_files``, or with that key null the host
+    adapter's default the context carries.
+    """
+    configured = ctx.manifest.get("guidelines.instruction_files")
+    named = ctx.host_instruction_files if configured is None else configured
+    found: list[str] = []
+    for entry in named:
+        rel = guidelines_relpath(ctx, entry)
+        if rel is None:
+            raise RenderRefused(
+                f"the instruction file {entry!r} names nothing inside the project",
+                "set guidelines.instruction_files to project-relative paths",
+            )
+        if PurePosixPath(rel).suffix != ".md":
+            raise RenderRefused(
+                f"the instruction file {rel} is not a markdown file, and the "
+                f"block markers are markdown comments",
+                "name .md files in guidelines.instruction_files",
+            )
+        if rel in (source, checklist):
+            what = "ruleset" if rel == source else "checklist"
+            raise RenderRefused(
+                f"the instruction file {rel} is also the guidelines {what}",
+                "name a different file in guidelines.instruction_files",
+            )
+        if is_exempt_path(ctx.manifest, tree, tree / rel):
+            raise RenderRefused(
+                f"the instruction file {rel} is exempt from session isolation, "
+                f"and a generated file never is (ADR-012 ruling 13)",
+                "name a file outside session.exempt_paths and the declared stores",
+            )
+        if rel not in found:
+            found.append(rel)
+    return found
+
+
+def _plan_block(
+    tree: Path, rel: str, body: str, insert: tuple[str, ...], overwrite_local: bool
+) -> BlockPlan:
+    name = guidelines_reader.INDEX_BLOCK
+    path = tree / rel
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    try:
+        block = guidelines_reader.find_blocks(existing).get(name)
+    except guidelines_reader.BlockError as exc:
+        raise RenderRefused(
+            f"{rel} {exc}; nothing was written",
+            "repair the pair by hand (a begin and an end line per block, "
+            "never nested), then render again",
+        ) from exc
+    if block is None:
+        if name not in insert:
+            return BlockPlan(BlockRendered(rel, name, "absent", False), path, None)
+        text = guidelines_reader.append_block(existing, name, body)
+        return BlockPlan(BlockRendered(rel, name, "new", True), path, text)
+    state = guidelines_reader.block_state(block, body)
+    if state == "edited" and not overwrite_local:
+        return BlockPlan(BlockRendered(rel, name, state, False), path, None)
+    text = guidelines_reader.replace_block(existing, block, body)
+    return BlockPlan(BlockRendered(rel, name, state, True), path, text)
+
+
+def _checklist_status(path: Path, rel: str, fmt: str, text: str) -> str:
+    if not path.exists():
+        return "new"
+    existing = path.read_text(encoding="utf-8")
+    digest, body = guidelines_reader.split_managed(existing, fmt)
+    if digest is None:
+        raise RenderRefused(
+            f"{rel} exists and has no invariant-managed marker, so render "
+            f"did not write it and will not overwrite it",
+            "move that file, or point guidelines.checklist at another path",
+        )
+    if digest != guidelines_reader.digest_of(body.encode("utf-8")):
+        return "edited"
+    return "current" if existing == text else "stale"
+
+
+@rule(
+    "guidelines.generated_current",
+    summary="Every generated guidelines output matches what render would write now.",
+    events=(),
+)
+def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
+    """ADR-012 D3, "Drift is a rule". It reports and never renders.
+
+    The checklist and each ``guidelines/index`` block are compared with the
+    render plan, so "current" is what ``guidelines render --dry-run`` says. A
+    block nobody inserted is no finding: render never inserts one unasked.
+    A refusal fails the rule as well, because drift render refuses to fix
+    cannot be fixed by the command this rule points at.
+    """
+    try:
+        plan = plan_render(ctx)
+    except RenderRefused as exc:
+        return Verdict.fail(
+            f"the generated guidelines outputs cannot be checked: {exc.reason}",
+            detail="This is what `invariant guidelines render` refuses, so drift "
+            "here could not be fixed by rendering.",
+            fixes=(exc.fix,),
+        )
+    if plan is None:
+        return Verdict.na("no guidelines ruleset configured")
+
+    findings: list[str] = []
+    checklist = {
+        "new": f"{plan.relpath} is missing: the checklist was never rendered",
+        "stale": f"{plan.relpath} is stale: rendered from an older ruleset",
+        "edited": f"{plan.relpath} was edited by hand",
+    }
+    if plan.status in checklist:
+        findings.append(checklist[plan.status])
+    edited_block = False
+    absent: list[str] = []
+    for block in plan.blocks:
+        result = block.result
+        where = f"{result.relpath} ({result.name} block)"
+        if result.status == "stale":
+            findings.append(f"{where} is stale: rendered from an older ruleset")
+        elif result.status == "edited":
+            findings.append(f"{where} was edited by hand")
+            edited_block = True
+        elif result.status == "absent":
+            absent.append(f"no {result.name} block in {result.relpath} (none inserted)")
+
+    if not findings:
+        current = 1 + len(plan.blocks) - len(absent)
+        return Verdict.clean(
+            f"{current} generated output(s) current against ruleset {plan.ruleset}",
+            detail="; ".join(absent) or None,
+        )
+    hand_edited = plan.status == "edited" or edited_block
+    fixes = [
+        (
+            "move the edit into the ruleset, then: invariant guidelines render"
+            if hand_edited
+            else "invariant guidelines render"
+        )
+    ]
+    if edited_block:
+        fixes.append(
+            "invariant guidelines render --overwrite-local  # takes the rendered "
+            "block back over the hand edit"
+        )
+    return Verdict.fail(
+        f"{len(findings)} generated guidelines output(s) not current against ruleset "
+        f"{plan.ruleset}: " + "; ".join(findings),
+        detail="The ruleset is the source of every generated output (ADR-012 D3). "
+        "This rule reports; it never renders.",
+        fixes=tuple(fixes),
+    )
 
 
 # -- test rules --------------------------------------------------------

@@ -19,8 +19,8 @@ from test_guidelines import RULESET, WITH_ALWAYS
 
 from invariant.core import guidelines
 from invariant.core.errors import InvariantError
-from invariant.core.rules import RuleContext, all_rules
-from invariant.domains.guidelines import GuidelinesDomain, RenderRefused
+from invariant.core.rules import RenderRefused, RuleContext, all_rules
+from invariant.domains.guidelines import GuidelinesDomain
 
 REGISTERED = frozenset(spec.id for spec in all_rules())
 RULESET_REL = "docs/guidelines/ruleset.yaml"
@@ -47,8 +47,10 @@ def domain(
         body.pop("guidelines")
     manifest = make_manifest(body)
     return GuidelinesDomain(
-        RuleContext(manifest=manifest, cwd=root, session=session),
-        instruction_files=instruction_files,
+        RuleContext(
+            manifest=manifest, cwd=root, session=session,
+            host_instruction_files=tuple(instruction_files),
+        )
     )
 
 
@@ -197,6 +199,22 @@ class TestRefusals:
         error = self.refused(domain(make_manifest, tree, {"checklist": ".claude/checklist.md"}))
         assert "exempt from session isolation" in str(error)
         assert not (tree / ".claude/checklist.md").exists()
+
+    @pytest.mark.parametrize(
+        "store",
+        [
+            {"items": {"path": "docs/backlog"}},
+            {"paths": {"reports": "docs/backlog"}},
+            {"paths": {"sweeps": "docs/backlog"}},
+        ],
+        ids=["items", "reports", "sweeps"],
+    )
+    def test_a_checklist_inside_a_declared_store(self, make_manifest, tree, store):
+        """A declared store is exempt from isolation, and a generated file
+        never is (ruling 13), so the store's own exemption refuses it too."""
+        dom = domain(make_manifest, tree, {"checklist": "docs/backlog/checklist.md"}, **store)
+        assert "exempt from session isolation" in str(self.refused(dom, dry_run=True))
+        assert not (tree / "docs/backlog/checklist.md").exists()
 
     def test_a_checklist_suffix_that_disagrees_with_docs_format(self, make_manifest, tree):
         error = self.refused(domain(make_manifest, tree, {"checklist": "docs/rules.rst"}))
@@ -486,6 +504,17 @@ class TestInstructionBlockRefusals:
         dom = host_default(make_manifest, blocks_tree, {"instruction_files": [".claude/CLAUDE.md"]})
         assert "exempt from session isolation" in str(self.refused(dom, insert=(INDEX,)))
         assert not (blocks_tree / ".claude/CLAUDE.md").exists()
+
+    def test_an_instruction_file_in_a_declared_store_is_refused_unasked(
+        self, make_manifest, blocks_tree
+    ):
+        """Refused with no --insert and on a dry run: the target is checked,
+        not only the write."""
+        dom = host_default(
+            make_manifest, blocks_tree, {"instruction_files": ["docs/backlog/NOTES.md"]},
+            items={"path": "docs/backlog"},
+        )
+        assert "exempt from session isolation" in str(self.refused(dom, dry_run=True))
 
     def test_a_privacy_finding_in_the_block_refuses_the_render(self, make_manifest, blocks_tree):
         # Only the block spells a rule as "(always): <title>", so the pattern

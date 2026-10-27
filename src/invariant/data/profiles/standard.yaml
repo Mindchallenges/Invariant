@@ -58,6 +58,10 @@ rules:
   # state only when one is. Blocks everywhere: a ruleset that does not load
   # is one every guidelines gate would otherwise answer from in part.
   guidelines.ruleset_valid: block
+  # Every generated output (the checklist, each guidelines/index block) is
+  # what render would write now (ADR-012 D3). Warns in every profile, strict
+  # included (ruling 7): by the time it sees a hand edit, the edit happened.
+  guidelines.generated_current: warn
 
   # Memory hygiene is a maintenance concern, not a safety one.
   memory.schema_valid: warn

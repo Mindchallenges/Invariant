@@ -2,8 +2,10 @@ description: >
   The clean change, in a project whose guidelines ruleset validates and uses
   every v1 check kind: engine, pattern, boundary, both cochange forms with the
   registry file a rule names, and judgement with a mechanical and a claimed
-  N/A condition. guidelines.ruleset_valid, injected at the landing because a
-  ruleset is configured, passes beside every other landing gate.
+  N/A condition. The change renders the checklist from the ruleset. The
+  guidelines gates, injected at the landing because a ruleset is configured,
+  pass beside every other landing gate: ruleset_valid, and generated_current
+  with the checklist current and no instruction-file block inserted.
 
 manifest:
   version: 1
@@ -69,6 +71,7 @@ steps:
       cwd: "{worktree}"
       tool_name: Task
       tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [guidelines, render]}
   - {kind: cli, in: worktree, argv: [pipeline, test]}
   - {kind: cli, in: worktree, argv: [pipeline, coverage]}
   - {kind: commit, in: worktree, message: answer is 42}
@@ -88,4 +91,5 @@ expect:
       agents.design_agent_ran: pass
       agents.review_agent_ran: pass
       guidelines.ruleset_valid: pass
+      guidelines.generated_current: pass
   refusals: {}

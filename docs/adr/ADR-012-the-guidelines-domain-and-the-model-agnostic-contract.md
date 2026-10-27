@@ -511,6 +511,83 @@ D3, ruling 8 and DN-C.
   `tests/test_guidelines.py`. The domain, each refusal, `show`, and both
   commands through `main` are tested in `tests/test_guidelines_domain.py`.
 
+**As built: A2 increment 5, the drift gate.** Built to D3 ("Drift is a
+rule"), ruling 7 and ruling 13.
+
+- *`guidelines.generated_current`.* The rule is graded `warn` in all three
+  profiles, strict included. With no ruleset it is N/A. `core/machines`
+  injects it beside `ruleset_valid` in `GUIDELINES_GATES`, so it rides the
+  landing entry only when a ruleset is configured. It only reports. Nothing
+  renders at the landing.
+- *One plan, lifted into `core/rules`.* "Current" has to mean what
+  `guidelines render --dry-run` reports, so the rule and the command must
+  ask one plan. The planning lived in `domains/guidelines`, and `core/` may
+  not import a domain. So it moved down into `core/rules` as `plan_render`,
+  with `RenderRefused`, the same way `guidelines_tree` and
+  `guidelines_relpath` were lifted in increment 3. `plan_render` covers
+  where each output goes, every refusal, the privacy scans, and each
+  output's state. Nothing is written. The domain now writes what the plan
+  decided, and keeps `show`. `ruleset_or_refuse` is the one conversion of a
+  ruleset that does not load into a refusal, used by both.
+- *The findings.* A checklist that is `new` is reported as missing. A
+  checklist that is stale or edited is a finding, and so is a block that is
+  stale or edited. An absent block is not, because render never inserts one
+  unasked. The detail of a passing verdict names each absent block. Each
+  finding names its file, and a block finding names its block too. The fix
+  is `invariant guidelines render`. When anything was edited by hand, the
+  fix says to move the edit into the ruleset first. An edited block also
+  gets `invariant guidelines render --overwrite-local`.
+- *Choices the rulings left open, taken in the strict direction.*
+  - A refusal of the plan fails the rule, naming the refusal and its fix.
+    Drift that render refuses to fix cannot be fixed by the command the rule
+    points at. This covers a ruleset that does not load, as D3 asks of every
+    gate that needs the ruleset. It also covers an exempt or misplaced
+    output, a file render did not write, a malformed pair, and a privacy
+    finding in text about to be written.
+  - An edited checklist's fix is a plain render, which replaces the edit
+    (increment 3). `--overwrite-local` is named only for an edited block,
+    because only a block is skipped without it.
+- *The `doctor` row warns, by user ruling.* The row, `guidelines generated`,
+  was first built to fail on drift. The user ruled that it must warn, as the
+  gate does, and never fail: drift alone must not make `doctor` report a
+  failure. So drift prints `warn`, names each output and the fix, and leaves
+  the exit code alone. `--json` marks the row `"ok": true, "warn": true`.
+  The ruling did not cover a plan refusal, so the choice consistent with it
+  was taken: the row warns on a refusal too. The rule still fails on one;
+  only the row's grading changed. A ruleset that does not load still fails
+  `doctor`, through the `guidelines ruleset` row, which this ruling did not
+  touch.
+- *The host's default reaches the rule on the rule context.* With
+  `guidelines.instruction_files` null, the files are the host adapter's
+  (increment 4). Nothing below the CLI imports a host. So
+  `RuleContext.host_instruction_files` carries them, and the CLI supplies
+  it to:
+  - every rule context it builds, which covers `render`, `check` and
+    `doctor`;
+  - `PipelineDomain`, which hands it to the landing gates;
+  - the oracle's gate cache, through `evaluate_row`'s
+    `instruction_files_for`.
+
+  No manifest key was added. `GuidelinesDomain` lost its
+  `instruction_files` parameter, so one carrier remains.
+- *Never exempt from isolation (ruling 13).* The existing guarantee held.
+  The plan refuses a checklist or an instruction file that
+  `session.exempt_paths` or a declared store would exempt. It checks every
+  configured target, on a dry run, and whether or not a block would be
+  written. This increment adds tests for a checklist in each declared store
+  (`items.path`, `paths.reports`, `paths.sweeps`) and for an instruction
+  file in one. The rule fails on an exempt output as well. No path was
+  missing the guarantee, so no code changed for it.
+- *A1 increment 2, extended.* The `valid-ruleset` scenario now renders its
+  checklist in the change, and `generated_current` passes at the landing.
+  In `malformed-ruleset` it warns, because outputs cannot be judged against
+  a ruleset that does not load. The landing refusal is still
+  `ruleset_valid` alone.
+- *Tests.* The rule, its agreement with `render --dry-run`, the landing
+  injection, the pipeline and oracle hand-off, and the `doctor` row are
+  tested in `tests/test_guidelines_current.py`. The store refusals are
+  tested in `tests/test_guidelines_domain.py`.
+
 ### D4 — Five check kinds; v1 ships four of them in full and one in part
 
 | Kind | Question it answers | Evaluated by | v1 |

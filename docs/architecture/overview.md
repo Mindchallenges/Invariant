@@ -230,13 +230,12 @@ graph TD
     CREPLAY --> CONF
     CONF -- get_rule --> RULES
     CONF --> CONFDATA
-    RULES -- load, the ruleset gate --> CGUIDE
+    RULES -- load, the render plan, the ruleset and drift gates --> CGUIDE
     CGUIDE -- project_relative --> MANIFEST
     CLI --> GDOM
-    CLI -. injects INSTRUCTION_FILES into GDOM from .-> CC
-    GDOM -- render_checklist, split_managed, the managed block --> CGUIDE
-    GDOM -- load_ruleset, the tree in hand, is_exempt_path --> RULES
-    GDOM -- scans before it writes --> PRIVACY
+    CLI -. injects INSTRUCTION_FILES into the rule context, PIPELINE and OGATES from .-> CC
+    GDOM -- render_checklist, split_managed, for show --> CGUIDE
+    GDOM -- plan_render, ruleset_or_refuse --> RULES
 ```
 
 `CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
@@ -450,16 +449,24 @@ ruleset is configured, so a project that has not opted in sees no change, and
 `sweep`. Today it has one effect, `guidelines render`: the human checklist in
 `docs.format`, whose first line is a managed marker holding the digest of the
 rest (`<!-- invariant-managed: … -->` or `.. invariant-managed: …`). What the
-text is belongs to `core/guidelines` (`GDOM --> CGUIDE`: `render_checklist`,
-and `split_managed` to read an existing file's marker back), which stays pure.
-`GDOM --> RULES` reuses three answers rather than keeping copies of them:
-`load_ruleset`, so render refuses exactly what the gate fails; the tree in
-hand (`guidelines_tree`, `guidelines_relpath`), so the checklist lands in the
-tree its ruleset was read from; and `is_exempt_path`, so a generated file can
-never sit where isolation would let it land unreviewed (ruling 13). `GDOM -->
-PRIVACY` scans the rendered text before anything is written. A finding
-refuses the render whole. The CLI's write scope names this class, generated
-files the manifest declares (cli.md, Conventions).
+text is belongs to `core/guidelines`, which stays pure. What render would
+write is the **render plan**, `core.rules.plan_render`, and the domain writes
+what the plan decided (`GDOM -- plan_render --> RULES`). The plan sits in
+`core/rules` rather than in the domain because a rule asks it too:
+`guidelines.generated_current` compares every generated output with the same
+plan (A2 increment 5), so the drift gate and `render --dry-run` cannot
+disagree about "current", and `core/` may not import a domain. The plan
+reuses three answers rather than keeping copies of them: `load_ruleset`
+(through `ruleset_or_refuse`), so render refuses exactly what the gate fails;
+the tree in hand (`guidelines_tree`, `guidelines_relpath`), so the checklist
+lands in the tree its ruleset was read from; and `is_exempt_path`, so a
+generated file can never sit where isolation would let it land unreviewed,
+whether `session.exempt_paths` or a declared store would exempt it (ruling
+13). It privacy-scans the rendered text before anything is written, through
+the existing `RULES --> PRIVACY`, and a finding refuses the render whole.
+`GDOM --> CGUIDE` is what is left in the domain: `render_checklist` and
+`split_managed` for `guidelines show`. The CLI's write scope names this
+class, generated files the manifest declares (cli.md, Conventions).
 
 The same render keeps one managed block, `guidelines/index`, in each
 instruction file (A2 increment 4, ADR-012 D3 and DN-C): the rule index plus
@@ -467,17 +474,33 @@ the `always` rules, capped by `guidelines.injection.max_lines`, between a
 begin marker holding the body's digest and an end marker. `core/guidelines`
 renders the body and reads the pairs back (`render_index_block`,
 `find_blocks`, `block_state`, `replace_block`, `append_block`), refusing a
-malformed pair by line. `GDOM` decides the rest: a block is inserted only on
-`--insert`, a hand-edited one is skipped unless `--overwrite-local` (the
-`classify_installed` three-way rule), and every output is decided and
-privacy-scanned before the first write, so a refusal writes nothing. Which
-file a host reads as standing instructions is the host's answer, so
-`hosts/claude_code` names it (`INSTRUCTION_FILES`, CLAUDE.md), and the CLI
-injects it into `GDOM` as the default of `guidelines.instruction_files`
-(`CLI -. injects INSTRUCTION_FILES into GDOM from .-> CC`): no domain imports
-a host. `guidelines show` prints the checklist text without writing it, and
-the capped block's last line points there. The rest of the family (the drift
-gate, the pin) arrives in later increments; ADR-012 D12 draws where it sits.
+malformed pair by line. The render plan decides the rest: a block is
+inserted only on `--insert`, a hand-edited one is skipped unless
+`--overwrite-local` (the `classify_installed` three-way rule), and every
+output is decided and privacy-scanned before the first write, so a refusal
+writes nothing. Which file a host reads as standing instructions is the
+host's answer, so `hosts/claude_code` names it (`INSTRUCTION_FILES`,
+CLAUDE.md). Nothing below the CLI imports a host, so the CLI supplies it as
+`RuleContext.host_instruction_files`, the default of
+`guidelines.instruction_files`, everywhere the plan can be asked: on every
+rule context it builds (so `guidelines render`, `invariant check` and
+`doctor`), to `PipelineDomain`, whose landing gates hand it on, and to the
+oracle's gate cache (`CLI -. injects INSTRUCTION_FILES into the rule context,
+PIPELINE and OGATES from .-> CC`). `guidelines show` prints the checklist
+text without writing it, and the capped block's last line points there.
+
+`guidelines.generated_current` is the drift gate (ADR-012 D3, "Drift is a
+rule"; A2 increment 5). It asks the render plan what render would do now and
+reports a checklist that is missing, stale or edited by hand, and a block that
+is stale or edited by hand, each by file, with `invariant guidelines render`
+as the fix and `--overwrite-local` for an edited block. A block nobody
+inserted is no finding. A refusal of the plan fails it too, since render could
+not fix that drift. It only reports; nothing renders at the landing.
+`core/machines` injects it beside `ruleset_valid` at the landing entry when a
+ruleset is configured, it warns in every profile (ruling 7), and `doctor`
+prints it as the `guidelines generated` row, which warns on drift and never
+fails the diagnosis. The pin of the ruleset's hash
+arrives with increment 6; ADR-012 D12 draws where the family sits.
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -899,7 +922,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level | Decide policy — levels come from the manifest |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
@@ -907,7 +930,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
-| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file, or decide where one goes (`domains/guidelines` does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
+| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
@@ -941,16 +964,17 @@ advance it. They are the only place where "what a session is" is encoded.
 - **`guidelines`** — the effects of the project's guidelines ruleset (ADR-012
   D12). Not an FSM. Today it renders the human checklist and the managed
   `guidelines/index` block in each instruction file (`guidelines render`),
-  and shows the checklist text without writing it (`guidelines show`). It reads the ruleset through `core/rules`'
-  `load_ruleset` from the tree in hand, and writes the checklist into that
-  tree. Before any write it refuses: a target outside the project, the ruleset
-  itself, a suffix that disagrees with `docs.format`, a path exempt from
-  isolation, an existing file without its marker, and rendered text with a
-  privacy finding. It names whether the file it rewrote was current, stale,
-  or hand-edited. In an instruction file it writes only between a block's
-  markers: never a block nobody asked to insert, never over a hand edit
-  without `--overwrite-local`, and nothing at all past a malformed pair. It
-  writes only the generated-file class (cli.md).
+  and shows the checklist text without writing it (`guidelines show`). It
+  writes what `core/rules`' render plan (`plan_render`) decided, from the
+  ruleset in the tree in hand and into that tree. The plan refuses, before any
+  write: a target outside the project, the ruleset itself, a suffix that
+  disagrees with `docs.format`, a path exempt from isolation, an existing file
+  without its marker, and rendered text with a privacy finding. It names
+  whether the file it rewrote was current, stale, or hand-edited. In an
+  instruction file it writes only between a block's markers: never a block
+  nobody asked to insert, never over a hand edit without `--overwrite-local`,
+  and nothing at all past a malformed pair. It writes only the
+  generated-file class (cli.md).
 - **`memorystore`** — validation, dedup, and index regeneration over the
   memory directory. Not an FSM; a set of invariants plus repair operations.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for

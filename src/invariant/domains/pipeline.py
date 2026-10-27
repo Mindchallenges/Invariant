@@ -373,6 +373,7 @@ class PipelineDomain:
         store: JsonStore | None = None,
         watermarks: WatermarkSource | None = None,
         clock=time.time,
+        host_instruction_files: tuple[str, ...] = (),
     ) -> None:
         self.manifest = manifest
         self.store = store or JsonStore(manifest.state_root)
@@ -386,6 +387,11 @@ class PipelineDomain:
         #: harmless: transitions record ``usage: None`` and the report says so.
         self.watermarks = watermarks
         self.clock = clock
+        #: The host adapter's instruction files, handed to every gate on the
+        #: rule context: ``guidelines.generated_current`` at the landing reads
+        #: them as the default of ``guidelines.instruction_files`` (ADR-012
+        #: D3). Injected by the CLI, because no domain imports a host.
+        self.host_instruction_files = tuple(host_instruction_files)
 
     def _reading(self, host_session_id: str | None) -> tuple[dict | None, str | None]:
         """Read the watermark and the counter it came from, or give up quietly.
@@ -594,6 +600,7 @@ class PipelineDomain:
             cwd=Path(cwd or Path.cwd()),
             session=session,
             pipeline=pipeline.to_dict(),
+            host_instruction_files=self.host_instruction_files,
         )
         return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
 

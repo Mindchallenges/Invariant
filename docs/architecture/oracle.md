@@ -807,7 +807,13 @@ same with or without it. The suite checks that.
 | `oracle list` | Evaluates the eligible sessions once and waits up to the timeout. |
 
 The CLI reaches the cache through the `_oracle_gates` seam, as it does the scan
-cache. The text output prints the detail on its own line under `next`.
+cache. The text output prints the detail on its own line under `next`. The
+seam also hands the cache the host's instruction files for each manifest
+(`evaluate_row`'s `instruction_files_for`), because the landing's
+`guidelines.generated_current` reads them as the default of
+`guidelines.instruction_files` and the oracle imports no host (ADR-012 D3).
+Without that the cache could pass a drifted `CLAUDE.md` block that `pipeline
+gates` reports.
 
 **Measured** on this repository's real state root, against a scratch
 `INVARIANT_HOME`, on 2026-10-22: one live session, evaluated in 0.02 s in its

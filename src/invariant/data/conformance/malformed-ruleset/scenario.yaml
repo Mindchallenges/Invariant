@@ -2,7 +2,9 @@ description: >
   The clean change, in a project whose guidelines ruleset does not validate:
   one rule gives a severity the schema does not know. Every other gate passes,
   and guidelines.ruleset_valid, injected at the landing because a ruleset is
-  configured, blocks the advance to committed.
+  configured, blocks the advance to committed. guidelines.generated_current,
+  injected beside it, cannot judge outputs against a ruleset that does not
+  load, and warns.
 
 manifest:
   version: 1
@@ -87,5 +89,6 @@ expect:
       agents.design_agent_ran: pass
       agents.review_agent_ran: pass
       guidelines.ruleset_valid: block
+      guidelines.generated_current: warn
   refusals:
     land: [guidelines.ruleset_valid]

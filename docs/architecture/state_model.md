@@ -1065,14 +1065,20 @@ Details that are load-bearing rather than incidental:
   `pipeline gates` never lists a rule that cannot apply. It warns and never
   blocks; the manifest refuses it at `block` or `ask` (ADR-010 D3 item 5, D6).
 
-- **`guidelines.ruleset_valid` rides the landing entry when a ruleset is
-  configured.** `core/machines` adds it to the `landing` state's entry set
+- **The `guidelines.*` landing gates ride the landing entry when a ruleset
+  is configured.** `core/machines` adds `guidelines.ruleset_valid` to the
+  `landing` state's entry set
   (`GUIDELINES_GATES`) only when `guidelines.ruleset` is set, for the reason
   `sweep.fresh` is injected only under a cadence: with no ruleset the rule is
   N/A, and a `block`-level skip on every landing would be a change on every
   project that has not opted in (ADR-012 D3, ruling 7). Like the cadence
   injection it follows the manifest as it stands; pinning the ruleset's hash
   on the pipeline at `start` is a later increment of the same deliverable.
+  `guidelines.generated_current` rides beside it in the same set (A2
+  increment 5): it compares every generated output with what `guidelines
+  render` would write now and warns on drift in every profile, so it reports
+  and never refuses the landing. It reads the host's default instruction
+  files from the rule context, which `PipelineDomain` is handed by the CLI.
 
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —

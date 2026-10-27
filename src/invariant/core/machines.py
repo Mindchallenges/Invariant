@@ -6,7 +6,7 @@ shipped one, so forking a methodology never means forking the library.
 
 The docs-first gates are injected here rather than written into every
 methodology file, and so is ``sweep.fresh`` beside each gate a sweep cadence
-schedules, and ``guidelines.ruleset_valid`` on the landing state of a project
+schedules, and the ``guidelines.*`` landing gates on the landing state of a project
 with a guidelines ruleset. ADR-001 D12 makes docs-first core policy, so a methodology
 cannot opt out by omission — including a methodology this library has never
 seen, which is why the injection is by state role rather than by state name.
@@ -115,9 +115,11 @@ FRESHNESS_GATE = "sweep.fresh"
 #: rule is N/A, and a ``block``-level rule that cannot apply renders as
 #: ``[skip:BLOCK]`` on every landing, which would be a change on every project
 #: that has not opted in. With a ruleset, the landing is where a malformed one
-#: stops a change: the gates later increments add read it there.
+#: stops a change, and where drift between the ruleset and what render wrote
+#: from it is reported (``guidelines.generated_current``, warn in every
+#: profile, ruling 7).
 GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
-    "landing": {"entry": ["guidelines.ruleset_valid"]},
+    "landing": {"entry": ["guidelines.ruleset_valid", "guidelines.generated_current"]},
 }
 
 

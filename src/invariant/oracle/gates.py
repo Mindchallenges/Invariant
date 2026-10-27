@@ -182,13 +182,20 @@ def summarise(by_destination: Mapping[str, list[Evaluated]], state: str) -> Gate
     return GateReport(pipeline_state=state, owed=tuple(ordered))
 
 
-def evaluate_row(row: Row) -> Mapping[str, list[Evaluated]]:
+def evaluate_row(
+    row: Row,
+    *,
+    instruction_files_for: Callable[[Manifest], tuple[str, ...]] = lambda manifest: (),
+) -> Mapping[str, list[Evaluated]]:
     """``pipeline gates`` for the session ``row`` names, as its worktree sees it.
 
     Over an inert store on the project's state root, so nothing is written, and
     with the worktree's own manifest, because the rules resolve the paths they
     compare against the manifest's root. Every git call the rules make takes
-    no optional lock (ADR-007 D16).
+    no optional lock (ADR-007 D16). ``instruction_files_for`` answers the host
+    adapter's instruction files for a manifest, which the drift gate at the
+    landing reads (ADR-012 D3); the CLI supplies it, because the oracle
+    imports no host.
     """
     workdir = _workdir(row)
     if workdir is None:
@@ -198,7 +205,9 @@ def evaluate_row(row: Row) -> Mapping[str, list[Evaluated]]:
     store = InertStore(Path(row.project))
     with git.without_optional_locks():
         session = SessionDomain(manifest, store=store).get(row.session_id)
-        return PipelineDomain(manifest, store=store).evaluate_gates_by_destination(
+        return PipelineDomain(
+            manifest, store=store, host_instruction_files=instruction_files_for(manifest)
+        ).evaluate_gates_by_destination(
             row.session_id,
             session=session.to_dict() if session is not None else None,
             cwd=workdir,

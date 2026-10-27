@@ -15,7 +15,7 @@ import re
 import shlex
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -279,7 +279,10 @@ class Context:
 
     @property
     def pipelines(self) -> PipelineDomain:
-        return PipelineDomain(self.manifest, self.store, watermarks=self.watermarks)
+        return PipelineDomain(
+            self.manifest, self.store, watermarks=self.watermarks,
+            host_instruction_files=host_instruction_files(self.manifest),
+        )
 
     @property
     def items(self):
@@ -592,6 +595,7 @@ class Context:
             payload=payload or {},
             extra=extra or {},
             ambiguous=ambiguous,
+            host_instruction_files=host_instruction_files(self.manifest),
         )
 
 
@@ -720,6 +724,9 @@ def cmd_doctor(args) -> int:
     from ..hosts.claude_code import ClaudeCodeHost
 
     checks: list[tuple[str, bool, str]] = []
+    # Labels of passing rows that carry a warning: shown as `warn`, never
+    # counted as a failure.
+    warned: set[str] = set()
 
     # `doctor` is the command someone runs BECAUSE the manifest is wrong, and
     # it used to resolve the manifest before it could report anything — so a
@@ -892,6 +899,22 @@ def cmd_doctor(args) -> int:
                 ruleset.message + (f": {ruleset.detail}" if not ruleset.ok else ""),
             )
         )
+        # Drift between the ruleset and what render wrote from it (ADR-012
+        # D3). The row warns, as the gate does, and never fails the diagnosis:
+        # drift alone is not a broken installation (user ruling, A2 increment
+        # 5). A refusal warns here too; a ruleset that does not load already
+        # fails the row above.
+        generated = get_rule("guidelines.generated_current").fn(ctx.rule_context())
+        checks.append(
+            (
+                "guidelines generated",
+                True,
+                generated.message
+                + "".join(f"; try: {fix}" for fix in generated.fixes),
+            )
+        )
+        if not generated.ok:
+            warned.add("guidelines generated")
 
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()
@@ -915,7 +938,7 @@ def cmd_doctor(args) -> int:
         checks.extend(_oracle_watcher_build_check())
     checks.extend(_oracle_web_checks())
 
-    return _report_checks(args, checks)
+    return _report_checks(args, checks, warned)
 
 
 def _oracle_watcher_build_check() -> list[tuple[str, bool, str]]:
@@ -971,13 +994,28 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
     return rows
 
 
-def _report_checks(args, checks: list[tuple[str, bool, str]]) -> int:
-    lines = [
-        f"  {'ok ' if ok else 'FAIL'}  {label:<28} {detail}" for label, ok, detail in checks
-    ]
+def _report_checks(
+    args, checks: list[tuple[str, bool, str]], warned: Collection[str] = ()
+) -> int:
+    """Print the rows; exit 1 if any fails. A warned row passes, shown as ``warn``."""
+
+    def status(label: str, ok: bool) -> str:
+        if not ok:
+            return "FAIL"
+        return "warn" if label in warned else "ok "
+
+    lines = [f"  {status(label, ok)}  {label:<28} {detail}" for label, ok, detail in checks]
     failed = [c for c in checks if not c[1]]
-    emit(args, {"checks": [{"check": c, "ok": o, "detail": d} for c, o, d in checks]},
-         "\n".join(lines))
+    emit(
+        args,
+        {
+            "checks": [
+                {"check": c, "ok": o, "warn": o and c in warned, "detail": d}
+                for c, o, d in checks
+            ]
+        },
+        "\n".join(lines),
+    )
     return 1 if failed else EXIT_OK
 
 
@@ -3040,22 +3078,27 @@ _BLOCK_STATUS = {
 }
 
 
-def _guidelines_domain(ctx: Context):
-    """The guidelines domain, given the host adapter's instruction files.
+def host_instruction_files(manifest) -> tuple[str, ...]:
+    """The host adapter's instruction files for ``manifest``'s ``host.kind``.
 
-    A domain may not import a host, so the default of
-    ``guidelines.instruction_files`` is injected here. A host kind with no
-    adapter has no default, and then only configured files carry a block.
+    The default of ``guidelines.instruction_files`` (ADR-012 D3). Nothing
+    below the CLI may import a host, so the CLI supplies it on every rule
+    context it builds, to the pipeline domain whose gates read it, and to the
+    oracle's gate cache. A host kind with no adapter has no default, and then
+    only configured files carry a block.
     """
-    from ..domains.guidelines import GuidelinesDomain
     from ..hosts.claude_code import ClaudeCodeHost
 
-    defaults = (
-        ClaudeCodeHost.INSTRUCTION_FILES
-        if ctx.manifest.get("host.kind") == "claude_code"
-        else ()
-    )
-    return GuidelinesDomain(ctx.rule_context(), instruction_files=defaults)
+    if manifest.get("host.kind") == "claude_code":
+        return ClaudeCodeHost.INSTRUCTION_FILES
+    return ()
+
+
+def _guidelines_domain(ctx: Context):
+    """The guidelines domain over the CLI's rule context, host default included."""
+    from ..domains.guidelines import GuidelinesDomain
+
+    return GuidelinesDomain(ctx.rule_context())
 
 
 def _block_line(block, verb: str, overwrite_local: bool) -> str:
@@ -3265,9 +3308,11 @@ def _oracle_gates():
     A seam beside ``_oracle_cache``, so a test can count or stall the
     evaluations. The real one evaluates over an inert store and writes nothing.
     """
-    from ..oracle.gates import GateCache
+    from functools import partial
 
-    return GateCache()
+    from ..oracle.gates import GateCache, evaluate_row
+
+    return GateCache(evaluate=partial(evaluate_row, instruction_files_for=host_instruction_files))
 
 
 def _oracle_row_lines(row: dict) -> list[str]:

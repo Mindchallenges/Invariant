@@ -33,6 +33,9 @@ from invariant.core.conformance import (
     status_of,
 )
 
+#: The gates a configured ruleset injects at the landing (ADR-012 D3).
+GUIDELINES = ("guidelines.ruleset_valid", "guidelines.generated_current")
+
 SHIPPED = [
     "clean", "docs-first-breach", "malformed-ruleset", "red-first-breach", "valid-ruleset",
 ]
@@ -52,8 +55,11 @@ def test_a_malformed_ruleset_is_the_one_refusal_at_the_landing(tmp_path):
     outcome = replay(load_named("malformed-ruleset"), workdir=tmp_path).outcome
     clean = load_named("clean").expected.gates["committed"]
     landing = outcome.gates["committed"]
-    assert {k: v for k, v in landing.items() if k != "guidelines.ruleset_valid"} == clean
+    assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
     assert landing["guidelines.ruleset_valid"] == "block"
+    # Its outputs cannot be judged against a ruleset that does not load, and
+    # the drift gate only ever warns (ruling 7), so it is no refusal.
+    assert landing["guidelines.generated_current"] == "warn"
     assert outcome.refusals == {"land": ("guidelines.ruleset_valid",)}
 
 
@@ -65,8 +71,9 @@ def test_a_ruleset_using_every_kind_lands_like_the_clean_change(tmp_path):
     outcome = replay(load_named("valid-ruleset"), workdir=tmp_path).outcome
     clean = load_named("clean").expected.gates["committed"]
     landing = outcome.gates["committed"]
-    assert {k: v for k, v in landing.items() if k != "guidelines.ruleset_valid"} == clean
+    assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
     assert landing["guidelines.ruleset_valid"] == "pass"
+    assert landing["guidelines.generated_current"] == "pass"
     assert outcome.refusals == {}
 
 
