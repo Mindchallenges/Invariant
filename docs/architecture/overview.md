@@ -271,7 +271,9 @@ untouched. See [oracle.md](oracle.md) and ADR-007.
 D6). The writes run in the same `hook` command, for the same reason. The host
 adapter turns each event into an `AttentionSignal` (a normalised fact, the
 `NORMALISED_PAYLOAD_KEYS` shape) and leaves it on `ClaudeCodeHost.attention`.
-The CLI applies it through `oracle/attention` to the hook's own `JsonStore`.
+A Stop also has a signal before any work runs, `arrival_attention`, which the
+CLI records before calling the handler (BUG_095). The CLI applies each
+signal through `oracle/attention` to the hook's own `JsonStore`.
 That store is why the file lands in the project's state root, and why the
 probe's inert store discards it. The gated CLI commands write a refusal the
 same way. The host pid the record carries comes from `claude_code_launch`

@@ -196,6 +196,15 @@ cannot be written costs the oracle one event. It never costs the host a
 verdict, an exit status or a degraded marker. The same helper records
 `degraded` when the hook's own handler raises.
 
+*Amended by BUG_095:* one write runs before the response is computed. A
+Stop's arrival (`turn-stopped`) is recorded before the closeout runs, because
+the host cancels a hook at its timeout and a turn end recorded only after a
+slow closeout was lost. The decision itself stands. That write goes through
+the same helper, cannot see the response, and swallows its failure, so it
+cannot change a verdict either.
+On a cancelled closeout `blocked` keeps its last value, because the early
+write leaves it untouched; the user confirmed that choice.
+
 `doctor`'s probe writes nothing. The attention store is built on the hook's
 own `JsonStore`, which is the inert store for a probe, and the CLI also skips
 the write explicitly, so a probe does not walk the process table either

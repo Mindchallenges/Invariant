@@ -1504,8 +1504,10 @@ invariant hook <event>
     per-event table). `notification` exists for that alone: its response is
     always empty, and it marks the host as waiting on a permission prompt,
     a question, or idle. A handler that raises records `degraded` there.
-    These writes happen after the response is computed. They never change
-    it, a failure is swallowed, and the probe writes none.
+    These writes happen after the response is computed, except that a stop
+    records `turn: ended` before its closeout runs, so a closeout the host
+    cancels at the hook timeout still ends the turn (BUG_095). They never
+    change the response, a failure is swallowed, and the probe writes none.
 
 invariant context
     Print the state projection a host would inject: current state, legal

@@ -4419,6 +4419,16 @@ def cmd_hook(args) -> int:
             if args.event in _TOOL_EVENTS and isinstance(body, dict)
             else ctx
         )
+        # What the event says before any work runs is recorded before the
+        # work: the host cancels a hook at its timeout, and a slow Stop
+        # closeout must not take the turn's end down with it (BUG_095).
+        arrival = None if probe else host.arrival_attention(args.event)
+        if arrival is not None:
+            _record_attention(
+                ctx,
+                host_session_id,
+                lambda store, hid, pid: _apply_signal(store, hid, pid, arrival),
+            )
         response = host.handle(args.event, raw, work)
     except Exception as exc:  # noqa: BLE001 - see below
         # The same reasoning as the guard above, extended to the part that does
@@ -4507,6 +4517,8 @@ def _apply_signal(store, host_id: str, pid_source, signal) -> None:
         store.answered(host_id, pid_source=pid_source)
     elif signal.op == host.ATTENTION_PROMPT:
         store.prompt(host_id, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_TURN_STOPPED:
+        store.turn_stopped(host_id, pid_source=pid_source)
     elif signal.op == host.ATTENTION_TURN_ENDED:
         store.turn_ended(host_id, signal.rules, pid_source=pid_source)
     elif signal.op == host.ATTENTION_HOST_ENDED:
@@ -4516,11 +4528,12 @@ def _apply_signal(store, host_id: str, pid_source, signal) -> None:
 def _record_attention(ctx: Context, host_session_id, write) -> None:
     """Apply one sidecar write for ``host_session_id``, swallowing any failure.
 
-    The one guarded path every attention write takes (ADR-007 D10). The hook's
-    response is computed before this runs and printed after it, and nothing
-    here reads or returns it — so a sidecar that cannot be written costs the
-    oracle one event and never costs the host a verdict, an exit status or a
-    degraded marker. A payload with no host id has no record to write.
+    The one guarded path every attention write takes (ADR-007 D10). Nothing
+    here reads or returns the hook's response — the one write made before it
+    is computed, a Stop's arrival, cannot see it either — so a sidecar that
+    cannot be written costs the oracle one event and never costs the host a
+    verdict, an exit status or a degraded marker. A payload with no host id
+    has no record to write.
     """
     if not host_session_id:
         return

@@ -165,6 +165,7 @@ def is_probe(payload: object) -> bool:
 ATTENTION_WAITING = "waiting"
 ATTENTION_ANSWERED = "answered"
 ATTENTION_PROMPT = "prompt"
+ATTENTION_TURN_STOPPED = "turn-stopped"
 ATTENTION_TURN_ENDED = "turn-ended"
 ATTENTION_HOST_ENDED = "host-ended"
 
@@ -175,6 +176,8 @@ class AttentionSignal:
 
     ``kind`` and ``message`` accompany ``waiting``; ``rules`` accompanies
     ``turn-ended`` and names the closeout rules that refused the turn, if any.
+    ``turn-stopped`` is the Stop as it arrives, before the closeout has said
+    anything; see :meth:`ClaudeCodeHost.arrival_attention`.
     """
 
     op: str
@@ -1022,6 +1025,20 @@ class ClaudeCodeHost:
         ]
 
     # -- request handling ----------------------------------------------
+
+    def arrival_attention(self, event: str) -> AttentionSignal | None:
+        """What ``event`` says about the host's attention before any work is done.
+
+        Only a Stop says anything this early: the host has ended the turn,
+        whatever the closeout then decides. The closeout is the slow part of
+        the Stop path, and the host cancels a hook at its timeout, so a turn
+        end learned only from :meth:`handle` is lost exactly when the closeout
+        runs long (BUG_095). The caller records this before calling
+        :meth:`handle`, which then refines it with the closeout's verdict.
+        """
+        if event == "stop":
+            return AttentionSignal(ATTENTION_TURN_STOPPED)
+        return None
 
     def handle(self, event: str, raw: str, ctx) -> dict:
         """The host's response to ``event``; :attr:`attention` is left set too.

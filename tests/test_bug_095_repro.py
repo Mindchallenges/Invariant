@@ -49,10 +49,6 @@ def governed(project, monkeypatch):
     return project
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_095 is live — delete this marker with the fix",
-)
 def test_BUG_095_a_stop_cancelled_at_its_timeout_still_records_the_turn_ended(
     governed, monkeypatch
 ):

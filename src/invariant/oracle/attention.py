@@ -158,6 +158,23 @@ class AttentionStore:
 
         self._update(host_id, mutate, pid_source)
 
+    def turn_stopped(self, host_id: str, pid_source: PidSource | None = None) -> None:
+        """The host delivered a Stop; the closeout has not answered yet.
+
+        Written before the closeout runs, so the turn reads ended even when
+        the host cancels the hook at its timeout (BUG_095). ``blocked`` is left
+        alone: whether the closeout refused the turn is :meth:`turn_ended`'s
+        to say, and a closeout that never finished said nothing.
+        """
+        now = self.clock()
+
+        def mutate(record: AttentionRecord) -> None:
+            record.turn = TURN_ENDED
+            record.turn_since = now
+            record.waiting = None
+
+        self._update(host_id, mutate, pid_source)
+
     def turn_ended(
         self,
         host_id: str,

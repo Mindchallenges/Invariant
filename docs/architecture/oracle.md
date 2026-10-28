@@ -261,6 +261,7 @@ applies the signal through one guarded helper, `_record_attention`.
 | `PreToolUse`, `AskUserQuestion` | `waiting` | `waiting: question`, with the first question's text. Not when the hook denies the call. |
 | `PostToolUse` | `answered` | `waiting` cleared. Reads first, and writes only if something was waiting. |
 | `UserPromptSubmit` | `prompt` | `turn: running`. `waiting`, `blocked` and `degraded` cleared, `ended: false`. |
+| `Stop`, on arrival | `turn-stopped` | `turn: ended`, `waiting` cleared. Written before the closeout runs (BUG_095). `blocked` is left alone. |
 | `Stop` | `turn-ended` | `turn: ended`, `waiting` cleared. `blocked` set to the closeout's blocking rule ids, or, on a clean stop, cleared if the Stop had set it. A CLI block is kept. |
 | `SessionEnd` | `host-ended` | `ended: true`. Everything else cleared, including `pid`. |
 | `invariant hook` handler raised | — | `degraded` set, with the event and the error. |
@@ -269,12 +270,33 @@ applies the signal through one guarded helper, `_record_attention`.
 `SessionStart` writes nothing. The rule that a hook must not write on every
 start still holds.
 
-### The two guarantees
+A Stop writes twice. The host adapter's `arrival_attention` names what an
+event says before any work runs, and only a Stop says anything then: the turn
+is over. The CLI records that `turn-stopped` signal first, and only then
+calls the handler, whose closeout evaluation is the slow part of the Stop
+path. The handler's `turn-ended` signal then adds the closeout's verdict.
+When the closeout never finishes, `blocked` keeps its last value. That value
+is a CLI refusal from this turn, or the block an earlier Stop in this turn
+recorded. A closeout that was cancelled refused nothing, and it lifted
+nothing either. The user confirmed this choice: on a cancelled closeout,
+`blocked` keeps its last value.
 
-**A failed write never changes a verdict.** The helper runs after the response
-is computed and before it is printed. It neither reads nor returns the
-response, and it swallows every failure. The suite checks this by breaking the
-store and comparing the output byte for byte (ADR-007 D10).
+### The three guarantees
+
+**A failed write never changes a verdict.** The helper neither reads nor
+returns the response, and it swallows every failure. Every write runs after
+the response is computed and before it is printed, except a Stop's arrival.
+That write runs before the closeout and cannot see the response either. The
+suite checks this by breaking the store and comparing the output byte for
+byte (ADR-007 D10).
+
+**A delivered Stop ends the turn** (BUG_095). The host cancels a hook at its
+15 s timeout, and a cancelled process writes nothing more. So `turn: ended`
+is written before the closeout runs, and a Stop whose closeout outlasts the
+timeout still leaves the turn ended. A stale `running` would otherwise read
+as mid-turn (`busy`, then `stuck`) until a later event corrected it. The
+timeout itself is unchanged. The fix does not depend on it, and a longer
+timeout would only make the host wait longer on a slow closeout.
 
 **The probe writes nothing.** `doctor`'s probe payloads, including the new
 `Notification` one, skip the helper outright. They are run against the inert

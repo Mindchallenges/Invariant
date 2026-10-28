@@ -200,6 +200,39 @@ class TestStore:
         assert doc["blocked"]["rules"] == ["docs.read_architecture"]
         assert doc["turn"] == "ended"
 
+    def test_a_stop_arriving_ends_the_turn_and_clears_waiting(self, attention, store):
+        attention.prompt(HOST)
+        attention.wait(HOST, "permission", "x")
+        attention.turn_stopped(HOST, pid_source=fixed(4242))
+        doc = on_disk(store)
+        assert doc["turn"] == "ended"
+        assert doc["turn_since"] == NOW
+        assert doc["waiting"] is None
+        assert doc["pid"] == 4242
+
+    @pytest.mark.parametrize("surface", ["stop", "cli"])
+    def test_a_stop_arriving_leaves_any_block_to_the_closeout(
+        self, attention, store, surface
+    ):
+        """Whether the closeout refused the turn is not known yet, and a
+        closeout cancelled at its timeout never says: the last word stands."""
+        if surface == "stop":
+            attention.turn_ended(HOST, ["pipeline.complete"])
+        else:
+            attention.refused(HOST, ["pipeline.complete"])
+        before = on_disk(store)["blocked"]
+        attention.turn_stopped(HOST)
+        assert on_disk(store)["blocked"] == before
+
+    def test_the_closeout_refines_the_arrival(self, attention, store):
+        attention.turn_ended(HOST, ["pipeline.complete"])
+        attention.turn_stopped(HOST)
+        attention.turn_ended(HOST, [])
+        assert on_disk(store)["blocked"] is None
+        attention.turn_stopped(HOST)
+        attention.turn_ended(HOST, ["test.all_pass"])
+        assert on_disk(store)["blocked"]["rules"] == ["test.all_pass"]
+
     def test_a_blocking_stop_replaces_a_cli_refusal(self, attention, store):
         attention.refused(HOST, ["docs.read_architecture"])
         attention.turn_ended(HOST, ["pipeline.complete"])
@@ -495,6 +528,14 @@ class TestHostSignals:
         assert host.handle("stop", "{}", ctx)["decision"] == "block"
         assert host.attention is None
 
+    def test_only_a_stop_says_anything_on_arrival(self, host):
+        assert host.arrival_attention("stop") == AttentionSignal(
+            cc.ATTENTION_TURN_STOPPED
+        )
+        for event in (*EVENTS, "no-such-event"):
+            if event != "stop":
+                assert host.arrival_attention(event) is None, event
+
     def test_session_end(self, host, ctx):
         assert self.signal(host, ctx, "session-end", {}) == AttentionSignal(
             cc.ATTENTION_HOST_ENDED
@@ -586,7 +627,9 @@ class TestHookWrites:
         def boom(*args, **kwargs):
             raise OSError("disk full")
 
-        for name in ("wait", "turn_ended", "prompt", "answered", "host_ended"):
+        for name in (
+            "wait", "turn_stopped", "turn_ended", "prompt", "answered", "host_ended"
+        ):
             monkeypatch.setattr(AttentionStore, name, boom)
         broken = [hook("notification", body), hook("stop", stop)]
         assert broken == healthy
@@ -612,6 +655,39 @@ class TestHookWrites:
             "error": "RuntimeError: engine broke",
             "since": json.loads(sidecar(governed).read_text())["degraded"]["since"],
         }
+
+    def test_a_stop_whose_handler_raises_still_ends_the_turn(
+        self, governed, monkeypatch
+    ):
+        """The arrival is recorded before the closeout runs (BUG_095)."""
+        hook("user-prompt-submit", {"session_id": HOST})
+
+        def explode(self, event, raw, ctx):
+            raise RuntimeError("engine broke")
+
+        monkeypatch.setattr(ClaudeCodeHost, "handle", explode)
+        hook("stop", {"session_id": HOST})
+        doc = json.loads(sidecar(governed).read_text())
+        assert doc["turn"] == "ended"
+        assert doc["degraded"]["event"] == "stop"
+
+    def test_the_arrival_is_written_before_the_closeout_runs(
+        self, governed, monkeypatch
+    ):
+        hook("user-prompt-submit", {"session_id": HOST})
+        seen = []
+
+        def closeout(event, rule_ctx):
+            seen.append(json.loads(sidecar(governed).read_text())["turn"])
+            return [blocking("pipeline.complete")]
+
+        monkeypatch.setattr(cc, "evaluate_event", closeout)
+        _, out = hook("stop", {"session_id": HOST})
+        assert seen == ["ended"]
+        assert json.loads(out)["decision"] == "block"
+        doc = json.loads(sidecar(governed).read_text())
+        assert doc["turn"] == "ended"
+        assert doc["blocked"]["rules"] == ["pipeline.complete"]
 
     def test_a_raising_handler_under_the_probe_records_nothing(
         self, governed, monkeypatch
