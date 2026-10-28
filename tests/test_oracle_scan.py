@@ -732,8 +732,10 @@ class TestClaudeCodeProbe:
         assert launch.process_name(1) is None
 
     def test_the_closer_asks_the_same_question(self, monkeypatch):
+        from invariant.cli.host_close import DetachedCloser
+
         monkeypatch.setattr(launch, "process_name", lambda pid: f"name-{pid}")
-        assert launch.DetachedCloser().process_name(7) == "name-7"
+        assert DetachedCloser().process_name(7) == "name-7"
 
 
 # -- the CLI ---------------------------------------------------------------------

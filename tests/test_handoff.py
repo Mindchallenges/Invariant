@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from invariant.cli import host_close
 from invariant.cli.main import main
 from invariant.core.errors import GateFailure, InvariantError, UsageError
 from invariant.core.manifest import Manifest
@@ -38,6 +39,12 @@ from invariant.domains.session import (
     handoff_name,
 )
 from invariant.hosts import claude_code_launch as launch
+from invariant.oracle.closehost import (
+    GRACE_SECONDS,
+    TAB_POLL_SECONDS,
+    TAB_SETTLE_SECONDS,
+    HostSeams,
+)
 
 #: A note carrying every character class the quoting has to survive: spaces,
 #: colons, a middot, an arrow, an apostrophe, double quotes, a backslash, a
@@ -1052,29 +1059,76 @@ class TestTheOldSessionEnds:
     def test_the_real_closer_is_the_detached_one(self):
         from invariant.cli import main as cli
 
-        assert isinstance(cli._real_handoff_closer(), launch.DetachedCloser)
+        assert isinstance(cli._real_handoff_closer(), host_close.DetachedCloser)
 
 
-def _run_close_script(script: str, comm: str | None, tmp_path) -> list[str]:
-    """Run ``script`` in a real shell whose ``kill`` only records its arguments.
+_START = "start-of-the-old-host"
+_TTY = "ttys004"
 
-    ``kill`` is a regular built-in, so a function of the same name shadows it;
-    ``ps`` is replaced the same way when ``comm`` is given, and is the real
-    ``ps`` otherwise. Nothing is signalled either way.
+
+class _Facts:
+    def __init__(self, is_host=True, start=_START, tty=_TTY) -> None:
+        self.is_host, self.start, self.tty = is_host, start, tty
+
+
+class _OldHost:
+    """The Claude that ran a handoff, as every seam describes it. Inert.
+
+    ``reads`` are what ``ps`` answers, in turn: when the closer is started,
+    then after its wait. ``events`` is everything asked and done, in order.
     """
-    log = tmp_path / "kill.log"
-    stubs = [f'kill() {{ echo "$*" >> {shlex.quote(str(log))}; }}']
-    if comm is not None:
-        stubs.append(f"ps() {{ printf '%s\\n' {shlex.quote(comm)}; }}")
-    proc = subprocess.run(
-        ["/bin/sh", "-c", "\n".join([*stubs, script])],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+    def __init__(self, before=None, after=None, *, in_terminal=True, exits=True,
+                 tab=(("closed_window", ""),)) -> None:
+        self.reads = [before or _Facts(), after or _Facts()]
+        self.in_terminal_answer = in_terminal
+        self.exits = exits
+        self.tab_answers = list(tab)
+        self.signalled = False
+        self.events: list[tuple] = []
+        self.clock = 0.0
+
+    def seams(self) -> HostSeams:
+        return HostSeams(
+            records=list,
+            facts=self.facts,
+            alive=self.alive,
+            terminate=self.terminate,
+            in_terminal=self.in_terminal,
+            close_tab=self.close_tab,
+            sleep=self.sleep,
+            monotonic=lambda: self.clock,
+        )
+
+    def facts(self, pid):
+        self.events.append(("ps", pid))
+        return self.reads.pop(0)
+
+    def alive(self, pid):
+        return not (self.signalled and self.exits)
+
+    def terminate(self, pid):
+        self.events.append(("TERM", pid))
+        self.signalled = True
+
+    def in_terminal(self, pid):
+        self.events.append(("chain", pid))
+        return self.in_terminal_answer
+
+    def close_tab(self, tty):
+        self.events.append(("tab", tty))
+        return self.tab_answers.pop(0) if len(self.tab_answers) > 1 else self.tab_answers[0]
+
+    def sleep(self, seconds):
+        self.events.append(("sleep", seconds))
+        self.clock += seconds
+
+    def kinds(self) -> list[str]:
+        return [event[0] for event in self.events]
+
+
+def _end(host: _OldHost, delay: int = 20) -> list[str]:
+    return host_close.end_handed_off_host(4242, delay, host.seams(), sleep=host.sleep)
 
 
 class TestTheHostCloser:
@@ -1106,30 +1160,120 @@ class TestTheHostCloser:
     def test_only_claude_is_a_claude_process(self, name, verdict):
         assert launch.is_claude_process_name(name) is verdict
 
-    def test_the_script_is_a_bounded_sleep_then_a_checked_term(self):
-        script = launch.close_script(4242, 20)
-        assert script.startswith("sleep 20;")
-        assert "ps -p 4242 -o comm=" in script
-        assert "kill -TERM 4242" in script
-
-    @pytest.mark.parametrize("comm", ["claude", "/opt/homebrew/bin/claude"])
-    def test_the_script_signals_a_claude_process(self, comm, tmp_path):
-        assert _run_close_script(launch.close_script(4242, 0), comm, tmp_path) == [
-            "-TERM 4242"
+    def test_the_same_claude_is_ended_then_its_tab_closed(self):
+        host = _OldHost()
+        lines = _end(host)
+        assert host.events == [
+            ("ps", 4242), ("sleep", 20), ("ps", 4242),
+            ("chain", 4242), ("TERM", 4242), ("tab", _TTY),
         ]
+        assert lines[-1] == "Claude ended, and its Terminal window closed."
 
-    @pytest.mark.parametrize("comm", ["python3", "claude-helper", ""])
-    def test_the_script_spares_anything_else(self, comm, tmp_path):
-        assert _run_close_script(launch.close_script(4242, 0), comm, tmp_path) == []
+    @pytest.mark.parametrize(
+        ("before", "after"),
+        [
+            (_Facts(), _Facts(is_host=False)),
+            (_Facts(is_host=False), _Facts()),
+            (None, _Facts()),
+            (_Facts(), None),
+        ],
+    )
+    def test_a_process_that_is_not_claude_is_spared(self, before, after):
+        host = _OldHost(before, after)
+        if before is None:
+            host.reads[0] = None
+        if after is None:
+            host.reads[1] = None
+        lines = _end(host)
+        assert host.kinds() == ["ps", "sleep", "ps"]
+        assert lines == ["left process 4242 alone: it is not Claude any more"]
 
-    def test_a_reused_pid_is_spared_at_kill_time_by_the_real_ps(self, tmp_path):
-        # This process is python, not claude: the check the script makes
-        # immediately before the signal must refuse it.
-        script = launch.close_script(os.getpid(), 0)
-        assert _run_close_script(script, None, tmp_path) == []
+    @pytest.mark.parametrize(
+        "after", [_Facts(start="start-of-a-newer-process"), _Facts(tty="ttys009")]
+    )
+    def test_a_reused_pid_is_spared_at_kill_time(self, after):
+        host = _OldHost(_Facts(), after)
+        lines = _end(host)
+        assert "TERM" not in host.kinds() and "tab" not in host.kinds()
+        assert lines == ["left process 4242 alone: it is another process than the one handed off"]
+
+    def test_no_tty_ends_claude_and_leaves_the_window(self):
+        host = _OldHost(_Facts(tty=None), _Facts(tty=None))
+        lines = _end(host)
+        assert host.kinds() == ["ps", "sleep", "ps", "TERM"]
+        assert "it has no terminal" in lines[-1]
+
+    @pytest.mark.parametrize(("app", "why"), [
+        (False, "it does not run in Terminal"),
+        (None, "invariant could not tell which app owns it"),
+    ])
+    def test_only_a_terminal_app_tab_is_closed(self, app, why):
+        host = _OldHost(in_terminal=app)
+        lines = _end(host)
+        assert host.kinds() == ["ps", "sleep", "ps", "chain", "TERM"]
+        assert why in lines[-1]
+
+    def test_a_busy_tab_is_asked_again_while_it_settles(self):
+        host = _OldHost(tab=(("busy", "caffeinate"), ("busy", "caffeinate"), ("closed_tab", "")))
+        lines = _end(host)
+        assert [e for e in host.events if e[0] == "tab"] == [("tab", _TTY)] * 3
+        assert ("sleep", TAB_POLL_SECONDS) in host.events
+        assert lines[-1] == "Claude ended, and its Terminal tab closed."
+
+    def test_a_tab_still_busy_past_the_settle_is_left(self):
+        host = _OldHost(tab=(("busy", "vim"),))
+        lines = _end(host)
+        asked = [e for e in host.events if e[0] == "tab"]
+        assert len(asked) == int(TAB_SETTLE_SECONDS / TAB_POLL_SECONDS) + 1
+        assert "something else is running in its tab (vim)" in lines[-1]
+
+    def test_a_claude_that_does_not_exit_keeps_its_window(self):
+        host = _OldHost(exits=False)
+        with pytest.raises(InvariantError, match=f"within {int(GRACE_SECONDS)} s"):
+            _end(host)
+        assert "tab" not in host.kinds()
+
+    def test_the_closer_process_ends_the_host(self, capsys):
+        host = _OldHost()
+        assert host_close.main(["4242", "0"], seams=host.seams) == 0
+        assert host.kinds()[-1] == "tab"
+        assert capsys.readouterr().out.strip().endswith("its Terminal window closed.")
+
+    def test_the_closer_process_reports_a_claude_that_stayed(self, capsys):
+        host = _OldHost(exits=False)
+        assert host_close.main(["4242", "0"], seams=host.seams) == 1
+        assert "did not exit" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "argv", [[], ["4242"], ["4242", "20", "x"], ["0", "20"], ["-3", "20"], ["abc", "1"]]
+    )
+    def test_the_closer_process_refuses_bad_arguments(self, argv, capsys):
+        def never():
+            raise AssertionError("no seam may be built for a refused call")
+
+        assert host_close.main(argv, seams=never) == 2
+        assert "usage" in capsys.readouterr().err
+
+    def test_the_real_seams_are_claude_codes(self):
+        from invariant.oracle.closehost import send_sigterm
+        from invariant.oracle.scan import pid_exists
+
+        seams = host_close.claude_code_seams()
+        assert seams.alive is pid_exists
+        assert seams.terminate is send_sigterm
+        assert seams.in_terminal is launch.runs_in_terminal_app
+        assert seams.close_tab.__self__.__class__ is launch.TerminalTabCloser
+
+    def test_close_host_gets_the_same_seams(self):
+        from invariant.cli import main as cli
+        from invariant.oracle.closehost import send_sigterm
+
+        seams = cli._real_oracle_host_seams()
+        assert seams.terminate is send_sigterm
+        assert seams.in_terminal is launch.runs_in_terminal_app
 
     def test_process_name_reads_ps(self):
-        name = launch.DetachedCloser().process_name(os.getpid())
+        name = host_close.DetachedCloser().process_name(os.getpid())
         assert name
         assert not launch.is_claude_process_name(name)
 
@@ -1139,26 +1283,26 @@ class TestTheHostCloser:
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
 
         monkeypatch.setattr(launch.subprocess, "run", fake_run)
-        assert launch.DetachedCloser().process_name(999999) is None
+        assert host_close.DetachedCloser().process_name(999999) is None
 
     def test_process_name_is_none_without_ps(self, monkeypatch):
         def fake_run(argv, **kwargs):
             raise FileNotFoundError(argv[0])
 
         monkeypatch.setattr(launch.subprocess, "run", fake_run)
-        assert launch.DetachedCloser().process_name(42) is None
+        assert host_close.DetachedCloser().process_name(42) is None
 
-    def test_close_spawns_a_detached_sleeper_holding_no_pipe(self, monkeypatch):
+    def test_close_spawns_a_detached_closer_holding_no_pipe(self, monkeypatch):
         calls = []
 
         def fake_popen(argv, **kwargs):
             calls.append((argv, kwargs))
 
-        monkeypatch.setattr(launch.subprocess, "Popen", fake_popen)
-        launch.DetachedCloser().close(4242, 20)
+        monkeypatch.setattr(host_close.subprocess, "Popen", fake_popen)
+        host_close.DetachedCloser().close(4242, 20)
 
         ((argv, kwargs),) = calls
-        assert argv == ["/bin/sh", "-c", launch.close_script(4242, 20)]
+        assert argv == [sys.executable, "-m", "invariant.cli.host_close", "4242", "20"]
         assert kwargs["start_new_session"] is True
         for stream in ("stdin", "stdout", "stderr"):
             assert kwargs[stream] is subprocess.DEVNULL
@@ -1213,9 +1357,27 @@ print("closed_window")
 '''
 
 
-@pytest.mark.xfail(
-    strict=True, reason="BUG_100 is live — delete this marker with the fix"
-)
+#: Runs ``python -m <module> <args>`` with ``os.kill`` recording each signal
+#: and marking the pid gone; signal 0 answers from the marks. No signal is
+#: ever sent.
+_BUG_100_FAKE_KILL = '''
+import os, runpy, sys
+state = os.environ["BUG_100_STATE"]
+def kill(pid, sig):
+    with open(os.path.join(state, "events"), "a") as log:
+        log.write(f"kill -{'0' if sig == 0 else 'TERM'} {pid}\\n")
+    gone = os.path.join(state, f"gone-{pid}")
+    if sig == 0:
+        if os.path.exists(gone):
+            raise ProcessLookupError(pid)
+        return
+    open(gone, "w").close()
+os.kill = kill
+module, sys.argv = sys.argv[1], sys.argv[1:]
+runpy.run_module(module, run_name="__main__", alter_sys=True)
+'''
+
+
 def test_BUG_100_handoff_close_closes_the_old_terminal_tab_after_claude_exits(
     monkeypatch, tmp_path
 ):
@@ -1259,7 +1421,7 @@ def test_BUG_100_handoff_close_closes_the_old_terminal_tab_after_claude_exits(
         return real_popen(argv, *rest, **kwargs)
 
     monkeypatch.setattr(launch.subprocess, "Popen", popen)
-    launch.DetachedCloser().close(_BUG_100_CLAUDE, 0)
+    host_close.DetachedCloser().close(_BUG_100_CLAUDE, 0)
     assert len(detached) == 1, detached
     argv = detached[0]
     assert "/usr/bin/osascript" not in " ".join(argv), "the real osascript must never run"
@@ -1272,6 +1434,10 @@ def test_BUG_100_handoff_close_closes_the_old_terminal_tab_after_claude_exits(
             '*) : > "$BUG_100_STATE/gone-$a" ;; esac; }'
         )
         argv = [*argv[:2], f"{kill}\n{argv[2]}", *argv[3:]]
+    elif argv[1:3] == ["-m", host_close.__name__]:
+        # The closer is this interpreter running a module: its signals go
+        # through os.kill, faked the way the shell's kill is above.
+        argv = [argv[0], "-c", _BUG_100_FAKE_KILL, *argv[2:]]
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
     assert proc.returncode == 0, proc.stderr
 

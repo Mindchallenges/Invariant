@@ -163,7 +163,7 @@ graph TD
     OWSVC --> OTLS
     OTLS --> OWEB
     OTLS --> OHOME
-    CLI --> OCLOSE
+    CLI -- close-host and the handoff closer --> OCLOSE
     OCLOSE --> OSCAN
     CLI -. injects the record reader, ps, SIGTERM and the Terminal tab closer from .-> CCLAUNCH
     CCLAUNCH --> CCTEL
@@ -365,7 +365,9 @@ CCLAUNCH`), the probe's shape a third time. A terminal step reuses the
 `OCLOSE` is `oracle close-host`, the oracle's first destructive power
 (IDEA_027 increment 6, ADR-009 D1, D15): the step a closeable leftover host
 recommends, run like any other through `OACT`. `CLI --> OCLOSE` is the
-subcommand; `OCLOSE --> OSCAN` is the process shapes it checks and the
+subcommand, and since BUG_100 also the handoff's detached closer
+(`cli/host_close`), which ends its own host through the same
+`end_then_close_tab`; `OCLOSE --> OSCAN` is the process shapes it checks and the
 session row kind its binding check reads from a fresh `scan_all` and
 `assess`. Every host fact and effect it needs, Claude Code's per-process
 records and `ps`, the signal, which app owns the window and the AppleScript
@@ -1253,10 +1255,14 @@ It also ends the host that ran the handoff, once the launch has succeeded —
 that is, once the watch has seen the successor alive (IDEA_009, BUG_075). `HostCloser` is a second seam beside `Launcher`, reached through
 `_handoff_closer` the way the launcher is through `_handoff_launcher`, and the
 suite replaces it everywhere, so no test signals a process. The real
-`DetachedCloser` starts `close_script` in a session of its own, holding none
-of the command's streams: `sleep CLOSE_DELAY_SECONDS`, then `ps -p` to check
-that `CLAUDE_PID` still names `claude`, then SIGTERM. The check runs at kill
-time because a pid can be reused while the script sleeps. The CLI checks once
+`DetachedCloser` lives in the CLI layer (`cli/host_close`), because it joins
+this module's facts to the oracle's `closehost`, which neither layer may
+import from the other. It starts `python -m invariant.cli.host_close` in a
+session of its own, holding none of the command's streams: `ps` on
+`CLAUDE_PID` at once, `sleep CLOSE_DELAY_SECONDS`, `ps` again, and only for
+the same `claude` (same start, same tty) `closehost.end_then_close_tab`,
+the panel Close's own SIGTERM, wait and Terminal tab close (BUG_100). The
+check runs at kill time because a pid can be reused while it sleeps. The CLI checks once
 too, before scheduling, so a missing or foreign pid is reported instead of
 being left to fail silently. `CLAUDE_PID` is read as `HOST_PID_ENV`, a constant
 of its own: the same spelling is in `HOST_MARKERS`, but there it is a value the
@@ -1267,9 +1273,11 @@ process primitives, `process_facts` and `is_claude_process_name`, for its own
 check at the moment it acts, and adds two of its own: `runs_in_terminal_app`,
 which walks the parent chain for Terminal.app, and `TerminalTabCloser`, which
 runs `TERMINAL_TAB_SCRIPT` through `osascript` with the tty as the script's
-argument, never as its text. Unlike `DetachedCloser` it does close a
-Terminal tab, and only once Claude has exited and only a login shell is left
-in it; ADR-005 D7's rejection stands for the handoff closer.
+argument, never as its text. It closes a Terminal tab only once Claude has
+exited and only a login shell is left in it. Since BUG_100 the handoff's
+closer closes the old host's tab through the same `end_then_close_tab`
+(ADR-005 D7, amended), and `host_close.claude_code_seams` is the one place
+both get Claude Code's seams from.
 
 The telemetry reader is also the library's only dependency on another program's **undocumented**
 format, and that shapes the code: every field access tolerates absence, an

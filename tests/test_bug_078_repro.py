@@ -38,7 +38,7 @@ import yaml
 
 from invariant.core.manifest import MANIFEST_RELPATH, Manifest
 from invariant.core.store import JsonStore
-from invariant.hosts.claude_code_launch import ClaudeCodeProbe
+from invariant.hosts.claude_code_launch import ClaudeCodeProbe, ProcessFacts
 from invariant.oracle.home import oracle_home
 from invariant.oracle.index import ProjectIndex
 from invariant.oracle.scan import ROW_HOST, ScanCache, scan_project
@@ -105,7 +105,18 @@ def world(tmp_path):
     transcript.write_text("".join(json.dumps(line) + "\n" for line in lines), "utf-8")
     os.utime(transcript, (TOUCHED, TOUCHED))
 
-    probe = ClaudeCodeProbe(home=home, name_of=lambda pid: "claude")
+    # The ps-facts seam agrees with name_of: the pid is a claude that started
+    # before the host's last write, so the attention pid verifies and nothing
+    # real is read for it.
+    probe = ClaudeCodeProbe(
+        home=home,
+        name_of=lambda pid: "claude",
+        facts_of=lambda pid: ProcessFacts(
+            is_host=True, start="2026-01-01T00:00:00", tty="ttys001",
+            started=LAST_TURN - 3600,
+        ),
+        cwd_of=lambda pid: None,
+    )
     return entry, probe
 
 

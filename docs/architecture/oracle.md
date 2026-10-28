@@ -1630,9 +1630,10 @@ D15's; the words are [oracle-panel.md](oracle-panel.md)'s.
 
 | Module | Owns | Never does |
 |---|---|---|
-| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, the SIGTERM and the wait, the tab and its settle), `binding_refusal`, `attention_refusal` (the fresh scan's word for a pid no record names, BUG_099), `send_sigterm`, the outcome lines and `outcome_word` (a line back to its code, BUG_098) | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
+| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, then `end_then_close_tab`), `end_then_close_tab` (the parent chain read, the SIGTERM and the wait, the tab and its settle; the one way invariant ends a Claude window, shared with the handoff's closer, BUG_100), `binding_refusal`, `attention_refusal` (the fresh scan's word for a pid no record names, BUG_099), `send_sigterm`, the outcome lines and `outcome_word` (a line back to its code, BUG_098) | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
 | `webactions` | Writes the close's outcome code on the audit log's done line (`tab`), through `outcome_word` | Record the outcome line or any other output |
 | `hosts/claude_code_launch` | `runs_in_terminal_app` (Terminal.app in the parent chain), `TerminalTabCloser` and `TERMINAL_TAB_SCRIPT` | Interpolate the tty into the script; start Terminal; decide whether to close |
+| `cli/host_close` | `claude_code_seams` (the one join of Claude Code's facts and effects into `HostSeams`), `end_handed_off_host`, `DetachedCloser` and the detached process `session handoff` starts (`main`) | Check a leftover window (that is `close_host`'s); close a tab by any rule of its own |
 
 ```mermaid
 sequenceDiagram
@@ -1719,7 +1720,8 @@ out of the log ([state_model.md](state_model.md), "The web actions' audit
 log"). A refused or failed close, and every other step, has no `tab`.
 
 **The seams.** The CLI reaches every host fact and effect through
-`_oracle_host_seams`, a `HostSeams` of Claude Code's: `ClaudeCodeProbe`'s
+`_oracle_host_seams`, a `HostSeams` of Claude Code's built by
+`host_close.claude_code_seams`: `ClaudeCodeProbe`'s
 `host_processes` and `process_facts`, `scan.pid_exists`,
 `closehost.send_sigterm`, `runs_in_terminal_app` and
 `TerminalTabCloser().close`. The binding check and, for a pid no record
@@ -1731,6 +1733,40 @@ anything. Beside the `osascript` guard, the `conftest.py` guard refuses
 the test itself spawned through `subprocess.Popen`, and raises
 `RefusedProgram`. The one test that sends a real SIGTERM sends it to a
 `python -c "sleep"` child of its own.
+
+**The handoff closes its window the same way (BUG_100).** `session handoff`
+ends the host that ran it once its successor is alive (cli.md; ADR-005 D7).
+Its closer is `end_then_close_tab` too, behind a check of its own: the
+handoff names its own `CLAUDE_PID`, so there is no record, binding or
+confirm to check again, only the process. `DetachedCloser` starts
+`python -m invariant.cli.host_close <pid> <delay>` in a session of its own,
+holding none of the command's streams, with the interpreter that runs
+invariant. That process describes the pid with `ps` at once, waits the
+delay, describes it again, and ends it only if it is still `claude`,
+started at the same moment, on the same terminal; anything else is left
+alone with nothing signalled. From there every rule above holds unchanged:
+the parent chain read before the signal, one SIGTERM and the 10 s wait,
+the tab only with a tty, only under Terminal.app, only when nothing but its
+shell is left, asked again while it settles. No `osascript` appears in any
+shell text; the tab closer finds it on `PATH`. The suite replaces
+`_handoff_closer` everywhere, and BUG_100's repro runs the real detached
+process with `ps`, `osascript` and its signals faked.
+
+```mermaid
+sequenceDiagram
+    participant Cmd as session handoff
+    participant Det as host_close (detached process)
+    participant Seams as HostSeams (claude_code_seams)
+    Cmd->>Seams: ps: CLAUDE_PID names claude?
+    Note over Cmd: not claude: "leaving this session open", nothing scheduled
+    Cmd->>Det: start: pid, CLOSE_DELAY_SECONDS (own session, no streams)
+    Cmd-->>Cmd: output printed, command returns
+    Det->>Seams: ps: is claude, start, tty
+    Det->>Det: sleep the delay
+    Det->>Seams: ps again: still claude, same start, same tty?
+    Note over Det: any mismatch: left alone, nothing signalled
+    Det->>Det: end_then_close_tab(pid, tty): parent chain, SIGTERM, wait, settled tab close
+```
 
 ## Start a session (IDEA_030)
 

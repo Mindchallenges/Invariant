@@ -204,6 +204,23 @@ person asked for that window to be gone, its tty is known, and the tab is
 closed only once Claude has exited and nothing but its shell is left. The
 handoff closer is unchanged.
 
+*Amended by BUG_100 (2026-10-28):* the rejection above is withdrawn for the
+handoff too. Every handoff left one more idle window at a shell prompt, and
+the maintainer asked for the old session to end itself window included.
+Each objection is met by the panel Close's own rules, which the handoff now
+reuses rather than restates: the tab is closed only after Claude has
+exited, so the shell is ended only once nothing but it is left; over
+Remote Control, in another terminal or an editor there is no Terminal.app
+tab, and Claude still ends while the window is left as before; and the
+window is known, because its tty and whether Terminal.app owns it are read
+from the process itself, the parent chain before the signal. The closer is
+no longer a shell `sleep; check; kill`: it is a detached invariant process
+(`cli/host_close`) that describes the pid when it starts and again at kill
+time, ends only the same `claude` (same start, same tty), and then runs
+`closehost.end_then_close_tab`, the one SIGTERM, bounded wait and settled
+`TERMINAL_TAB_SCRIPT` close the oracle uses. Nothing else in this decision
+changes: the delay, `--keep-open`, and which launches end the old session.
+
 ## Consequences
 
 - A host process is started by this library for the first time. It is macOS

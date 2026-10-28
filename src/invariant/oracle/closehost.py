@@ -21,7 +21,9 @@ closed, when nothing but its shell is left there (the window, when that tab
 was its only one). Claude's own children share its tty and may outlive it by
 a moment, so a tab that answers ``busy`` is asked again every
 :data:`TAB_POLL_SECONDS` for up to :data:`TAB_SETTLE_SECONDS` (BUG_098).
-Anything else leaves the window open and says why.
+Anything else leaves the window open and says why. That ending,
+:func:`end_then_close_tab`, is also how ``session handoff`` ends the host that
+ran it (BUG_100), behind a check of its own.
 
 The last line is one of a fixed set of sentences, and :func:`outcome_word`
 names which by its code, so the actions audit log can record what happened
@@ -248,17 +250,17 @@ def _settled_close(tty: str, seams: HostSeams) -> tuple[str, str]:
         seams.sleep(TAB_POLL_SECONDS)
 
 
-def _tab_outcome(request: CloseRequest, app: bool | None, seams: HostSeams) -> str:
+def _tab_outcome(tty: str | None, app: bool | None, seams: HostSeams) -> str:
     """The last line: the tab closed, or why the window was left open."""
-    if not request.tty:
+    if not tty:
         return LEFT_OPEN.format(why=_WHY_LEFT["no_tty"])
     if app is not True:
         return LEFT_OPEN.format(why=_WHY_LEFT["not_terminal" if app is False else "unknown_app"])
-    code, detail = _settled_close(request.tty, seams)
+    code, detail = _settled_close(tty, seams)
     if code in OUTCOMES:
         return OUTCOMES[code]
     reason = _WHY_LEFT.get(code, _WHY_LEFT["failed"])
-    why = reason.format(detail=detail or code, tty=request.tty)
+    why = reason.format(detail=detail or code, tty=tty)
     return LEFT_OPEN.format(why=why)
 
 
@@ -297,11 +299,27 @@ def close_host(request: CloseRequest, seams: HostSeams,
     """
     _check(request, seams, bound, vouched)
     pid = request.pid
-    app = seams.in_terminal(pid) if request.tty else None
     lines = [
         f"checked just now: process {pid} is Claude, window {request.host_id[:8]}, "
         f"started {request.start}" + (f", on {request.tty}" if request.tty else "")
     ]
+    return lines + end_then_close_tab(pid, request.tty, seams)
+
+
+def end_then_close_tab(pid: int, tty: str | None, seams: HostSeams) -> list[str]:
+    """Ask a checked Claude to end, wait for it, then close its tab. The lines to print.
+
+    The one way invariant ends a Claude window, shared by ``oracle close-host``
+    and the handoff's closer (BUG_100); the caller has already checked that
+    ``pid`` is the Claude it means. Whether Terminal.app owns the window is
+    read from the parent chain BEFORE the signal, while the chain exists.
+    One SIGTERM and the bounded wait, never a SIGKILL: a Claude still running
+    after it raises, and its window is not touched. Only then, only with a
+    tty and only under Terminal.app, the tab is asked to close, again while
+    it settles (BUG_098).
+    """
+    app = seams.in_terminal(pid) if tty else None
+    lines: list[str] = []
     began = seams.monotonic()
     try:
         seams.terminate(pid)
@@ -314,5 +332,5 @@ def close_host(request: CloseRequest, seams: HostSeams,
             raise InvariantError(DID_NOT_EXIT.format(seconds=int(GRACE_SECONDS)))
         lines.append(f"asked Claude (process {pid}) to end; it exited after "
                      f"{seams.monotonic() - began:.1f} s")
-    lines.append(_tab_outcome(request, app, seams))
+    lines.append(_tab_outcome(tty, app, seams))
     return lines

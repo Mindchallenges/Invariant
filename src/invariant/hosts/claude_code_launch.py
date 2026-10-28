@@ -44,14 +44,16 @@ windows the user opens by hand. Everything else — the user's own variables and
 
 **Once the successor is running, the old host ends (IDEA_009).** Claude Code
 names its own process in ``CLAUDE_PID`` for the tools it runs, and after a
-successful launch the CLI hands that pid to a ``HostCloser``. The real one
-starts ``close_script``: a detached ``sleep``, a ``ps`` check that the pid
-still names ``claude``, and a SIGTERM — the check at kill time, because a pid
-can be reused while the script sleeps. It signals the process rather than
-closing a window, so it works in any terminal and over Remote Control, and the
-window stays at a shell prompt. The CLI reaches the closer through one
-replaceable function, the way it reaches the launcher, and the suite replaces
-it everywhere: no test signals a process.
+successful launch the CLI hands that pid to a closer of its own
+(``cli/host_close``), which joins this module's process facts and tab closer
+to the oracle's ``end_then_close_tab``: a ``ps`` check that the pid is still
+the same ``claude`` at kill time, a SIGTERM, and once Claude has exited the
+Terminal tab closed under the panel Close's rules (BUG_100). This module
+supplies the facts (``process_name``, ``process_facts``,
+``runs_in_terminal_app``) and ``TerminalTabCloser``; it never decides to end
+anything. The CLI reaches the closer through one replaceable function, the
+way it reaches the launcher, and the suite replaces it everywhere: no test
+signals a process.
 
 **The note never rides the typed line (BUG_075).** ``do script`` TYPES the
 line into the new window's tty before its shell has started line editing, and
@@ -564,8 +566,7 @@ def is_claude_process_name(name: str | None) -> bool:
     """Whether ``ps -o comm=`` output names a ``claude`` executable.
 
     Linux prints the bare name and macOS may print the full path, so the last
-    path component is compared, exactly. ``close_script`` makes the same test
-    in the shell, with a ``case`` over the same two spellings.
+    path component is compared, exactly.
     """
     if not name:
         return False
@@ -887,52 +888,6 @@ def find_host_pid(start: int, lookup, max_hops: int = HOST_PID_MAX_HOPS) -> int 
     return None
 
 
-def close_script(pid: int, delay: int) -> str:
-    """The detached shell line that ends the launching host: sleep, check, TERM.
-
-    The identity check runs immediately before the signal, not only when the
-    close is scheduled: the pid could be reused in between, and a process that
-    is not ``claude`` any more is left alone. ``sleep`` bounds the script's
-    life, and it exits on its own whatever the check answers.
-    """
-    return (
-        f"sleep {int(delay)}; "
-        f'case "$(ps -p {int(pid)} -o comm= 2>/dev/null)" in '
-        f"{CLAUDE_BINARY}|*/{CLAUDE_BINARY}) kill -TERM {int(pid)} ;; esac"
-    )
-
-
-class HostCloser(Protocol):
-    """The seam that ends the launching host. A test passes an inert recorder."""
-
-    def process_name(self, pid: int) -> str | None: ...
-
-    def close(self, pid: int, delay: int) -> None: ...
-
-
-class DetachedCloser:
-    """Ends the launching host through a short, detached ``close_script``.
-
-    The script runs in its own session (``start_new_session``), so it outlives
-    this command and is not in the process group the host's tool runner tears
-    down when the command returns. It holds none of this command's streams: an
-    inherited stdout would keep the host's tool call open until the sleep
-    ended, which is the output being held back rather than printed first.
-    """
-
-    def process_name(self, pid: int) -> str | None:
-        return process_name(pid)
-
-    def close(self, pid: int, delay: int) -> None:
-        subprocess.Popen(
-            ["/bin/sh", "-c", close_script(pid, delay)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-
-
 #: The process name macOS's Terminal.app runs as, the last component of its
 #: ``ps -o comm=`` path.
 TERMINAL_APP = "Terminal"
@@ -1013,7 +968,8 @@ def runs_in_terminal_app(pid: int, lookup=parent_process,
 
 
 class TerminalTabCloser:
-    """Closes the Terminal tab a leftover Claude ran in, once Claude has ended.
+    """Closes the Terminal tab a Claude ran in, once Claude has ended: a leftover
+    the panel closes, or the host that ran a handoff (BUG_100).
 
     ``osascript`` gets :data:`TERMINAL_TAB_SCRIPT` as one argument and the
     tty as another (``on run argv``), with no shell between, and runs without

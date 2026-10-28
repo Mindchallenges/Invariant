@@ -1725,7 +1725,7 @@ def _handoff_launcher():
 
 
 def _real_handoff_closer():
-    from ..hosts.claude_code_launch import DetachedCloser
+    from .host_close import DetachedCloser
 
     return DetachedCloser()
 
@@ -1847,8 +1847,8 @@ def _close_launching_host(launch, keep_open: bool) -> tuple[dict, str]:
     closer.close(pid, delay)
     close.update({"scheduled": True, "delay": delay})
     return close, (
-        f"  this session ends in {delay}s: SIGTERM to claude (pid {pid}); "
-        f"--keep-open keeps it next time"
+        f"  this session ends in {delay}s: SIGTERM to claude (pid {pid}), then its "
+        f"Terminal tab closes if only its shell is left; --keep-open keeps it next time"
     )
 
 
@@ -1931,8 +1931,9 @@ def cmd_session_handoff(args) -> int:
     5. **End the old host, last, and only after a launch that succeeded**
        (IDEA_009). The output is printed first; the launching `claude`
        (`CLAUDE_PID`) is sent SIGTERM `CLOSE_DELAY_SECONDS` later, by a
-       detached sleeper that checks the pid still names `claude` before it
-       signals. `--keep-open` opts out; a dry run, a refusal and a failed
+       detached closer that checks the pid is still the same `claude` before
+       it signals, and once Claude has exited closes its Terminal tab under
+       the panel Close's rules (BUG_100). `--keep-open` opts out; a dry run, a refusal and a failed
        launch never get here, and a missing or foreign pid is reported and
        left alone.
 
@@ -2033,7 +2034,7 @@ def cmd_session_handoff(args) -> int:
                 else (
                     f"  a real run then ends this session: SIGTERM to "
                     f"{launch.HOST_PID_ENV} after {launch.CLOSE_DELAY_SECONDS}s, "
-                    f"unless --keep-open"
+                    f"then its Terminal tab, unless --keep-open"
                 )
             ),
         ]
@@ -3462,19 +3463,9 @@ def _oracle_actions():
 
 
 def _real_oracle_host_seams():
-    from ..hosts import claude_code_launch as launch
-    from ..oracle.closehost import HostSeams, send_sigterm
-    from ..oracle.scan import pid_exists
+    from .host_close import claude_code_seams
 
-    probe = launch.ClaudeCodeProbe()
-    return HostSeams(
-        records=probe.host_processes,
-        facts=probe.process_facts,
-        alive=pid_exists,
-        terminate=send_sigterm,
-        in_terminal=launch.runs_in_terminal_app,
-        close_tab=launch.TerminalTabCloser().close,
-    )
+    return claude_code_seams()
 
 
 def _oracle_host_seams():

@@ -595,16 +595,26 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     says. The note stays recorded. The JSON result carries `successor`:
     `{"pid": <pid>}`.
 
-    Once the launch has succeeded, the old session ends itself (IDEA_009).
-    The output is printed in full; then, 20 seconds later
-    (`CLOSE_DELAY_SECONDS`), the Claude Code process named by `CLAUDE_PID` is
-    sent SIGTERM and exits, and its terminal window stays at a shell prompt.
-    The delay is the 15-second budget of the PostToolUse hook that records the
-    call, plus a margin; the note itself was recorded before the launch. The
-    wait is a detached `sleep 20; <check>; kill -TERM <pid>` that exits on its
-    own, and the check — `ps -p <pid> -o comm=` names `claude` — runs
-    immediately before the signal, so a pid reused in the meantime is spared.
-    `--keep-open` launches and leaves the session running. A `--dry-run`, any
+    Once the launch has succeeded, the old session ends itself, its window
+    included (IDEA_009, BUG_100). The output is printed in full; then, 20
+    seconds later (`CLOSE_DELAY_SECONDS`), the Claude Code process named by
+    `CLAUDE_PID` is sent SIGTERM, and once it has exited its Terminal tab
+    closes under the rules of the panel's Close (oracle.md, "Close host"):
+    only on a tty, only when the parent chain, read before the signal, shows
+    Terminal.app, only when nothing but the tab's shell is left
+    (`TERMINAL_TAB_SCRIPT`, asked again while the tab is busy for up to 5
+    seconds), and never by starting Terminal. A Claude still running 10
+    seconds after the signal is not forced, and its window is left; so is a
+    window in any other terminal, an editor or over Remote Control, where
+    Claude still ends. The delay is the 15-second budget of the PostToolUse
+    hook that records the call, plus a margin; the note itself was recorded
+    before the launch. The wait runs in a detached process of its own
+    (`python -m invariant.cli.host_close <pid> <delay>`, started by
+    `DetachedCloser`) that exits on its own. It describes the pid with `ps`
+    when it starts and again immediately before the signal, and ends only
+    the same process: still `claude`, started at the same moment, on the same
+    terminal, so a pid reused in the meantime is spared and nothing is
+    signalled. `--keep-open` launches and leaves the session running. A `--dry-run`, any
     refusal and a failed launch never end it. When `CLAUDE_PID` is unset,
     unusable, or names something other than `claude`, the handoff still
     succeeds, prints why it is leaving the session open, and signals nothing.
