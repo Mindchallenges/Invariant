@@ -623,6 +623,83 @@ class TestClaudeCodeProbe:
         assert source.activity() == {"h1": 2000.0}
         assert len(reads) == 2
 
+    @staticmethod
+    def _subagent(main, agent_id, lines, mtime):
+        directory = main.parent / main.stem / "subagents"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"agent-{agent_id}.jsonl"
+        path.write_text("".join(json.dumps(line) + "\n" for line in lines), "utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_a_subagents_newer_turn_is_the_parent_hosts_activity(self, tmp_path):
+        turn = {"type": "assistant", "timestamp": "1970-01-01T00:16:40Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=1000.0)
+        side = {"type": "assistant", "timestamp": "1970-01-01T00:50:00Z", "isSidechain": True}
+        self._subagent(main, "a1", [side, {"type": "cost-state"}], mtime=4000.0)
+        assert source.activity() == {"h1": 3000.0}
+
+    def test_the_newest_of_several_subagents_wins(self, tmp_path):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:16:40Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=1000.0)
+        for agent_id, stamp in (("a1", "00:33:20"), ("a2", "00:50:00"), ("a3", "00:41:40")):
+            self._subagent(
+                main, agent_id, [{"type": "user", "timestamp": f"1970-01-01T{stamp}Z"}],
+                mtime=3500.0,
+            )
+        assert source.activity() == {"h1": 3000.0}
+
+    def test_a_subagent_without_a_turn_falls_back_to_its_mtime(self, tmp_path):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:16:40Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=1000.0)
+        self._subagent(main, "a1", [{"type": "system"}], mtime=2500.0)
+        assert source.activity() == {"h1": 2500.0}
+
+    def test_a_subagent_older_than_the_answer_is_never_read(self, tmp_path, monkeypatch):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:33:20Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=2000.0)
+        old = self._subagent(
+            main, "a1", [{"type": "user", "timestamp": "1970-01-01T00:16:40Z"}], mtime=2000.0
+        )
+        reads: list[Path] = []
+        real = telemetry.last_turn
+
+        def counting(where, *args, **kwargs):
+            reads.append(where)
+            return real(where, *args, **kwargs)
+
+        monkeypatch.setattr(telemetry, "last_turn", counting)
+        assert source.activity() == {"h1": 2000.0}
+        assert old not in reads
+
+    def test_only_agent_transcripts_in_the_subagents_directory_count(self, tmp_path):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:16:40Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=1000.0)
+        stray = self._subagent(main, "a1", [turn], mtime=9000.0)
+        stray.rename(stray.with_name("notes.jsonl"))
+        meta = stray.with_name("agent-a1.meta.json")
+        meta.write_text("{}", "utf-8")
+        os.utime(meta, (9000.0, 9000.0))
+        assert source.activity() == {"h1": 1000.0}
+
+    def test_a_subagent_that_vanishes_is_skipped(self, tmp_path, monkeypatch):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:16:40Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=1000.0)
+        ghost = main.parent / "h1" / "subagents" / "agent-gone.jsonl"
+        monkeypatch.setattr(telemetry, "_subagent_transcripts", lambda transcript: [ghost])
+        assert source.activity() == {"h1": 1000.0}
+
+    def test_subagent_transcripts_are_neither_hosts_nor_sources(self, tmp_path):
+        turn = {"type": "user", "timestamp": "1970-01-01T00:16:40Z"}
+        source, main = self._transcript(tmp_path, "h1.jsonl", [turn], mtime=1000.0)
+        self._subagent(main, "a1", [turn], mtime=3000.0)
+        # A subagent directory whose host has no main transcript credits nobody.
+        self._subagent(main.with_name("h-none.jsonl"), "a2", [turn], mtime=3000.0)
+        assert source.paths() == [main]
+        assert [ref.host_session_id for ref in source.sessions()] == ["h1"]
+        assert source.find("agent-a1") is None
+        assert set(source.activity()) == {"h1"}
+
     def test_a_transcript_that_vanishes_is_skipped(self, tmp_path, monkeypatch):
         ghost = tmp_path / "ghost.jsonl"
         monkeypatch.setattr(ClaudeCodeTranscripts, "paths", lambda self: [ghost])

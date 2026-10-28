@@ -77,6 +77,12 @@ TAIL_BUDGET_BYTES = 2 << 20
 #: The most text a :class:`TranscriptTurn` carries, in characters.
 TURN_TEXT_CAP = 4000
 
+#: Where the host writes a subagent's transcript, relative to the directory
+#: named after its parent host's session id beside the main transcript:
+#: ``<project dir>/<host id>/subagents/agent-<agent id>.jsonl`` (BUG_096).
+SUBAGENTS_DIR = "subagents"
+SUBAGENT_PREFIX = "agent-"
+
 
 def claude_home() -> Path:
     return Path(os.environ.get(CLAUDE_HOME_ENV) or (Path.home() / ".claude"))
@@ -408,6 +414,25 @@ def _under_origin(name: str, prefix: str, origin: Path) -> bool:
     return _resolves_under(origin, remainder.split(PATH_MARK))
 
 
+def _subagent_transcripts(transcript: Path) -> list[Path]:
+    """The subagent transcripts of the host whose main transcript is given.
+
+    A host without a subagent directory, or one that cannot be listed, has
+    none. Only ``agent-*.jsonl`` files count; anything else the host keeps
+    there is not a transcript.
+    """
+    directory = transcript.parent / transcript.stem / SUBAGENTS_DIR
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    return [
+        directory / name
+        for name in names
+        if name.startswith(SUBAGENT_PREFIX) and name.endswith(".jsonl")
+    ]
+
+
 class ClaudeCodeTranscripts:
     """``core.stats.SampleSource`` over the host's per-project transcripts.
 
@@ -519,6 +544,16 @@ class ClaudeCodeTranscripts:
         written after its last turn, so the fallback errs towards "active",
         which is the direction the mtime always erred in.
 
+        **A subagent's turn is its parent host's activity** (BUG_096). The
+        host writes a subagent's entries to a file of its own, beside the main
+        transcript under ``<host id>/subagents/``, so while a subagent works the
+        main transcript can stay quiet for many minutes. Each of those files is
+        credited to the host whose directory holds it, and never becomes a host
+        of its own: :meth:`paths` does not list them, so :meth:`sessions` and
+        :meth:`find` are unchanged. One is read only when its mtime is newer
+        than the host's answer so far, because a file cannot hold a turn later
+        than its last write; a finished subagent costs a ``stat`` per scan.
+
         A time is read here and handed on, never stored, so the "no stored
         clock time" rule ``_watermark`` keeps is untouched. Each file's answer
         is remembered for this instance against its size and mtime, so a
@@ -527,21 +562,37 @@ class ClaudeCodeTranscripts:
         """
         latest: dict[str, float] = {}
         for path in self.paths():
-            try:
-                stat = path.stat()
-            except OSError:
+            when = self._turn_at(path)
+            if when is None:
                 continue
-            key = (stat.st_size, stat.st_mtime_ns)
-            remembered = self._turns.get(path)
-            if remembered is not None and remembered[0] == key:
-                turn_at = remembered[1]
-            else:
-                found = last_turn(path)
-                turn_at = found.timestamp if found is not None else None
-                self._turns[path] = (key, turn_at)
-            when = turn_at if turn_at is not None else stat.st_mtime
+            for agent in _subagent_transcripts(path):
+                agent_at = self._turn_at(agent, newer_than=when)
+                if agent_at is not None:
+                    when = max(when, agent_at)
             latest[path.stem] = max(when, latest.get(path.stem, when))
         return latest
+
+    def _turn_at(self, path: Path, newer_than: float | None = None) -> float | None:
+        """``path``'s last turn, its mtime without one, ``None`` if unreadable.
+
+        ``newer_than`` skips the read, answering ``None``, for a file last
+        written no later than that time.
+        """
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        if newer_than is not None and stat.st_mtime <= newer_than:
+            return None
+        key = (stat.st_size, stat.st_mtime_ns)
+        remembered = self._turns.get(path)
+        if remembered is not None and remembered[0] == key:
+            turn_at = remembered[1]
+        else:
+            found = last_turn(path)
+            turn_at = found.timestamp if found is not None else None
+            self._turns[path] = (key, turn_at)
+        return turn_at if turn_at is not None else stat.st_mtime
 
     def sessions(self) -> list[SourceRef]:
         return [

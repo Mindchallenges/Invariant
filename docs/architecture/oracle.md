@@ -502,7 +502,17 @@ days read as active minutes ago, never left the 24-hour window, and `stuck`
 was judged against a clock that kept being reset. A `user` entry that only
 carries a tool result counts as a turn, because a tool finishing is the host
 working, and that is what `stuck` asks during a running turn. A subagent's
-(`isSidechain`) entry counts too.
+(`isSidechain`) entry counts too, and it is not in the main transcript: Claude
+Code writes each subagent's entries to a file of its own,
+`<host id>/subagents/agent-<agent id>.jsonl` beside the host's transcript, so
+the main transcript can stay quiet for as long as a subagent works (BUG_096).
+`activity()` credits each such file to the host whose directory holds it and
+takes the latest of their last turns with the host's own. It reads one only
+when the file's mtime is newer than the host's answer so far, because a file
+cannot hold a turn later than its last write, so a finished subagent costs a
+`stat` per scan. The subagent files are never hosts or telemetry sources of
+their own: `paths()`, `sessions()` and `find()` list main transcripts only, and
+a subagent directory with no main transcript beside it credits nobody.
 
 The read is `hosts/claude_code_telemetry.last_turn`, behind the probe's
 `activity()`. It reads the transcript backwards from its end in 32 KiB

@@ -130,10 +130,6 @@ def world(tmp_path):
     return entry, probe
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_096 is live — delete this marker with the fix",
-)
 def test_BUG_096_subagent_turn_moves_the_hosts_last_activity(world):
     entry, probe = world
     snapshot = scan_project(entry, clock=lambda: NOW, cache=ScanCache(probe=probe))
