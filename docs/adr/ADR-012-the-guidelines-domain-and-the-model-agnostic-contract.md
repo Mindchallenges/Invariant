@@ -643,7 +643,7 @@ per pipeline") and DN-D, after the methodology pin (AUD-02, AUD-03).
 | `engine` | none of its own; it points at an existing registry rule | that rule | yes |
 | `pattern` | does a match exist in the changed files, in scope? | `core/findings` (A3.3) with the adapter's lexical mask | regex: yes. Syntax tree: deferred (ruling 3) |
 | `boundary` | does code under `applies_to` reference a project file its `forbid` list names, or one its `only` list leaves out? | an adapter dependency question | import graph where the adapter can answer: yes. Symbol index: deferred (ruling 3) |
-| `cochange` | if X changed (or is listed in registry R), did Y change too? | `core/guidelines` over the one changed set | yes |
+| `cochange` | if X changed (or is listed in registry R), did Y change too? | `core/findings` (A3.4) over the one changed set, with git's account of the change | yes |
 | `judgement` | does the change honour this rule? | a model, through a cited verdict (D5) | yes |
 
 **`engine`** removes duplication rather than adding a kind of check. Four of
@@ -923,6 +923,117 @@ fingerprint), DN-12 (the seeded-pattern scenario), DN-13 (a pure module beside
   rule and its levels, the injection, and `check --json` through `main`) and
   `tests/test_conformance_engine.py` (the seeded pattern and the two amended
   known answers).
+
+**As built: A3 increment 4, `cochange` evaluation.** Built to D4, the
+check-kind amendment's cochange rulings (DN-A4 to DN-A9) and the A3 rulings
+that bind it: DN-4 (a cochange finding is never baselined), DN-12 (the
+missing-test scenario) and DN-13 (`core/findings` stays pure).
+
+- *New `git` queries, in `core/git` (D12, `RULES --> GIT`).* `core/rules`
+  makes every call, and `core/findings` makes none.
+  - `merge_base(cwd, base, tip)`: the commit the branch left its base at.
+    Every other read is measured from it, as `_changed_set`'s commit leg is.
+  - `exists_at(cwd, rev, path)`: `True`, `False`, or `None`, so "the path was
+    absent" is kept apart from "the revision could not be read", the two
+    answers `file_at` merges. A directory is not a file, and the path is read
+    literally, never as a pathspec glob.
+  - `blob_at(cwd, rev, path)`: the exact bytes, unstripped. `file_at` strips
+    and decodes, which a reduction to executable text should not have to
+    tolerate.
+  - `changed_lines(cwd, base)`: every file the change touched, from the merge
+    base to the working tree, each with the line numbers it added there.
+    Committed, staged and unstaged work all count; what the base gained after
+    the branch left does not. An untracked file is counted whole
+    (`AddedLines.whole`), without being read. A file touched with no added
+    line (deleted, binary, lines only removed) is a key with no lines, so the
+    keys are git's own account of what changed. Any leg git cannot answer
+    makes the whole answer `None`, never a smaller one.
+- *`core/findings` evaluates both forms.* `EVALUATED_KINDS` is all three
+  mechanical kinds. `History` carries what git knows as callables (whether a
+  path existed at the merge base, its bytes there, the added lines, the
+  adapters' `executable_text`), and `evaluate` takes the changed paths that
+  are gone from the tree and the registries as the change leaves them.
+  - *Pair (DN-A4 to DN-A6).* `any` is a path in the changed set; `added` is a
+    file in the tree that was no file at the merge base; `executable` is the
+    adapters' `executable_text` differing between the merge base and the tree,
+    path-aware since A3.1 (DN-11), so a comment-only edit triggers nothing.
+    `when.match` then narrows the trigger to a file where a line the change
+    added matches, through the mask its `in` names, line by line as a pattern
+    is (DN-2). `then` is `all_of`, `any_of` or `each`, and a finding names
+    what did not change.
+  - *Registry (DN-A7, DN-A8).* A changed file under `applies_to` listed in an
+    open entry is one finding per entry, at the outcome the entry's class
+    maps to, with the class's fix or a default naming the entry and the
+    registry. The registry is the one `load_ruleset` read from the tree in
+    hand, so the change that strikes the file, or resolves the entry, clears
+    the finding.
+  - *Unanswerable, never a pass.* No base recorded, a merge base git cannot
+    find, an existence or a blob it cannot read, lines it cannot give, a mask
+    or an `executable_text` answering `None`, a mask that moves lines, a file
+    that cannot be read, a derived path naming nothing in the project, and a
+    registry that was not read. Each is a failing finding that names why.
+- *DN-4.* A cochange finding describes the change, not the tree. It has no
+  line and no fingerprint (`null` in the record), so it sits outside the
+  (rule, path, fingerprint) key a baseline entry is made of, and no baseline
+  can hold it. Increment 5 refuses a baseline entry naming a cochange rule.
+- *`guidelines.mechanical_clean`.* It counts cochange findings with the same
+  semantics: a new or unanswerable finding at blocker fails it, a warn one
+  is reported inside a pass. A registry finding's severity is its class's
+  outcome. The pass message counts "mechanical guideline(s)". A blocking
+  finding's fix joins the verdict's fixes. The record in D5's shape gains
+  `fix`, empty for a pattern or boundary finding.
+- *Validation (A3.1 deferred it here).* `guidelines.ruleset_valid` refuses a
+  cochange `when.in` of `code`, `comments` or `strings` unless a configured
+  adapter offers `mask`, naming the rule. `no_added_match.in` stays with A4.
+- *Conformance (DN-12, A1 increment 3 in part).* The `missing-test`
+  scenario is the clean change under a ruleset whose blocker pair says an
+  executable change to `X.py` touches `tests/test_X.py`. Its manifest sets
+  `guidelines.mechanical_clean: block`, so the finding is the one refusal at
+  `committed`, naming `tests.module-has-test app.py`. `valid-ruleset` still
+  passes: its warn pair finds `app.py` changed without `check.sh`, which is
+  reported inside the pass, and its registry lists no changed file.
+- *Small points the rulings left open, taken in the strict direction.*
+  - A file satisfies `then` only when it is in the changed set AND git shows
+    it changed (`changed_lines`' keys). The changed set holds declared
+    files, and declaring a file is not changing it. An untracked file nobody
+    declared is not in the changed set, so it satisfies nothing until it is
+    declared, staged or committed.
+  - The trigger side reads the changed set as ruled, unwidened. A changed
+    path that is gone from the tree is still a change: `any` triggers on it,
+    `executable` compares its executable text at the merge base with an empty
+    file's, and a registry still listing it is a finding. A gone path that
+    was never a file at the merge base triggers no `added`, `executable` or
+    `when.match`; `any` still triggers on it, because it is in the changed
+    set.
+  - With no base recorded, every fact git would give is unanswerable. An
+    `added` or `executable` trigger, or a `when.match`, is then unanswerable,
+    and so is any triggered pair, because `then` needs git's account.
+  - A file that is not UTF-8 text cannot be reduced, so an `executable`
+    trigger on it is unanswerable. A `when.match` does not apply to it, and
+    the verdict names it, as for a pattern.
+  - `{dir}` is `.` for a file at the top, so `{dir}/test_{name}` names
+    `test_m.py` beside `m.py`. A derived path is spelled canonically, and
+    one naming nothing inside the project is unanswerable.
+  - Renames are not followed. A moved file's every line is added at its new
+    path, and the old path is a key with no lines.
+  - A path git prints quoted is unquoted, octal escapes included. A patch
+    header the reader cannot spell makes `changed_lines` answer `None`, not
+    file lines under a wrong name.
+  - `ruleset_valid` refuses a fingerprint exception on a cochange rule,
+    because no cochange finding has a fingerprint and the exception could
+    never apply. A path exception sets the trigger file aside, as for the
+    other kinds.
+  - A new cochange finding's fix names what to change. The fingerprint
+    exception advice is given only for a pattern or boundary finding.
+  - The queries run in the tree in hand, the session's worktree when there
+    is one, from its `HEAD`.
+- *Tests.* `tests/test_guidelines_cochange.py` (each trigger, each `then`
+  shape, the template tokens, the registry, every unanswerable fact, the
+  record, and the rule over real repositories), `tests/test_git.py` (the four
+  queries, the patch reader, quoting, and every failing leg),
+  `tests/test_guidelines_kinds.py` (the `when.in` mask refusal and the
+  fingerprint-exception refusal), `tests/test_guidelines_findings.py` (the
+  record's `fix`) and `tests/test_conformance_engine.py` (`missing-test`).
 
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
@@ -1310,7 +1421,7 @@ graph TD
     end
     subgraph core["core/"]
         CGUIDE["guidelines (NEW): ruleset model, validation,<br/>selection, rendering, baseline arithmetic,<br/>verdict schema and checks"]
-        CFIND["findings (A3.3): Finding, fingerprint,<br/>pattern and boundary evaluators; pure"]
+        CFIND["findings (A3.3, A3.4): Finding, fingerprint,<br/>pattern, boundary and cochange evaluators; pure"]
         CAGENTS["agents (NEW, A6): host-neutral model, overlay merge"]
         RULES["rules: guidelines.* family"]
         MANIFEST[manifest]

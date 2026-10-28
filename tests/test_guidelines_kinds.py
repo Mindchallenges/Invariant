@@ -780,3 +780,121 @@ class TestABoundaryNeedsImports:
             parse(text, registered=REGISTERED, engines=frozenset())
         assert "deferred" in str(caught.value.problems)
         assert "reads the import graph" not in str(caught.value.problems)
+
+
+# -- a cochange when.in needs a mask some configured adapter offers (A3.4) ---------
+
+
+COCHANGE_RULESET = """\
+version: 1
+sections:
+  - id: di
+    title: Dependency injection
+rules:
+  - id: di.container-member-updates-mocks
+    section: di
+    title: A new container member updates both mocks
+    statement: A member added to the container is added to both mocks.
+    severity: blocker
+    phases: [landing]
+    applies_to: ["app/container.py"]
+    check:
+      kind: cochange
+      form: pair
+      when: {change: any, in: code, match: '^\\s*def\\s'}
+      then: {all_of: [app/mock_a.py, app/mock_b.py]}
+"""
+
+
+def cochange_ruleset(scope: str) -> str:
+    return COCHANGE_RULESET.replace("in: code", f"in: {scope}")
+
+
+class TestACochangeScopeNeedsAMask:
+    """A3 increment 1 deferred this to A3.4: a cochange ``when.in`` of code,
+    comments or strings is read through the adapter's lexical mask, so the
+    ruleset is refused when no configured adapter offers ``mask``. ``any``
+    needs none. ``no_added_match.in`` stays with A4."""
+
+    @pytest.mark.parametrize("scope", ["code", "comments", "strings"])
+    @pytest.mark.parametrize("ecosystems", [None, ["generic"], ["node"]])
+    def test_no_adapter_offering_a_mask_refuses_it(
+        self, make_manifest, tmp_path, scope, ecosystems
+    ):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", cochange_ruleset(scope))
+        result = ruleset_valid_under(make_manifest, tmp_path, ecosystems)
+        assert result.blocks
+        assert (
+            f"rule 'di.container-member-updates-mocks' check: when.in {scope!r} "
+            f"needs a lexical mask" in result.verdict.detail
+        )
+
+    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode"], ["node", "python"]])
+    def test_a_configured_adapter_offering_a_mask_passes(
+        self, make_manifest, tmp_path, ecosystems
+    ):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", cochange_ruleset("code"))
+        result = ruleset_valid_under(make_manifest, tmp_path, ecosystems)
+        assert result.verdict.ok, result.verdict.detail
+
+    def test_any_needs_no_mask(self, make_manifest, tmp_path):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", cochange_ruleset("any"))
+        assert ruleset_valid_under(make_manifest, tmp_path, ["node"]).verdict.ok
+
+    def test_a_trigger_with_no_match_needs_no_mask(self):
+        text = COCHANGE_RULESET.replace(
+            "when: {change: any, in: code, match: '^\\s*def\\s'}", "when: {change: any}"
+        )
+        assert parse(text, registered=REGISTERED, engines=frozenset()).rules
+
+    def test_parse_without_engines_checks_the_schema_only(self):
+        assert parse(COCHANGE_RULESET, registered=REGISTERED).rules
+        with pytest.raises(RulesetError, match="when.in 'code' needs a lexical mask"):
+            parse(COCHANGE_RULESET, registered=REGISTERED, engines=frozenset())
+
+    def test_a_judgement_no_added_match_is_not_refused_here(self):
+        """``no_added_match.in`` is A4's to check, where it is evaluated."""
+        text = """\
+version: 1
+sections:
+  - id: data
+    title: Data
+rules:
+  - id: data.one-library
+    section: data
+    title: One library at a time
+    statement: Only one library is open at a time.
+    severity: blocker
+    phases: [review]
+    applies_to: ["app/**"]
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no-handle-code
+          mechanical: {no_added_match: {in: code, match: 'open'}}
+"""
+        assert parse(text, registered=REGISTERED, engines=frozenset()).rules
+
+
+class TestACochangeExceptionHasNoFingerprint:
+    """DN-4: a cochange finding describes the change, not the tree, so it
+    carries no fingerprint. An exception naming one could never apply, and is
+    refused rather than kept as a silent no-op. A path exception stands."""
+
+    def test_a_fingerprint_exception_on_a_cochange_rule_is_refused(self):
+        text = COCHANGE_RULESET + (
+            "    exceptions:\n"
+            "      - {path: app/container.py, reason: generated, fingerprint: abcdefabcdef}\n"
+        )
+        with pytest.raises(RulesetError, match="a cochange finding has no fingerprint"):
+            parse(text, registered=REGISTERED)
+
+    def test_a_path_exception_on_a_cochange_rule_stands(self):
+        text = COCHANGE_RULESET + (
+            "    exceptions:\n"
+            "      - {path: app/container.py, reason: generated}\n"
+        )
+        (rule,) = parse(text, registered=REGISTERED).rules
+        assert rule.exceptions[0].path == "app/container.py"

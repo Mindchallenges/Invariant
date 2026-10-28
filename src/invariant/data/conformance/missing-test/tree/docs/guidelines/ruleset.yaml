@@ -1,0 +1,17 @@
+version: 1
+sections:
+  - id: tests
+    title: Testing
+rules:
+  - id: tests.module-has-test
+    section: tests
+    title: A module change touches its paired test
+    statement: A change to the executable code of X.py touches tests/test_X.py.
+    severity: blocker
+    phases: [review, landing]
+    applies_to: ["*.py"]
+    check:
+      kind: cochange
+      form: pair
+      when: {change: executable}
+      then: {each: "tests/test_{stem}.py"}

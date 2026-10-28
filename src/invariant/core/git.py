@@ -8,6 +8,7 @@ repository — a rule that crashes is worse than a rule that abstains.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -335,6 +336,206 @@ def file_at(cwd: Path, rev: str, path: str) -> str | None:
     if code != 0:
         return None
     return out
+
+
+def _is_revision(cwd: Path, rev: str) -> bool:
+    """Whether ``rev`` names a commit here. A name opening with ``-`` never
+    reaches git, where it would be read as an option."""
+    if not rev or rev.startswith("-"):
+        return False
+    code, _, _ = _run(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], cwd)
+    return code == 0
+
+
+def merge_base(cwd: Path, base: str, tip: str = "HEAD") -> str | None:
+    """The commit ``tip`` left ``base`` at, or ``None`` if git cannot say.
+
+    The point a change is measured from: what the base gained after the
+    branch left is not the branch's (the three-dot rule ``branch_files``
+    keeps).
+    """
+    if not _is_revision(cwd, base) or not _is_revision(cwd, tip):
+        return None
+    code, out, _ = _run(["merge-base", base, tip], cwd)
+    return out if code == 0 and out else None
+
+
+def exists_at(cwd: Path, rev: str, path: str) -> bool | None:
+    """Whether ``path`` was a file at ``rev``: ``True``, ``False``, or ``None``.
+
+    The question :func:`file_at` cannot answer, because its ``None`` merges
+    "the path was absent" with "the revision could not be read". A caller
+    deciding that a file is NEW on a branch needs the first alone, and must
+    read the second as unanswered. A directory is not a file. The path is
+    read literally, never as a pathspec glob, from the top of the tree.
+    """
+    if not path or not _is_revision(cwd, rev):
+        return None
+    code, out = _run_bytes(
+        ["--literal-pathspecs", "ls-tree", "--full-tree", "-z", rev, "--", path], cwd
+    )
+    if code != 0:
+        return None
+    for entry in out.split(b"\0"):
+        meta, _, name = entry.partition(b"\t")
+        if name.decode("utf-8", "surrogateescape") == path:
+            return meta.split(b" ")[1:2] == [b"blob"]
+    return False
+
+
+def blob_at(cwd: Path, rev: str, path: str) -> bytes | None:
+    """The exact bytes of ``path`` at ``rev``, unstripped, or ``None``.
+
+    :func:`file_at` strips and decodes, which a comparison of two revisions
+    tolerates and a reduction to executable text should not have to.
+    """
+    if not path or not _is_revision(cwd, rev):
+        return None
+    code, out = _run_bytes(["show", f"{rev}:{path}"], cwd)
+    return out if code == 0 else None
+
+
+@dataclass(frozen=True)
+class AddedLines:
+    """The lines a change added to one file, by their working-tree numbers.
+
+    ``whole`` is a file git does not track yet: every line it has is added,
+    and none of them needs counting to say so.
+    """
+
+    lines: frozenset[int] = frozenset()
+    whole: bool = False
+
+    def __contains__(self, number: object) -> bool:
+        return self.whole or number in self.lines
+
+
+#: A hunk header of a zero-context diff: the new side's first line and count.
+_HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+#: Git's C-style escapes in a quoted path.
+_ESCAPES = {
+    "a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
+    '"': '"', "\\": "\\",
+}
+
+
+def changed_lines(cwd: Path, base: str) -> dict[str, AddedLines] | None:
+    """Every file this change touched, and the lines it added to each.
+
+    Measured from the merge base of ``base`` and ``HEAD`` to the working
+    tree, so committed, staged and unstaged work all count, and what the base
+    gained after the branch left does not. A file nobody tracks yet is
+    counted whole. A file the change touched without adding a line (one it
+    deleted, a binary, a line it only removed) is a key with no lines, so the
+    keys answer "which files did this change touch" by git's own account,
+    and the values answer "which lines did it add". Renames are not followed:
+    a moved file's every line is added at its new path.
+
+    Paths are spelled from the top of the tree, as every other diff answer
+    in this module is. ``None`` when git cannot answer, which relaxes
+    nothing.
+    """
+    mb = merge_base(cwd, base)
+    top = toplevel(cwd)
+    if mb is None or top is None:
+        return None
+    quiet = ["-c", "core.quotePath=false"]
+    code, names = _run_bytes(
+        [*quiet, "diff", "--no-renames", "--name-only", "-z", mb, "--"], top
+    )
+    if code != 0:
+        return None
+    code, patch = _run_bytes(
+        [
+            *quiet, "diff", "--no-color", "--no-ext-diff", "--no-renames", "-U0",
+            "--src-prefix=a/", "--dst-prefix=b/", mb, "--",
+        ],
+        top,
+    )
+    if code != 0:
+        return None
+    added = _added_by_patch(patch)
+    if added is None:
+        return None
+    result = {
+        name: AddedLines(lines=frozenset(added.get(name, ())))
+        for name in _nul_separated(names)
+    }
+    code, untracked = _run_bytes(["ls-files", "--others", "--exclude-standard", "-z"], top)
+    if code != 0:
+        return None
+    for name in _nul_separated(untracked):
+        result[name] = AddedLines(whole=True)
+    return result
+
+
+def _nul_separated(data: bytes) -> list[str]:
+    return [p.decode("utf-8", "surrogateescape") for p in data.split(b"\0") if p]
+
+
+def _added_by_patch(patch: bytes) -> dict[str, set[int]] | None:
+    """The added line numbers per file, read from a zero-context patch.
+
+    A ``+++`` line names the file only inside a header: in a hunk the same
+    bytes are an added line whose text begins ``++``. ``None`` for a header
+    this reader cannot spell, rather than lines filed under a wrong name.
+    """
+    added: dict[str, set[int]] = {}
+    current: str | None = None
+    in_header = False
+    for line in patch.split(b"\n"):
+        if line.startswith(b"diff --git "):
+            in_header, current = True, None
+            continue
+        if in_header and line.startswith(b"+++ "):
+            current = _patch_path(line[4:])
+            if current is False:
+                return None
+            continue
+        hunk = _HUNK.match(line)
+        if hunk is None:
+            continue
+        in_header = False
+        first, count = int(hunk.group(1)), int(hunk.group(2) or 1)
+        if current and count:
+            added.setdefault(current, set()).update(range(first, first + count))
+    return added
+
+
+def _patch_path(raw: bytes) -> str | None | bool:
+    """A ``+++`` header's path: the name, ``None`` for /dev/null, ``False``
+    when it cannot be read."""
+    text = raw.decode("utf-8", "surrogateescape")
+    if text == "/dev/null":
+        return None
+    if text.startswith('"'):
+        text = _unquote(text)
+        if text is None:
+            return False
+    return text[2:] if text.startswith("b/") else False
+
+
+def _unquote(text: str) -> str | None:
+    """Git's C-style quoting undone: escapes and octal bytes, decoded as UTF-8."""
+    if len(text) < 2 or not text.endswith('"'):
+        return None
+    body, out, i = text[1:-1], bytearray(), 0
+    while i < len(body):
+        char = body[i]
+        if char != "\\":
+            out += char.encode("utf-8", "surrogateescape")
+            i += 1
+            continue
+        nxt = body[i + 1 : i + 2]
+        if nxt in _ESCAPES:
+            out += _ESCAPES[nxt].encode()
+            i += 2
+        elif re.fullmatch(r"[0-7]{3}", body[i + 1 : i + 4]):
+            out.append(int(body[i + 1 : i + 4], 8))
+            i += 4
+        else:
+            return None
+    return out.decode("utf-8", "surrogateescape")
 
 
 def resolve_commit(cwd: Path, rev: str) -> str | None:

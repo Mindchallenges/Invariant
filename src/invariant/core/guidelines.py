@@ -470,6 +470,15 @@ class _Reader:
                 f"{where}: severity {severity!r} is not one of {', '.join(SEVERITIES)}"
             )
         applies_to = self.globs(where, raw["applies_to"])
+        check = self.check(where, raw["check"], applies_to, str(severity))
+        exceptions = self.exceptions(where, raw.get("exceptions", []))
+        if check.kind == "cochange" and any(e.fingerprint for e in exceptions):
+            # DN-4: a cochange finding describes the change, not the tree, so
+            # it has no fingerprint, and such an exception could never apply.
+            self.problem(
+                f"{where}: an exception names a fingerprint, and a cochange finding "
+                f"has no fingerprint; set the trigger file aside by path alone"
+            )
         return Guideline(
             id=str(raw["id"]),
             section=str(section),
@@ -478,8 +487,8 @@ class _Reader:
             severity=str(severity),
             phases=self.phases(where, raw["phases"]),
             applies_to=applies_to,
-            check=self.check(where, raw["check"], applies_to, str(severity)),
-            exceptions=self.exceptions(where, raw.get("exceptions", [])),
+            check=check,
+            exceptions=exceptions,
             rationale=self.optional_text(where, raw, "rationale"),
             links=self.strings(where, "links", raw.get("links", [])),
             amended=self.amendments(where, raw.get("amended", [])),
@@ -640,9 +649,18 @@ class _Reader:
             return Trigger(change=str(change))
         if "match" not in raw:
             return Trigger(change=str(change))
+        scope = self.lexical_scope(where, "when.in", raw["in"])
+        if scope in MASKED_SCOPES and self.engines is not None and "mask" not in self.engines:
+            # A3.1 deferred this to the increment that evaluates the trigger:
+            # an added line is matched through the mask its in names.
+            self.problem(
+                f"{where}: when.in {scope!r} needs a lexical mask, and no configured "
+                f"ecosystem's adapter offers one; read in: any, or declare an "
+                f"ecosystem whose adapter masks these files"
+            )
         return Trigger(
             change=str(change),
-            scope=self.lexical_scope(where, "when.in", raw["in"]),
+            scope=scope,
             match=self.regex(where, "when.match", raw["match"]),
         )
 

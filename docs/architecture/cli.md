@@ -1086,17 +1086,23 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
                                  to no particular event.
     With --json, each verdict is {rule, level, ok, skipped, message, detail,
     fixes}. A rule that computes findings adds "findings", and today that is
-    guidelines.mechanical_clean alone (ADR-012 D5, A3 increment 3):
+    guidelines.mechanical_clean alone (ADR-012 D5, A3 increments 3 and 4):
 
       invariant check guidelines.mechanical_clean [--json]
 
-    evaluates the pattern and boundary guidelines over the changed files and
-    names each finding by rule, path, line and, for a boundary, target. Under
+    evaluates the pattern, boundary and cochange guidelines over the changed
+    files and names each finding by rule, path, line and, for a boundary,
+    target. A cochange finding names the rule and the trigger file, and its
+    note says what triggered it and what did not change with it. Under
     --json each finding is a record in D5's shape: rule, kind, severity,
     status (fail, or pass for an exception that applied), finding (new,
     unanswerable or excepted), citations [{path, lines}], fingerprint, target,
-    note and the ruleset digest. The fingerprint is what a reasoned exception
-    names in the ruleset. The findings are printed and kept nowhere (DN-16).
+    note, fix and the ruleset digest. The fingerprint is what a reasoned
+    exception names in the ruleset. A cochange finding has no line and no
+    fingerprint, because it describes the change and not the tree, so no
+    baseline can hold it (DN-4); its fix is what the rule owes (the files to
+    change, or a registry class's fix), and the verdict's fixes carry each
+    blocking finding's fix. The findings are printed and kept nowhere (DN-16).
     The rule is N/A with no ruleset, and fails on a ruleset that does not load
     and on a changed set that cannot be established. There is no guidelines
     verb for this.

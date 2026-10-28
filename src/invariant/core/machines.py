@@ -118,7 +118,7 @@ FRESHNESS_GATE = "sweep.fresh"
 #: stops a change, and where drift between the ruleset and what render wrote
 #: from it is reported (``guidelines.generated_current``, warn in every
 #: profile, ruling 7). ``guidelines.mechanical_clean`` holds new findings of
-#: the pattern and boundary guidelines there (A3 increment 3); it warns in
+#: the pattern, boundary and cochange guidelines there (A3 increments 3 and 4); it warns in
 #: ``loose`` and ``standard`` and blocks in ``strict``. A running pipeline
 #: that pinned a ruleset at ``start`` keeps them whatever the manifest says
 #: later (``guidelines=True``).

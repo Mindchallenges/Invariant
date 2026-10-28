@@ -233,7 +233,7 @@ graph TD
     CONF --> CONFDATA
     RULES -- load, the render plan, the ruleset and drift gates --> CGUIDE
     CGUIDE -- project_relative --> MANIFEST
-    RULES -- evaluate, with the bytes, masks and references as callables --> CFIND
+    RULES -- evaluate, with the bytes, masks, references and the change's history as callables --> CFIND
     CFIND -- Guideline, the ruleset model it evaluates --> CGUIDE
     CFIND -- project_relative, glob_matches --> MANIFEST
     CLI --> GDOM
@@ -453,12 +453,13 @@ ruleset is configured, so a project that has not opted in sees no change, and
 `doctor` prints the same verdict as a row.
 
 `CFIND` is `core/findings`, the evaluators of the mechanical guidelines
-(IDEA_031 A3 increment 3, ADR-012 D4, D5 and the A3 rulings DN-2, DN-3 and
-DN-13). It holds `Finding`, the `fingerprint` every finding and every
-exception is named by (the first twelve hex digits of SHA-256 over the rule
-id and a kind-specific key, never a line number), and the `pattern` and
-`boundary` evaluators. It is pure: the file bytes, the adapters' lexical mask
-and their references arrive as callables, and it makes no file read and no
+(IDEA_031 A3 increments 3 and 4, ADR-012 D4, D5 and the A3 rulings DN-2 to
+DN-4 and DN-13). It holds `Finding`, the `fingerprint` every pattern and
+boundary finding and every exception is named by (the first twelve hex digits
+of SHA-256 over the rule id and a kind-specific key, never a line number), and
+the `pattern`, `boundary` and `cochange` evaluators. It is pure: the file
+bytes, the adapters' lexical mask, their references and what git knows about
+the change (`History`) arrive as callables, and it makes no file read and no
 `git` call. `RULES --> CFIND` is the one caller, `guidelines.mechanical_clean`,
 which does every read from the tree in hand, over the changed files alone
 (`_changed_set`). `CFIND --> CGUIDE` is the ruleset model it evaluates, and
@@ -467,16 +468,37 @@ and the one glob matcher (`glob_matches`, lifted out of `core/rules`'
 `_first_matching_glob`), so a guideline's globs match exactly as every other
 declared glob does. A pattern matches each line of the masked text, one
 finding per matching line. A boundary checks each reference a changed file
-under `applies_to` makes against its `forbid` or `only` list. A file no
-adapter can mask or answer references for is a failing finding, never a
-pass; a file that is not UTF-8 is not text, so no pattern applies, and the
+under `applies_to` makes against its `forbid` or `only` list. A cochange
+`pair` triggers on a changed file under `applies_to` (`any`, `added` on the
+branch, or an `executable` change through the adapters' `executable_text`,
+optionally narrowed by an added line matching `when.match` through the mask
+its `in` names), and is a finding when what `then` names did not change with
+it: a file satisfies `then` only when it is in the changed set and git shows
+it changed, so declaring a file is not changing it. A cochange `registry`
+finding is a changed file listed in an open entry of its registry, as the
+change leaves the registry, at the outcome the entry's class maps to and with
+that class's fix. A cochange finding describes the change and not the tree,
+so it has no line and no fingerprint, and no baseline can hold it (DN-4). A
+file no adapter can mask, answer references for or reduce to executable text,
+and a fact git cannot give, is a failing finding, never a pass; a file that
+is not UTF-8 is not text, so no pattern or `when.match` applies, and the
 verdict names it. The rule fails on a new or unanswerable finding of a
-blocker guideline and reports a warn guideline's findings inside a pass. It
-warns in `loose` and `standard` and blocks in `strict`, and `core/machines`
-injects it beside the other guidelines gates at the landing. The findings are
-printed in D5's record shape on the verdict (`invariant check
-guidelines.mechanical_clean --json`) and kept nowhere. No baseline exists yet,
-so every finding is new; `cochange` is not evaluated yet.
+blocker guideline, or of a registry class mapped to blocker, and reports a
+warn finding inside a pass. It warns in `loose` and `standard` and blocks in
+`strict`, and `core/machines` injects it beside the other guidelines gates at
+the landing. The findings are printed in D5's record shape on the verdict
+(`invariant check guidelines.mechanical_clean --json`) and kept nowhere. No
+baseline exists yet, so every finding is new.
+
+`RULES --> GIT` carries the cochange kind's reads (A3 increment 4), each a
+thin query that answers `None` when git cannot: `merge_base`, the commit the
+branch left its base at; `exists_at`, whether a path was a file there, which
+keeps "absent" apart from "unreadable", the two answers `file_at` merges;
+`blob_at`, a path's exact bytes there, unstripped; and `changed_lines`, every
+file the change touched from the merge base to the working tree, with the
+lines it added, untracked files counted whole. `core/rules` makes every one of
+these calls, from the tree in hand, and hands the answers to `core/findings`
+as `History`.
 
 `GDOM` is `domains/guidelines`, the effects the ruleset has on the tree
 (IDEA_031 A2 increment 3, ADR-012 D12). It is not an FSM, like `stats` and
@@ -976,16 +998,16 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks and references), handed to `core/findings` as callables | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
-| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, and the commit a revision names — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
+| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`) — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
 | `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
-| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increment 3): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), and the `pattern` and `boundary` evaluators over the changed files, with path and fingerprint exceptions named and unanswerable files counted as findings | Read a file, call `git`, or ask an adapter directly: the bytes, the mask and the references arrive as callables. Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
+| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`

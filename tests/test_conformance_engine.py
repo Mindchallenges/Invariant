@@ -44,6 +44,7 @@ SHIPPED = [
     "clean",
     "docs-first-breach",
     "malformed-ruleset",
+    "missing-test",
     "red-first-breach",
     "seeded-pattern",
     "valid-ruleset",
@@ -107,6 +108,30 @@ def test_a_seeded_pattern_blocks_naming_the_rule_and_line(tmp_path):
     assert "style.no-print app.py:2" in gate["message"]
     (record,) = gate["findings"]
     assert record["citations"] == [{"path": "app.py", "lines": [2, 2]}]
+
+
+def test_a_missing_test_blocks_naming_the_rule_and_file(tmp_path):
+    """A1 increment 3, the missing test (ADR-012 D11, DN-12): a behaviour
+    change with no paired test diff, under a blocker cochange pair held at
+    block by the scenario's manifest, is the one refusal at the landing. The
+    refusal names the rule and the file, and the finding has no fingerprint,
+    because a cochange finding is never baselined (DN-4)."""
+    result = replay(load_named("missing-test"), workdir=tmp_path)
+    clean = load_named("clean").expected.gates["committed"]
+    landing = result.outcome.gates["committed"]
+    assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
+    assert landing["guidelines.ruleset_valid"] == "pass"
+    assert landing["guidelines.generated_current"] == "pass"
+    assert landing["guidelines.mechanical_clean"] == "block"
+    assert result.outcome.refusals == {"land": ("guidelines.mechanical_clean",)}
+    (land,) = [step for step in result.steps if step.label == "land"]
+    (gate,) = [g for g in land.document["gates"] if g["rule"] == "guidelines.mechanical_clean"]
+    assert "tests.module-has-test app.py" in gate["message"]
+    (record,) = gate["findings"]
+    assert record["kind"] == "cochange"
+    assert record["citations"] == [{"path": "app.py", "lines": None}]
+    assert record["fingerprint"] is None
+    assert "tests/test_app.py" in record["fix"]
 
 
 @pytest.mark.parametrize("name", SHIPPED)

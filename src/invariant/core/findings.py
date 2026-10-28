@@ -1,17 +1,18 @@
-"""Mechanical findings: the ``pattern`` and ``boundary`` evaluators.
+"""Mechanical findings: the ``pattern``, ``boundary`` and ``cochange`` evaluators.
 
-ADR-012 D4, D5 and D6, and the A3 rulings (DN-2, DN-3, DN-13). A finding is
-one place in a changed file where a mechanical guideline is broken, or one
-file a guideline covers that nothing could answer for. ``core/rules`` asks
-this module through ``guidelines.mechanical_clean``, and prints what it
-answers in D5's record shape. Nothing here is persisted (DN-16).
+ADR-012 D4, D5 and D6, and the A3 rulings (DN-2 to DN-4, DN-13). A finding is
+one place in a changed file where a mechanical guideline is broken, one
+changed file whose companion change is missing, or one file a guideline
+covers that nothing could answer for. ``core/rules`` asks this module through
+``guidelines.mechanical_clean``, and prints what it answers in D5's record
+shape. Nothing here is persisted (DN-16).
 
-Pure. The file bytes, the lexical mask and the references arrive as
-callables, so this module does no file read and no ``git`` call: ``core/rules``
-does every one of them, from the tree in hand, and decides which files
-changed (D4, ``_changed_set``). It imports the ruleset model it evaluates and
-the manifest's one spelling of a declared path, and nothing else of the
-engine's.
+Pure. The file bytes, the lexical mask, the references and what git knows
+about the change arrive as callables, so this module does no file read and no
+``git`` call: ``core/rules`` does every one of them, from the tree in hand,
+and decides which files changed (D4, ``_changed_set``). It imports the
+ruleset model it evaluates and the manifest's one spelling of a declared
+path, and nothing else of the engine's.
 
 - **pattern** (DN-2). Each line of the masked text is matched, one finding per
   matching line. The mask is the region the rule's ``in`` names, through the
@@ -21,29 +22,47 @@ engine's.
 - **boundary** (DN-A1 to DN-A3, DN-3). Each reference a changed file under
   ``applies_to`` makes is checked against the rule's ``forbid`` deny-list or
   its allow-only ``only`` list of project path globs.
+- **cochange** (DN-A4 to DN-A9). A ``pair`` triggers on a changed file under
+  ``applies_to`` (``any``, ``added`` or ``executable``, narrowed by an added
+  line matching ``when.match``), and is one finding when what ``then`` names
+  did not change with it. A ``registry`` is one finding per open entry, as
+  the registry stands after the change, listing a changed file. A cochange
+  finding describes the change, not the tree: it has no line and no
+  fingerprint, so no baseline can hold it (DN-4).
 
 Unanswerable is a failing finding, never a pass: a mask or references answer
-of ``None``, a file that could not be read, and a mask that did not keep the
-file's lines. A file that does not decode as UTF-8 is not text: the pattern
-kind does not apply to it, and the evaluation names it, so the verdict can.
+of ``None``, a file that could not be read, a mask that did not keep the
+file's lines, and any fact about the change git or an adapter could not give.
+A file that does not decode as UTF-8 is not text: the pattern kind does not
+apply to it, nor does a cochange ``when.match``, and the evaluation names it,
+so the verdict can.
 
 No baseline exists in this build, so every finding is ``new``. The baseline
-(D6) and ``cochange`` arrive in later increments.
+(D6) arrives in a later increment.
 """
 
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .guidelines import DIGEST_LENGTH, Guideline, GuidelineException
+from .guidelines import (
+    DIGEST_LENGTH,
+    Guideline,
+    GuidelineException,
+    Registry,
+    Requirement,
+    Trigger,
+)
 from .manifest import glob_matches, project_relative
 
-#: The kinds this module evaluates. ``cochange`` is A3 increment 4.
-EVALUATED_KINDS = ("pattern", "boundary")
+#: The kinds this module evaluates: every mechanical kind (D4). ``engine`` is
+#: its registered rule's, and ``judgement`` is a verdict's (A4).
+EVALUATED_KINDS = ("pattern", "boundary", "cochange")
 
 #: What a finding can be. ``new`` and ``unanswerable`` count against the
 #: rule's severity; ``excepted`` is a reasoned exception that applied, named
@@ -116,8 +135,11 @@ class Finding:
     fingerprint: str | None = None
     #: The referenced file, for a boundary finding.
     target: str | None = None
-    #: Why a file is unanswerable, or the reason an exception gives.
+    #: Why a file is unanswerable, what a cochange owes, or the reason an
+    #: exception gives.
     note: str = ""
+    #: What to do about it, when the guideline says more than the gate's fix.
+    fix: str = ""
 
     @property
     def counts(self) -> bool:
@@ -154,6 +176,7 @@ class Finding:
             "fingerprint": self.fingerprint,
             "target": self.target,
             "note": self.note,
+            "fix": self.fix,
             "ruleset": ruleset,
         }
 
@@ -171,6 +194,45 @@ class Evaluation:
     rules: int = 0
 
 
+@dataclass(frozen=True)
+class History:
+    """What git knows about the change, for the ``cochange`` kind.
+
+    Every answer arrives as a callable, so this module makes no ``git`` call:
+    ``core/rules`` makes them from the tree in hand. ``None`` from any of them
+    is "git could not say", and a finding resting on it is unanswerable.
+
+    - ``existed(rel)``: was the path a file where the branch left its base?
+    - ``before(rel)``: its bytes there, asked only of a path that existed.
+    - ``lines()``: every file git shows the change touched, each with the
+      lines it added (``git.changed_lines``, spelled project-relative). Asked
+      at most once, and only when a rule needs it.
+    - ``executable(rel, text)``: the adapters' ``executable_text``.
+    """
+
+    existed: Callable[[str], bool | None]
+    before: Callable[[str], bytes | None]
+    lines: Callable[[], Mapping[str, Container[int]] | None]
+    executable: Callable[[str, str], str | None]
+
+
+def derive(template: str, rel: str) -> str | None:
+    """The path an ``each`` template derives from a trigger file (DN-A5).
+
+    ``{path}`` is the file, ``{dir}`` its directory (``.`` at the top),
+    ``{name}`` its base name, ``{stem}`` the name without its last suffix and
+    ``{suffix}`` that suffix with its dot. The result is spelled canonically,
+    and one that names nothing inside the project is ``None``.
+    """
+    name = posixpath.basename(rel)
+    stem, suffix = posixpath.splitext(name)
+    derived = template.format(
+        path=rel, dir=posixpath.dirname(rel) or ".", name=name, stem=stem, suffix=suffix
+    )
+    canonical = project_relative(derived)
+    return None if canonical in (None, ".") else canonical
+
+
 def evaluate(
     rules: Iterable[Guideline],
     changed: Iterable[str],
@@ -178,20 +240,34 @@ def evaluate(
     read: Read,
     mask: Mask,
     references: References,
+    gone: Iterable[str] = (),
+    history: History | None = None,
+    registries: Iterable[Registry] | None = None,
 ) -> Evaluation:
-    """Every finding of the ``pattern`` and ``boundary`` rules in ``changed``.
+    """Every finding of the mechanical rules in the change.
 
-    ``changed`` is the changed files that exist in the tree, project-relative.
+    ``changed`` is the changed files that exist in the tree, project-relative,
+    and ``gone`` the changed paths that do not. ``pattern`` and ``boundary``
+    read only the first: a file that is gone has no line to match and imports
+    nothing. ``cochange`` reads both, because removing a file is a change.
+    ``history`` is what git knows about the change, and ``registries`` the
+    registry files as the change leaves them; a cochange rule without them is
+    unanswerable.
+
     Rules are taken in declared order and files in sorted order, so the same
     change gives the same findings in the same order. Each file is read once.
     """
     files = sorted(set(changed))
+    present = set(files)
+    everything = sorted(present | set(gone))
     evaluated = [rule for rule in rules if rule.check.kind in EVALUATED_KINDS]
     texts = _Texts(read)
+    pairs = _Pairs(history, texts, mask, everything)
+    by_path = {registry.path: registry for registry in registries or ()}
     found: list[Finding] = []
     covered: set[str] = set()
     for rule in evaluated:
-        for rel in files:
+        for rel in everything if rule.check.kind == "cochange" else files:
             if not any(matches(rel, glob) for glob in rule.applies_to):
                 continue
             covered.add(rel)
@@ -200,8 +276,12 @@ def evaluate(
                 found.append(_finding(rule, rel, "excepted", note=exempt.reason))
             elif rule.check.kind == "pattern":
                 found.extend(_pattern(rule, rel, texts, mask))
-            else:
+            elif rule.check.kind == "boundary":
                 found.extend(_boundary(rule, rel, references))
+            elif rule.check.form == "registry":
+                found.extend(_registry(rule, rel, by_path.get(rule.check.registry or "")))
+            else:
+                found.extend(pairs.evaluate(rule, rel, present=rel in present))
     return Evaluation(
         findings=tuple(found),
         not_text=tuple(sorted(texts.not_text)),
@@ -220,8 +300,12 @@ class _Texts:
         self._cache: dict[str, Any] = {}
         self.not_text: set[str] = set()
 
-    def get(self, rel: str) -> str | None | object:
-        """The text, ``None`` when it is not text, or ``_UNREAD``."""
+    def get(self, rel: str, *, name: bool = True) -> str | None | object:
+        """The text, ``None`` when it is not text, or ``_UNREAD``.
+
+        A file that is not text is named in the evaluation, unless the
+        caller reads it for a question that makes it unanswerable instead.
+        """
         if rel not in self._cache:
             data = self._read(rel)
             if data is None:
@@ -232,7 +316,7 @@ class _Texts:
                 except UnicodeDecodeError:
                     self._cache[rel] = None
         value = self._cache[rel]
-        if value is None:
+        if value is None and name:
             self.not_text.add(rel)
         return value
 
@@ -278,6 +362,202 @@ def _boundary(rule: Guideline, rel: str, references: References) -> list[Finding
             continue
         stamp = fingerprint(rule.id, collapse(ref.text), ref.target)
         found.append(_matched(rule, rel, ref.line, stamp, target=ref.target))
+    return found
+
+
+class _Unanswerable(Exception):
+    """A fact a cochange finding rests on that git or an adapter cannot give."""
+
+
+class _Pairs:
+    """The ``pair`` form of ``cochange`` (DN-A4 to DN-A6).
+
+    "If a file under ``applies_to`` changed in this way, did the files
+    ``then`` names change too?" A file satisfies ``then`` only when it is in
+    the changed set AND git shows it changed: the changed set alone holds
+    declared files, and declaring a file is not changing it.
+    """
+
+    _UNASKED = object()
+
+    def __init__(
+        self, history: History | None, texts: _Texts, mask: Mask, candidates: list[str]
+    ) -> None:
+        self._history = history
+        self._texts = texts
+        self._mask = mask
+        self._candidates = candidates
+        self._lines: Any = self._UNASKED
+
+    def evaluate(self, rule: Guideline, rel: str, *, present: bool) -> list[Finding]:
+        when, then = rule.check.when, rule.check.then
+        if when is None or then is None:
+            return []
+        try:
+            if not self._triggered(when, rel, present):
+                return []
+            missing = self._missing(then, rel)
+        except _Unanswerable as why:
+            return [_finding(rule, rel, "unanswerable", note=str(why))]
+        if not missing:
+            return []
+        owed = " and ".join(missing) if then.shape != "any_of" else (
+            "one of " + ", ".join(missing)
+        )
+        trigger = _TRIGGERS[when.change] + (
+            f", with an added line in {when.scope} matching {when.match!r}" if when.match else ""
+        )
+        return [_finding(
+            rule, rel, "new",
+            note=f"{trigger}, and this change touches no {owed}",
+            fix=(
+                f"change {owed} in this change, as {rule.id} asks; a new file counts once "
+                "it is declared (invariant session files add), staged or committed"
+            ),
+        )]
+
+    # -- the trigger (DN-A6) ---------------------------------------------------------
+
+    def _triggered(self, when: Trigger, rel: str, present: bool) -> bool:
+        if when.change == "added" and not self._added(rel, present):
+            return False
+        if when.change == "executable" and not self._executable(rel, present):
+            return False
+        return self._matched(when, rel, present) if when.match else True
+
+    def _facts(self) -> History:
+        if self._history is None:
+            raise _Unanswerable("what git knows about this change was not read")
+        return self._history
+
+    def _existed(self, rel: str) -> bool:
+        existed = self._facts().existed(rel)
+        if existed is None:
+            raise _Unanswerable(
+                "whether the file existed where the branch left its base could not be read"
+            )
+        return existed
+
+    def _added(self, rel: str, present: bool) -> bool:
+        return present and not self._existed(rel)
+
+    def _executable(self, rel: str, present: bool) -> bool:
+        existed = self._existed(rel)
+        if not present and not existed:
+            return False
+        before = self._decoded(self._facts().before(rel), "its base") if existed else ""
+        after = self._current(rel) if present else ""
+        reduce = self._facts().executable
+        reduced = reduce(rel, before), reduce(rel, after)
+        if None in reduced:
+            raise _Unanswerable(
+                "no configured adapter can reduce this file to its executable text"
+            )
+        return reduced[0] != reduced[1]
+
+    def _matched(self, when: Trigger, rel: str, present: bool) -> bool:
+        if not present:
+            return False
+        text = self._texts.get(rel)
+        if text is _Texts._UNREAD:
+            raise _Unanswerable("the file could not be read")
+        if text is None:
+            return False
+        added = self._changed().get(rel)
+        if added is None:
+            return False
+        scope = when.scope or "any"
+        masked = text if scope == "any" else self._mask(rel, text, scope)
+        if masked is None:
+            raise _Unanswerable(f"no configured adapter can mask {scope} in this file")
+        lines = masked.split("\n")
+        if len(lines) != len(text.split("\n")):
+            raise _Unanswerable("the lexical mask did not keep the file's lines")
+        regex = re.compile(when.match or "")
+        return any(
+            number in added and regex.search(line)
+            for number, line in enumerate(lines, 1)
+        )
+
+    def _current(self, rel: str) -> str:
+        text = self._texts.get(rel, name=False)
+        if text is _Texts._UNREAD:
+            raise _Unanswerable("the file could not be read")
+        if text is None:
+            raise _Unanswerable("the file is not UTF-8 text, so it has no executable text")
+        return text  # type: ignore[return-value]
+
+    @staticmethod
+    def _decoded(data: bytes | None, where: str) -> str:
+        if data is None:
+            raise _Unanswerable(f"the file could not be read at {where}")
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise _Unanswerable(
+                f"the file is not UTF-8 text at {where}, so it has no executable text"
+            ) from None
+
+    # -- what must change with it (DN-A5) ----------------------------------------------
+
+    def _changed(self) -> Mapping[str, Container[int]]:
+        if self._lines is self._UNASKED:
+            self._lines = self._facts().lines()
+        if self._lines is None:
+            raise _Unanswerable("the files and lines this change touched could not be read from git")
+        return self._lines
+
+    def _missing(self, then: Requirement, rel: str) -> list[str]:
+        changed = self._changed()
+        touched = [path for path in self._candidates if path in changed]
+        if then.shape == "each":
+            derived = derive(then.template or "", rel)
+            if derived is None:
+                raise _Unanswerable(
+                    f"then.each {then.template!r} derives no path inside the project from it"
+                )
+            return [] if derived in touched else [derived]
+        unmet = [g for g in then.globs if not any(matches(p, g) for p in touched)]
+        if then.shape == "any_of":
+            return list(then.globs) if len(unmet) == len(then.globs) else []
+        return unmet
+
+
+#: How a finding states what triggered it.
+_TRIGGERS = {
+    "any": "this change touches it",
+    "added": "it is new on this branch",
+    "executable": "this change alters its executable code",
+}
+
+
+def _registry(rule: Guideline, rel: str, registry: Registry | None) -> list[Finding]:
+    """The ``registry`` form (DN-A7, DN-A8): an open entry listing the file.
+
+    The registry is read as the change leaves it, so the change that resolves
+    a file strikes it from its entry, or resolves the entry, and the finding
+    clears. Each open entry listing the file is one finding, at the outcome
+    its class maps to, with the class's fix.
+    """
+    if registry is None:
+        return [_finding(
+            rule, rel, "unanswerable",
+            note=f"the registry {rule.check.registry} was not read",
+        )]
+    outcomes, fixes = dict(rule.check.outcomes), dict(rule.check.fixes)
+    found: list[Finding] = []
+    for entry in registry.entries:
+        if entry.status != "open" or rel not in entry.paths:
+            continue
+        found.append(Finding(
+            rule=rule.id, kind=rule.check.kind,
+            severity=outcomes.get(entry.cls, rule.severity), path=rel, status="new",
+            note=f"listed in open entry {entry.id} ({entry.cls}) of {registry.path}",
+            fix=fixes.get(entry.cls) or (
+                f"resolve entry {entry.id} in this change, and strike {rel} from it in "
+                f"{registry.path} or mark the entry resolved"
+            ),
+        ))
     return found
 
 

@@ -2145,19 +2145,22 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
 
 @rule(
     "guidelines.mechanical_clean",
-    summary="No new or unanswerable blocker finding of a pattern or boundary guideline.",
+    summary="No new or unanswerable blocker finding of a pattern, boundary or cochange guideline.",
     events=(),
 )
 def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
-    """ADR-012 D4, D5 and D12, and the A3 rulings DN-2, DN-3, DN-13, DN-16.
+    """ADR-012 D4, D5 and D12, and the A3 rulings DN-2 to DN-4, DN-13, DN-16.
 
-    The ``pattern`` and ``boundary`` guidelines evaluated over the changed
-    files only (D4), read from the tree in hand. ``core/findings`` evaluates
-    and this rule does every read: the bytes, the mask through the declared
-    adapters, the references through them, and the changed set. A new or
-    unanswerable finding of a blocker rule fails it. A warn rule's findings
-    are reported inside a pass. Every finding is printed in D5's record shape
-    and kept nowhere. No baseline exists yet, so every finding is new.
+    The ``pattern``, ``boundary`` and ``cochange`` guidelines evaluated over
+    the changed files only (D4), read from the tree in hand. ``core/findings``
+    evaluates and this rule does every read: the bytes, the mask through the
+    declared adapters, the references through them, the changed set, and
+    what git knows about the change (the merge base, the lines it added, a
+    file's bytes there). A new or unanswerable finding of a blocker rule, or
+    of a registry class mapped to blocker, fails it. A warn finding is
+    reported inside a pass. Every finding is printed in D5's record shape and
+    kept nowhere. No baseline exists yet, so every finding is new; a
+    cochange finding never has one to be in (DN-4).
     """
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
@@ -2177,13 +2180,16 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
 
     tree = guidelines_tree(ctx)
     adapters = _ecosystem_adapters(ctx)
-    files = _changed_in_tree(ctx, changed, tree)
+    files, gone = _changed_in_tree(ctx, changed, tree)
     evaluation = findings_reader.evaluate(
         ruleset.rules,
         files,
         read=lambda rel: _read_bytes(tree / rel),
         mask=lambda rel, text, keep: _lexical_mask(adapters, Path(rel), text, keep),
         references=lambda rel: _references(adapters, tree / rel, Path(rel), tree),
+        gone=gone,
+        history=_change_history(ctx, tree, changed.base, adapters),
+        registries=ruleset.registries,
     )
     records = tuple(f.record(ruleset.digest) for f in evaluation.findings)
     blocking = [f for f in evaluation.findings if f.blocks]
@@ -2202,28 +2208,83 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     return Verdict(
         ok=True,
         message=f"no new blocker finding in {evaluation.scanned} changed file(s) "
-        f"under {evaluation.rules} pattern and boundary guideline(s), "
+        f"under {evaluation.rules} mechanical guideline(s), "
         f"ruleset {ruleset.digest}",
         detail=detail,
         findings=records,
     )
 
 
-def _changed_in_tree(ctx: RuleContext, changed: _ChangedSet, tree: Path) -> list[str]:
-    """The changed files that are files in the tree, project-relative.
+def _changed_in_tree(
+    ctx: RuleContext, changed: _ChangedSet, tree: Path
+) -> tuple[list[str], list[str]]:
+    """The changed paths, project-relative: those that are files in the tree,
+    and those that are not.
 
-    A deleted file has nothing to match and imports nothing, so it is no
-    finding. The spelling is the one every declared glob is compared in, and
-    a declared absolute path is spelled against the project's checkouts.
+    A deleted file has nothing to match and imports nothing, so only a
+    cochange reads the second list: removing a file is a change. The
+    spelling is the one every declared glob is compared in, and a declared
+    absolute path is spelled against the project's checkouts.
     """
-    bases = [tree, ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
     files: set[str] = set()
+    gone: set[str] = set()
     for path in changed.paths:
-        rel = project_relative(Path(path).as_posix(), bases)
-        if rel in (None, ".") or not (tree / rel).is_file():
+        rel = _tree_relative(ctx, tree, path)
+        if rel is None:
             continue
-        files.add(rel)
-    return sorted(files)
+        (files if (tree / rel).is_file() else gone).add(rel)
+    return sorted(files), sorted(gone)
+
+
+def _tree_relative(ctx: RuleContext, tree: Path, path: Path | str) -> str | None:
+    bases = [tree, ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
+    rel = project_relative(Path(path).as_posix(), bases)
+    return None if rel in (None, ".") else rel
+
+
+def _change_history(
+    ctx: RuleContext, tree: Path, base: str, adapters: list[Adapter]
+) -> findings_reader.History:
+    """What git knows about the change, read from the tree in hand.
+
+    Measured from where the branch left its base, as ``_changed_set``'s
+    commit leg is. With no base recorded every answer is ``None``, so a
+    cochange rule that needs one is unanswerable rather than passed. The
+    merge base is asked once, and the added lines once, and only when a rule
+    needs them.
+    """
+    asked: dict[str, Any] = {}
+
+    def merge_base() -> str | None:
+        if "base" not in asked:
+            asked["base"] = git.merge_base(tree, base) if base else None
+        return asked["base"]
+
+    def existed(rel: str) -> bool | None:
+        point = merge_base()
+        return None if point is None else git.exists_at(tree, point, rel)
+
+    def before(rel: str) -> bytes | None:
+        point = merge_base()
+        return None if point is None else git.blob_at(tree, point, rel)
+
+    def lines() -> dict[str, Any] | None:
+        answer = git.changed_lines(tree, base) if base else None
+        if answer is None:
+            return None
+        spelled: dict[str, Any] = {}
+        for path, added in answer.items():
+            rel = _tree_relative(ctx, tree, path)
+            if rel is not None:
+                spelled[rel] = added
+        return spelled
+
+    return findings_reader.History(
+        existed=existed,
+        before=before,
+        lines=lines,
+        executable=lambda rel, text: _executable_text(adapters, Path(rel), text),
+    )
 
 
 def _read_bytes(path: Path) -> bytes | None:
@@ -2257,7 +2318,7 @@ def _mechanical_detail(
 
 def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...]:
     fixes = []
-    if any(f.status == "new" for f in blocking):
+    if any(f.status == "new" and f.kind != "cochange" for f in blocking):
         fixes.append(
             "change the code so the guideline holds, or give the finding a reasoned "
             "exception in the ruleset (its path, and its fingerprint from "
@@ -2268,6 +2329,9 @@ def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...
             "make the file answerable: declare the ecosystem whose adapter reads it, "
             "or fix what stops it being read; an unanswered file never passes"
         )
+    for finding in blocking:
+        if finding.fix and finding.fix not in fixes:
+            fixes.append(finding.fix)
     return tuple(fixes)
 
 

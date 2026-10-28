@@ -351,6 +351,7 @@ class TestTheRecord:
             "fingerprint": "0123456789ab",
             "target": None,
             "note": "",
+            "fix": "",
             "ruleset": "5be0c2d91f7a",
         }
 
