@@ -90,6 +90,7 @@ carry no flag that leaves Claude's default permission mode
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
@@ -651,11 +652,25 @@ class HostProcessRecord:
 @dataclass(frozen=True)
 class ProcessFacts:
     """What one ``ps`` says about a live pid: is it ``claude``, when it
-    started, and the terminal it runs on (``None`` when it has none)."""
+    started, and the terminal it runs on (``None`` when it has none).
+
+    ``started`` is the same start as epoch seconds, for a caller that must
+    order it against another time rather than compare it for equality: an
+    attention pid is that host's only while its process started before the
+    host's last write (BUG_099).
+    """
 
     is_host: bool
     start: str | None = None
     tty: str | None = None
+    started: float | None = None
+
+
+def _epoch_of(token: str | None) -> float | None:
+    """A :func:`process_start_token` as epoch seconds; it is spelled in UTC."""
+    if token is None:
+        return None
+    return float(calendar.timegm(time.strptime(token, "%Y-%m-%dT%H:%M:%S")))
 
 
 def process_facts(pid: int) -> ProcessFacts | None:
@@ -689,7 +704,35 @@ def process_facts(pid: int) -> ProcessFacts | None:
         is_host=is_claude_process_name(name),
         start=start,
         tty=None if tty in ("?", "??") else tty,
+        started=_epoch_of(start),
     )
+
+
+def process_cwd(pid: int) -> str | None:
+    """The working directory of ``pid``, from ``lsof``, or ``None`` when it cannot say.
+
+    ``lsof -a -p PID -d cwd -Fn`` reads one file descriptor of one process
+    the user owns: no privilege, about a tenth of a second. Its field output
+    names the path on the line that starts with ``n``. Only an absolute path
+    is an answer; anything else, a refusal or no ``lsof`` at all, is "cannot
+    say", never a guess (BUG_099).
+    """
+    try:
+        proc = subprocess.run(
+            ["lsof", "-a", "-p", str(int(pid)), "-d", "cwd", "-Fn"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("n/"):
+            return line[1:]
+    return None
 
 
 def _record(path: Path, platform: str) -> HostProcessRecord | None:
@@ -760,19 +803,22 @@ class ClaudeCodeProbe:
     """What the oracle needs to know about Claude Code, and nothing else.
 
     The oracle's scan defines the shape it reads — a project's transcripts,
-    whether a live pid is still the host, the per-process records and what
-    ``ps`` says about a recorded pid — and the CLI injects this. It imports
+    whether a live pid is still the host, the per-process records, what
+    ``ps`` says about a pid, and the working directory ``lsof`` reads for a
+    pid no record describes (BUG_099) — and the CLI injects this. It imports
     nothing from ``oracle/``, so no ``hosts -> oracle`` arrow exists (ADR-007
     D6, D11): the host answers questions, the layer above asks them.
     """
 
     def __init__(
-        self, home: Path | None = None, name_of=None, facts_of=None, platform=None
+        self, home: Path | None = None, name_of=None, facts_of=None, platform=None,
+        cwd_of=None,
     ) -> None:
         self.home = home
         self.name_of = name_of if name_of is not None else process_name
         self.facts_of = facts_of if facts_of is not None else process_facts
         self.platform = platform if platform is not None else host_platform
+        self.cwd_of = cwd_of if cwd_of is not None else process_cwd
 
     def transcripts(self, root: Path) -> ClaudeCodeTranscripts:
         return ClaudeCodeTranscripts(origin=Path(root), home=self.home)
@@ -786,6 +832,9 @@ class ClaudeCodeProbe:
 
     def process_facts(self, pid: int) -> ProcessFacts | None:
         return self.facts_of(pid)
+
+    def process_cwd(self, pid: int) -> str | None:
+        return self.cwd_of(pid)
 
 
 #: How far up the parent chain :func:`find_host_pid` looks. A hook is the

@@ -368,6 +368,23 @@ one and a row of unknown liveness are offered nothing, and the panel says
 "Its process ids disagree" on a conflict row rather than "process id not
 recorded".
 
+*Amended 2026-10-28 (BUG_099)*: a host Claude Code keeps no per-process
+record for (its environment inherited `CLAUDE_CODE_CHILD_SESSION`) was never
+closeable, whatever the evidence. The user asked that a live, verified Claude
+host be closeable whichever source named its pid, with the same pid-reuse
+safety, and that a window that cannot be verified say why. So the pid may
+also be the attention record's, when the scan verifies it with evidence for
+each guard rather than by relaxing one: `ps` says it is `claude` and gives
+its start and tty; it started before the attention record was last written,
+which ties it to the host as the record's `sessionId` does; Claude Code's
+records were read and none names the pid for another host; and `lsof` reads
+its working directory for `rooted_here`. Such a row is `pid_source`
+`attention+ps`. `close-host` checks it again without a record: a fresh scan
+must show the same verified pid at the same start, and every `ps` check
+applies as before. A live leftover or unmanaged window that fails a guard
+says which on its leftovers row instead of the generic line
+([oracle.md](../architecture/oracle.md), "oracle/recommend").
+
 *Amended 2026-10-25 (BUG_087)*: "active" and "idle" are read from one
 mid-turn answer, `signals.turn_state`, which the signals and the gate cache
 share. When Claude Code's per-process record verified the host, its

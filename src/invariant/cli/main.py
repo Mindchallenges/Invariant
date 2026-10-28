@@ -3497,16 +3497,31 @@ def cmd_oracle_close_host(args) -> int:
     registered project refuses it. One SIGTERM, a wait, never a SIGKILL; the
     tab is closed only once Claude has gone and only its shell is left.
     """
-    from ..oracle.closehost import CloseRequest, binding_refusal, close_host
+    from ..oracle.closehost import (
+        CloseRequest,
+        attention_refusal,
+        binding_refusal,
+        close_host,
+    )
     from ..oracle.recommend import assess
     from ..oracle.scan import scan_all
 
+    read: list[dict] = []
+
+    def fresh() -> dict:
+        if not read:
+            snapshots = scan_all(_project_index(), cache=_oracle_cache())
+            read.append(assess(snapshots, time.time()))
+        return read[0]
+
     def bound() -> str | None:
-        snapshots = scan_all(_project_index(), cache=_oracle_cache())
-        return binding_refusal(assess(snapshots, time.time()), args.host_id)
+        return binding_refusal(fresh(), args.host_id)
+
+    def vouched() -> str | None:
+        return attention_refusal(fresh(), args.host_id, args.pid, args.start)
 
     request = CloseRequest(args.host_id, args.pid, args.start, args.tty)
-    lines = close_host(request, _oracle_host_seams(), bound)
+    lines = close_host(request, _oracle_host_seams(), bound, vouched)
     payload = {"host_id": args.host_id, "pid": args.pid, "tty": args.tty, "lines": lines}
     return emit(args, payload, "\n".join(lines))
 

@@ -46,7 +46,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .recommend import CLI, RERUN_UNRECORDED, RERUN_UNSCOPED, RUN, TERMINAL
+from .recommend import (
+    CLI,
+    CLOSE_CLAIMED,
+    CLOSE_CWD,
+    CLOSE_NEWER,
+    CLOSE_NOT_ROOTED,
+    CLOSE_OTHER,
+    CLOSE_PS,
+    CLOSE_RECORDS,
+    CLOSE_START,
+    RERUN_UNRECORDED,
+    RERUN_UNSCOPED,
+    RUN,
+    TERMINAL,
+)
 from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, row_key
 from .signals import (
     ERROR,
@@ -497,6 +511,20 @@ _NO_RERUN = {
                        "session's own window."),
 }
 
+#: Why a live leftover is offered no "Close…" (BUG_099), by
+#: ``Recommendation.reason``: the guard its evidence did not satisfy, said on
+#: its leftovers row in place of a pill.
+_NO_CLOSE = {
+    CLOSE_PS: "invariant could not read its process",
+    CLOSE_START: "invariant could not read when its process started",
+    CLOSE_NEWER: "its process may be a newer one",
+    CLOSE_RECORDS: "invariant could not read Claude's process records",
+    CLOSE_OTHER: "its process now runs another Claude conversation",
+    CLOSE_CWD: "invariant could not read its folder",
+    CLOSE_NOT_ROOTED: "it was started outside this project",
+    CLOSE_CLAIMED: "a session in another project uses it",
+}
+
 _RECENT = {
     "permission": "Claude asked for permission",
     "question": "Claude asked you a question",
@@ -543,6 +571,7 @@ _LEFTOVER = {
     "unmanaged": "Open, never had a session",
     "active": "Active, no session",
     "window": "{state} · window {id}",
+    "no_close": "{state} · window {id} · cannot close from here: {why}",
     "folder_title": "{project} · {name}",
     "branch": "On branch {branch}",
     "no_branch": "Not on a branch",
@@ -1032,8 +1061,10 @@ def _host_leftover(row: dict[str, Any], project: str, now: float,
         title = _LEFTOVER["host_title_now"].format(project=project)
     window = str(host.get("host_session_id") or "")[:8]
     words = _runnable(row)
-    return {"row": row_key(row), "title": title,
-            "line": _LEFTOVER["window"].format(state=_host_state(row, host), id=window),
+    why = _NO_CLOSE.get((row.get("recommendation") or {}).get("reason") or "")
+    line = (_LEFTOVER["no_close"].format(state=_host_state(row, host), id=window, why=why)
+            if why else _LEFTOVER["window"].format(state=_host_state(row, host), id=window))
+    return {"row": row_key(row), "title": title, "line": line,
             "button": {"text": words.button} if acting and words else None}
 
 

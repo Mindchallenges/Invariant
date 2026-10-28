@@ -44,11 +44,20 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from .scan import (
+    PID_ATTENTION_PS,
+    PID_BOTH,
+    PID_RECORD,
     ROW_ERROR,
     ROW_HOST,
     ROW_SESSION,
     ROW_WORKTREE,
     SESSION_ENV,
+    UNVERIFIED_CWD,
+    UNVERIFIED_NEWER,
+    UNVERIFIED_OTHER,
+    UNVERIFIED_PS,
+    UNVERIFIED_RECORDS,
+    UNVERIFIED_START,
     HostView,
     ProjectSnapshot,
     Row,
@@ -89,6 +98,40 @@ CLI = "invariant"
 #: Why a failing row is offered no re-run (BUG_093), as ``Recommendation.reason``.
 RERUN_UNSCOPED = "rerun_unscoped"
 RERUN_UNRECORDED = "rerun_unrecorded"
+
+#: Why a live leftover or unmanaged host is offered no Close (BUG_099), as
+#: ``Recommendation.reason``: the first close guard its evidence does not
+#: satisfy. The panel words each one on the host's card.
+CLOSE_PS = "close_ps"
+CLOSE_START = "close_start"
+CLOSE_NEWER = "close_newer"
+CLOSE_RECORDS = "close_records"
+CLOSE_OTHER = "close_other"
+CLOSE_CWD = "close_cwd"
+CLOSE_NOT_ROOTED = "close_not_rooted"
+CLOSE_CLAIMED = "close_claimed"
+
+#: The scan's ``unverified`` word, as the reason it gives.
+_UNVERIFIED_REASON = {
+    UNVERIFIED_PS: CLOSE_PS,
+    UNVERIFIED_START: CLOSE_START,
+    UNVERIFIED_NEWER: CLOSE_NEWER,
+    UNVERIFIED_RECORDS: CLOSE_RECORDS,
+    UNVERIFIED_OTHER: CLOSE_OTHER,
+    UNVERIFIED_CWD: CLOSE_CWD,
+}
+
+#: The step's label for each, as the dashboard shows an ``info`` step.
+_CLOSE_LABEL = {
+    CLOSE_PS: "the process table could not describe its process",
+    CLOSE_START: "its process's start could not be read",
+    CLOSE_NEWER: "its process started after the window last reported, so it may be another one",
+    CLOSE_RECORDS: "Claude Code's process records could not be read",
+    CLOSE_OTHER: "another Claude conversation's record names its process",
+    CLOSE_CWD: "its working folder could not be read",
+    CLOSE_NOT_ROOTED: "it was started outside this project",
+    CLOSE_CLAIMED: "a live session in another project lists it",
+}
 
 
 @dataclass(frozen=True)
@@ -188,27 +231,46 @@ def _owed_detail(gates: GateReport) -> str:
 
 
 #: Where a pid must come from for a host to be closed: Claude Code's own
-#: per-process record, which carries the start token checked again at close.
-_VERIFIED = ("record", "both")
+#: per-process record, which carries the start token checked again at close,
+#: or an attention pid the scan verified with ``ps`` and ``lsof`` (BUG_099).
+_VERIFIED = (PID_RECORD, PID_BOTH, PID_ATTENTION_PS)
+
+
+def close_blocker(row: Row, host: HostView | None, cause: str) -> str | None:
+    """The first close guard a live leftover or unmanaged host fails, as a reason.
+
+    ``None`` when every guard holds, and for any host the guards do not
+    apply to: no host, another class, not known alive, or a pid conflict,
+    which say for themselves why nothing is offered. The guards are ADR-009
+    D7's and D15's: a pid one verified source names with a start token,
+    started in this project, and listed by no live session anywhere.
+    """
+    if (host is None or cause not in (ORPHAN_LEFTOVER, ORPHAN_UNMANAGED)
+            or host.alive is not True or host.pid_conflict
+            or not isinstance(host.pid, int) or host.pid <= 0):
+        return None
+    if host.pid_source not in _VERIFIED:
+        return _UNVERIFIED_REASON.get(host.unverified or "", CLOSE_PS)
+    if not host.process_start:
+        return CLOSE_START
+    if host.rooted_here is None:
+        return CLOSE_CWD
+    if host.rooted_here is False:
+        return CLOSE_NOT_ROOTED
+    if row.claimed_elsewhere:
+        return CLOSE_CLAIMED
+    return None
 
 
 def _closeable(row: Row, host: HostView | None, cause: str) -> bool:
-    """Whether every guard for closing ``host`` holds (ADR-009 D7, D15).
-
-    A leftover or unmanaged host that is idle, whose pid Claude Code's record
-    names with a start token and no other source disputes, that was started
-    in this project, and that no live session anywhere lists.
-    """
+    """Whether every guard for closing ``host`` holds (ADR-009 D7, D15)."""
     return (
         host is not None
         and cause in (ORPHAN_LEFTOVER, ORPHAN_UNMANAGED)
         and host.alive is True
-        and host.pid_source in _VERIFIED
         and not host.pid_conflict
         and isinstance(host.pid, int) and host.pid > 0
-        and bool(host.process_start)
-        and host.rooted_here is True
-        and not row.claimed_elsewhere
+        and close_blocker(row, host, cause) is None
     )
 
 
@@ -255,6 +317,12 @@ def _for_orphan(row: Row, cause: str = "") -> Recommendation:
         )
     if closeable:
         return _close(row, host)
+    blocker = close_blocker(row, host, cause)
+    if blocker:
+        return Recommendation(
+            f"not closeable from here: {_CLOSE_LABEL[blocker]}; close it in its own terminal",
+            reason=blocker,
+        )
     return Recommendation("start or resume a session from that host's own terminal")
 
 

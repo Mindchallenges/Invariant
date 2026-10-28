@@ -5,7 +5,9 @@ The panel offers "Close…" on a leftover host only when every guard holds
 the page's word for any of it. At the moment it runs it checks again:
 
 * Claude Code's per-process record for the pid still exists, names this host
-  session, and carries the start the confirm was made against;
+  session, and carries the start the confirm was made against; or, for a
+  window Claude Code keeps no record for, a fresh scan verifies the host's
+  attention pid again, at that start (``attention+ps``, BUG_099);
 * the pid is alive (``kill 0``), ``ps`` says it is ``claude``, it started at
   that start, and it runs on the terminal the confirm named;
 * no live invariant session in any registered project lists the host.
@@ -42,7 +44,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.errors import InvariantError
-from .scan import ROW_SESSION, HostProcess, ProcessFacts
+from .scan import PID_ATTENTION_PS, ROW_HOST, ROW_SESSION, HostProcess, ProcessFacts
 
 #: Seconds to wait for Claude to exit after SIGTERM.
 GRACE_SECONDS = 10.0
@@ -153,11 +155,37 @@ def binding_refusal(document: Mapping[str, Any], host_id: str) -> str | None:
     return None
 
 
+def attention_refusal(document: Mapping[str, Any], host_id: str, pid: int,
+                      start: str) -> str | None:
+    """Why no record is needed to close ``host_id`` on ``pid``, or why it is.
+
+    ``document`` is a fresh :func:`~invariant.oracle.recommend.assess`. With
+    no per-process record for the pid, the scan's own verification stands in
+    for it (BUG_099): the host's orphan row must name this pid, verified by
+    the process table (``attention+ps``), at the start the confirm showed.
+    ``None`` when it does; else the refusal.
+    """
+    for project in document.get("projects", []):
+        for row in project.get("rows", []):
+            if row.get("kind") != ROW_HOST:
+                continue
+            host = (row.get("hosts") or [{}])[0]
+            if host.get("host_session_id") != host_id:
+                continue
+            if (host.get("pid") == pid and host.get("pid_source") == PID_ATTENTION_PS
+                    and host.get("process_start") == start):
+                return None
+            return (f"Claude Code has no record of process {pid}, and the window's own "
+                    f"record no longer verifies it as this Claude")
+    return f"Claude Code has no record of process {pid}, and nothing else names it any more"
+
+
 def _refuse(why: str) -> InvariantError:
     return InvariantError(NOTHING_DONE + why)
 
 
-def _check(request: CloseRequest, seams: HostSeams, bound: Callable[[], str | None]) -> None:
+def _check(request: CloseRequest, seams: HostSeams, bound: Callable[[], str | None],
+           vouched: Callable[[], str | None] | None) -> None:
     """Every guard, again, at the moment of the close. Raises on the first that fails."""
     pid = request.pid
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
@@ -168,13 +196,17 @@ def _check(request: CloseRequest, seams: HostSeams, bound: Callable[[], str | No
         records = [r for r in seams.records() if r.pid == pid]
     except Exception as exc:  # an unreadable source is a refusal, never a guess
         raise _refuse(f"Claude Code's per-process records cannot be read ({exc})") from exc
-    if not records:
-        raise _refuse(f"Claude Code has no record of process {pid} any more")
-    record = records[0]
-    if record.session_id != request.host_id:
-        raise _refuse(f"process {pid} now belongs to another Claude session")
-    if record.start != request.start:
-        raise _refuse(f"process {pid} is a newer process than the Claude window confirmed")
+    if records:
+        record = records[0]
+        if record.session_id != request.host_id:
+            raise _refuse(f"process {pid} now belongs to another Claude session")
+        if record.start != request.start:
+            raise _refuse(f"process {pid} is a newer process than the Claude window confirmed")
+    else:
+        why = (vouched() if vouched is not None
+               else f"Claude Code has no record of process {pid} any more")
+        if why:
+            raise _refuse(why)
     if not seams.alive(pid):
         raise _refuse(f"process {pid} has already exited")
     facts = seams.facts(pid)
@@ -252,15 +284,18 @@ def outcome_word(line: str | None) -> str | None:
 
 
 def close_host(request: CloseRequest, seams: HostSeams,
-               bound: Callable[[], str | None]) -> list[str]:
+               bound: Callable[[], str | None],
+               vouched: Callable[[], str | None] | None = None) -> list[str]:
     """End the confirmed Claude, then close its Terminal tab. The lines to print.
 
     ``bound`` answers whether a live session anywhere lists the host
-    (:func:`binding_refusal` over a fresh read). A failed check raises before
-    anything is signalled; a Claude that does not exit raises after the one
-    SIGTERM, and nothing else is done.
+    (:func:`binding_refusal` over a fresh read). ``vouched`` answers, for a
+    pid no per-process record names, whether a fresh scan still verifies it
+    as this host (:func:`attention_refusal`); without it such a pid is
+    refused. A failed check raises before anything is signalled; a Claude
+    that does not exit raises after the one SIGTERM, and nothing else is done.
     """
-    _check(request, seams, bound)
+    _check(request, seams, bound, vouched)
     pid = request.pid
     app = seams.in_terminal(pid) if request.tty else None
     lines = [

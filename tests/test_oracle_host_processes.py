@@ -586,6 +586,10 @@ class TestProcessStart:
         assert launch.process_start_token(text) == token
 
 
+def utc(token: str) -> float:
+    return float(calendar.timegm(time.strptime(token, "%Y-%m-%dT%H:%M:%S")))
+
+
 class TestProcessFacts:
     def canned(self, monkeypatch, stdout="", returncode=0, raises=None):
         calls = []
@@ -604,13 +608,14 @@ class TestProcessFacts:
             monkeypatch, "ttys004  Sun Oct  5 09:00:00 2026     /opt/bin/claude\n")
         facts = launch.process_facts(52001)
         assert facts == launch.ProcessFacts(is_host=True, start="2026-10-05T09:00:00",
-                                            tty="ttys004")
+                                            tty="ttys004", started=utc("2026-10-05T09:00:00"))
         assert calls == [["ps", "-o", "tty=,lstart=,comm=", "-p", "52001"]]
 
     def test_no_terminal_is_no_tty(self, monkeypatch):
         self.canned(monkeypatch, "??       Sun Oct 25 12:21:28 2026     zsh\n")
         assert launch.process_facts(1) == launch.ProcessFacts(
-            is_host=False, start="2026-10-25T12:21:28", tty=None)
+            is_host=False, start="2026-10-25T12:21:28", tty=None,
+            started=utc("2026-10-25T12:21:28"))
 
     def test_an_unparseable_line_still_judges_the_name(self, monkeypatch):
         self.canned(monkeypatch, "ttys001 claude\n")

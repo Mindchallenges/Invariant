@@ -1,7 +1,7 @@
 """Repro for BUG_099 — see the work-item entry (docs/backlog/BUG_099.md).
 
-Fails while the defect is live. When the fix lands, delete the strict
-expected-failure marker; the assertion must then pass unchanged.
+Failed while the defect was live; the fix removed the strict expected-failure
+marker and the assertion passes unchanged.
 
 Observed: a live Claude window that wrote no Claude Code per-process record
 (its ``<claude home>/sessions`` holds only the ``<pid>.<hash>.key`` file, no
@@ -25,8 +25,8 @@ The test asserts the symptom -- the step the ``oracle list --json`` document
 offers the row -- not the suspected cause (which ``pid_source`` the close
 guards accept, or whether the scan reads tty and start for an attention pid).
 The Claude Code home is a synthetic directory under ``tmp_path`` read through
-the real ``ClaudeCodeProbe`` (never the real ``~/.claude``); ``ps`` is a
-stand-in; no process is signalled and no Terminal is driven.
+the real ``ClaudeCodeProbe`` (never the real ``~/.claude``); ``ps`` and ``lsof`` are
+stand-ins; no process is signalled and no Terminal is driven.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ IDLE_FOR = 15 * HOUR
 
 
 class RealClaudeProbe(FakeProbe):
-    """The scan's fake transcripts, with Claude Code's real record, name and ``ps`` reads."""
+    """The scan's fake transcripts, with Claude Code's real record, name, ``ps`` and ``lsof`` reads."""
 
     def __init__(self, real, transcripts):
         super().__init__(transcripts)
@@ -76,13 +76,23 @@ class RealClaudeProbe(FakeProbe):
     def process_facts(self, pid):
         return self.real.process_facts(pid)
 
+    def process_cwd(self, pid):
+        return self.real.process_cwd(pid)
+
 
 @pytest.fixture
-def fake_ps(monkeypatch):
-    """``ps`` for the one live Claude process: its name, and its tty, start and name."""
+def fake_ps(monkeypatch, tmp_path):
+    """``ps`` for the one live Claude process: its name, and its tty, start and name.
+
+    And ``lsof``, for the folder it was started in: the project's root.
+    """
     real_run = subprocess.run
 
     def run(argv, *args, **kwargs):
+        if argv and argv[0] == "lsof":
+            assert str(PID) in argv, argv
+            out = f"p{PID}\nfcwd\nn{tmp_path / 'alpha'}\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
         if not argv or argv[0] != "ps":
             return real_run(argv, *args, **kwargs)  # git, for the project fixture
         assert str(PID) in argv, argv
@@ -95,8 +105,6 @@ def fake_ps(monkeypatch):
     monkeypatch.setattr(launch.subprocess, "run", run)
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="BUG_099 is live — delete this marker with the fix")
 def test_BUG_099_a_live_host_with_no_per_process_record_is_offered_close(tmp_path, fake_ps):
     alpha = make_project(tmp_path, "alpha")
     # The session this host was bound to has ended: the host is a leftover.

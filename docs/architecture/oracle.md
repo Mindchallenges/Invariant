@@ -468,6 +468,19 @@ flowchart TD
     R -- "none" --> P{"attention pid?"}
     P -- "no" --> U["pid null, alive null"]
     P -- "yes" --> AP["pid_source attention: kill 0 + name check"]
+    AP --> O{"a live orphan?"}
+    O -- "no" --> AK["pid_source attention"]
+    O -- "yes" --> V["one ps (TZ=UTC): claude, start, tty"]
+    V -- "cannot describe / no start" --> UV["pid_source attention, unverified ps / start"]
+    V -- "not claude" --> G["alive false: a reused pid"]
+    V -- "described" --> W{"started before the attention record's last write?"}
+    W -- "no" --> UN["unverified newer"]
+    W -- "yes" --> RR{"records read, none names this pid?"}
+    RR -- "not read" --> UR["unverified records"]
+    RR -- "another host's record" --> UO["unverified other"]
+    RR -- "yes" --> L{"lsof: its cwd?"}
+    L -- "cannot read" --> UC["unverified cwd"]
+    L -- "read" --> AV["pid_source attention+ps: start, tty and cwd kept"]
     R -- "two or more alive" --> C["pid_source conflict: pid null, alive null, every candidate listed"]
     R -- "one alive, or the newest dead one" --> J{"attention pid differs?"}
     J -- "yes" --> C
@@ -476,6 +489,28 @@ flowchart TD
     RP --> CHK["kill 0 + one ps (TZ=UTC): claude, same start; tty kept"]
     BP --> CHK
 ```
+
+**An attention pid no record describes** (BUG_099). A host whose
+environment inherited `CLAUDE_CODE_CHILD_SESSION` (a Terminal.app itself
+started from a Claude tool shell, IDEA_035) writes no per-process record,
+so only its attention record names its pid. For such a host the scan reads
+the evidence the record would have given, and only when the row is a live
+orphan, because only an orphan can be offered Close: one `ps` (the same
+`process_facts` read, kept for 60 seconds) for the name, the start and the
+tty, and one `lsof -a -p PID -d cwd -Fn` (`ClaudeCodeProbe.process_cwd`,
+kept for 60 seconds, dropped with the pid) for its working directory. What
+ties the pid to the host, the job the record's `sessionId` does, is the
+attention record itself: one host writes it, so a process that started
+before its last write is the process that wrote the pid, not a later one on
+a reused pid. `ProcessFacts.started` gives the start as epoch seconds for
+that one ordering; the start token is still compared for equality only. The
+records must have been read and none may name the pid for another host (a
+`/clear` or a resume moves one process to another conversation). All of it
+read, the row's `pid_source` is `attention+ps`, with `process_start`, `tty`
+and `cwd` filled. The first fact that fails is kept as `unverified` (`ps`,
+`start`, `newer`, `records`, `other`, `cwd`) and the pid stays `attention`;
+`ps` naming another program makes the host not alive, as on the record
+path. A host a live session holds, or one that is gone, costs nothing more.
 
 **The oracle never picks one silently.** When both sources name a pid and the
 pids differ, or two records for one host are both alive, the row carries
@@ -488,7 +523,10 @@ A host row also keeps the record's `launched_name` (the session name it was
 started with), `cwd`, `started` (epoch seconds) and `process_start` (the
 start token, so a later action can compare it again at the moment it acts),
 and the verified process's `tty`. The tty is what close host needs to find
-the terminal tab the host runs in ("Close host" below). It keeps the
+the terminal tab the host runs in ("Close host" below). On an
+`attention+ps` row these come from `ps` and `lsof` instead (`launched_name`,
+`started` and `status` stay `null`), and `unverified` names what could not
+be read. It keeps the
 record's `status` too, as written (Claude Code writes `busy`, `idle`,
 `waiting`, or `shell` while its turn is idle and a background shell runs),
 and only when the record joined the host: `signals.turn_state` decides what
@@ -496,7 +534,8 @@ it means ("Mid-turn" below, BUG_087, BUG_094). A conflict row has no
 status, as it has no pid.
 
 **Where an orphan was started** (IDEA_027 increment 6). An orphan host row's
-view also carries `rooted_here`: whether its record's `cwd` is the project's
+view also carries `rooted_here`: whether its `cwd` (the record's, or on an
+`attention+ps` row the one `lsof` read) is the project's
 root, a folder under it, or one of its worktrees (the ones git lists and the
 ones its session records name), compared by whole path components after
 resolving; `null` without a `cwd`. And once every project is read,
@@ -579,7 +618,8 @@ IDEA_029 can ask it for the newest entry with text.
 **Host facts are injected** (ADR-007 D11). Which transcripts belong to a
 project and whether a pid is `claude` are Claude Code knowledge. The scan
 defines `HostProbe` (`transcripts(root)`, `is_host_process(pid)`, and, since
-IDEA_024, `host_processes()` and `process_facts(pid)`), the CLI injects
+IDEA_024, `host_processes()` and `process_facts(pid)`, and since BUG_099
+`process_cwd(pid)`), the CLI injects
 `hosts/claude_code_launch.ClaudeCodeProbe`, and the oracle imports nothing
 from `hosts/`. The start token in a record and in `process_facts` is one
 UTC spelling, `YYYY-MM-DDTHH:MM:SS`: `procStart` is UTC as Claude Code writes
@@ -587,7 +627,8 @@ it, and `process_facts` runs `ps` with `TZ=UTC`. The oracle compares the two
 for equality and never parses them.
 Without a probe the scan still runs: no transcripts, no records, and a live
 pid counts as the host. A probe without the two newer methods is a probe whose
-records are not used.
+records are not used; one without `process_cwd` leaves an attention-only
+orphan `unverified: cwd`, so it is never offered Close.
 
 **Cheap on the next pass.** `ScanCache` keeps the git-backed answers — each
 project's worktree list and its transcript source, whose construction asks git
@@ -712,6 +753,7 @@ table that holds wins.
 | orphan host, `leftover` and every close guard holds | run | `invariant oracle close-host <host> --pid N --start TOKEN [--tty ttysNNN]` | project root |
 | orphan host, alive, exactly one adoptable session, and no other live orphan host here could take it (`adopt_rivals` 0) | run | `invariant session adopt <host> --id <session>` | project root |
 | orphan host, `unmanaged` and every close guard holds | run | `invariant oracle close-host …`, as above | project root |
+| orphan host, alive, `leftover` or `unmanaged`, a close guard failing | info | none: "not closeable from here: <the guard>", with `reason` naming it (BUG_099) | — |
 | orphan host, otherwise | info | none: start or resume a session from that host | — |
 | failed tests, a scoped run on record | run | `invariant pipeline test --selector S …`, each selector of the session's newest scoped run, with `INVARIANT_SESSION_ID` and `INVARIANT_<KEY>` for each value that run's discovery resolved (BUG_093) | worktree, else root |
 | failed tests, no scoped run on record, or one older than the record of discovered values while the project's `test_one` needs discovery | info | none: run its tests from the session's own window. The oracle never runs the whole suite (ADR-010) | — |
@@ -726,12 +768,30 @@ table that holds wins.
 | `error`, degraded | run | `invariant doctor` | project root |
 | `your_turn` | info | none | — |
 
-The close guards are ADR-009 D7's and D15's: the host is alive by Claude
-Code's record (`pid_source` `record` or `both`), with a start token and no
-`pid_conflict`; it is `rooted_here`; and no other project's live session
-claims it (`claimed_elsewhere`). A gone, active or unknown orphan is never
-offered close, and an active one includes a host Claude Code says is busy or
-waiting ("Mid-turn" above).
+The close guards are ADR-009 D7's and D15's: the host is alive by a
+verified source (`pid_source` `record` or `both`, or `attention+ps` since
+BUG_099), with a start token and no `pid_conflict`; it is `rooted_here`;
+and no other project's live session claims it (`claimed_elsewhere`). A
+gone, active or unknown orphan is never offered close, and an active one
+includes a host Claude Code says is busy or waiting ("Mid-turn" above).
+
+**Why a live leftover is not closeable** (BUG_099). `recommend.close_blocker`
+names the first guard a live `leftover` or `unmanaged` host fails, in the
+order above, and the `info` step carries it as `reason`, which the panel
+words on the host's leftovers row:
+
+| `reason` | The guard | From |
+|---|---|---|
+| `close_ps` | `ps` describes the process | `unverified: ps`, or an attention pid with nothing read |
+| `close_start` | a start token | `unverified: start`, or a record with no `procStart` |
+| `close_newer` | the process started before the attention record's last write | `unverified: newer` |
+| `close_records` | Claude Code's records were read | `unverified: records` |
+| `close_other` | no record names the pid for another host | `unverified: other` |
+| `close_cwd` | a working directory | `unverified: cwd`, or a record with no `cwd` (`rooted_here` null) |
+| `close_not_rooted` | the directory is in this project | `rooted_here` false |
+| `close_claimed` | no other project's live session lists it | `claimed_elsewhere` |
+
+A conflict, a gone or unknown host and an active one keep their own words.
 
 **Attach only when the match is unique both ways.** `assess` calls
 `scan.mark_rivals` on each project after `mark_claims`: an orphan host row
@@ -1570,7 +1630,7 @@ D15's; the words are [oracle-panel.md](oracle-panel.md)'s.
 
 | Module | Owns | Never does |
 |---|---|---|
-| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, the SIGTERM and the wait, the tab and its settle), `binding_refusal`, `send_sigterm`, the outcome lines and `outcome_word` (a line back to its code, BUG_098) | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
+| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, the SIGTERM and the wait, the tab and its settle), `binding_refusal`, `attention_refusal` (the fresh scan's word for a pid no record names, BUG_099), `send_sigterm`, the outcome lines and `outcome_word` (a line back to its code, BUG_098) | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
 | `webactions` | Writes the close's outcome code on the audit log's done line (`tab`), through `outcome_word` | Record the outcome line or any other output |
 | `hosts/claude_code_launch` | `runs_in_terminal_app` (Terminal.app in the parent chain), `TerminalTabCloser` and `TERMINAL_TAB_SCRIPT` | Interpolate the tty into the script; start Terminal; decide whether to close |
 
@@ -1586,6 +1646,7 @@ sequenceDiagram
     Srv->>Srv: fresh scan, same step? (else 409, nothing runs)
     Srv->>Cmd: run argv in the project root
     Cmd->>Seams: record for pid: same session id, same start?
+    Note over Cmd: no record: a fresh scan still has the host's row at attention+ps, this pid, this start?
     Cmd->>Seams: kill 0; ps: claude, same start, same tty?
     Cmd->>Cmd: fresh scan of every project: no live session lists it?
     Note over Cmd: any mismatch: "nothing was done: …", exit 1
@@ -1603,8 +1664,9 @@ sequenceDiagram
 | Check, at the moment it runs | Refusal (nothing is signalled) |
 |---|---|
 | `--pid` is a positive number, the host id a plain name | a process id must be a positive number / is not a host id |
-| Claude Code's per-process records can be read, and one has this pid | the records cannot be read / no record of process N any more |
-| that record's `sessionId` is the host id, its `procStart` the `--start` | now belongs to another Claude session / a newer process than the one confirmed |
+| Claude Code's per-process records can be read | the records cannot be read |
+| a record has this pid: its `sessionId` is the host id, its `procStart` the `--start` | now belongs to another Claude session / a newer process than the one confirmed |
+| no record has this pid (BUG_099): a fresh `scan_all` and `assess` still show the host's orphan row with this pid, `pid_source` `attention+ps` and `process_start` the `--start`, every fact in "An attention pid no record describes" read again | no record of process N, and the window's own record no longer verifies it as this Claude / … and nothing else names it any more |
 | `kill 0` finds the pid | process N has already exited |
 | `ps` describes it, as `claude`, started at `--start`, on `--tty` (or on none when no `--tty`) | cannot describe / not Claude any more / started at another time / runs on another terminal |
 | no live session in any registered project lists the host (a fresh `scan_all` and `assess`) | a live invariant session uses this Claude window now (<project>, session <id>) |
@@ -1660,8 +1722,9 @@ log"). A refused or failed close, and every other step, has no `tab`.
 `_oracle_host_seams`, a `HostSeams` of Claude Code's: `ClaudeCodeProbe`'s
 `host_processes` and `process_facts`, `scan.pid_exists`,
 `closehost.send_sigterm`, `runs_in_terminal_app` and
-`TerminalTabCloser().close`. The binding check reads through
-`_oracle_cache`. The suite replaces `_oracle_host_seams` for every test with
+`TerminalTabCloser().close`. The binding check and, for a pid no record
+names, the attention check read one fresh scan through `_oracle_cache`,
+made once per run. The suite replaces `_oracle_host_seams` for every test with
 seams that know no process, so the command refuses before it signals
 anything. Beside the `osascript` guard, the `conftest.py` guard refuses
 `os.kill` and `os.killpg` with any signal but 0 unless the pid is a child

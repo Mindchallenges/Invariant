@@ -101,6 +101,26 @@ MERGE_GATE = "session.ff_merge_target"
 #: after its last sign of life.
 ORPHAN_WINDOW_SECONDS = 24 * 3600
 
+#: Where a host's pid came from (IDEA_024, BUG_099), as ``HostView.pid_source``.
+PID_ATTENTION = "attention"
+#: An attention pid the process table and the host's own records vouch for:
+#: a live ``claude`` with a start and a working directory, started before the
+#: attention record was last written, and named by no other host's record.
+PID_ATTENTION_PS = "attention+ps"
+PID_RECORD = "record"
+PID_BOTH = "both"
+PID_CONFLICT = "conflict"
+
+#: What could not be verified about a live orphan's attention pid, as
+#: ``HostView.unverified`` (BUG_099). Each one keeps Close off the row and
+#: names why on its card.
+UNVERIFIED_PS = "ps"
+UNVERIFIED_START = "start"
+UNVERIFIED_NEWER = "newer"
+UNVERIFIED_RECORDS = "records"
+UNVERIFIED_OTHER = "other"
+UNVERIFIED_CWD = "cwd"
+
 #: The variable a step pins its session with: ``pipeline test`` takes no ``--id``.
 SESSION_ENV = "INVARIANT_SESSION_ID"
 
@@ -147,7 +167,12 @@ class HostProcess(Protocol):
 
 
 class ProcessFacts(Protocol):
-    """What the process table says about a live pid."""
+    """What the process table says about a live pid.
+
+    ``started`` is the start as epoch seconds, read only to order it against
+    an attention record's last write (BUG_099); a probe whose facts lack it
+    leaves an attention pid unverified.
+    """
 
     is_host: bool
     start: str | None
@@ -177,6 +202,15 @@ class HostProbe(Protocol):
 
     def process_facts(self, pid: int) -> ProcessFacts | None:
         """``pid``'s name check, start token and terminal, or ``None``."""
+        ...
+
+    def process_cwd(self, pid: int) -> str | None:
+        """``pid``'s working directory, or ``None`` when it cannot be read.
+
+        Optional, like the two above: asked only for a live orphan whose pid
+        no per-process record describes (BUG_099). A probe without it leaves
+        such a host's folder unread, so it is never offered Close.
+        """
         ...
 
 
@@ -294,6 +328,32 @@ class ScanCache:
             True, len(records), f"{len(records)} per-process records read"
         )
 
+    def facts(self, pid: int) -> ProcessFacts | None:
+        """``ps`` on a live ``pid``, kept for ``ttl``; ``None`` when it cannot say.
+
+        The same cached answer :meth:`process_alive` reads, so a pid asked
+        both ways costs one ``ps``. A probe without the read, or a read that
+        raises, cannot say.
+        """
+        ask = getattr(self.probe, "process_facts", None)
+        if ask is None:
+            return None
+        try:
+            return self._cached("facts", pid, lambda: ask(pid))
+        except Exception:  # noqa: BLE001 - an unanswerable check is unknown, not dead
+            return None
+
+    def process_cwd(self, pid: int) -> str | None:
+        """``pid``'s working directory, kept for ``ttl``; ``None`` when it cannot be read."""
+        ask = getattr(self.probe, "process_cwd", None)
+        if ask is None:
+            return None
+        try:
+            cwd = self._cached("cwd", pid, lambda: ask(pid))
+        except Exception:  # noqa: BLE001 - an unread folder is unknown, never a guess
+            return None
+        return cwd if isinstance(cwd, str) and cwd else None
+
     def process_alive(self, pid: int | None, start: str | None) -> tuple[bool | None, str | None]:
         """Whether a recorded pid is still that host, and its terminal.
 
@@ -307,8 +367,8 @@ class ScanCache:
         if not isinstance(pid, int) or isinstance(pid, bool):
             return None, None
         if not self.pid_alive(pid):
-            self._entries.pop(("facts", pid), None)
-            self._entries.pop(("host", pid), None)
+            for kind in ("facts", "host", "cwd"):
+                self._entries.pop((kind, pid), None)
             return False, None
         ask = getattr(self.probe, "process_facts", None)
         if ask is None:
@@ -344,7 +404,9 @@ class HostView:
     transcript_written: float | None = None
     #: Where ``pid`` came from: ``attention``, ``record`` (Claude Code's
     #: per-process record), ``both`` when they agree, ``conflict`` when they
-    #: do not; ``None`` with no pid at all (IDEA_024).
+    #: do not; ``None`` with no pid at all (IDEA_024). ``attention+ps`` is a
+    #: live orphan's attention pid that the process table verified, with no
+    #: record to say so (BUG_099).
     pid_source: str | None = None
     #: On a conflict, every pid named, ``{source, pid, alive}`` each. The
     #: oracle never picks one silently.
@@ -359,6 +421,10 @@ class HostView:
     #: The terminal the verified host runs on, from ``ps`` (``None`` without
     #: one, or when the pid came from the attention record alone).
     tty: str | None = None
+    #: On a live orphan whose pid only the attention record names: what
+    #: could not be verified about it (``ps``, ``start``, ``newer``,
+    #: ``records``, ``other``, ``cwd``), else ``None`` (BUG_099).
+    unverified: str | None = None
     #: On an orphan row: whether the record's ``cwd`` is this project's root,
     #: a folder under it or one of its worktrees; ``None`` without a ``cwd``.
     #: The evidence that ties the host to this project (ADR-009 D7, BUG_040).
@@ -813,27 +879,76 @@ class _ProjectReader:
         found = [(r, *self.cache.process_alive(r.pid, r.start)) for r in records]
         live = [f for f in found if f[1] is True]
         if len(live) > 1:
-            view.pid_source = "conflict"
+            view.pid_source = PID_CONFLICT
             view.pid_conflict = [_candidate("record", r.pid, a) for r, a, _ in live]
             return
         chosen = live[0] if live else max(found, key=lambda f: f[0].started or 0.0, default=None)
         if chosen is None:
             if pid is not None:
-                view.pid, view.alive, view.pid_source = pid, self.cache.host_alive(pid), "attention"
+                view.pid, view.alive = pid, self.cache.host_alive(pid)
+                view.pid_source = PID_ATTENTION
             return
         process, alive, tty = chosen
         if pid is not None and pid != process.pid:
-            view.pid_source = "conflict"
+            view.pid_source = PID_CONFLICT
             view.pid_conflict = [
                 _candidate("attention", pid, self.cache.host_alive(pid)),
                 _candidate("record", process.pid, alive),
             ]
             return
         view.pid, view.alive, view.tty = process.pid, alive, tty
-        view.pid_source = "both" if pid is not None else "record"
+        view.pid_source = PID_BOTH if pid is not None else PID_RECORD
         view.launched_name, view.cwd = process.name, process.cwd
         view.started, view.process_start = process.started, process.start
         view.status = process.status
+
+    def _verify_attention(self, view: HostView) -> None:
+        """Vouch for a live orphan's attention pid with the process's own facts.
+
+        No per-process record ties the pid to the host, so the evidence is
+        read here, once per ``ttl``, and only for these rows (BUG_099):
+
+        * ``ps``: it is ``claude``, with a start and its terminal;
+        * it started before the attention record was last written, so the
+          host that wrote the pid is this process and not a later one on a
+          reused pid;
+        * Claude Code's records were read, and none names the pid for
+          another host;
+        * ``lsof``: its working directory, for ``rooted_here``.
+
+        All of it read: ``attention+ps``. The first that fails is named in
+        ``unverified`` and the pid stays ``attention``. A process ``ps``
+        says is not ``claude`` is a reused pid, so the host is not alive.
+        """
+        pid = view.pid
+        facts = self.cache.facts(pid)
+        if facts is None:
+            view.unverified = UNVERIFIED_PS
+            return
+        if not facts.is_host:
+            view.alive = False
+            return
+        started = getattr(facts, "started", None)
+        if not facts.start or not isinstance(started, (int, float)):
+            view.unverified = UNVERIFIED_START
+            return
+        view.process_start, view.tty = facts.start, facts.tty
+        written = view.attention_written
+        if written is None or started > written:
+            view.unverified = UNVERIFIED_NEWER
+            return
+        if not self.cache.host_process_status.get("used"):
+            view.unverified = UNVERIFIED_RECORDS
+            return
+        if any(r.pid == pid for records in self._processes.values() for r in records):
+            view.unverified = UNVERIFIED_OTHER
+            return
+        cwd = self.cache.process_cwd(pid)
+        if cwd is None:
+            view.unverified = UNVERIFIED_CWD
+            return
+        view.cwd = cwd
+        view.pid_source = PID_ATTENTION_PS
 
     def _attention_of(self, host_id: str) -> tuple[dict[str, Any] | None, float | None]:
         try:
@@ -873,6 +988,8 @@ class _ProjectReader:
             view = self._host(host_id, current=True)
             if view.attention and view.attention.get("ended"):
                 continue
+            if view.pid_source == PID_ATTENTION and view.alive is True:
+                self._verify_attention(view)
             if view.cwd:
                 homes = homes if homes is not None else self._homes(records)
                 view.rooted_here = _inside(view.cwd, homes)
