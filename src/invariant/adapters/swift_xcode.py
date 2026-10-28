@@ -13,8 +13,9 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import Any, ClassVar
 
-from .base import Adapter, Hazard, TestResult
+from .base import Adapter, Hazard, TestResult, masked
 
 
 def _tool_is_reachable(tool: str, developer_dir) -> bool:
@@ -52,7 +53,7 @@ def _newest_developer_dir() -> Path | None:
 class SwiftXcodeAdapter(Adapter):
     id = "swift_xcode"
 
-    manifest_defaults = {
+    manifest_defaults: ClassVar[dict[str, Any]] = {
         "commands": {
             "build": "xcodebuild build -workspace {workspace} -scheme {scheme}",
             # -resultBundlePath is not optional decoration. The bundle is the
@@ -119,6 +120,8 @@ class SwiftXcodeAdapter(Adapter):
 
     def detect(self, root: Path) -> bool:
         return any(root.glob("*.xcworkspace")) or any(root.glob("*.xcodeproj"))
+
+    guideline_engines: ClassVar[frozenset[str]] = frozenset({"mask"})
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".swift"]
@@ -191,7 +194,22 @@ class SwiftXcodeAdapter(Adapter):
             return None
         return _swift_carries_executable_code(text)
 
-    def executable_text(self, source: str) -> str | None:
+    def lexical_mask(self, relative: Path, text: str, keep: str) -> str | None:
+        """Swift's comments and literals, read by :func:`_swift_regions`.
+
+        ``None`` for a file that is not ``.swift`` and for text that reader
+        cannot finish, so a literal running to the end never masks the rest
+        of the file as one string.
+        """
+        if Path(relative).suffix != ".swift":
+            return None
+        regions, finished = _swift_regions(text)
+        return masked(text, regions, keep) if finished else None
+
+    def executable_text(self, relative: Path, source: str) -> str | None:
+        """For `.swift` only: Swift's lexer misreads every other language."""
+        if Path(relative).suffix != ".swift":
+            return None
         return _swift_executable_text(source)
 
     def hazards(self) -> list[Hazard]:
@@ -750,13 +768,75 @@ _TOP_LEVEL_RESIDUE = re.compile(
 )
 
 
+def _swift_regions(text: str) -> tuple[list[tuple[str, int, int]], bool]:
+    """``text`` cut into code, comment and string regions, and whether it ended.
+
+    The one reader of Swift's comments and literals (ADR-012 D4). The comment
+    and string blanker, the coverage reducer and the lexical mask all consume
+    it, so they cannot disagree about where a comment or a literal is.
+
+    A `//` inside a string literal and a `"` inside a comment each break the
+    naive version of the other, so both are read in ONE left-to-right pass:
+    whichever opens first wins, which is what the compiler does. Block
+    comments nest, as Swift's do. The regions are ``(kind, start, end)``
+    offsets that cover the text, the kinds those of
+    :data:`~invariant.adapters.base.LEXICAL_REGIONS`.
+
+    The second value is ``False`` when a block comment or a literal runs off
+    the end, so its region is cut short at the end of the text.
+
+    Two limits, both known and both kept. A raw string's extended delimiter
+    (`#"say "hi""#`) is not read, so the quotes inside it close and reopen
+    literals. A quote inside an interpolation (`"\\(f("x"))"`) does the same.
+    Each misreads only the text it sits in, and a quote the reader cannot
+    balance runs to the end and reports the text as unfinished.
+    """
+    regions: list[tuple[str, int, int]] = []
+    finished = True
+    code_from, i, n = 0, 0, len(text)
+    while i < n:
+        start = i
+        if text.startswith("//", i):
+            newline = text.find("\n", i)
+            i, kind = (n if newline < 0 else newline), "comments"
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            finished, kind = finished and not depth, "comments"
+        elif text.startswith('"""', i):
+            close = text.find('"""', i + 3)
+            i, kind = (n if close < 0 else close + 3), "strings"
+            finished = finished and close >= 0
+        elif text[i] == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            finished, kind = finished and i < n, "strings"
+            i = min(i + 1, n)
+        else:
+            i += 1
+            continue
+        if start > code_from:
+            regions.append(("code", code_from, start))
+        regions.append((kind, start, i))
+        code_from = i
+    if code_from < n:
+        regions.append(("code", code_from, n))
+    return regions, finished
+
+
 def _strip_comments_and_strings(text: str) -> str:
     """Blank out anything whose contents are not code.
 
-    A `//` inside a string literal and a `"` inside a comment each break the
-    naive version of the other, so both are consumed in ONE left-to-right
-    pass — whichever opens first wins, which is what the compiler does.
-    Newlines are preserved so line-oriented checks still see the shape.
+    Read through :func:`_swift_regions`. Newlines are preserved so
+    line-oriented checks still see the shape, except inside a one-line
+    literal, which never had any in valid Swift.
 
     A string's CONTENTS go and its QUOTES stay, which is what "blank" means
     here and what the sibling reducer's docstring has always said this one
@@ -766,51 +846,29 @@ def _strip_comments_and_strings(text: str) -> str:
     string on the right came out with an empty right-hand side. Both are
     distinctions a reader downstream has to be able to make.
     """
+    regions, _ = _swift_regions(text)
     out: list[str] = []
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        two = text[i : i + 2]
-        if two == "//":
-            j = text.find("\n", i)
-            i = n if j < 0 else j
-        elif two == "/*":
-            depth, i = 1, i + 2  # Swift nests block comments
-            while i < n and depth:
-                if text[i : i + 2] == "/*":
-                    depth, i = depth + 1, i + 2
-                elif text[i : i + 2] == "*/":
-                    depth, i = depth - 1, i + 2
-                else:
-                    if text[i] == "\n":
-                        out.append("\n")
-                    i += 1
-        elif ch == '"':
-            if text[i : i + 3] == '"""':
-                j = text.find('"""', i + 3)
-                chunk = text[i : n if j < 0 else j + 3]
-                out.append('""' + "\n" * chunk.count("\n"))
-                i = n if j < 0 else j + 3
-            else:
-                i += 1
-                while i < n and text[i] != '"':
-                    i += 2 if text[i] == "\\" else 1
-                i += 1
-                out.append('""')
+    for kind, start, end in regions:
+        chunk = text[start:end]
+        if kind == "code":
+            out.append(chunk)
+        elif kind == "comments":
+            out.append("\n" * chunk.count("\n"))
         else:
-            out.append(ch)
-            i += 1
+            multiline = chunk.startswith('"""')
+            out.append('""' + ("\n" * chunk.count("\n") if multiline else ""))
     return "".join(out)
 
 
 def _swift_executable_text(source: str) -> str | None:
     """`source` with comments and layout removed and code left intact.
 
-    Deliberately NOT `_strip_comments_and_strings`. That one blanks a string
-    literal's CONTENTS, which is right for asking "is there a statement here"
-    and catastrophic for asking "did the code change": `"a"` and `"b"` reduce
-    to the same text, so a real edit would read as cosmetic — the one mistake
-    this answer must never make. Literals are copied verbatim.
+    Deliberately NOT `_strip_comments_and_strings`, though it reads the same
+    regions. That one blanks a string literal's CONTENTS, which is right for
+    asking "is there a statement here" and catastrophic for asking "did the
+    code change": `"a"` and `"b"` reduce to the same text, so a real edit
+    would read as cosmetic — the one mistake this answer must never make.
+    Literals are copied verbatim.
 
     Whitespace is normalised because re-indenting is not a code change and a
     reader who reflows a signature has changed nothing a coverage run can
@@ -821,45 +879,11 @@ def _swift_executable_text(source: str) -> str | None:
     literal or block comment means the reduction is missing text, and a
     truncated reduction compares equal too easily.
     """
-    out: list[str] = []
-    i, n = 0, len(source)
-    while i < n:
-        ch = source[i]
-        two = source[i : i + 2]
-        if two == "//":
-            j = source.find("\n", i)
-            i = n if j < 0 else j
-        elif two == "/*":
-            depth, i = 1, i + 2  # Swift nests block comments
-            while i < n and depth:
-                if source[i : i + 2] == "/*":
-                    depth, i = depth + 1, i + 2
-                elif source[i : i + 2] == "*/":
-                    depth, i = depth - 1, i + 2
-                else:
-                    i += 1
-            if depth:
-                return None  # ran off the end inside a comment
-        elif ch == '"':
-            if source[i : i + 3] == '"""':
-                j = source.find('"""', i + 3)
-                if j < 0:
-                    return None
-                out.append(source[i : j + 3])
-                i = j + 3
-            else:
-                start = i
-                i += 1
-                while i < n and source[i] != '"':
-                    i += 2 if source[i] == "\\" else 1
-                if i >= n:
-                    return None
-                i += 1
-                out.append(source[start:i])
-        else:
-            out.append(ch)
-            i += 1
-    return " ".join("".join(out).split())
+    regions, finished = _swift_regions(source)
+    if not finished:
+        return None
+    kept = "".join(source[start:end] for kind, start, end in regions if kind != "comments")
+    return " ".join(kept.split())
 
 
 def _brace_blocks(text: str) -> list[tuple[str, str]]:

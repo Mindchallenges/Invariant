@@ -725,6 +725,52 @@ both and with no carve-out (DN-A3). The amendment below gives its keys.
 
 **`judgement`** is D5.
 
+**As built: A3 increment 1, lexical masks and a path-aware
+`executable_text`.** Built to D4 ("Comment and string aware") and to the A3
+design rulings the user accepted (DN-1 to DN-17, option A each time). Those that bind this increment:
+
+- *DN-9.* `node` and `generic` gain nothing here. A node lexer is IDEA_038.
+- *DN-10.* Python's mask and `executable_text` go through `tokenize`. An
+  f-string or a t-string is one string region, replacement fields included,
+  on every interpreter from 3.10, so a verdict does not depend on which one
+  ran. `executable_text` drops comments, blank lines and layout and keeps
+  docstrings, which reduces too little rather than too much. A comment-only
+  Python edit is therefore excused from `coverage.meets_floor` in every Python
+  project, this repository included.
+- *DN-11.* `executable_text` takes the file's path and answers `None` outside
+  its adapter's ecosystem; `core/rules._executable_text` passes the path.
+  That is the fix for BUG_103.
+
+What landed:
+
+- *The seam.* `Adapter.lexical_mask(relative, text, keep)` returns the same
+  lines and columns with every region outside `keep` (`code`, `comments` or
+  `strings`) blanked, and `None` for a file outside the adapter's ecosystem
+  or one it cannot read to the end. `Adapter.guideline_engines` is a
+  `ClassVar` subset of `{mask, imports}`. The base offers nothing and
+  answers `None`, which relaxes nothing. `python` and `swift_xcode` offer
+  `mask`. In a stacked project the first adapter with an answer wins, as
+  with `is_test_file` (`core/rules._lexical_mask`, for A3.3 to consume).
+- *One Swift reader.* `_swift_regions` is the one reader of Swift comments
+  and literals. `_strip_comments_and_strings`, `_swift_executable_text` and
+  the mask all consume it, so they cannot disagree. `executable_text` is
+  restricted to `.swift`. The known limits stay: `#"raw"#` strings, and
+  quotes inside a `\( )` interpolation.
+- *Validation.* `guidelines.ruleset_valid` hands `core/guidelines.load` the
+  engines the configured adapters offer, and refuses a `pattern` rule whose
+  `in:` is not `any` unless one of them offers `mask`. `parse` without
+  `engines` asks the schema question alone. A cochange `when.in` and a
+  `no_added_match.in` are not refused here: the ruling names pattern rules,
+  and those keys are evaluated by A3.4 and A4, where a file without a mask
+  is unanswerable.
+- *Text.* A file that does not decode as UTF-8 is not text, and no adapter
+  is asked about it.
+- *Tests.* `tests/test_adapters_lexical.py` (the seam, both lexers, the
+  pre-3.14 t-string tokens, stacking), `tests/test_adapters.py` (the Swift
+  reducer, now path-aware), `tests/test_guidelines_kinds.py` (the mask
+  refusal) and `tests/test_rules.py` (BUG_103's repro, its marker removed,
+  and the Python comment-only regression).
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through
@@ -1120,7 +1166,7 @@ graph TD
         FSM["fsm / machines"]
     end
     subgraph adapters["adapters/"]
-        AD["lexical mask, references,<br/>executable_text (existing)"]
+        AD["lexical_mask and guideline_engines (A3.1), references,<br/>executable_text, path-aware since A3.1"]
     end
     subgraph data["shipped data"]
         AGENTS["agents/*.md (host-neutral source)"]

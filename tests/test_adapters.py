@@ -1769,22 +1769,23 @@ class TestSwiftExecutableText:
     def setup_method(self):
         self.adapter = get_adapter("swift_xcode")
 
+    def reduce(self, source):
+        return self.adapter.executable_text(Path("App/Mod.swift"), source)
+
     def test_comments_and_layout_are_not_code(self):
         before = "func f() {\n    return 1 // one\n}\n"
         after = "/* doc /* nested */ still doc */\nfunc f() { return 1 }"
-        assert self.adapter.executable_text(before) == self.adapter.executable_text(
-            after
-        )
+        assert self.reduce(before) == self.reduce(after)
 
     def test_string_literals_are_kept_verbatim(self):
-        a = self.adapter.executable_text('let s = "a // not a comment"')
-        b = self.adapter.executable_text('let s = "b // not a comment"')
+        a = self.reduce('let s = "a // not a comment"')
+        b = self.reduce('let s = "b // not a comment"')
         assert a == 'let s = "a // not a comment"'
         assert a != b
 
     def test_escaped_quotes_and_multiline_literals_survive(self):
         text = 'let s = "say \\"hi\\""\nlet m = """\n  x // y\n  """'
-        assert self.adapter.executable_text(text) == (
+        assert self.reduce(text) == (
             'let s = "say \\"hi\\"" let m = """ x // y """'
         )
 
@@ -1793,7 +1794,7 @@ class TestSwiftExecutableText:
         ["let a = 1 /* never closed", 'let s = "never closed', 'let m = """ open'],
     )
     def test_an_unterminated_construct_answers_none(self, source):
-        assert self.adapter.executable_text(source) is None
+        assert self.reduce(source) is None
 
 
 class TestBUG041CoverageRowsAreNotSwiftOnly:

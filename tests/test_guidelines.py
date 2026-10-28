@@ -249,7 +249,9 @@ class TestRefusals:
 
 
 def context(make_manifest, tmp_path, body=None, *, session=None):
-    manifest = make_manifest({"version": 1, "project": {"name": "demo"}, **(body or {})})
+    # The ruleset's pattern rule reads code, which needs a masking adapter.
+    project = {"name": "demo", "ecosystems": ["python"]}
+    manifest = make_manifest({"version": 1, "project": project, **(body or {})})
     return RuleContext(manifest=manifest, cwd=tmp_path, session=session)
 
 

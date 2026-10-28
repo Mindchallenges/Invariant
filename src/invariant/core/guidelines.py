@@ -80,6 +80,8 @@ SEVERITIES = ("blocker", "warn")
 
 #: What a pattern's regex runs over, once the adapter's lexical mask applies (D4).
 PATTERN_SCOPES = ("code", "comments", "strings", "any")
+#: The scopes only an adapter's mask can answer; ``any`` reads the text whole.
+MASKED_SCOPES = ("code", "comments", "strings")
 PATTERN_ENGINES = ("regex",)
 #: Engines v1 refuses everywhere (ruling 3).
 DEFERRED_ENGINES = ("syntax", "symbols")
@@ -310,23 +312,31 @@ def digest_of(data: bytes) -> str:
 
 
 def load(
-    path: Path, *, registered: Collection[str], root: Path | None = None
+    path: Path,
+    *,
+    registered: Collection[str],
+    root: Path | None = None,
+    engines: Collection[str] | None = None,
 ) -> Ruleset:
     """Read and validate the ruleset at ``path``, or refuse it whole.
 
     ``root`` is the project tree the ruleset was read from, which a registry
-    path is resolved against.
+    path is resolved against. ``engines`` is as :func:`parse` takes it.
     """
     try:
         data = Path(path).read_bytes()
         text = data.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise RulesetError([f"the ruleset could not be read: {exc}"]) from exc
-    return parse(text, registered=registered, root=root)
+    return parse(text, registered=registered, root=root, engines=engines)
 
 
 def parse(
-    text: str, *, registered: Collection[str], root: Path | None = None
+    text: str,
+    *,
+    registered: Collection[str],
+    root: Path | None = None,
+    engines: Collection[str] | None = None,
 ) -> Ruleset:
     """Validate ruleset ``text`` against schema version 1.
 
@@ -334,6 +344,13 @@ def parse(
     ``engine`` check must name. ``root`` is the project tree a registry path
     is read from. With none, a ruleset naming a registry is refused, because
     a registry nobody read cannot be said to validate (DN-A9).
+
+    ``engines`` is every guideline engine the project's configured adapters
+    offer (``Adapter.guideline_engines``). A pattern rule reading ``code``,
+    ``comments`` or ``strings`` needs ``mask``, and is refused without it
+    (ADR-012 D4): evaluated over raw text instead, it would read more than it
+    says. ``None`` asks the schema question alone; ``guidelines.ruleset_valid``
+    always passes what the configured adapters offer.
     """
     try:
         raw = yaml.safe_load(text)
@@ -341,7 +358,7 @@ def parse(
         raise RulesetError([f"the ruleset is not valid YAML: {exc}"]) from exc
     if not isinstance(raw, Mapping):
         raise RulesetError(["the ruleset must be a mapping with version, sections and rules"])
-    reader = _Reader(registered, root)
+    reader = _Reader(registered, root, engines)
     ruleset = reader.ruleset(raw, digest_of(text.encode("utf-8")))
     if reader.problems:
         raise RulesetError(reader.problems)
@@ -351,9 +368,15 @@ def parse(
 class _Reader:
     """One validation pass, collecting every problem it meets."""
 
-    def __init__(self, registered: Collection[str], root: Path | None) -> None:
+    def __init__(
+        self,
+        registered: Collection[str],
+        root: Path | None,
+        engines: Collection[str] | None = None,
+    ) -> None:
         self.registered = frozenset(registered)
         self.root = root
+        self.engines = None if engines is None else frozenset(engines)
         self.problems: list[str] = []
         #: Each registry path read so far, and what it read as. ``None`` is a
         #: registry already refused, so its problems are named once.
@@ -537,6 +560,12 @@ class _Reader:
     def pattern(self, where: str, raw: Mapping) -> Check:
         engine = self.engine(where, raw["engine"], PATTERN_ENGINES, "pattern")
         scope = self.lexical_scope(where, "in", raw["in"])
+        if scope in MASKED_SCOPES and self.engines is not None and "mask" not in self.engines:
+            self.problem(
+                f"{where}: in {scope!r} needs a lexical mask, and no configured "
+                f"ecosystem's adapter offers one; read in: any, or declare an "
+                f"ecosystem whose adapter masks these files"
+            )
         match = self.regex(where, "match", raw["match"])
         return Check(kind="pattern", engine=engine, scope=scope, match=match)
 

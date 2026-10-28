@@ -39,7 +39,8 @@ def domain(
 ):
     body = {
         "version": 1,
-        "project": {"name": "demo"},
+        # The ruleset's pattern rule reads code, which needs a masking adapter.
+        "project": {"name": "demo", "ecosystems": ["python"]},
         "guidelines": {"ruleset": RULESET_REL, **(guidelines_cfg or {})},
         **extra,
     }

@@ -309,8 +309,41 @@ class Adapter:
         """
         return None
 
-    def executable_text(self, source: str) -> str | None:
+    #: The guideline engines this adapter answers for (ADR-012 D4), a subset
+    #: of ``mask`` (:meth:`lexical_mask`) and ``imports`` (the import graph a
+    #: ``boundary`` rule reads). ``guidelines.ruleset_valid`` refuses a rule
+    #: that needs an engine no configured adapter offers, so a rule is never
+    #: evaluated over raw text in place of the masked text it asked for. The
+    #: base offers none.
+    guideline_engines: ClassVar[frozenset[str]] = frozenset()
+
+    def lexical_mask(self, relative: Path, text: str, keep: str) -> str | None:
+        """``text`` with every region outside ``keep`` blanked in place.
+
+        ``keep`` is one of :data:`LEXICAL_REGIONS`: ``code``, ``comments`` or
+        ``strings``. The answer has the same lines and columns as ``text``, so
+        a pattern rule's match is reported where it is in the file (ADR-012
+        D4). ``relative`` is the project-relative path, which says whose
+        language the file is written in.
+
+        ``None`` for a file outside this adapter's ecosystem, and for one it
+        cannot read to the end. Adapters stack and the first answer wins, so
+        an answer for a file in another language is the defect BUG_103 was:
+        one lexer reading another's quotes and comments. ``None`` relaxes
+        nothing. A rule that needs a mask and gets none cannot be answered for
+        that file, which is the opposite of matching the raw text, a silent
+        widening of what the rule reads. The base answers ``None``.
+        """
+        return None
+
+    def executable_text(self, relative: Path, source: str) -> str | None:
         """This source with everything a coverage tool ignores removed.
+
+        ``relative`` is the file's project-relative path. An adapter answers
+        only for a file of its own ecosystem and ``None`` for every other:
+        adapters stack and the first answer wins, and a Swift reducer reading
+        a Python or TypeScript file took ``'http://a'`` for a string opener
+        followed by a comment, so a real edit compared equal (BUG_103).
 
         The third fact a coverage floor needs and cannot derive. Comparing
         two revisions of a file through this answers a question the raw diff
@@ -424,3 +457,32 @@ class Adapter:
 
     def hazards(self) -> list[Hazard]:
         return []
+
+
+#: The regions a lexical mask can keep (ADR-012 D4). A pattern rule's fourth
+#: scope, ``any``, reads the text unmasked and never asks for one.
+LEXICAL_REGIONS = ("code", "comments", "strings")
+
+
+def masked(text: str, regions: Sequence[tuple[str, int, int]], keep: str) -> str:
+    """``text`` with every region not of kind ``keep`` blanked in place.
+
+    ``regions`` are ``(kind, start, end)`` character offsets that cover the
+    text. Blanking replaces each character with a space and leaves line ends
+    alone, so the result has the same lines and the same columns: a match in
+    the mask is a match at the same place in the file.
+    """
+    if keep not in LEXICAL_REGIONS:
+        raise ValueError(
+            f"a lexical mask keeps one of {', '.join(LEXICAL_REGIONS)}, not {keep!r}; "
+            "a rule reading any region reads the text unmasked"
+        )
+    out: list[str] = []
+    for kind, start, end in regions:
+        chunk = text[start:end]
+        out.append(chunk if kind == keep else _LINE_BODY.sub(" ", chunk))
+    return "".join(out)
+
+
+#: Every character a blanked region replaces: anything but a line end.
+_LINE_BODY = re.compile(r"[^\r\n]")

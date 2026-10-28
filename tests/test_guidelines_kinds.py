@@ -631,3 +631,79 @@ class TestRulesetValidReadsTheRegistry:
         result = ruleset_valid(make_manifest, tree, session={"worktree": str(worktree)})
         assert result.blocks
         assert "version 9" in result.verdict.detail
+
+
+# -- a pattern rule needs a mask some configured adapter offers (A3.1) -------------
+
+
+PATTERN_RULESET = """\
+version: 1
+sections:
+  - id: quality
+    title: Code quality
+rules:
+  - id: quality.no-inline-todo
+    section: quality
+    title: No inline backlog markers
+    statement: A TODO in a comment is filed as an idea instead.
+    severity: warn
+    phases: [landing]
+    applies_to: ["src/**/*.py"]
+    check: {kind: pattern, engine: regex, in: comments, match: 'TODO'}
+"""
+
+
+def pattern_ruleset(scope: str) -> str:
+    return PATTERN_RULESET.replace("in: comments", f"in: {scope}")
+
+
+def ruleset_valid_under(make_manifest, cwd, ecosystems):
+    project = {"name": "demo"}
+    if ecosystems is not None:
+        project["ecosystems"] = ecosystems
+    manifest = make_manifest({"version": 1, "project": project, **CONFIGURED})
+    (result,) = evaluate(
+        ["guidelines.ruleset_valid"], RuleContext(manifest=manifest, cwd=cwd)
+    )
+    return result
+
+
+class TestAPatternScopeNeedsAMask:
+    """ADR-012 D4: a rule needing a mask fails as unanswerable rather than
+    matching raw text. ``ruleset_valid`` refuses a pattern rule reading
+    ``code``, ``comments`` or ``strings`` unless a configured adapter offers
+    ``mask``. ``any`` needs no mask."""
+
+    @pytest.mark.parametrize("scope", ["code", "comments", "strings"])
+    @pytest.mark.parametrize("ecosystems", [None, ["generic"], ["node"]])
+    def test_no_adapter_offering_a_mask_refuses_it(
+        self, make_manifest, tmp_path, scope, ecosystems
+    ):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", pattern_ruleset(scope))
+        result = ruleset_valid_under(make_manifest, tmp_path, ecosystems)
+        assert result.blocks
+        assert (
+            f"rule 'quality.no-inline-todo' check: in {scope!r} needs a lexical mask"
+            in result.verdict.detail
+        )
+
+    @pytest.mark.parametrize(
+        "ecosystems", [["python"], ["swift_xcode"], ["node", "python"]]
+    )
+    def test_a_configured_adapter_offering_a_mask_passes(
+        self, make_manifest, tmp_path, ecosystems
+    ):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", pattern_ruleset("code"))
+        result = ruleset_valid_under(make_manifest, tmp_path, ecosystems)
+        assert result.verdict.ok, result.verdict.detail
+
+    def test_any_needs_no_mask(self, make_manifest, tmp_path):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", pattern_ruleset("any"))
+        assert ruleset_valid_under(make_manifest, tmp_path, ["node"]).verdict.ok
+
+    def test_parse_without_engines_checks_the_schema_only(self):
+        """``engines=None`` is the schema question alone; the gate always
+        passes what the configured adapters offer."""
+        assert parse(PATTERN_RULESET, registered=REGISTERED).rules
+        with pytest.raises(RulesetError, match="needs a lexical mask"):
+            parse(PATTERN_RULESET, registered=REGISTERED, engines=frozenset())

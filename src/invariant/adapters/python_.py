@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
-from collections.abc import Sequence
+import tokenize
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
 import tomllib
 
-from .base import Adapter, Hazard, TestResult
+from .base import Adapter, Hazard, TestResult, masked
 
 
 class PythonAdapter(Adapter):
@@ -31,8 +33,39 @@ class PythonAdapter(Adapter):
     def detect(self, root: Path) -> bool:
         return (root / "pyproject.toml").is_file() or (root / "setup.py").is_file()
 
+    guideline_engines: ClassVar[frozenset[str]] = frozenset({"mask"})
+
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".py"]
+
+    def lexical_mask(self, relative: Path, text: str, keep: str) -> str | None:
+        """Through ``tokenize``, so the regions are Python's own.
+
+        An f-string or a t-string is masked whole as a string, replacement
+        fields included, on every interpreter from 3.10 (DN-10). ``None`` for
+        a file that is not ``.py`` and for text that does not tokenize.
+        """
+        if Path(relative).suffix != ".py":
+            return None
+        tokens = _python_tokens(text)
+        if tokens is None:
+            return None
+        return masked(text, _python_regions(text, tokens), keep)
+
+    def executable_text(self, relative: Path, source: str) -> str | None:
+        """Python's tokens with comments, blank lines and layout removed (DN-10).
+
+        Docstrings are kept: a docstring is a string a coverage run executes
+        as an expression, and keeping it reduces too little, never too much.
+        ``None`` for a file that is not ``.py`` and for text that does not
+        tokenize, so a truncated reduction never compares equal.
+        """
+        if Path(relative).suffix != ".py":
+            return None
+        tokens = _python_tokens(source)
+        if tokens is None:
+            return None
+        return _python_executable_text(source, tokens)
 
     def owns_selector(self, selector: str) -> bool:
         """A pytest node id names its file before the first ``::``."""
@@ -349,3 +382,124 @@ def _literal_true(call: ast.Call, keyword: str) -> bool:
 def _first_int(pattern: str, text: str) -> int | None:
     match = re.search(pattern, text)
     return int(match.group(1)) if match else None
+
+
+# -- the lexer the mask and the reducer share (IDEA_031 A3.1, DN-10) ----------
+
+#: Tokens that open and close an f-string or a t-string on the interpreters
+#: that split one into parts (f-strings from 3.12, t-strings from 3.14).
+#: Missing names are simply absent, so an older interpreter matches nothing.
+_LITERAL_OPENERS = frozenset(
+    getattr(tokenize, name) for name in ("FSTRING_START", "TSTRING_START")
+    if hasattr(tokenize, name)
+)
+_LITERAL_CLOSERS = frozenset(
+    getattr(tokenize, name) for name in ("FSTRING_END", "TSTRING_END")
+    if hasattr(tokenize, name)
+)
+
+#: The prefixes a t-string can carry. Before 3.14 the tokenizer reads
+#: ``t"..."`` as a name glued to a string.
+_TSTRING_PREFIXES = frozenset({"t", "rt", "tr"})
+
+_REGION_OF = {tokenize.STRING: "strings", tokenize.COMMENT: "comments"}
+
+#: Tokens whose own text is layout: the structure they mark is kept, the
+#: whitespace or line end that spells it is not.
+_LAYOUT = frozenset({tokenize.INDENT, tokenize.DEDENT, tokenize.NEWLINE, tokenize.ENDMARKER})
+
+
+def _python_tokens(text: str) -> list[tokenize.TokenInfo] | None:
+    """Every token of ``text``, or ``None`` when it does not tokenize to the end."""
+    try:
+        return list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return None
+
+
+def _lexemes(
+    text: str, tokens: Sequence[tokenize.TokenInfo]
+) -> Iterator[tuple[int, int, int, str]]:
+    """``(type, start, end, string)`` per lexeme, with offsets into ``text``.
+
+    One lexeme per token, except that every f-string and t-string is ONE
+    ``STRING`` lexeme spelled as its source. The interpreters disagree about
+    them: 3.10 and 3.11 read an f-string as one string token, 3.12 splits it
+    into parts and reads the replacement fields as code, and a t-string is a
+    name glued to a string before 3.14 and split into parts from it. Merging
+    gives every interpreter the same lexemes, so a verdict does not depend on
+    which one ran (DN-10).
+    """
+    starts = [0, *(i + 1 for i, ch in enumerate(text) if ch == "\n")]
+
+    def at(position: tuple[int, int]) -> int:
+        row, col = position
+        return min(starts[row - 1] + col, len(text)) if row <= len(starts) else len(text)
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.type in _LITERAL_OPENERS:
+            close, depth = index, 0
+            while True:
+                kind = tokens[close].type
+                depth += (kind in _LITERAL_OPENERS) - (kind in _LITERAL_CLOSERS)
+                if not depth:
+                    break
+                close += 1
+            start, end = at(token.start), at(tokens[close].end)
+            yield tokenize.STRING, start, end, text[start:end]
+            index = close + 1
+            continue
+        glued = tokens[index + 1] if index + 1 < len(tokens) else None
+        if (
+            token.type == tokenize.NAME
+            and token.string.lower() in _TSTRING_PREFIXES
+            and glued is not None
+            and glued.type == tokenize.STRING
+            and glued.start == token.end
+        ):
+            start, end = at(token.start), at(glued.end)
+            yield tokenize.STRING, start, end, text[start:end]
+            index += 2
+            continue
+        yield token.type, at(token.start), at(token.end), token.string
+        index += 1
+
+
+def _python_regions(
+    text: str, tokens: Sequence[tokenize.TokenInfo]
+) -> list[tuple[str, int, int]]:
+    """``text`` cut into code, comment and string regions that cover it."""
+    regions: list[tuple[str, int, int]] = []
+    position = 0
+    for kind, start, end, _ in _lexemes(text, tokens):
+        region = _REGION_OF.get(kind)
+        if region is None:
+            continue
+        if start > position:
+            regions.append(("code", position, start))
+        regions.append((region, start, end))
+        position = end
+    if position < len(text):
+        regions.append(("code", position, len(text)))
+    return regions
+
+
+def _python_executable_text(text: str, tokens: Sequence[tokenize.TokenInfo]) -> str:
+    """One line per lexeme a coverage run could count: its type and its text.
+
+    Comments and blank lines go, and so does every byte of whitespace between
+    tokens, because ``tokenize`` does not keep it. Indentation is kept as the
+    ``INDENT`` and ``DEDENT`` structure it spells, so re-indenting a block
+    whole is no change and moving a statement out of its block is one.
+    Docstrings are string tokens and stay, which reduces too little: a
+    docstring-only edit is held to the floor, the safe direction.
+    """
+    lines = []
+    for kind, _, _, string in _lexemes(text, tokens):
+        if kind in (tokenize.COMMENT, tokenize.NL):
+            continue
+        spelled = "" if kind in _LAYOUT else string
+        lines.append(f"{tokenize.tok_name[kind]} {spelled!r}")
+    return "\n".join(lines)

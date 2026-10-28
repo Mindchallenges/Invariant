@@ -733,7 +733,14 @@ the same reason — reducing too little costs a spurious block, reducing too muc
 calls a real code change cosmetic. The Swift implementation is where that has
 teeth: it must copy string literals VERBATIM, because the reader that answers
 `carries_executable_code` blanks their contents and would make `"a"` and `"b"`
-compare equal.
+compare equal. The question takes the file's project-relative path, and an
+adapter answers only for its own ecosystem's files. Without the path, the Swift
+reducer answered first for every file in a project declaring `swift_xcode`
+before another ecosystem, read the single-quoted `'http://a'` in a Python or
+TypeScript line as a quote and a comment, and excused a real change (BUG_103).
+The Python implementation goes through `tokenize`: comments, blank lines and
+layout go, docstrings stay, so a comment-only Python edit is excused too and a
+docstring edit is not (IDEA_031 A3.1).
 
 Alongside it sits the one lever that is policy rather than fact —
 `methodology.gates.coverage_exclude`, glob patterns a project states in its
@@ -1074,6 +1081,34 @@ refuses the request, and the caller runs them one at a time. Guessing would
 build a well-formed command against the wrong scope, which is the exact defect
 the question exists to close: a repeated `--selector` used to keep only the
 last, and report a healthy green for a scope nobody asked for (BUG_031).
+
+`lexical_mask` answers the guidelines domain's question about a file's text
+(ADR-012 D4): the same text, the same lines and columns, with every region
+outside `code`, `comments` or `strings` blanked, so a `pattern` rule reads only
+the region it names and reports a match where it sits. It is answered per
+file, by the adapter whose ecosystem the file belongs to. Every other adapter
+answers `None`, and so does the owner for a file it cannot read to the end.
+Stacking is the classification rule: the first adapter with an answer wins. A
+file nobody can mask has no mask. It is never matched as raw text, because
+that would widen what the rule reads without anyone seeing it.
+`guideline_engines` is what an adapter offers the guidelines domain, a subset
+of `mask` and `imports`. `guidelines.ruleset_valid` refuses a pattern rule
+reading anything but `any` unless a configured adapter offers `mask`, so a
+ruleset cannot ask for a reading the project's adapters cannot give.
+
+Which adapters mask, and how:
+
+| Adapter | `guideline_engines` | Mask and `executable_text` |
+|---|---|---|
+| `python` | `mask` | Through `tokenize`, for `.py`. An f-string or t-string is one string region, replacement fields included, on every interpreter from 3.10, so a verdict never depends on which interpreter ran. |
+| `swift_xcode` | `mask` | One region reader (`_swift_regions`) for `.swift`, consumed by the comment-and-string blanker, the coverage reducer and the mask. Known limits: a raw string's `#"…"#` delimiter and a quote inside a `\( )` interpolation are read as ordinary quotes. |
+| `node`, `generic` | none | `None`. A node lexer is IDEA_038. |
+
+Both questions take text, and text is what decodes as UTF-8. A file that does
+not decode is not text: the caller asks no adapter about it, so it gets no
+mask and no reduction, and nothing is relaxed. The comment-only exclusion
+already reads the working copy that way; the pattern evaluator (A3.3) reads
+every file it masks that way.
 
 The `swift_xcode` adapter exists first because the originating project needs
 it, and because it carries the most instructive ecosystem traps — a build tool

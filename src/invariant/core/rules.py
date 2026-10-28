@@ -1743,7 +1743,10 @@ def load_ruleset(
         # (ADR-012 DN-A9), so a registry broken in the session cannot pass
         # on another checkout's copy either.
         return guidelines_reader.load(
-            path, registered=[spec.id for spec in all_rules()], root=tree
+            path,
+            registered=[spec.id for spec in all_rules()],
+            root=tree,
+            engines=_offered_engines(_ecosystem_adapters(ctx)),
         ), None
     except guidelines_reader.RulesetError as exc:
         return None, Verdict.fail(
@@ -4282,8 +4285,8 @@ def _excluded_as_comment_only(
         except (OSError, UnicodeDecodeError, ValueError):
             kept[rel] = pct
             continue
-        reduced_before = _executable_text(adapters, before)
-        reduced_after = _executable_text(adapters, after)
+        reduced_before = _executable_text(adapters, Path(rel), before)
+        reduced_after = _executable_text(adapters, Path(rel), after)
         if (
             reduced_before is not None
             and reduced_after is not None
@@ -4498,13 +4501,42 @@ def _ratchet_detail(ratcheted: list[str]) -> str:
     )
 
 
-def _executable_text(adapters: list[Adapter], source: str) -> str | None:
-    """The first adapter with an opinion wins; no opinion answers ``None``."""
+def _executable_text(
+    adapters: list[Adapter], relative: Path, source: str
+) -> str | None:
+    """The first adapter with an opinion wins; no opinion answers ``None``.
+
+    The path is what makes the first opinion the right one: an adapter
+    answers only for its own ecosystem's files, so a file reaches the adapter
+    whose language it is written in or relaxes nothing (BUG_103).
+    """
     for adapter in adapters:
-        reduced = adapter.executable_text(source)
+        reduced = adapter.executable_text(relative, source)
         if reduced is not None:
             return reduced
     return None
+
+
+def _lexical_mask(
+    adapters: list[Adapter], relative: Path, text: str, keep: str
+) -> str | None:
+    """The stacking rule again: the first adapter with a mask answers.
+
+    An adapter masks only a file of its own ecosystem, so the first answer is
+    the owning adapter's. ``None`` when no declared adapter owns the file,
+    which leaves a rule needing a mask unanswerable for it rather than
+    matching its raw text (ADR-012 D4).
+    """
+    for adapter in adapters:
+        mask = adapter.lexical_mask(relative, text, keep)
+        if mask is not None:
+            return mask
+    return None
+
+
+def _offered_engines(adapters: list[Adapter]) -> frozenset[str]:
+    """Every guideline engine some declared adapter offers (ADR-012 D4)."""
+    return frozenset().union(*(adapter.guideline_engines for adapter in adapters))
 
 
 def _outside_measured_scope(adapters: list[Adapter], root: Path, path: Path) -> bool:

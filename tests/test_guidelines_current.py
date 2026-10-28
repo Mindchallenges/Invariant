@@ -38,7 +38,8 @@ RULE = "guidelines.generated_current"
 def context(make_manifest, root, guidelines_cfg=None, *, in_session=None, host=(), **extra):
     body = {
         "version": 1,
-        "project": {"name": "demo"},
+        # The ruleset's pattern rule reads code, which needs a masking adapter.
+        "project": {"name": "demo", "ecosystems": ["python"]},
         "guidelines": {"ruleset": RULESET_REL, **(guidelines_cfg or {})},
         **extra,
     }

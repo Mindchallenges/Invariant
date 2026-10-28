@@ -33,7 +33,12 @@ from invariant.domains.session import SessionDomain
 
 VALID = "guidelines.ruleset_valid"
 DRIFT = "guidelines.generated_current"
-CONFIGURED = {"version": 1, "project": {"name": "demo"}, "guidelines": {"ruleset": RULESET_REL}}
+#: The ruleset's pattern rule reads code, which needs a masking adapter.
+CONFIGURED = {
+    "version": 1,
+    "project": {"name": "demo", "ecosystems": ["python"]},
+    "guidelines": {"ruleset": RULESET_REL},
+}
 
 
 def digest(text: str) -> str:

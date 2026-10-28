@@ -6232,8 +6232,9 @@ class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:
 class TestBug103AStackedProjectHoldsANonPrimaryCodeChangeToTheFloor:
     """Repro for BUG_103 — see the work-item entry.
 
-    Fails while the defect is live. When the fix lands, delete the strict
-    xfail marker; the assertions must then pass unchanged.
+    Fixed in IDEA_031 A3 increment 1: ``executable_text`` takes the file's
+    path and answers ``None`` outside its own ecosystem, so a Python or
+    TypeScript file reaches the adapter that can read it or relaxes nothing.
 
     The symptom: in a project that declares `swift_xcode` first and a second
     ecosystem after it, a real code change in a file of that second ecosystem
@@ -6248,10 +6249,6 @@ class TestBug103AStackedProjectHoldsANonPrimaryCodeChangeToTheFloor:
     BEFORE = "x = 'http://a' + b\n"
     AFTER = "x = 'http://zzz' + c\n"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_103 is live — delete this marker with the fix",
-    )
     @pytest.mark.parametrize(
         ("second", "src"),
         [("python", "app/mod.py"), ("node", "app/mod.ts")],
@@ -6293,6 +6290,78 @@ class TestBug103AStackedProjectHoldsANonPrimaryCodeChangeToTheFloor:
         assert "altered no code" not in (verdict.detail or ""), verdict.detail
         assert not verdict.ok, verdict.message
         assert "below the 90% floor" in verdict.message
+
+
+class TestAPythonCommentOnlyChangeIsNotHeldToTheFloor:
+    """The comment-only exclusion reaches Python (IDEA_031 A3.1, DN-10).
+
+    Python's ``executable_text`` goes through ``tokenize``: comments, blank
+    lines and layout go, and docstrings and every other literal stay. So a
+    comment-only Python edit is excused from the floor in every Python
+    project, this repository included, and a code change is not. Also in a
+    stacked project, where the Swift reducer used to answer first (BUG_103).
+    """
+
+    SRC = "pkg/mod.py"
+    BEFORE = "def go():\n    # queued into pending_imports\n    return run('http://a')\n"
+
+    def verdict(self, ctx_factory, after, ecosystems, before=BEFORE):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        landed = main / self.SRC
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text(before, encoding="utf-8")
+        run(["git", "add", "-A"], main)
+        run(["git", "commit", "-qm", "base"], main)
+        run(["git", "merge", "-q", "--ff-only", "master"], wt)
+        path = wt / self.SRC
+        path.write_text(after, encoding="utf-8")
+        write_manifest(
+            main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ecosystems},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        ctx = ctx_factory(
+            cwd=wt,
+            session={
+                "id": "s1",
+                "files": [self.SRC],
+                "worktree": str(wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": {str(path): 30.0}}},
+        )
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode", "python"]])
+    def test_a_comment_only_edit_below_the_floor_does_not_block(
+        self, ctx_factory, ecosystems
+    ):
+        after = "def go():\n    # queued for review\n\n    return run('http://a')  # ok\n"
+        verdict = self.verdict(ctx_factory, after, ecosystems)
+        assert verdict.ok, verdict.message
+        assert "altered no code" in (verdict.detail or "")
+
+    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode", "python"]])
+    def test_a_code_change_still_blocks(self, ctx_factory, ecosystems):
+        after = "def go():\n    # queued into pending_imports\n    return run('http://b')\n"
+        verdict = self.verdict(ctx_factory, after, ecosystems)
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_a_docstring_edit_still_blocks(self, ctx_factory):
+        """Docstrings are kept: reducing too little is the safe direction."""
+        verdict = self.verdict(
+            ctx_factory,
+            'def go():\n    """Two."""\n',
+            ["python"],
+            before='def go():\n    """One."""\n',
+        )
+        assert not verdict.ok
 
 
 class TestTheNormalisedPayloadContract:
