@@ -192,6 +192,19 @@ class TestEligibility:
             assert eligible(row, NOW) is (
                 (view.attention or {}).get("turn") == "ended" or quiet >= 120)
 
+    def test_background_work_is_never_evaluated(self, tmp_path):
+        """BUG_094: a background reviewer may be committing in that worktree."""
+        shell = [recorded("shell", attention(turn="ended"))]
+        assert not eligible(idle_row(tmp_path, hosts=shell, last_activity=NOW - 15 * 3600),
+                            NOW)
+        open_agent = attention(turn="ended",
+                               background={"a1": {"kind": "agent", "since": "x"}})
+        for view in (host(open_agent), recorded("idle", open_agent)):
+            row = idle_row(tmp_path, hosts=[view], last_activity=NOW - 300)
+            assert not eligible(row, NOW)
+        lapsed = idle_row(tmp_path, hosts=[host(open_agent)], last_activity=NOW - 1800)
+        assert eligible(lapsed, NOW)
+
     def test_a_running_turn_whose_host_is_gone_waits_for_quiet(self, tmp_path):
         gone = [host(attention(turn="running"), alive=False)]
         assert not eligible(idle_row(tmp_path, hosts=gone, last_activity=NOW - 30), NOW)

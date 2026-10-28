@@ -168,6 +168,8 @@ ATTENTION_PROMPT = "prompt"
 ATTENTION_TURN_STOPPED = "turn-stopped"
 ATTENTION_TURN_ENDED = "turn-ended"
 ATTENTION_HOST_ENDED = "host-ended"
+ATTENTION_BACKGROUND_STARTED = "background-started"
+ATTENTION_BACKGROUND_DONE = "background-done"
 
 
 @dataclass(frozen=True)
@@ -178,12 +180,18 @@ class AttentionSignal:
     ``turn-ended`` and names the closeout rules that refused the turn, if any.
     ``turn-stopped`` is the Stop as it arrives, before the closeout has said
     anything; see :meth:`ClaudeCodeHost.arrival_attention`.
+
+    ``background-started`` names, in ``tasks``, the one piece of work the
+    main turn launched in the background, and in ``kind`` whether it is an
+    ``agent`` or a ``command``. ``background-done`` is a completion notice
+    arriving as a turn; ``tasks`` are the ones it says finished (BUG_094).
     """
 
     op: str
     kind: str | None = None
     message: str | None = None
     rules: tuple[str, ...] = ()
+    tasks: tuple[str, ...] = ()
 
 
 #: ``notification_type`` values as Claude Code sends them.
@@ -204,6 +212,23 @@ _NOTIFICATION_PATTERNS = (
 
 #: The tool whose call puts a question to the person.
 _QUESTION_TOOL = "AskUserQuestion"
+
+#: The shell tool, whose ``tool_response`` names a ``backgroundTaskId`` when
+#: the command runs on in the background.
+_SHELL_TOOL = "Bash"
+
+#: A task id becomes a key in the attention record: a plain name, bounded.
+_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+#: How Claude Code tells the main turn background work ended: a user turn
+#: whose text is one or more ``<task-notification>`` blocks, each with the
+#: task's ``<task-id>`` and a ``<status>``. The tags are what is read; the
+#: prose around them is not, except the one note that says the agent stopped
+#: with work of its own still running and will notify again.
+_TASK_NOTIFICATION = "<task-notification>"
+_TASK_BLOCK = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
+_TASK_DONE = frozenset({"completed", "failed", "killed", "stopped"})
+_STILL_RUNNING = re.compile(r"<note>[^<]*\bstill running\b", re.IGNORECASE)
 
 
 def notification_kind(payload: dict) -> str | None:
@@ -1060,11 +1085,15 @@ class ClaudeCodeHost:
             return response
         if event == "post-tool-use":
             response = self._post_tool_use(payload, ctx)
-            self.attention = AttentionSignal(ATTENTION_ANSWERED)
+            self.attention = _signal_or_none(
+                lambda: _background_launch(payload)
+            ) or AttentionSignal(ATTENTION_ANSWERED)
             return response
         if event == "user-prompt-submit":
             response = _context_response("UserPromptSubmit", build_context(ctx))
-            self.attention = AttentionSignal(ATTENTION_PROMPT)
+            self.attention = _signal_or_none(
+                lambda: _task_notification(payload)
+            ) or AttentionSignal(ATTENTION_PROMPT)
             return response
         if event == "session-start":
             return _context_response("SessionStart", build_context(ctx, greeting=True))
@@ -1723,6 +1752,61 @@ def _question_signal(payload: dict, response: dict) -> AttentionSignal | None:
     return AttentionSignal(
         ATTENTION_WAITING, kind="question", message=_question_text(payload.get("tool_input"))
     )
+
+
+def _background_launch(payload: dict) -> AttentionSignal | None:
+    """``background-started`` when the main turn's tool call runs on after it
+    returned: an Agent the host answered as launched, or a shell command it
+    gave a background task id.
+
+    A subagent's own call (the payload carries its ``agent_id``) is not the
+    host's: its completion notifies that subagent, never the main turn, so
+    nothing would ever close the entry.
+    """
+    if payload.get("agent_id"):
+        return None
+    response = payload.get("tool_response")
+    if not isinstance(response, dict):
+        return None
+    tool = payload.get("tool_name")
+    if tool in AGENT_TOOLS:
+        launched = response.get("isAsync") is True or response.get("status") == "async_launched"
+        task, kind = (response.get("agentId") if launched else None), "agent"
+    elif tool == _SHELL_TOOL:
+        task, kind = response.get("backgroundTaskId"), "command"
+    else:
+        return None
+    if not isinstance(task, str) or not _TASK_ID.match(task):
+        return None
+    return AttentionSignal(ATTENTION_BACKGROUND_STARTED, kind=kind, tasks=(task,))
+
+
+def _task_notification(payload: dict) -> AttentionSignal | None:
+    """``background-done`` when the prompt is Claude Code's completion notice.
+
+    Only a prompt that starts with the notice's tag is one, so a person who
+    mentions the tag is still a person speaking. Each block whose status is
+    terminal closes its task, unless its note says the agent stopped with
+    background work of its own still running: it notifies again when that
+    ends.
+    """
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.lstrip().startswith(_TASK_NOTIFICATION):
+        return None
+    done = []
+    for block in _TASK_BLOCK.findall(prompt):
+        task, status = _tag(block, "task-id"), _tag(block, "status")
+        if task and _TASK_ID.match(task) and status in _TASK_DONE and not (
+            _STILL_RUNNING.search(block)
+        ):
+            done.append(task)
+    return AttentionSignal(ATTENTION_BACKGROUND_DONE, tasks=tuple(done))
+
+
+def _tag(block: str, name: str) -> str | None:
+    """The text of ``block``'s first ``<name>`` element, stripped."""
+    found = re.search(rf"<{name}>([^<]*)</{name}>", block)
+    return found.group(1).strip() if found else None
 
 
 def _edit_target(payload: dict) -> Path | None:

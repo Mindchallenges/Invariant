@@ -61,7 +61,9 @@ from .signals import (
     PARKED,
     STRANDED,
     STUCK,
+    STUCK_BACKGROUND,
     TEARDOWN_PENDING,
+    TURN_BACKGROUND,
     TURN_BUSY,
     WAITING,
     WAITING_INPUT,
@@ -203,6 +205,10 @@ _FACTS: dict[tuple[str, str], tuple[str, str, str, str]] = {
         "No progress for {age}", TONE_PROBLEM,
         "Claude has been working for {age} with no sign of progress.",
         "Claude has been working with no sign of progress."),
+    (STUCK, STUCK_BACKGROUND): (
+        "No progress for {age}", TONE_PROBLEM,
+        "Its background work has shown no sign of progress for {age}.",
+        "Its background work has shown no sign of progress."),
     (ERROR, "degraded"): (
         "A hook failed", TONE_PROBLEM,
         "One of invariant's hooks failed in this session.", ""),
@@ -232,6 +238,15 @@ _TESTS_FAILING = "Tests failing"
 
 _RUNNING_CHIP = ("Claude is working", TONE_WORKING)
 _RUNNING_SENTENCE = ("Claude is working on it; active {age} ago.", "Claude is working on it.")
+
+#: A host whose turn ended while work it started runs on (BUG_094): what it
+#: waits on, one noun per kind (singular, plural), and the sentence.
+_BACKGROUND_CHIP = ("Waiting on {work}", "Waiting on background work")
+_BACKGROUND_NOUNS = (("agents", ("agent", "agents")),
+                     ("commands", ("background command", "background commands")))
+_BACKGROUND_SENTENCE = (
+    "Claude finished its turn and is waiting on its background work; active {age} ago.",
+    "Claude finished its turn and is waiting on its background work.")
 
 #: A gate rule, in plain words. A rule not here is not named.
 _RULES = {
@@ -578,8 +593,26 @@ def _attention(row: dict[str, Any]) -> dict[str, Any]:
 
 def _running(row: dict[str, Any]) -> bool:
     """Whether Claude is working: the document's mid-turn answer, never the
-    attention turn on its own, which a missed Stop leaves running (BUG_087)."""
-    return row.get("turn_state") == TURN_BUSY
+    attention turn on its own, which a missed Stop leaves running (BUG_087).
+    Background work its turn left running counts (BUG_094)."""
+    return row.get("turn_state") in (TURN_BUSY, TURN_BACKGROUND)
+
+
+def _background(row: dict[str, Any]) -> bool:
+    return row.get("turn_state") == TURN_BACKGROUND
+
+
+def _background_chip(row: dict[str, Any]) -> str:
+    """"Waiting on 1 agent and 2 background commands", from the row's counts."""
+    counts = row.get("background") if isinstance(row.get("background"), dict) else {}
+    parts = []
+    for key, (one, many) in _BACKGROUND_NOUNS:
+        n = counts.get(key)
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            parts.append(f"{n} {one if n == 1 else many}")
+    if not parts:
+        return _BACKGROUND_CHIP[1]
+    return _BACKGROUND_CHIP[0].format(work=" and ".join(parts))
 
 
 def _signals(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -714,7 +747,9 @@ def _chips(row: dict[str, Any], now: float, aged: bool = False) -> list[dict[str
             if since is not None and now - since >= 60:
                 text = f"{text} {age_text(now - since)}"
         chips.append({"text": text, "tone": fact[1]})
-    if _running(row):
+    if _background(row):
+        chips.append({"text": _background_chip(row), "tone": TONE_WORKING})
+    elif _running(row):
         chips.append({"text": _RUNNING_CHIP[0], "tone": _RUNNING_CHIP[1]})
     seen: set[str] = set()
     return [c for c in chips if not (c["text"] in seen or seen.add(c["text"]))]
@@ -735,11 +770,12 @@ def _sentences(row: dict[str, Any], now: float) -> list[str]:
         if text and text not in said:
             said.append(text)
     if _running(row):
+        sentence = _BACKGROUND_SENTENCE if _background(row) else _RUNNING_SENTENCE
         last = row.get("last_activity")
         if isinstance(last, (int, float)):
-            said.append(_RUNNING_SENTENCE[0].format(age=age_text(now - last)))
+            said.append(sentence[0].format(age=age_text(now - last)))
         else:
-            said.append(_RUNNING_SENTENCE[1])
+            said.append(sentence[1])
     return said[:3]
 
 

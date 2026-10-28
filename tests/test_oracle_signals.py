@@ -613,3 +613,140 @@ class TestTheClassAndTheSignalsAgree:
     def test_a_session_host_known_only_by_its_record_alerts_when_waiting(self):
         row = session_row(hosts=[recorded("waiting")])
         assert [s.kind for s in classify(row, NOW)] == [sig.WAITING]
+
+
+# -- background work: the main turn is over, work it started is not (BUG_094) ---------
+
+
+def ledger(*entries: tuple[str, str]) -> dict:
+    """The attention record's background ledger: ``(task id, kind)`` each."""
+    return {task: {"kind": kind, "since": iso(600)} for task, kind in entries}
+
+
+AGENT = ("a1b2c3", "agent")
+COMMAND = ("b4d5e6", "command")
+
+
+class TestBackground:
+    """A host whose main turn ended while work it started runs on reads
+    ``background``: mid-turn, so no ``your_turn``, and the panel's Working."""
+
+    @staticmethod
+    def state(view: HostView, idle: float | None = 60.0,
+              thresholds: Thresholds | None = None) -> str:
+        last = None if idle is None else NOW - idle
+        return sig.turn_state(view, last, NOW, thresholds)
+
+    @staticmethod
+    def work(view: HostView, idle: float | None = 60.0) -> dict:
+        last = None if idle is None else NOW - idle
+        return sig.background_work(view, last, NOW)
+
+    def test_claude_codes_shell_status_is_background_work(self):
+        """Claude Code writes ``shell`` when its turn is idle and a background
+        shell still runs; it used to be discarded as an unknown word."""
+        view = recorded("shell", attention(turn="ended", waiting=waiting("idle")))
+        assert self.state(view) == sig.TURN_BACKGROUND
+        assert sig.mid_turn(view, NOW - 60, NOW)
+        assert self.work(view) == {"agents": 0, "commands": 1}
+
+    def test_shell_outranks_the_attention_record_however_long_it_has_been(self):
+        assert self.state(recorded("shell", attention(turn="ended")), 15 * 3600.0) == (
+            sig.TURN_BACKGROUND)
+
+    def test_shell_is_not_used_unless_the_host_is_alive(self):
+        unknown = recorded("shell", attention(turn="ended"), alive=None)
+        assert self.state(unknown) == sig.TURN_IDLE
+        gone = recorded("shell", attention(turn="ended"), alive=False)
+        assert self.state(gone) == sig.TURN_IDLE
+
+    def test_an_open_agent_in_the_ledger_after_the_turn_ended_is_background(self):
+        record = attention(turn="ended", waiting=waiting("idle"), background=ledger(AGENT))
+        assert self.state(host(record)) == sig.TURN_BACKGROUND
+        assert self.work(host(record)) == {"agents": 1, "commands": 0}
+
+    def test_an_open_agent_outranks_an_idle_record(self):
+        """Claude Code says ``shell`` only for a background shell; while a
+        background agent runs, its status reads ``idle``."""
+        view = recorded("idle", attention(turn="ended", background=ledger(AGENT)))
+        assert self.state(view) == sig.TURN_BACKGROUND
+
+    def test_a_verified_record_answers_for_the_ledgers_commands(self):
+        """A shell still running would read ``shell``: an ``idle`` record says
+        every background command is done, a missed notification or not."""
+        view = recorded("idle", attention(turn="ended", background=ledger(COMMAND)))
+        assert self.state(view) == sig.TURN_IDLE
+        assert self.work(view) == {"agents": 0, "commands": 0}
+        shell = recorded("shell", attention(turn="ended",
+                                            background=ledger(COMMAND, ("b2", "command"))))
+        assert self.work(shell) == {"agents": 0, "commands": 2}
+
+    def test_without_a_record_the_ledger_counts_both_kinds(self):
+        record = attention(turn="ended",
+                           background=ledger(AGENT, ("a2", "agent"), COMMAND))
+        assert self.state(host(record)) == sig.TURN_BACKGROUND
+        assert self.work(host(record)) == {"agents": 2, "commands": 1}
+
+    def test_a_running_main_turn_is_busy_with_background_work_open(self):
+        record = attention(turn="running", background=ledger(AGENT))
+        assert self.state(host(record)) == sig.TURN_BUSY
+        assert self.state(recorded("busy", record)) == sig.TURN_BUSY
+
+    def test_a_question_is_still_waiting_on_the_person(self):
+        record = attention(turn="running", waiting=waiting("question"),
+                           background=ledger(AGENT))
+        assert self.state(host(record)) == sig.TURN_WAITING
+
+    def test_the_ledger_lapses_after_stuck_minutes_without_activity(self):
+        """A notification Claude Code absorbs into a running turn fires no
+        hook, so an entry it should have closed lapses instead."""
+        record = attention(turn="ended", background=ledger(AGENT))
+        assert self.state(host(record), 19 * 60.0) == sig.TURN_BACKGROUND
+        assert self.state(host(record), 20 * 60.0) == sig.TURN_IDLE
+        assert self.work(host(record), 20 * 60.0) == {"agents": 0, "commands": 0}
+        assert self.state(host(record), 300.0, Thresholds(stuck_minutes=5)) == sig.TURN_IDLE
+
+    def test_no_activity_known_is_no_proof_the_ledger_lapsed(self):
+        record = attention(turn="ended", background=ledger(AGENT))
+        assert self.state(host(record), None) == sig.TURN_BACKGROUND
+
+    @pytest.mark.parametrize("bad", [None, [], "a1", {"a1": "agent"}, {"a1": {"kind": "x"}}])
+    def test_a_ledger_this_build_cannot_read_counts_nothing(self, bad):
+        record = attention(turn="ended", background=bad)
+        assert self.state(host(record)) == sig.TURN_IDLE
+
+    def test_a_gone_host_has_no_background_work(self):
+        view = host(attention(turn="ended", background=ledger(AGENT)), alive=False)
+        assert self.state(view) == sig.TURN_IDLE
+        assert self.work(view) == {"agents": 0, "commands": 0}
+        assert sig.background_work(None, NOW, NOW) == {"agents": 0, "commands": 0}
+
+    def test_background_work_is_not_your_turn(self):
+        record = attention(turn="ended", waiting=waiting("idle"), background=ledger(AGENT))
+        row = session_row(hosts=[host(record)], last_activity=NOW - 60)
+        assert kinds(classify(row, NOW)) == set()
+
+    def test_an_orphan_with_background_work_is_active(self):
+        row = Row(kind=ROW_HOST, project=PROJECT, last_activity=NOW - 15 * 3600,
+                  hosts=[recorded("shell", attention(turn="ended"))])
+        assert only(classify(row, NOW), sig.ORPHAN_HOST).cause == sig.ORPHAN_ACTIVE
+
+    def test_a_background_shell_silent_past_the_threshold_is_stuck(self):
+        record = attention(turn="ended", turn_since=iso(3600), waiting=waiting("idle"))
+        row = session_row(hosts=[recorded("shell", record)], last_activity=NOW - 99 * 60)
+        stuck = only(classify(row, NOW), sig.STUCK)
+        assert (stuck.alert, stuck.severity, stuck.cause) == (True, sig.MEDIUM, "background")
+        assert stuck.detail == "background work, silent for 99 min"
+        assert stuck.key == f"{PROJECT}|s1|stuck|{iso(3600)}"
+        assert sig.YOUR_TURN not in kinds(classify(row, NOW))
+
+    def test_a_background_shell_within_the_threshold_is_not_stuck(self):
+        row = session_row(hosts=[recorded("shell", attention(turn="ended"))],
+                          last_activity=NOW - 19 * 60)
+        assert kinds(classify(row, NOW)) == set()
+
+    def test_the_ledger_alone_lapses_before_it_could_read_stuck(self):
+        record = attention(turn="ended", background=ledger(AGENT))
+        for idle in (19 * 60, 21 * 60, 99 * 60):
+            row = session_row(hosts=[host(record)], last_activity=NOW - idle)
+            assert sig.STUCK not in kinds(classify(row, NOW)), idle

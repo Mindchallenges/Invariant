@@ -1836,8 +1836,14 @@ D5):
  "blocked": {"rules": ["<rule id>"], "surface": "stop|cli", "since": "<iso>"},
  "turn": "running|ended", "turn_since": "<iso>",
  "ended": false,
- "degraded": {"event": "<hook>", "error": "<type: message>", "since": "<iso>"}}
+ "degraded": {"event": "<hook>", "error": "<type: message>", "since": "<iso>"},
+ "background": {"<task id>": {"kind": "agent|command", "since": "<iso>"}}}
 ```
+
+`background` is the ledger of work the host's main turn started in the
+background and has not heard finish (BUG_094): a launch opens an entry
+under the id Claude Code gave the task, its task-notification closes it,
+and `SessionEnd` clears the lot. It holds at most 32 entries, oldest out.
 
 Every field may be `null` or absent. A record nobody has written means nothing
 is known about that host.
@@ -1845,7 +1851,7 @@ is known about that host.
 | Property | Why |
 |---|---|
 | **One writer, atomic replace, no lock** | A file is written by its own host's hooks, which run one at a time, so this is the per-session-file argument above. The other writer is a refused CLI command, which writes the record of the host bound to the refused session, and that host is the caller. |
-| **Read-first where it fires constantly** | `PostToolUse` runs after every tool call. It reads, and writes only when something was waiting. `SessionStart` writes nothing, so the rule that a hook must not write on every start still holds. |
+| **Read-first where it fires constantly** | `PostToolUse` runs after every tool call. It reads, and writes only when something was waiting, or when the call launched work into the background. `SessionStart` writes nothing, so the rule that a hook must not write on every start still holds. |
 | **Clock times, machine-local** | `since` and `turn_since` are UTC wall-clock times, to the second. They are the exception to "Storing what was measured, not when", and they are scoped by where they live: under the state root, which is never committed or rendered (ADR-007 D9). |
 | **Unknown keys survive; an unreadable record is replaced** | The BUG_061 contract, as for the session records. The difference is that this record is derived from events, so a corrupt one is overwritten by the next event instead of wedging every hook. |
 | **A write never changes a verdict** | One guarded helper in the CLI applies every write after the response is computed and swallows any failure. `doctor`'s probe writes nothing (ADR-007 D10). |

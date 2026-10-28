@@ -56,10 +56,12 @@ from .signals import (
     STRANDED,
     STUCK,
     TEARDOWN_PENDING,
+    TURN_BACKGROUND,
     WAITING,
     YOUR_TURN,
     Signal,
     Thresholds,
+    background_work,
     classify,
     turn_state,
 )
@@ -299,6 +301,8 @@ def assess(
     each row carries its own under ``gates``, or ``null``. ``turn_state`` is
     whether the row's current host is mid-turn (:func:`turn_state`), the
     answer the panel's "working" reads so it cannot disagree with the signals.
+    ``background`` is what a ``background`` host waits on, ``{agents,
+    commands}`` (:func:`background_work`), and ``null`` for any other.
 
     ``oracle`` is the read's own condition, not any project's: ``skew`` when
     this process is older than the installed invariant (BUG_089), and
@@ -320,7 +324,12 @@ def assess(
             body["signals"] = [s.to_dict() for s in signals]
             body["recommendation"] = advice.to_dict() if advice else None
             body["gates"] = report.to_dict() if report else None
-            body["turn_state"] = turn_state(row.current_host, row.last_activity, now, thresholds)
+            state = turn_state(row.current_host, row.last_activity, now, thresholds)
+            body["turn_state"] = state
+            body["background"] = (
+                background_work(row.current_host, row.last_activity, now, thresholds)
+                if state == TURN_BACKGROUND else None
+            )
             rows.append(body)
         projects.append(
             {

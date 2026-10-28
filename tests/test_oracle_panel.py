@@ -1140,3 +1140,68 @@ class TestAnOlderOracle:
         shown = panel.view(assess(snapshots, NOW))
         [card] = cards(shown, panel.PROBLEMS)
         assert card["row"] == panel.ORACLE_ROW and card["note"] == "Not read: one, two"
+
+
+# -- background work (BUG_094) ----------------------------------------------------------
+
+
+def background(sid="b", agents=1, commands=0, **fields):
+    row = session(sid, hosts=[host(attention={"turn": "ended"})], turn_state="background",
+                  **fields)
+    row["background"] = {"agents": agents, "commands": commands}
+    return row
+
+
+class TestBackgroundCards:
+    """A host whose main turn ended while work it started runs on is working."""
+
+    def test_it_is_grouped_under_working(self):
+        shown = panel.view(doc(background()))
+        assert [g["id"] for g in shown["groups"]] == ["working"]
+        assert shown["summary"]["working"] == 1
+
+    @pytest.mark.parametrize(("agents", "commands", "chip"), [
+        (1, 0, "Waiting on 1 agent"),
+        (2, 0, "Waiting on 2 agents"),
+        (0, 1, "Waiting on 1 background command"),
+        (0, 3, "Waiting on 3 background commands"),
+        (1, 2, "Waiting on 1 agent and 2 background commands"),
+        (0, 0, "Waiting on background work"),
+    ])
+    def test_the_chip_counts_what_it_waits_on(self, agents, commands, chip):
+        card = cards(panel.view(doc(background(agents=agents, commands=commands))),
+                     "working")[0]
+        assert [(c["text"], c["tone"]) for c in card["chips"]] == [(chip, "working")]
+
+    def test_counts_this_build_cannot_read_are_background_work(self):
+        row = background()
+        row["background"] = {"agents": "two", "commands": None}
+        card = cards(panel.view(doc(row)), "working")[0]
+        assert [c["text"] for c in card["chips"]] == ["Waiting on background work"]
+        del row["background"]
+        card = cards(panel.view(doc(row)), "working")[0]
+        assert [c["text"] for c in card["chips"]] == ["Waiting on background work"]
+
+    def test_what_is_going_on_says_the_turn_is_over_and_the_work_is_not(self):
+        shown = panel.view(doc(background(last_activity=NOW - 180)))
+        assert shown["details"]["K|b"]["going_on"] == [
+            ("Claude finished its turn and is waiting on its background work; "
+             "active 3 min ago.")]
+        quiet = panel.view(doc(background()))
+        assert quiet["details"]["K|b"]["going_on"] == [
+            "Claude finished its turn and is waiting on its background work."]
+
+    def test_its_compact_line_is_the_phase_and_last_activity(self):
+        row = background(pipeline=pipeline("bugfix", "fixing"), last_activity=NOW - 70)
+        assert cards(panel.view(doc(row)), "working")[0]["line"] == (
+            "Fixing a bug · active 1 min ago")
+
+    def test_background_work_gone_quiet_is_a_problem_that_says_so(self):
+        row = background(agents=0, commands=1, last_activity=NOW - 99 * 60,
+                         signals=[sig("stuck", "background", severity="medium")])
+        shown = panel.view(doc(row))
+        card = cards(shown, "problems")[0]
+        assert [c["text"] for c in card["chips"]] == [
+            "No progress for 1 h", "Waiting on 1 background command"]
+        assert shown["details"]["K|b"]["going_on"][0] == (
+            "Its background work has shown no sign of progress for 1 h.")

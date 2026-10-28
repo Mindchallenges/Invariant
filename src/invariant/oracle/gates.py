@@ -19,7 +19,9 @@ Four rules keep it from costing a project anything:
 * **Never while a turn runs.** The rules shell out to git in the session's
   worktree; a host mid-turn is using that worktree, and its own git commands
   must not meet ours. Mid-turn is :func:`~invariant.oracle.signals.turn_state`'s
-  answer, the one the signals read (BUG_087). A session whose host is not
+  answer, the one the signals read (BUG_087), so a host whose turn ended
+  while work it started in the background runs on, a reviewer committing
+  there perhaps, counts too (BUG_094). A session whose host is not
   mid-turn is evaluated at once when its turn has ended, else after two quiet
   minutes.
 * **Only when something moved.** The fingerprint is the session's state and

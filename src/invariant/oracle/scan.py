@@ -344,7 +344,8 @@ class HostView:
     #: The evidence that ties the host to this project (ADR-009 D7, BUG_040).
     rooted_here: bool | None = None
     #: The per-process record's ``status`` (Claude Code: ``busy``, ``idle``,
-    #: ``waiting``), when the record joined this host; ``None`` otherwise.
+    #: ``waiting``, ``shell`` while its turn is idle and a background shell
+    #: runs), when the record joined this host; ``None`` otherwise.
     #: Fresher than the attention ``turn``, which a missed Stop leaves
     #: ``running`` for ever (BUG_087).
     status: str | None = None

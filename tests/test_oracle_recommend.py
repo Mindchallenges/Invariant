@@ -409,6 +409,15 @@ class TestCloseHost:
         )
         assert [r["turn_state"] for r in rows] == ["busy", "waiting", "idle", "idle"]
 
+    def test_assess_counts_the_background_work_a_row_waits_on(self):
+        """BUG_094: what the panel's "Waiting on 1 agent" reads."""
+        rows = assessed(
+            leftover(status="shell"),
+            leftover(status="idle", host_session_id="h8"),
+        )
+        assert [(r["turn_state"], r["background"]) for r in rows] == [
+            ("background", {"agents": 0, "commands": 1}), ("idle", None)]
+
     def test_assess_marks_a_host_a_live_session_elsewhere_holds(self):
         orphan = leftover()
         holder = session_row(project="/state/beta", project_name="beta", session_id="b1",

@@ -4523,6 +4523,11 @@ def _apply_signal(store, host_id: str, pid_source, signal) -> None:
         store.turn_ended(host_id, signal.rules, pid_source=pid_source)
     elif signal.op == host.ATTENTION_HOST_ENDED:
         store.host_ended(host_id)
+    elif signal.op == host.ATTENTION_BACKGROUND_STARTED:
+        for task in signal.tasks:
+            store.background_started(host_id, task, signal.kind, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_BACKGROUND_DONE:
+        store.background_done(host_id, signal.tasks, pid_source=pid_source)
 
 
 def _record_attention(ctx: Context, host_session_id, write) -> None:

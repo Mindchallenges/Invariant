@@ -242,8 +242,11 @@ liveness". In summary:
 - `waiting` is `{kind, message, since}`, where `kind` is `permission`,
   `question` or `idle`, and `message` is the host's raw text. `blocked` is
   `{rules, surface, since}`, where `surface` is `stop` or `cli`. Then `turn`
-  (`running` or `ended`) and `turn_since`, `ended`, `pid`, and `degraded`
-  (`{event, error, since}`).
+  (`running` or `ended`) and `turn_since`, `ended`, `pid`, `degraded`
+  (`{event, error, since}`), and `background`, the ledger of work the main
+  turn started in the background and has not heard finish: `{<task id>:
+  {kind, since}}`, where `kind` is `agent` or `command` (BUG_094). It keeps
+  at most 32 entries, oldest out.
 - The store is built on the caller's `JsonStore`, so the probe's inert store
   discards these writes along with every other.
 - One writer per file, atomic replace, no lock. Unknown keys are kept. A
@@ -260,15 +263,39 @@ applies the signal through one guarded helper, `_record_attention`.
 | `Notification` (new, the 7th hook) | `waiting` | `waiting` set. `notification_type` `permission_prompt` → `permission`, `elicitation_dialog` → `question`, `idle_prompt` → `idle`. When the type is missing or unknown, the message is matched instead. A notification that matches nothing writes nothing. |
 | `PreToolUse`, `AskUserQuestion` | `waiting` | `waiting: question`, with the first question's text. Not when the hook denies the call. |
 | `PostToolUse` | `answered` | `waiting` cleared. Reads first, and writes only if something was waiting. |
-| `UserPromptSubmit` | `prompt` | `turn: running`. `waiting`, `blocked` and `degraded` cleared, `ended: false`. |
+| `PostToolUse` of a launch into the background | `background-started` | A ledger entry opened under the task id, `waiting` cleared. A launch is an `Agent` or `Task` call answered as launched (`isAsync`, or `status: async_launched`; the id is `agentId`), or a `Bash` call answered with a `backgroundTaskId`. A subagent's own call (the payload carries `agent_id`) is not one: its completion notifies the subagent. |
+| `UserPromptSubmit` | `prompt` | `turn: running`. `waiting`, `blocked` and `degraded` cleared, `ended: false`. The ledger is kept. |
+| `UserPromptSubmit` of a task-notification | `background-done` | The entries it names closed; `turn: running`, `waiting` cleared. `blocked` and `degraded` are kept, because the person has not spoken. |
 | `Stop`, on arrival | `turn-stopped` | `turn: ended`, `waiting` cleared. Written before the closeout runs (BUG_095). `blocked` is left alone. |
 | `Stop` | `turn-ended` | `turn: ended`, `waiting` cleared. `blocked` set to the closeout's blocking rule ids, or, on a clean stop, cleared if the Stop had set it. A CLI block is kept. |
-| `SessionEnd` | `host-ended` | `ended: true`. Everything else cleared, including `pid`. |
+| `SessionEnd` | `host-ended` | `ended: true`. Everything else cleared, including `pid` and the ledger. |
 | `invariant hook` handler raised | — | `degraded` set, with the event and the error. |
 | `pipeline advance`, `session transition` / `review` / `merge` refused | — | `blocked: {surface: cli}` on the bound host's record, if the session has a live host. Cleared when one of those commands later succeeds. |
 
 `SessionStart` writes nothing. The rule that a hook must not write on every
 start still holds.
+
+**What a task-notification is** (BUG_094). Claude Code tells the main turn
+that background work ended with a user turn of its own, which fires
+`UserPromptSubmit` like a prompt. Its text starts with `<task-notification>`
+and holds one block per task, each with the task's `<task-id>` (the id the
+launch answered with) and a `<status>`. The host adapter reads those tags
+and nothing else of the text, with one exception: a block whose `<note>`
+says the agent stopped "with background work of its own still running" will
+notify again, so it closes nothing. A status of `completed`, `failed`,
+`killed` or `stopped` closes the task; any other closes nothing. A prompt
+that does not start with the tag is the person speaking, whatever it
+quotes. These are Claude Code internals, not a contract: if the tags change,
+entries stop closing, and the ledger's lapse ("Mid-turn" below) bounds what
+that costs.
+
+**What the ledger misses.** A notification that arrives while a turn is
+already running is absorbed into that turn, and no hook fires for it. On
+this machine about half the notifications in recent transcripts arrived
+that way, so an entry often outlives its task. The reader therefore lets
+the ledger lapse after `stuck_minutes` without activity, and a verified
+Claude Code status answers for the commands: it reads `shell` exactly while
+a background shell runs.
 
 A Stop writes twice. The host adapter's `arrival_attention` names what an
 event says before any work runs, and only a Stop says anything then: the turn
@@ -458,9 +485,10 @@ started with), `cwd`, `started` (epoch seconds) and `process_start` (the
 start token, so a later action can compare it again at the moment it acts),
 and the verified process's `tty`. The tty is what close host needs to find
 the terminal tab the host runs in ("Close host" below). It keeps the
-record's `status` too, as written (Claude Code writes `busy`, `idle` or
-`waiting`), and only when the record joined the host: `signals.turn_state`
-decides what it means ("Mid-turn" below, BUG_087). A conflict row has no
+record's `status` too, as written (Claude Code writes `busy`, `idle`,
+`waiting`, or `shell` while its turn is idle and a background shell runs),
+and only when the record joined the host: `signals.turn_state` decides what
+it means ("Mid-turn" below, BUG_087, BUG_094). A conflict row has no
 status, as it has no pid.
 
 **Where an orphan was started** (IDEA_027 increment 6). An orphan host row's
@@ -557,10 +585,10 @@ nothing else. Alerts come first in the list it returns.
 |---|---|---|---|---|
 | `waiting` | yes | high; medium after 6 h | the current host is waiting on the person (`turn_state` `waiting`): its `waiting.kind` is `permission` or `question`, or Claude Code's own status says `waiting` (cause `input` when the hooks recorded no prompt; always high, it carries no time) | `<kind>@<since>`, or `input` |
 | `gate_blocked` | yes | medium | `blocked` is set and `turn` is `ended` (ADR-007 D8) | the sorted rule ids |
-| `stuck` | yes | medium | `turn` is `running`, the host is mid-turn and working (`turn_state` `busy`, "Mid-turn" below), and the last activity is older than 20 minutes | `turn_since` |
+| `stuck` | yes | medium | `turn` is `running`, the host is mid-turn and working (`turn_state` `busy`, "Mid-turn" below), and the last activity is older than 20 minutes; or the host's turn ended with background work still running (`turn_state` `background`, cause `background`, BUG_094) and the last activity is older than 20 minutes | `turn_since` |
 | `finished` | yes | low | the session is in its reviewed stage (`cause: reviewed`), or in its working stage with a complete plan and a landed pipeline (`cause: ready`) | `reviewed` / `ready` |
 | `error` | yes | high | the last test run failed, was not read as red, and was not in the red phase (`tests`); a hook recorded `degraded` (`degraded`); the row is an error row (`scan`) | `tests:<run count>`, `degraded@<since>`, `scan` |
-| `your_turn` | no | info | `waiting.kind` is `idle`, the host is not gone, and it is not mid-turn (`turn_state` `idle`) | — |
+| `your_turn` | no | info | `waiting.kind` is `idle`, the host is not gone, and it is not mid-turn (`turn_state` `idle`): never while background work it started runs on | — |
 | `host_gone` | no | info | the recorded pid is not alive, and neither the binding nor the record says the host ended | — |
 | `parked` | no | info | the session's binding is spent and its worktree is there | — |
 | `stranded` | no | info | the session's recorded worktree is gone | — |
@@ -570,20 +598,54 @@ nothing else. Alerts come first in the list it returns.
 
 **Mid-turn** (BUG_087). Whether a host is mid-turn is one answer,
 `turn_state(host, last_activity, now, thresholds)`: `busy` (working),
-`waiting` (on the person) or `idle` (not mid-turn). The orphan class, the
-`waiting`, `stuck` and `your_turn` signals, the gate cache's "Never while a
-turn runs" and the panel's Working group all read it, so none can contradict
-another. `mid_turn` is "not `idle`". `assess` writes it on each row as
-`turn_state`, the field the panel reads.
+`waiting` (on the person), `background` (its main turn ended, and work it
+started in the background runs on, BUG_094) or `idle` (not mid-turn). The
+orphan class, the `waiting`, `stuck` and `your_turn` signals, the gate
+cache's "Never while a turn runs" and the panel's Working group all read it,
+so none can contradict another. `mid_turn` is "not `idle`". `assess` writes
+it on each row as `turn_state`, the field the panel reads, and beside it
+`background`: for a `background` row, what it waits on, `{agents,
+commands}` (`background_work`), and `null` for any other.
 
 | Evidence, first that holds | Answer |
 |---|---|
 | no current host, or it is known to be gone | `idle` |
-| alive, and Claude Code's per-process record joined it with a `status` of `busy`, `idle` or `waiting` | that status: the record outranks the attention record |
+| alive, and Claude Code's per-process record joined it with a `status` of `shell` | `background`: its turn is idle and a background shell runs |
+| the same, with `idle`, and an open `agent` in the ledger | `background`: Claude Code says `idle` while a background agent runs |
+| the same, with `busy`, `idle` or `waiting` | that status: the record outranks the attention record |
 | the attention record waits on a `permission` or a `question` | `waiting` |
-| the attention record waits on an `idle` prompt (notified after the last prompt was submitted, so newer than the turn), or its `turn` is not `running` | `idle` |
-| a `running` turn, heard from within `orphan_idle_minutes` (60), or with no activity known | `busy` |
-| a `running` turn quiet longer than that | `idle`: stale, because a Stop that never arrived leaves `running` for ever |
+| a `running` turn with no `idle` prompt after it (an idle prompt is notified after the last prompt was submitted, so it is newer than the turn), heard from within `orphan_idle_minutes` (60), or with no activity known | `busy` |
+| an open ledger entry (the turn ended, an `idle` prompt came after it, or a `running` turn went stale) | `background` |
+| otherwise | `idle`: a `running` turn quiet past the edge is stale, because a Stop that never arrived leaves `running` for ever |
+
+**Background work** (BUG_094). The ledger on the attention record ("What
+writes it" above) counts what the main turn left running. It lapses once
+the host has been quiet for `stuck_minutes` (20), because Claude Code
+absorbs a notification that arrives during a turn without a hook; no
+activity known is no proof it lapsed. With BUG_096, a background agent's own
+transcript is the host's activity, so a working agent keeps its entry open.
+A verified Claude Code status answers for the commands, since it reads
+`shell` exactly while one runs: `shell` is at least one, any other status
+none. The ledger's agents still count under an `idle` status.
+
+```mermaid
+stateDiagram-v2
+    [*] --> busy: a prompt, or a task-notification turn
+    busy --> background: Stop, with a ledger entry open or Claude Code saying shell
+    busy --> idle: Stop, nothing left running
+    background --> busy: a task-notification turn closes its entries, or a prompt
+    background --> idle: Claude Code says idle with no agent open, or the ledger lapses
+    background --> stuck: shell, and quiet past stuck_minutes
+    idle --> [*]: SessionEnd clears the ledger
+```
+
+`stuck` on background work needs the `shell` status: the ledger on its own
+lapses at the same 20 minutes, so a missed notification never raises an
+alert. A background command the host verifies as running, with the host
+quiet for 99 minutes, reads "background work, silent for 99 min". A
+background shell meant to run for a long time, such as a development
+server, reads `stuck` too once the host has been quiet that long; the alert
+is keyed on `turn_since`, so it notifies once per turn.
 
 The record's status is used only when the host is alive by the record's own
 check, so a reused or unverified pid never speaks for the host; an unknown
@@ -805,7 +867,7 @@ prints, and keeps the answer in memory.
 | Rule | How |
 |---|---|
 | **Never a write** | The domains are built on an `InertStore` over the row's state root. The manifest is the session worktree's own (the main checkout's if the worktree has none), because the rules resolve the paths they compare against the manifest's root. The rules run with `cwd` set to the worktree, so their git questions are asked there, and inside `core/git.without_optional_locks()`, so every one runs with `GIT_OPTIONAL_LOCKS=0`: a plain `git diff` cannot refresh the index stat cache and take `index.lock` under the host working there (ADR-007 D16). |
-| **Never while a turn runs** | A host mid-turn is using that worktree, and its own git commands must not meet ours. Mid-turn is `signals.turn_state`'s answer, the one the signals read ("Mid-turn" above): a host Claude Code says is busy or waiting, one waiting on a prompt, or a `running` turn heard from within an hour is never evaluated. A session whose host is not mid-turn is evaluated at once when its `turn` is `ended`, and otherwise after 2 minutes without activity: no turn known, a gone host, a record that says `idle`, or a `running` turn gone stale. |
+| **Never while a turn runs** | A host mid-turn is using that worktree, and its own git commands must not meet ours. Mid-turn is `signals.turn_state`'s answer, the one the signals read ("Mid-turn" above): a host Claude Code says is busy or waiting, one waiting on a prompt, a `running` turn heard from within an hour, or a host whose turn ended with background work still running (`background`, BUG_094: a background reviewer may be committing there) is never evaluated. A session whose host is not mid-turn is evaluated at once when its `turn` is `ended`, and otherwise after 2 minutes without activity: no turn known, a gone host, a record that says `idle`, or a `running` turn gone stale. |
 | **Only when something moved** | The fingerprint is the session's `state` and `heartbeat`, the pipeline's `state` and transition count, and the pipeline record's `st_mtime_ns`. Evidence is recorded without a transition, so the write time is what moves for a new test run or a doc read. The scan supplies all five (`PipelineView.transitions`, `written_ns`), so fingerprinting costs no extra read. |
 | **Skipped when there is nothing to ask** | A row that is not a session, has no pipeline or a terminal one, is stranded, or whose worktree (else root) is not a directory. |
 | **Bounded** | Each evaluation runs in a daemon thread, at most 2 at once across every project, with a 10-second timeout. A worker that timed out keeps its slot until it really ends, so a hung `git` cannot multiply threads. A result later than the timeout is dropped. |

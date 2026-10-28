@@ -409,7 +409,7 @@ with "…". A button that acts is named for the deed.
 |---|---|---|---|
 | needs | Needs you | Need you | `waiting` (permission, question, input); `finished` (reviewed, ready) |
 | problems | Problems | Problems | the oracle itself when it is older than the installed invariant (one card, first, BUG_089); `error` (tests, degraded, scan); `gate_blocked`; `stuck`; `host_gone`; `stranded` |
-| working | Working | Working | the row's `turn_state` is `busy` (the current host is mid-turn and working, `signals.turn_state`, BUG_087), nothing above |
+| working | Working | Working | the row's `turn_state` is `busy` (the current host is mid-turn and working, `signals.turn_state`, BUG_087) or `background` (its turn ended while work it started in the background runs on, BUG_094), nothing above |
 | idle | Idle | (no tile) | every other live session: `your_turn`, `parked`, `teardown_pending`, no signal |
 | leftovers | Leftovers | Leftovers | `orphan_host` and `leaked_worktree` rows with no alert |
 
@@ -425,6 +425,7 @@ with "…". A button that acts is named for the deed.
 | `error`, tests | N tests failing (else Tests failing) | problem | The last test run had N failures. |
 | `gate_blocked` | Blocked by a check | problem | A check refused the last step: <rule, in plain words where the table knows it>. |
 | `stuck` | No progress for N min | problem | Claude has been working for N min with no sign of progress. |
+| `stuck`, background (BUG_094) | No progress for N min | problem | Its background work has shown no sign of progress for N min. |
 | `error`, degraded | A hook failed | problem | One of invariant's hooks failed in this session. |
 | `error`, scan | Cannot read this project | problem | invariant cannot read this project's settings. |
 | the oracle older than the install, `changed` (BUG_089) | Restarting | problem | invariant was updated on the Mac after the oracle started. The oracle restarts itself to catch up, within a minute. Then: Until then it cannot read N projects: <names>. (1 project) |
@@ -432,6 +433,7 @@ with "…". A button that acts is named for the deed.
 | `host_gone` | Paused | idle | Its Claude window closed without saying so, N ago, so nothing is happening until you resume it. |
 | `stranded` | Its folder is gone | problem | The session's folder no longer exists. |
 | `turn_state` `busy` | Claude is working | working | Claude is working on it; active N min ago. |
+| `turn_state` `background` (BUG_094) | Waiting on N agent(s), Waiting on N background command(s), or both joined by "and" ("Waiting on 1 agent and 2 background commands"); Waiting on background work when the row carries no count | working | Claude finished its turn and is waiting on its background work; active N min ago. |
 | `your_turn` | Waiting for your next message | idle | Claude finished its turn and is waiting for you. |
 | `parked` | Paused | idle | No Claude window is working on it. Resume it to go on. |
 | `teardown_pending` | Merged, ready to clean up | idle | It is merged. Its folder and branch can be removed. |
@@ -607,7 +609,7 @@ build decided what this page left open:
 | Question | As built |
 |---|---|
 | Where the class is made | `signals.orphan_class`, the `orphan_host` marker's `cause`: `gone` (its process is gone), `unknown` (no pid that can be asked, a conflict, or no activity known), `active` (alive and heard from within an hour, `Thresholds.orphan_idle_minutes`, or mid-turn by `signals.turn_state`: working, or waiting on the person), `leftover` (alive, idle, its session ended), `unmanaged` (alive, idle, never bound here). None alerts |
-| What mid-turn means (BUG_087) | `signals.turn_state`, the one answer the class, the `waiting`, `stuck` and `your_turn` signals, the gate cache and the Working group read. When Claude Code's per-process record verified the host (alive), its `status` outranks the attention record: `busy` is working, `idle` is not mid-turn, `waiting` is waiting on the person. Without it, a permission prompt or a question is waiting, an idle prompt ends the turn, and a `running` turn counts only while the host was heard from within `orphan_idle_minutes`: a missed Stop leaves it `running` for ever, and six idle windows read "Active, no session" for up to 44 hours |
+| What mid-turn means (BUG_087) | `signals.turn_state`, the one answer the class, the `waiting`, `stuck` and `your_turn` signals, the gate cache and the Working group read. When Claude Code's per-process record verified the host (alive), its `status` outranks the attention record: `busy` is working, `idle` is not mid-turn, `waiting` is waiting on the person. Without it, a permission prompt or a question is waiting, an idle prompt ends the turn, and a `running` turn counts only while the host was heard from within `orphan_idle_minutes`: a missed Stop leaves it `running` for ever, and six idle windows read "Active, no session" for up to 44 hours. BUG_094 adds `background`: Claude Code's `shell` status, or an open entry in the attention record's background ledger, after the main turn ended. It is mid-turn, so the class is `active`, the gate cache waits, and the row is under Working, never `your_turn` (oracle.md, "Mid-turn") |
 | A window Claude says is waiting | Never closeable: it is `active`, and it raises the existing `waiting` alert (cause `input` when the hooks recorded no prompt), so it sits in Needs you as "Waiting for you" with no button, never on the leftovers screen, and `recommend` offers nothing to run (ADR-009 D8) |
 | Who is offered Close | A `leftover` or `unmanaged` row that is alive, whose pid is the per-process record's (`pid_source` `record` or `both`) with a start token and no `pid_conflict`, whose record `cwd` is this project's root, a folder under it or one of its worktrees (`rooted_here`), and that no live session in another registered project lists (`claimed_elsewhere`, BUG_040). `recommend` makes the close its step; an unmanaged host is offered Attach instead only when the match is unique both ways: the project has exactly one session it could take, and no other live orphan host here could take that session (`adopt_rivals`). Six windows that all list one session are each offered Close |
 | The pill | On the leftovers screen, by the row: the step's button ("Close…" or "Attach…") when the page may act, 36 px visible and 44 px to tap; it opens the confirm sheet over the leftovers screen, and Cancel returns there |

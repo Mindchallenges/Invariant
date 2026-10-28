@@ -32,7 +32,6 @@ a background-work ledger).
 
 from __future__ import annotations
 
-import pytest
 from test_oracle_attention import hook
 from test_oracle_scan import NOW, THE_HOST_PID, FakeProbe, make_project, put_session
 
@@ -47,7 +46,6 @@ SESSION = "s-bg"
 AGENT_ID = "a1b2c3d4e5f6"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_094 is live — delete this marker with the fix")
 def test_BUG_094_a_host_waiting_on_its_background_agent_is_working_not_your_turn(
     tmp_path, monkeypatch
 ):

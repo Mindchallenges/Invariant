@@ -114,6 +114,7 @@ class TestRecord:
             "turn_since": None,
             "ended": False,
             "degraded": None,
+            "background": None,
         }
 
     def test_keys_this_build_does_not_know_survive_a_round_trip(self):
@@ -870,3 +871,254 @@ class TestLayering:
 
     def test_the_module_names_its_directory(self):
         assert attention_module.ATTENTION_DIR == "attention"
+
+
+# -- background work (BUG_094) ----------------------------------------------
+
+
+AGENT_ID = "a0f1e2d3c4b5a6978"
+SHELL_ID = "b1x2y3z4w"
+
+
+def launched_agent(**extra) -> dict:
+    """The PostToolUse of an Agent dispatched in the background: it answers at
+    once, with the agent launched, not finished."""
+    return {
+        "tool_name": "Agent",
+        "tool_input": {"description": "Review it", "prompt": "Review it.",
+                       "run_in_background": True},
+        "tool_response": {"isAsync": True, "status": "async_launched",
+                          "agentId": AGENT_ID, "description": "Review it"},
+        **extra,
+    }
+
+
+def launched_shell(**extra) -> dict:
+    return {
+        "tool_name": "Bash",
+        "tool_input": {"command": "make test", "run_in_background": True},
+        "tool_response": {"stdout": "", "stderr": "", "interrupted": False,
+                          "backgroundTaskId": SHELL_ID},
+        **extra,
+    }
+
+
+def notification(task: str = AGENT_ID, status: str = "completed", note: str | None = None,
+                 summary: str = 'Agent "Review it" finished') -> str:
+    """A task-notification prompt, as Claude Code delivers one as a turn."""
+    lines = ["<task-notification>", f"<task-id>{task}</task-id>",
+             "<tool-use-id>toolu_01</tool-use-id>", f"<status>{status}</status>",
+             f"<summary>{summary}</summary>"]
+    if note is not None:
+        lines.append(f"<note>{note}</note>")
+    lines += ["<result>done</result>", "</task-notification>"]
+    return "\n".join(lines)
+
+
+STILL_RUNNING = ("This agent stopped with background work of its own still running. "
+                 "It may resume on its own when that work completes or reports, and the "
+                 "same task-id notifies again if it does; the result below may be interim.")
+NO_CHILDREN = ("A task-notification fires each time this agent stops with no live "
+               "background children of its own.")
+
+
+class TestBackgroundStore:
+    def test_a_launch_opens_a_ledger_entry_and_answers_what_waited(self, attention, store):
+        attention.wait(HOST, "idle", "waiting for your input")
+        attention.background_started(HOST, AGENT_ID, "agent", pid_source=fixed(4242))
+        doc = on_disk(store)
+        assert doc["background"] == {AGENT_ID: {"kind": "agent", "since": NOW}}
+        assert doc["waiting"] is None
+        assert doc["pid"] == 4242
+
+    def test_a_second_launch_adds_and_a_relaunch_keeps_one_entry(self, attention, store):
+        attention.background_started(HOST, AGENT_ID, "agent")
+        attention.background_started(HOST, SHELL_ID, "command")
+        attention.background_started(HOST, AGENT_ID, "agent")
+        assert sorted(on_disk(store)["background"]) == sorted([AGENT_ID, SHELL_ID])
+
+    def test_an_unknown_kind_is_refused(self, attention):
+        with pytest.raises(ValueError):
+            attention.background_started(HOST, AGENT_ID, "daemon")
+
+    def test_the_ledger_is_bounded_oldest_out(self, attention, store):
+        for n in range(attention_module.BACKGROUND_LIMIT + 3):
+            attention.background_started(HOST, f"t{n}", "command")
+        ledger = on_disk(store)["background"]
+        assert len(ledger) == attention_module.BACKGROUND_LIMIT
+        assert "t0" not in ledger and f"t{attention_module.BACKGROUND_LIMIT + 2}" in ledger
+
+    def test_a_notification_turn_closes_its_entries_and_runs_the_turn(self, attention, store):
+        attention.background_started(HOST, AGENT_ID, "agent")
+        attention.background_started(HOST, SHELL_ID, "command")
+        attention.turn_ended(HOST, [])
+        attention.wait(HOST, "idle", "waiting for your input")
+        attention.background_done(HOST, [AGENT_ID, "never-opened"])
+        doc = on_disk(store)
+        assert doc["background"] == {SHELL_ID: {"kind": "command", "since": NOW}}
+        assert (doc["turn"], doc["turn_since"], doc["waiting"]) == ("running", NOW, None)
+        attention.background_done(HOST, [SHELL_ID])
+        assert on_disk(store)["background"] is None
+
+    def test_a_notification_turn_is_not_the_person_speaking(self, attention, store):
+        """A refusal and a failed hook stay until the person answers them."""
+        attention.refused(HOST, ["pipeline.complete"])
+        attention.degraded(HOST, "stop", "RuntimeError: x")
+        attention.background_done(HOST, [])
+        doc = on_disk(store)
+        assert doc["blocked"]["rules"] == ["pipeline.complete"]
+        assert doc["degraded"]["event"] == "stop"
+
+    def test_a_prompt_and_a_stop_keep_the_ledger(self, attention, store):
+        attention.background_started(HOST, AGENT_ID, "agent")
+        attention.prompt(HOST)
+        attention.turn_stopped(HOST)
+        attention.turn_ended(HOST, [])
+        assert list(on_disk(store)["background"]) == [AGENT_ID]
+
+    def test_session_end_clears_the_ledger(self, attention, store):
+        attention.background_started(HOST, AGENT_ID, "agent")
+        attention.host_ended(HOST)
+        assert on_disk(store)["background"] is None
+
+    def test_a_ledger_on_disk_this_build_cannot_read_is_started_over(self, attention, store):
+        store.write(f"{ATTENTION_DIR}/{HOST}.json", {"host_session_id": HOST,
+                                                     "background": ["junk"]})
+        attention.background_done(HOST, [AGENT_ID])
+        assert on_disk(store)["background"] is None
+        attention.background_started(HOST, AGENT_ID, "agent")
+        assert list(on_disk(store)["background"]) == [AGENT_ID]
+
+
+class TestBackgroundSignals:
+    """What the host adapter reads from a launch and from a task-notification."""
+
+    @pytest.fixture
+    def host(self, governed):
+        return ClaudeCodeHost(governed)
+
+    @pytest.fixture
+    def ctx(self, governed):
+        return Context(cwd=governed, host_session_id=HOST)
+
+    def signal(self, host, ctx, event, body) -> AttentionSignal | None:
+        host.handle(event, json.dumps(body), ctx)
+        return host.attention
+
+    @pytest.mark.parametrize("tool", ["Agent", "Task"])
+    def test_a_background_agent_launch_opens_work(self, host, ctx, tool):
+        body = launched_agent(tool_name=tool)
+        assert self.signal(host, ctx, "post-tool-use", body) == AttentionSignal(
+            cc.ATTENTION_BACKGROUND_STARTED, kind="agent", tasks=(AGENT_ID,))
+
+    def test_a_background_shell_opens_work(self, host, ctx):
+        assert self.signal(host, ctx, "post-tool-use", launched_shell()) == AttentionSignal(
+            cc.ATTENTION_BACKGROUND_STARTED, kind="command", tasks=(SHELL_ID,))
+
+    def test_a_shell_moved_to_the_background_mid_run_opens_work_too(self, host, ctx):
+        body = launched_shell(tool_input={"command": "make test"})
+        assert self.signal(host, ctx, "post-tool-use", body).tasks == (SHELL_ID,)
+
+    @pytest.mark.parametrize("body", [
+        {"tool_name": "Agent", "tool_input": {}, "tool_response": {"agentId": AGENT_ID,
+                                                                   "status": "completed"}},
+        {"tool_name": "Agent", "tool_input": {}, "tool_response": "a string"},
+        {"tool_name": "Agent", "tool_input": {},
+         "tool_response": {"isAsync": True, "agentId": ""}},
+        {"tool_name": "Bash", "tool_input": {"command": "true"},
+         "tool_response": {"stdout": "", "stderr": ""}},
+        {"tool_name": "Bash", "tool_input": {}, "tool_response": {"backgroundTaskId": 7}},
+        {"tool_name": "Bash", "tool_input": {},
+         "tool_response": {"backgroundTaskId": "x" * 200}},
+        {"tool_name": "Read", "tool_input": {}, "tool_response": {"backgroundTaskId": "b1"}},
+    ])
+    def test_anything_else_is_a_finished_tool(self, host, ctx, body):
+        assert self.signal(host, ctx, "post-tool-use", body) == AttentionSignal(
+            cc.ATTENTION_ANSWERED)
+
+    def test_a_subagents_own_launch_is_not_the_hosts(self, host, ctx):
+        """Its completion notifies the subagent, never the main turn."""
+        body = launched_shell(agent_id="a0sub", agent_type="general-purpose")
+        assert self.signal(host, ctx, "post-tool-use", body) == AttentionSignal(
+            cc.ATTENTION_ANSWERED)
+
+    @pytest.mark.parametrize("status", ["completed", "failed", "killed", "stopped"])
+    def test_a_terminal_notification_closes_its_task(self, host, ctx, status):
+        body = {"prompt": notification(status=status, note=NO_CHILDREN)}
+        assert self.signal(host, ctx, "user-prompt-submit", body) == AttentionSignal(
+            cc.ATTENTION_BACKGROUND_DONE, tasks=(AGENT_ID,))
+
+    def test_an_agent_with_work_still_running_stays_open(self, host, ctx):
+        body = {"prompt": notification(note=STILL_RUNNING)}
+        assert self.signal(host, ctx, "user-prompt-submit", body) == AttentionSignal(
+            cc.ATTENTION_BACKGROUND_DONE)
+
+    @pytest.mark.parametrize("status", ["running", "", "progress"])
+    def test_a_notification_that_is_not_terminal_closes_nothing(self, host, ctx, status):
+        body = {"prompt": notification(status=status)}
+        assert self.signal(host, ctx, "user-prompt-submit", body).tasks == ()
+
+    def test_several_notifications_in_one_turn_close_each(self, host, ctx):
+        prompt = notification() + "\n" + notification(task=SHELL_ID, summary="Background "
+                                                       'command "x" completed (exit code 0)')
+        assert self.signal(host, ctx, "user-prompt-submit", {"prompt": prompt}).tasks == (
+            AGENT_ID, SHELL_ID)
+
+    @pytest.mark.parametrize("prompt", [
+        "please look at <task-notification> handling",
+        "  hello",
+        "",
+        None,
+        7,
+    ])
+    def test_a_person_s_prompt_is_a_prompt(self, host, ctx, prompt):
+        body = {} if prompt is None else {"prompt": prompt}
+        assert self.signal(host, ctx, "user-prompt-submit", body) == AttentionSignal(
+            cc.ATTENTION_PROMPT)
+
+    def test_a_notification_naming_no_task_closes_nothing(self, host, ctx):
+        prompt = "<task-notification>\n<status>completed</status>\n</task-notification>"
+        assert self.signal(host, ctx, "user-prompt-submit", {"prompt": prompt}) == (
+            AttentionSignal(cc.ATTENTION_BACKGROUND_DONE))
+
+    def test_the_response_does_not_depend_on_the_signal(self, host, ctx):
+        plain = host.handle("user-prompt-submit", json.dumps({"prompt": "hi"}), ctx)
+        told = host.handle("user-prompt-submit",
+                           json.dumps({"prompt": notification()}), ctx)
+        assert told == plain
+
+
+class TestBackgroundHooks:
+    def test_the_hooks_keep_the_ledger_across_a_background_agent(self, governed):
+        base = {"session_id": HOST}
+        hook("user-prompt-submit", {**base, "prompt": "review this in the background"})
+        hook("post-tool-use", {**base, **launched_agent()})
+        hook("post-tool-use", {**base, **launched_shell()})
+        hook("stop", base)
+        doc = json.loads(sidecar(governed).read_text())
+        assert sorted(doc["background"]) == sorted([AGENT_ID, SHELL_ID])
+        assert doc["turn"] == "ended"
+
+        hook("user-prompt-submit", {**base, "prompt": notification()})
+        doc = json.loads(sidecar(governed).read_text())
+        assert list(doc["background"]) == [SHELL_ID]
+        assert doc["turn"] == "running"
+
+        hook("session-end", base)
+        assert json.loads(sidecar(governed).read_text())["background"] is None
+
+    def test_a_failing_ledger_write_leaves_the_response_byte_identical(
+        self, governed, monkeypatch
+    ):
+        base = {"session_id": HOST}
+        launch_body = {**base, **launched_agent()}
+        told = {**base, "prompt": notification()}
+        healthy = [hook("post-tool-use", launch_body), hook("user-prompt-submit", told)]
+
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        for name in ("background_started", "background_done"):
+            monkeypatch.setattr(AttentionStore, name, boom)
+        assert [hook("post-tool-use", launch_body),
+                hook("user-prompt-submit", told)] == healthy

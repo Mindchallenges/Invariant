@@ -7,10 +7,12 @@ One document per host session, ``<state_root>/attention/<host-id>.json``::
      "blocked": {"rules": [...], "surface": "stop|cli", "since"} | null,
      "turn": "running|ended" | null, "turn_since": "<iso>" | null,
      "ended": false,
-     "degraded": {"event", "error", "since"} | null}
+     "degraded": {"event", "error", "since"} | null,
+     "background": {"<task id>": {"kind": "agent|command", "since"}} | null}
 
 It answers the questions the session record cannot: is this host sitting on a
-permission prompt, did its last turn end on a refusal, is it still alive. No
+permission prompt, did its last turn end on a refusal, is it still alive, is
+work it started in the background still running after its turn ended. No
 hook could see a permission prompt before the ``Notification`` event was
 wired, and none of the rest belongs on the session record, which is per
 INVARIANT session and written under the registry's discipline.
@@ -27,6 +29,15 @@ first this library stores outside the stats records' bare dates. They are
 machine-local and derived — under the state root, never committed, never
 rendered into a document — and they exist because "how long has this been
 waiting" is the oracle's whole question (ADR-007 D9).
+
+**The background ledger** (BUG_094) holds the work a host's main turn
+started in the background and has not heard finish: a subagent, or a shell
+command, keyed by the task id the host gave it. A launch opens an entry, the
+task's completion notice closes it, and ``SessionEnd`` clears the lot. A
+notice the host absorbs into a turn already running fires no hook, so an
+entry can outlive its task; the reader lets an entry lapse once the host has
+been quiet past a threshold (``signals.background_work``), and the ledger is
+bounded here, oldest out.
 
 **Keys this build does not know are kept** (the BUG_061 contract), and a record
 that cannot be read is replaced by the next write rather than wedging its host:
@@ -60,6 +71,15 @@ SURFACE_CLI = "cli"
 TURN_RUNNING = "running"
 TURN_ENDED = "ended"
 
+#: What a background ledger entry is: a subagent, or a shell command.
+BACKGROUND_AGENT = "agent"
+BACKGROUND_COMMAND = "command"
+BACKGROUND_KINDS = (BACKGROUND_AGENT, BACKGROUND_COMMAND)
+
+#: The most entries a ledger keeps. A host that launches more than this
+#: without hearing any finish has lost track already; the oldest go first.
+BACKGROUND_LIMIT = 32
+
 #: A host id becomes a file name, so only a plain name is accepted: no
 #: separator, no leading dot, bounded length.
 _HOST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -85,6 +105,7 @@ class AttentionRecord(PreservesUnknownKeys):
     turn_since: str | None = None
     ended: bool = False
     degraded: dict[str, Any] | None = None
+    background: dict[str, Any] | None = None
     _extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -214,8 +235,63 @@ class AttentionStore:
             record.blocked = None
             record.degraded = None
             record.pid = None
+            record.background = None
 
         self._update(host_id, mutate, None)
+
+    def background_started(
+        self,
+        host_id: str,
+        task: str,
+        kind: str,
+        pid_source: PidSource | None = None,
+    ) -> None:
+        """The main turn launched ``task`` in the background; it runs on.
+
+        A launch is a tool finishing, so whatever waited is answered, as
+        :meth:`answered` would. Launching an id already open keeps one entry.
+        """
+        if kind not in BACKGROUND_KINDS:
+            raise ValueError(f"{kind!r} is not one of {', '.join(BACKGROUND_KINDS)}")
+        now = self.clock()
+
+        def mutate(record: AttentionRecord) -> None:
+            ledger = _ledger(record.background)
+            ledger.pop(task, None)
+            ledger[task] = {"kind": kind, "since": now}
+            while len(ledger) > BACKGROUND_LIMIT:
+                ledger.pop(next(iter(ledger)))
+            record.background = ledger
+            record.waiting = None
+
+        self._update(host_id, mutate, pid_source)
+
+    def background_done(
+        self,
+        host_id: str,
+        tasks: Iterable[str],
+        pid_source: PidSource | None = None,
+    ) -> None:
+        """Background work notified the host it ended; the notice is a turn.
+
+        Each of ``tasks`` is closed. The host answers the notice with a turn
+        of its own, so the turn runs and an idle prompt is over, but the
+        person has not spoken: a refusal and a failed hook stay for them,
+        unlike :meth:`prompt`.
+        """
+        tasks = list(tasks)
+        now = self.clock()
+
+        def mutate(record: AttentionRecord) -> None:
+            ledger = _ledger(record.background)
+            for task in tasks:
+                ledger.pop(task, None)
+            record.background = ledger or None
+            record.turn = TURN_RUNNING
+            record.turn_since = now
+            record.waiting = None
+
+        self._update(host_id, mutate, pid_source)
 
     def refused(self, host_id: str, rules: Iterable[str]) -> None:
         """A CLI command's gates refused the session this host is bound to."""
@@ -286,6 +362,11 @@ class AttentionStore:
             return self.read(host_id)
         except StateError:
             return None
+
+
+def _ledger(background: Any) -> dict[str, Any]:
+    """The ledger to write over: a copy of a readable one, else a new one."""
+    return dict(background) if isinstance(background, dict) else {}
 
 
 def _surface(blocked: Any) -> str | None:

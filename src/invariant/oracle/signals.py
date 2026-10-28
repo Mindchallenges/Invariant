@@ -58,11 +58,17 @@ ORPHAN_ACTIVE = "active"
 ORPHAN_UNKNOWN = "unknown"
 
 #: Whether a host is mid-turn (:func:`turn_state`): working, paused on the
-#: person, or not mid-turn. The words are Claude Code's own ``status`` values,
-#: the evidence that outranks the attention ``turn`` when there is one.
+#: person, its main turn over while work it started in the background runs
+#: on (BUG_094), or not mid-turn. ``busy``, ``waiting`` and ``idle`` are
+#: Claude Code's own ``status`` values, the evidence that outranks the
+#: attention ``turn`` when there is one.
 TURN_BUSY = "busy"
 TURN_WAITING = "waiting"
+TURN_BACKGROUND = "background"
 TURN_IDLE = "idle"
+
+#: The ``stuck`` signal's cause when the silence is background work's.
+STUCK_BACKGROUND = "background"
 
 #: The ``waiting`` signal's cause when only the host's own status says it is
 #: waiting on the person, with no prompt the hooks recorded (BUG_087).
@@ -80,6 +86,13 @@ _IDLE = "idle"
 _TURN_RUNNING = "running"
 _TURN_ENDED = "ended"
 _STATUSES = (TURN_BUSY, TURN_WAITING, TURN_IDLE)
+#: Claude Code's status while its turn is idle and a background shell runs.
+_SHELL = "shell"
+_AGENT = "agent"
+_COMMAND = "command"
+#: The keys of :func:`background_work`'s answer, and of a row's ``background``.
+_AGENTS = "agents"
+_COMMANDS = "commands"
 
 
 @dataclass(frozen=True)
@@ -155,37 +168,86 @@ def turn_state(
     thresholds: Thresholds | None = None,
 ) -> str:
     """Whether ``host`` is mid-turn: :data:`TURN_BUSY`, :data:`TURN_WAITING` on
-    the person, or :data:`TURN_IDLE`. The one answer the orphan class, the
-    ``waiting`` / ``stuck`` / ``your_turn`` signals, the gate cache and the
-    panel's "working" all read, so none of them can contradict another
-    (BUG_087).
+    the person, :data:`TURN_BACKGROUND`, or :data:`TURN_IDLE`. The one answer
+    the orphan class, the ``waiting`` / ``stuck`` / ``your_turn`` signals, the
+    gate cache and the panel's "working" all read, so none of them can
+    contradict another (BUG_087).
 
     1. A host known to be gone is not mid-turn: that is ``host_gone``'s.
     2. Claude Code's own ``status``, from the per-process record the scan
        joined, outranks the attention record while the host is alive by the
-       record's check: ``busy``, ``waiting`` and ``idle`` mean what they say.
-       Without that check (liveness unknown) the record is not used.
+       record's check: ``busy``, ``waiting`` and ``idle`` mean what they say,
+       and ``shell`` (its turn idle, a background shell running) is
+       background work. Claude Code says ``idle`` while a background agent
+       runs, so an open agent in the ledger still makes ``idle`` background
+       (BUG_094). Without that check (liveness unknown) the record is not
+       used.
     3. Without one, the attention record: a permission prompt or a question
-       is waiting; an idle prompt was notified after the last prompt was
-       submitted, so the turn is over; a ``running`` turn is mid-turn only
+       is waiting; a ``running`` turn with no idle prompt after it is busy
        while the host was heard from within ``orphan_idle_minutes``, because
-       a missed Stop leaves it ``running`` for ever. No activity known is no
-       proof of staleness, so such a turn still counts.
+       a missed Stop leaves it ``running`` for ever (no activity known is no
+       proof of staleness, so such a turn still counts). Otherwise the turn
+       is over, and open background work (:func:`background_work`) makes it
+       background, else idle.
     """
     thresholds = thresholds or Thresholds()
     if host is None or host.alive is False:
         return TURN_IDLE
-    if host.alive is True and host.status in _STATUSES:
+    work = background_work(host, last_activity, now, thresholds)
+    if _verified(host):
+        if host.status == _SHELL or (host.status == TURN_IDLE and work[_AGENTS]):
+            return TURN_BACKGROUND
         return host.status
     record = host.attention if isinstance(host.attention, dict) else {}
     waiting = record.get("waiting") if isinstance(record.get("waiting"), dict) else {}
     if waiting.get("kind") in _ASKING:
         return TURN_WAITING
-    if waiting.get("kind") == _IDLE or record.get("turn") != _TURN_RUNNING:
-        return TURN_IDLE
     stale = (last_activity is not None
              and now - last_activity >= thresholds.orphan_idle_minutes * 60)
-    return TURN_IDLE if stale else TURN_BUSY
+    if waiting.get("kind") != _IDLE and record.get("turn") == _TURN_RUNNING and not stale:
+        return TURN_BUSY
+    return TURN_BACKGROUND if work[_AGENTS] or work[_COMMANDS] else TURN_IDLE
+
+
+def background_work(
+    host: HostView | None, last_activity: float | None, now: float,
+    thresholds: Thresholds | None = None,
+) -> dict[str, int]:
+    """How much background work ``host`` is waiting on: ``{agents, commands}``.
+
+    From the attention record's ledger (BUG_094), whose entries a launch
+    opens and a completion notice closes. Claude Code absorbs a notice that
+    arrives while a turn runs without firing a hook, so an entry can outlive
+    its task: the ledger lapses once the host has been quiet for
+    ``stuck_minutes``, and so never reads ``stuck`` on its own. No activity
+    known is no proof it lapsed. A verified ``status`` answers for the
+    commands, because Claude Code reads ``shell`` exactly while one runs:
+    ``shell`` is at least one, anything else none.
+    """
+    thresholds = thresholds or Thresholds()
+    counts = {_AGENTS: 0, _COMMANDS: 0}
+    if host is None or host.alive is False:
+        return counts
+    lapsed = (last_activity is not None
+              and now - last_activity >= thresholds.stuck_minutes * 60)
+    record = host.attention if isinstance(host.attention, dict) else {}
+    ledger = record.get("background")
+    if not lapsed and isinstance(ledger, dict):
+        for entry in ledger.values():
+            kind = entry.get("kind") if isinstance(entry, dict) else None
+            if kind == _AGENT:
+                counts[_AGENTS] += 1
+            elif kind == _COMMAND:
+                counts[_COMMANDS] += 1
+    if _verified(host):
+        counts[_COMMANDS] = max(counts[_COMMANDS], 1) if host.status == _SHELL else 0
+    return counts
+
+
+def _verified(host: HostView) -> bool:
+    """Whether Claude Code's own status speaks for ``host``: alive by the
+    record's check, with a status this build knows."""
+    return host.alive is True and host.status in (*_STATUSES, _SHELL)
 
 
 def mid_turn(
@@ -262,14 +324,13 @@ def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:
         )
 
     idle = None if row.last_activity is None else now - row.last_activity
-    if (
-        state == TURN_BUSY
-        and record.get("turn") == _TURN_RUNNING
-        and idle is not None
-        and idle > thresholds.stuck_minutes * 60
-    ):
+    silent = idle is not None and idle > thresholds.stuck_minutes * 60
+    if state == TURN_BUSY and record.get("turn") == _TURN_RUNNING and silent:
         add(STUCK, MEDIUM, True, f"a running turn, silent for {_minutes(idle)}",
             str(record.get("turn_since")))
+    elif state == TURN_BACKGROUND and silent:
+        add(STUCK, MEDIUM, True, f"background work, silent for {_minutes(idle)}",
+            str(record.get("turn_since")), STUCK_BACKGROUND)
 
     degraded = record.get("degraded")
     if isinstance(degraded, dict):
