@@ -378,6 +378,19 @@ class TestManifestKey:
         assert manifest.get("guidelines.ruleset") is None
         assert manifest.source_of("guidelines.ruleset") == "default"
 
+    def test_the_default_is_no_baseline(self, make_manifest):
+        """DN-1: null means no baseline, and every finding is new."""
+        manifest = make_manifest({"version": 1})
+        assert manifest.get("guidelines.baseline") is None
+        assert manifest.source_of("guidelines.baseline") == "default"
+
+    def test_a_configured_baseline_is_accepted_as_written(self, make_manifest):
+        manifest = make_manifest(
+            {"version": 1, "guidelines": {"baseline": "docs/guidelines/baseline.txt"}}
+        )
+        assert manifest.get("guidelines.baseline") == "docs/guidelines/baseline.txt"
+        assert manifest.source_of("guidelines.baseline") == "manifest"
+
     def test_a_configured_path_is_kept_as_written(self, make_manifest):
         manifest = make_manifest({"version": 1, **CONFIGURED})
         assert manifest.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
@@ -389,7 +402,10 @@ class TestManifestKey:
             ("docs/guidelines/ruleset.yaml", "guidelines must be a mapping"),
             ({"ruleset": 3}, "guidelines.ruleset must be null or a path"),
             ({"ruleset": "  "}, "guidelines.ruleset must be null or a path"),
-            ({"baseline": "docs/guidelines/baseline.txt"}, "guidelines.baseline is not a key this build reads"),
+            ({"baseline": 3}, "guidelines.baseline must be null or a path"),
+            ({"baseline": ""}, "guidelines.baseline must be null or a path"),
+            ({"baseline": ["docs/guidelines/baseline.txt"]}, "guidelines.baseline must be null or a path"),
+            ({"verdicts": {"note_max_chars": 280}}, "guidelines.verdicts is not a key this build reads"),
             ({"instruction_files": "CLAUDE.md"}, "guidelines.instruction_files must be null or a list of paths"),
             ({"instruction_files": []}, "guidelines.instruction_files must be null or a list of paths"),
             ({"instruction_files": ["CLAUDE.md", ""]}, "guidelines.instruction_files must be null or a list of paths"),

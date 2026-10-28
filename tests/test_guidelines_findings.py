@@ -9,8 +9,9 @@ reference a changed file under `applies_to` makes and checks its target
 against the `forbid` or `only` list. An unanswerable file is a failing
 finding, never a pass. A file that is not UTF-8 is not text, and is named.
 
-No baseline exists yet, so every finding is new. The rule fails on a new or
-unanswerable blocker finding and reports warn findings inside a pass.
+With no baseline configured every finding is new (the ratchet is tested in
+`tests/test_guidelines_baseline.py`). The rule fails on a new or unanswerable
+blocker finding and reports warn findings inside a pass.
 """
 
 from __future__ import annotations

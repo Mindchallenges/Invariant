@@ -1,8 +1,11 @@
 """The guidelines domain: the effects the ruleset has on the tree (ADR-012 D12).
 
 Not an FSM, like ``stats`` and ``sweep``: there is no lifecycle to advance.
-It owns one effect, rendering: the human checklist (A2 increment 3) and the
+It owns two effects. Rendering: the human checklist (A2 increment 3) and the
 managed ``guidelines/index`` block in each instruction file (increment 4).
+And the ratchet baseline (A3 increment 5, D6): ``baseline`` records or
+prunes the file ``guidelines.baseline`` names, writing what
+``core.rules.plan_baseline`` decided, the same shape as render.
 ``core/guidelines`` decides what the text is. Where it goes, whether it may be
 written there and what state it is in now is the render plan,
 ``core.rules.plan_render``: ``guidelines.generated_current`` asks the same
@@ -57,9 +60,11 @@ from pathlib import Path
 
 from ..core import guidelines
 from ..core.rules import (
+    BaselineChange,
     BlockRendered,
     RuleContext,
     guidelines_relpath,
+    plan_baseline,
     plan_render,
     ruleset_or_refuse,
 )
@@ -138,3 +143,46 @@ class GuidelinesDomain:
         text = guidelines.render_checklist(ruleset, "markdown", source=source)
         _digest, body = guidelines.split_managed(text, "markdown")
         return Shown(text=body.lstrip("\n"), ruleset=ruleset.digest)
+
+    def baseline(
+        self,
+        *,
+        mode: str,
+        rules: tuple[str, ...] = (),
+        dry_run: bool = False,
+    ) -> Baselined:
+        """Record or prune the ratchet baseline (ADR-012 D6), or with
+        ``dry_run`` say what would be written.
+
+        ``core.rules.plan_baseline`` decides the entries, checks the target
+        and privacy-scans the text; this writes what it decided, into the
+        tree in hand, and nothing else. The file carries no managed marker.
+        """
+        plan = plan_baseline(self.ctx, mode=mode, rules=rules)
+        if plan is None:
+            return Baselined(status="no-ruleset", written=False, mode=mode)
+        if not dry_run:
+            plan.path.parent.mkdir(parents=True, exist_ok=True)
+            plan.path.write_text(plan.text, encoding="utf-8")
+        return Baselined(
+            status=plan.status, written=not dry_run, mode=mode, relpath=plan.relpath,
+            ruleset=plan.ruleset, entries=len(plan.entries), changes=plan.changes,
+        )
+
+
+@dataclass(frozen=True)
+class Baselined:
+    """What one ``guidelines baseline`` did, or with ``--dry-run`` would do."""
+
+    #: ``new``, ``current``, ``changed``, or ``no-ruleset``.
+    status: str
+    written: bool
+    #: ``record`` or ``prune``.
+    mode: str
+    relpath: str | None = None
+    #: The ruleset digest the findings were evaluated under.
+    ruleset: str | None = None
+    #: How many entries the file holds after the write.
+    entries: int = 0
+    #: Each entry lowered or dropped, and why.
+    changes: tuple[BaselineChange, ...] = ()

@@ -630,3 +630,425 @@ class TestTheBlockCommands:
         write_manifest(project, {"version": 1, "project": {"name": "demo"}})
         assert run("guidelines", "show") == 0
         assert "no guidelines ruleset configured" in capsys.readouterr().out
+
+
+# -- the ratchet baseline (A3 increment 5, D6, DN-1, DN-4) ---------------------------
+
+
+BASELINE_REL = "docs/guidelines/baseline.txt"
+BASELINE_RULESET = """\
+version: 1
+sections:
+  - id: style
+    title: Style
+rules:
+  - id: style.no-print
+    section: style
+    title: No print calls in the application
+    statement: The application never prints.
+    severity: blocker
+    phases: [review]
+    applies_to: ["app/**"]
+    check: {kind: pattern, engine: regex, in: code, match: '\\bprint\\('}
+  - id: style.no-todo
+    section: style
+    title: No inline TODO
+    statement: A TODO is filed as an idea, never left in a comment.
+    severity: warn
+    phases: [review]
+    applies_to: ["app/**"]
+    check: {kind: pattern, engine: regex, in: comments, match: 'TODO'}
+  - id: style.app-never-imports-tools
+    section: style
+    title: The application imports nothing from tools
+    statement: No module of the application reaches into tools.
+    severity: blocker
+    phases: [review]
+    applies_to: ["app/*.py"]
+    check: {kind: boundary, engine: imports, forbid: ["tools/**"]}
+  - id: style.paired
+    section: style
+    title: A module change touches its test
+    statement: A change to app/X.py touches tests/test_X.py.
+    severity: warn
+    phases: [landing]
+    applies_to: ["app/*.py"]
+    check: {kind: cochange, form: pair, when: {change: any}, then: {each: "tests/test_{stem}.py"}}
+"""
+PRINT_ID = "style.no-print"
+TODO_ID = "style.no-todo"
+
+
+def stamp(line: str, rule: str = PRINT_ID) -> str:
+    from invariant.core.findings import collapse, fingerprint
+
+    return fingerprint(rule, collapse(line))
+
+
+def baseline_line(rule: str, path: str, fp: str, count: int) -> str:
+    return f"{rule}  {path}  {fp}  {count}\n"
+
+
+def baseline_entries(root: Path) -> list[tuple[str, str, str, int]]:
+    text = (root / BASELINE_REL).read_text(encoding="utf-8")
+    return [(e.rule, e.path, e.fingerprint, e.count) for e in guidelines.parse_baseline(text)]
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A committed project whose app carries pre-existing findings."""
+    from test_domains import git_project
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    write(root, RULESET_REL, BASELINE_RULESET)
+    write(root, "app/m.py", "print(x)\nprint(x)\n")
+    write(root, "app/n.py", "y = 1  # TODO later\n")
+    write(root, "tools/__init__.py", "")
+    write(root, "tools/helper.py", "X = 1\n")
+    git_project(root, {
+        "version": 1, "project": {"name": "demo", "ecosystems": ["python"]},
+        "guidelines": {"ruleset": RULESET_REL, "baseline": BASELINE_REL},
+    })
+    return root
+
+
+def baseline_domain(root, *, baseline=BASELINE_REL, files=None, ruleset=RULESET_REL, **extra):
+    from invariant.core.manifest import Manifest
+
+    cfg = {"ruleset": ruleset}
+    if baseline is not None:
+        cfg["baseline"] = baseline
+    write_manifest(root, {
+        "version": 1, "project": {"name": "demo", "ecosystems": ["python"]},
+        "guidelines": cfg, **extra,
+    })
+    session = None if files is None else {"files": list(files), "base": ""}
+    return GuidelinesDomain(RuleContext(manifest=Manifest.load(root), cwd=root, session=session))
+
+
+class TestBaselineRecord:
+    def test_it_records_every_tracked_finding_and_only_tracked_files(self, repo):
+        write(repo, "app/untracked.py", "print(z)\n")
+        result = baseline_domain(repo).baseline(mode="record")
+        assert result.status == "new" and result.written
+        assert result.relpath == BASELINE_REL
+        assert result.entries == 2
+        assert baseline_entries(repo) == [
+            (PRINT_ID, "app/m.py", stamp("print(x)"), 2),
+            (TODO_ID, "app/n.py", stamp("y = 1  # TODO later", TODO_ID), 1),
+        ]
+
+    def test_a_second_record_is_current(self, repo):
+        baseline_domain(repo).baseline(mode="record")
+        result = baseline_domain(repo).baseline(mode="record")
+        assert result.status == "current"
+
+    def test_rule_replaces_only_the_named_rules_entries(self, repo):
+        write(repo, BASELINE_REL,
+              baseline_line(PRINT_ID, "app/m.py", "abcdefabcdef", 9)
+              + baseline_line(TODO_ID, "app/kept.py", "0123456789ab", 4))
+        result = baseline_domain(repo).baseline(mode="record", rules=(PRINT_ID,))
+        assert result.status == "changed"
+        assert baseline_entries(repo) == [
+            (TODO_ID, "app/kept.py", "0123456789ab", 4),
+            (PRINT_ID, "app/m.py", stamp("print(x)"), 2),
+        ]
+
+    def test_rule_drops_the_entries_of_a_rule_that_is_gone_and_names_them(self, repo):
+        write(repo, BASELINE_REL, baseline_line("style.gone", "app/m.py", "abcdefabcdef", 1))
+        result = baseline_domain(repo).baseline(mode="record", rules=(PRINT_ID,))
+        (change,) = result.changes
+        assert change.rule == "style.gone" and change.after == 0
+        assert "gone" in change.reason
+
+    def test_a_full_record_replaces_a_malformed_file(self, repo):
+        write(repo, BASELINE_REL, "not a baseline\n")
+        assert baseline_domain(repo).baseline(mode="record").status == "changed"
+        assert len(baseline_entries(repo)) == 2
+
+    def test_rule_refuses_a_malformed_file(self, repo):
+        write(repo, BASELINE_REL, "not a baseline\n")
+        with pytest.raises(RenderRefused, match="fewer than four fields"):
+            baseline_domain(repo).baseline(mode="record", rules=(PRINT_ID,))
+
+    def test_record_creates_the_configured_file(self, repo):
+        """DN-1: --record is how a configured baseline comes to exist."""
+        assert not (repo / BASELINE_REL).exists()
+        baseline_domain(repo).baseline(mode="record")
+        assert (repo / BASELINE_REL).is_file()
+
+    def test_dry_run_writes_nothing(self, repo):
+        result = baseline_domain(repo).baseline(mode="record", dry_run=True)
+        assert result.status == "new" and not result.written
+        assert not (repo / BASELINE_REL).exists()
+
+    def test_an_unanswerable_file_refuses_the_record(self, repo):
+        write(repo, "app/broken.py", "def (:\n")
+        import subprocess
+
+        subprocess.run(["git", "add", "app/broken.py"], cwd=repo, check=True)
+        with pytest.raises(RenderRefused, match="app/broken.py") as caught:
+            baseline_domain(repo).baseline(mode="record")
+        assert "unanswerable" in str(caught.value)
+        assert not (repo / BASELINE_REL).exists()
+
+    @pytest.mark.parametrize(
+        ("rule", "needle"),
+        [
+            ("style.nothing", "no guideline"),
+            ("style.paired", "DN-4"),
+        ],
+    )
+    def test_a_rule_that_cannot_be_baselined_is_refused(self, repo, rule, needle):
+        with pytest.raises(RenderRefused, match=needle):
+            baseline_domain(repo).baseline(mode="record", rules=(rule,))
+
+
+class TestBaselinePrune:
+    @pytest.fixture
+    def recorded(self, repo):
+        write(repo, "app/other.py", "print(o)\n")
+        write(repo, BASELINE_REL,
+              baseline_line(PRINT_ID, "app/m.py", stamp("print(x)"), 3)
+              + baseline_line(TODO_ID, "app/n.py", stamp("y = 1  # TODO later", TODO_ID), 1)
+              + baseline_line(PRINT_ID, "app/other.py", stamp("print(o)"), 1)
+              + baseline_line(PRINT_ID, "app/deleted.py", stamp("print(d)"), 1)
+              + baseline_line("style.gone", "app/m.py", "abcdefabcdef", 1))
+        return repo
+
+    def test_it_lowers_drops_and_never_adds(self, recorded):
+        write(recorded, "app/m.py", "print(x)\nprint(new)\n")
+        write(recorded, "app/n.py", "y = 1\n")
+        result = baseline_domain(recorded, files=["app/m.py", "app/n.py"]).baseline(mode="prune")
+        assert result.written and result.status == "changed"
+        assert baseline_entries(recorded) == [
+            (PRINT_ID, "app/m.py", stamp("print(x)"), 1),
+            (PRINT_ID, "app/other.py", stamp("print(o)"), 1),
+        ]
+        reasons = {(c.rule, c.path): (c.before, c.after, c.reason) for c in result.changes}
+        assert reasons[(PRINT_ID, "app/m.py")][:2] == (3, 1)
+        assert reasons[(TODO_ID, "app/n.py")][:2] == (1, 0)
+        assert "deleted" in reasons[(PRINT_ID, "app/deleted.py")][2]
+        assert "gone" in reasons[("style.gone", "app/m.py")][2]
+
+    def test_an_untouched_file_keeps_its_entries(self, recorded):
+        result = baseline_domain(recorded, files=["tools/helper.py"]).baseline(
+            mode="prune", dry_run=True
+        )
+        assert (PRINT_ID, "app/other.py") not in {(c.rule, c.path) for c in result.changes}
+        assert (PRINT_ID, "app/m.py") not in {(c.rule, c.path) for c in result.changes}
+        assert not result.written
+
+    def test_prune_refuses_a_missing_file(self, repo):
+        with pytest.raises(RenderRefused, match="does not exist"):
+            baseline_domain(repo, files=[]).baseline(mode="prune")
+
+    def test_prune_refuses_a_malformed_file(self, repo):
+        write(repo, BASELINE_REL, "not a baseline\n")
+        with pytest.raises(RenderRefused, match="fewer than four fields"):
+            baseline_domain(repo, files=[]).baseline(mode="prune")
+
+    def test_prune_refuses_an_unanswerable_touched_file_with_entries(self, recorded):
+        write(recorded, "app/m.py", "def (:\n")
+        with pytest.raises(RenderRefused, match="unanswerable"):
+            baseline_domain(recorded, files=["app/m.py"]).baseline(mode="prune")
+
+    def test_prune_refuses_a_changed_set_that_cannot_be_established(self, recorded):
+        with pytest.raises(RenderRefused, match="changed set"):
+            baseline_domain(recorded).baseline(mode="prune")
+
+
+class TestBaselineRefusals:
+    """The generated-file write class (ruling 13): each refusal writes nothing."""
+
+    def test_no_baseline_configured(self, repo):
+        """DN-1: --record refuses until the key names a path."""
+        with pytest.raises(RenderRefused, match="guidelines.baseline") as caught:
+            baseline_domain(repo, baseline=None).baseline(mode="record")
+        assert "set guidelines.baseline" in caught.value.fix
+
+    def test_no_ruleset_records_nothing(self, tmp_path):
+        from test_domains import git_project
+
+        git_project(tmp_path / "p")
+        dom = baseline_domain(tmp_path / "p", baseline=None, ruleset=None)
+        assert dom.baseline(mode="record").status == "no-ruleset"
+
+    @pytest.mark.parametrize(
+        ("target", "needle"),
+        [
+            (".claude/baseline.txt", "exempt from session isolation"),
+            ("docs/backlog/baseline.txt", "exempt from session isolation"),
+            ("../baseline.txt", "names nothing inside the project"),
+            (RULESET_REL, "is the guidelines ruleset"),
+            (CHECKLIST_REL, "is the guidelines checklist"),
+            ("CLAUDE.md", "is a guidelines instruction file"),
+        ],
+    )
+    def test_a_target_it_may_not_write(self, repo, target, needle):
+        dom = baseline_domain(repo, baseline=target, items={"path": "docs/backlog"})
+        dom = GuidelinesDomain(RuleContext(
+            manifest=dom.manifest, cwd=repo, host_instruction_files=("CLAUDE.md",),
+        ))
+        before = (repo / RULESET_REL).read_text(encoding="utf-8")
+        with pytest.raises(RenderRefused, match=needle):
+            dom.baseline(mode="record", dry_run=True)
+        assert (repo / RULESET_REL).read_text(encoding="utf-8") == before
+        assert not (repo / ".claude/baseline.txt").exists()
+
+    def test_a_privacy_finding_in_the_text(self, repo):
+        import subprocess
+
+        write(repo, "app/TICKET-4242.py", "print(t)\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        dom = baseline_domain(repo, privacy={"enabled": False, "extra": ["TICKET-[0-9]+"]})
+        with pytest.raises(RenderRefused, match="privacy") as caught:
+            dom.baseline(mode="record")
+        assert "TICKET-4242" not in str(caught.value)
+        assert not (repo / BASELINE_REL).exists()
+
+
+class TestTheBaselineCommand:
+    @pytest.fixture(autouse=True)
+    def _inside(self, repo, monkeypatch):
+        monkeypatch.chdir(repo)
+
+    def test_record_writes_and_reports(self, repo, capsys):
+        assert run("guidelines", "baseline", "--record", "--json") == 0
+        doc = payload(capsys)
+        assert doc["mode"] == "record"
+        assert doc["status"] == "new" and doc["written"] is True and doc["dry_run"] is False
+        assert doc["path"] == BASELINE_REL
+        assert doc["entries"] == 2
+        assert doc["ruleset"] == guidelines.digest_of(BASELINE_RULESET.encode("utf-8"))
+
+    def test_record_text_names_the_file_and_count(self, repo, capsys):
+        assert run("guidelines", "baseline", "--record", "--dry-run") == 0
+        text = capsys.readouterr().out
+        assert f"would write {BASELINE_REL}" in text and "2 entries" in text
+        assert not (repo / BASELINE_REL).exists()
+
+    def test_record_with_rules(self, repo, capsys):
+        assert run("guidelines", "baseline", "--record", "--rule", PRINT_ID, "--json") == 0
+        assert payload(capsys)["entries"] == 1
+
+    def test_prune_reports_each_change(self, repo, capsys):
+        write(repo, BASELINE_REL, baseline_line(PRINT_ID, "app/deleted.py", "abcdefabcdef", 1))
+        assert run("session", "start", "prune") == 0
+        capsys.readouterr()
+        assert run("guidelines", "baseline", "--prune", "--json") == 0
+        doc = payload(capsys)
+        assert doc["mode"] == "prune" and doc["entries"] == 0
+        (change,) = doc["changes"]
+        assert change["path"] == "app/deleted.py" and change["after"] == 0
+        assert "deleted" in change["reason"]
+
+    def test_rule_without_record_is_refused(self, repo, capsys):
+        assert run("guidelines", "baseline", "--prune", "--rule", PRINT_ID) == 1
+        assert "--rule" in capsys.readouterr().err
+
+    def test_a_refusal_exits_one_and_names_the_fix(self, repo, capsys):
+        write_manifest(repo, {
+            "version": 1, "project": {"name": "demo", "ecosystems": ["python"]},
+            "guidelines": {"ruleset": RULESET_REL},
+        })
+        assert run("guidelines", "baseline", "--record") == 1
+        assert "set guidelines.baseline" in capsys.readouterr().err
+
+    def test_no_ruleset_is_reported_and_succeeds(self, repo, capsys):
+        write_manifest(repo, {"version": 1, "project": {"name": "demo"}})
+        assert run("guidelines", "baseline", "--record") == 0
+        assert "no guidelines ruleset configured" in capsys.readouterr().out
+
+
+class TestBaselineEdges:
+    """The branches the main cases do not reach, each still a refusal or a
+    drop that names itself."""
+
+    def test_prune_drops_a_rule_that_is_no_longer_baselined_and_one_that_no_longer_applies(
+        self, repo
+    ):
+        write(repo, BASELINE_REL,
+              baseline_line("style.paired", "app/m.py", "abcdefabcdef", 1)
+              + baseline_line(PRINT_ID, "tools/helper.py", "0123456789ab", 1))
+        result = baseline_domain(repo, files=["app/n.py"]).baseline(mode="prune")
+        reasons = {(c.rule, c.path): c.reason for c in result.changes}
+        assert "now a cochange rule" in reasons[("style.paired", "app/m.py")]
+        assert "no longer applies" in reasons[(PRINT_ID, "tools/helper.py")]
+        assert result.entries == 0
+
+    def test_prune_never_raises_a_count(self, repo):
+        write(repo, BASELINE_REL, baseline_line(PRINT_ID, "app/m.py", stamp("print(x)"), 1))
+        result = baseline_domain(repo, files=["app/m.py"]).baseline(mode="prune")
+        assert result.changes == ()
+        assert baseline_entries(repo) == [(PRINT_ID, "app/m.py", stamp("print(x)"), 1)]
+
+    def test_a_baseline_that_is_not_text_is_refused(self, repo):
+        (repo / BASELINE_REL).parent.mkdir(parents=True, exist_ok=True)
+        (repo / BASELINE_REL).write_bytes(b"\xff\xfe")
+        with pytest.raises(RenderRefused, match="could not be read"):
+            baseline_domain(repo, files=["app/m.py"]).baseline(mode="prune")
+
+    def test_git_that_cannot_list_tracked_files_refuses_the_record(self, repo, monkeypatch):
+        from invariant.core import git
+
+        monkeypatch.setattr(git, "tracked_files", lambda cwd: None)
+        with pytest.raises(RenderRefused, match="tracked files"):
+            baseline_domain(repo).baseline(mode="record")
+
+    def test_an_unknown_mode_is_a_programming_error(self, repo):
+        with pytest.raises(ValueError, match="mode"):
+            baseline_domain(repo).baseline(mode="grow")
+
+    def test_a_configured_checklist_is_refused_as_a_target(self, repo):
+        dom = baseline_domain(repo, baseline="docs/rules.md")
+        dom.ctx.manifest.data["guidelines"]["checklist"] = "docs/rules.md"
+        with pytest.raises(RenderRefused, match="is the guidelines checklist"):
+            dom.baseline(mode="record", dry_run=True)
+
+    def test_a_docs_format_with_no_renderer_still_records(self, repo):
+        result = baseline_domain(repo, docs={"format": "asciidoc"}).baseline(
+            mode="record", dry_run=True
+        )
+        assert result.entries == 2
+
+    def test_an_instruction_file_outside_the_project_is_not_a_target_clash(self, repo):
+        dom = baseline_domain(repo)
+        dom.ctx.manifest.data["guidelines"]["instruction_files"] = ["../elsewhere.md"]
+        assert dom.baseline(mode="record", dry_run=True).entries == 2
+
+    def test_a_registry_the_ruleset_names_is_refused_as_a_target(self, repo):
+        registry = "docs/guidelines/dup.yaml"
+        write(repo, registry, "version: 1\nentries: []\n")
+        write(repo, RULESET_REL, BASELINE_RULESET + f"""\
+  - id: style.dup
+    section: style
+    title: Not left in an open duplication entry
+    statement: A touched file is not left in an open duplication entry.
+    severity: warn
+    phases: [review]
+    applies_to: ["app/**"]
+    check: {{kind: cochange, form: registry, registry: {registry}, outcomes: {{contained: warn}}}}
+""")
+        with pytest.raises(RenderRefused, match="a registry the ruleset names"):
+            baseline_domain(repo, baseline=registry).baseline(mode="record", dry_run=True)
+
+    def test_a_path_the_format_cannot_hold_refuses_the_record(self, repo):
+        import subprocess
+
+        write(repo, RULESET_REL, BASELINE_RULESET + """\
+  - id: style.no-secret
+    section: style
+    title: No secrets in the application
+    statement: Nothing under app says SECRET.
+    severity: warn
+    phases: [review]
+    applies_to: ["app/**"]
+    check: {kind: pattern, engine: regex, in: any, match: 'SECRET'}
+""")
+        write(repo, "app/two\nlines.txt", "SECRET\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        with pytest.raises(RenderRefused, match="cannot be written"):
+            baseline_domain(repo).baseline(mode="record", rules=("style.no-secret",))
+        assert not (repo / BASELINE_REL).exists()

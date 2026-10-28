@@ -2159,8 +2159,15 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     file's bytes there). A new or unanswerable finding of a blocker rule, or
     of a registry class mapped to blocker, fails it. A warn finding is
     reported inside a pass. Every finding is printed in D5's record shape and
-    kept nowhere. No baseline exists yet, so every finding is new; a
-    cochange finding never has one to be in (DN-4).
+    kept nowhere.
+
+    The baseline (D6, A3 increment 5) is read first, in full or not at all,
+    and a baseline that does not read fails the rule. A pattern or boundary
+    finding it records is baselined and never counted, whether or not its
+    file is touched (ruling 5); a cochange finding never has an entry to be
+    in (DN-4). A recorded entry of a touched file that no finding holds is
+    stale, and is reported in the detail only: failing it is
+    ``guidelines.baseline_only_shrinks``' (DN-5).
     """
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
@@ -2171,6 +2178,13 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
         )
     if ruleset is None:
         return Verdict.na("no guidelines ruleset configured")
+    baseline, broken = load_baseline(ctx, ruleset)
+    if broken is not None:
+        return Verdict.fail(
+            f"no guideline can be evaluated: {broken.message}",
+            detail=broken.detail,
+            fixes=broken.fixes,
+        )
     changed = _changed_set(ctx)
     if not changed.answerable:
         # Stricter than `docs.updated`, which reads a partial set when the
@@ -2184,22 +2198,26 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     evaluation = findings_reader.evaluate(
         ruleset.rules,
         files,
-        read=lambda rel: _read_bytes(tree / rel),
-        mask=lambda rel, text, keep: _lexical_mask(adapters, Path(rel), text, keep),
-        references=lambda rel: _references(adapters, tree / rel, Path(rel), tree),
+        **_finding_reads(tree, adapters),
         gone=gone,
         history=_change_history(ctx, tree, changed.base, adapters),
         registries=ruleset.registries,
     )
-    records = tuple(f.record(ruleset.digest) for f in evaluation.findings)
-    blocking = [f for f in evaluation.findings if f.blocks]
-    warned = [f for f in evaluation.findings if f.counts and not f.blocks]
-    excepted = [f for f in evaluation.findings if not f.counts]
-    detail = _mechanical_detail(evaluation, warned, excepted)
+    ratcheted = findings_reader.ratchet(
+        evaluation.findings, baseline or (), touched=set(files) | set(gone)
+    )
+    found = ratcheted.findings
+    records = tuple(f.record(ruleset.digest) for f in found)
+    blocking = [f for f in found if f.blocks]
+    warned = [f for f in found if f.counts and not f.blocks]
+    baselined = [f for f in found if f.status == "baselined"]
+    excepted = [f for f in found if f.status == "excepted"]
+    detail = _mechanical_detail(evaluation, warned, excepted, baselined, ratcheted.stale)
+    held = f" ({len(baselined)} baselined)" if baselined else ""
     if blocking:
         return Verdict(
             ok=False,
-            message=f"{len(blocking)} new or unanswerable blocker finding(s): "
+            message=f"{len(blocking)} new or unanswerable blocker finding(s){held}: "
             + "; ".join(f.describe() for f in blocking),
             detail=detail,
             fixes=_mechanical_fixes(blocking),
@@ -2209,10 +2227,21 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
         ok=True,
         message=f"no new blocker finding in {evaluation.scanned} changed file(s) "
         f"under {evaluation.rules} mechanical guideline(s), "
-        f"ruleset {ruleset.digest}",
+        f"ruleset {ruleset.digest}" + (f"; {len(baselined)} baselined" if baselined else ""),
         detail=detail,
         findings=records,
     )
+
+
+def _finding_reads(tree: Path, adapters: list[Adapter]) -> dict[str, Any]:
+    """The reads ``core/findings`` is handed, from the tree in hand: one
+    answer for the gate, ``--record`` and ``--prune``, so a record holds
+    exactly what the gate then finds."""
+    return {
+        "read": lambda rel: _read_bytes(tree / rel),
+        "mask": lambda rel, text, keep: _lexical_mask(adapters, Path(rel), text, keep),
+        "references": lambda rel: _references(adapters, tree / rel, Path(rel), tree),
+    }
 
 
 def _changed_in_tree(
@@ -2298,8 +2327,23 @@ def _mechanical_detail(
     evaluation: findings_reader.Evaluation,
     warned: list[findings_reader.Finding],
     excepted: list[findings_reader.Finding],
+    baselined: Iterable[findings_reader.Finding] = (),
+    stale: Iterable[findings_reader.Stale] = (),
 ) -> str:
     parts: list[str] = []
+    baselined = list(baselined)
+    if baselined:
+        parts.append(
+            f"{len(baselined)} baselined: " + "; ".join(f.describe() for f in baselined)
+        )
+    stale = list(stale)
+    if stale:
+        noun = "entry" if len(stale) == 1 else "entries"
+        parts.append(
+            f"{len(stale)} stale baseline {noun}, which no finding holds any more: "
+            + "; ".join(s.describe() for s in stale)
+            + "; prune them in this change: invariant guidelines baseline --prune"
+        )
     if warned:
         parts.append(
             f"{len(warned)} warn finding(s): " + "; ".join(f.describe() for f in warned)
@@ -2333,6 +2377,485 @@ def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...
         if finding.fix and finding.fix not in fixes:
             fixes.append(finding.fix)
     return tuple(fixes)
+
+
+# -- the baseline (ADR-012 D6) ------------------------------------------------
+#
+# The ratchet's record of pre-existing pattern and boundary findings, named by
+# `guidelines.baseline` (D13). Read in full or not at all by every gate that
+# reads it (`load_baseline`), and written only by `guidelines baseline`, the
+# generated-file write class (ruling 13): `plan_baseline` decides, checks and
+# scans everything before `domains/guidelines` writes, the shape of
+# `plan_render`. The engine never writes it at the landing; gates only ask.
+
+
+class BaselineRefused(RenderRefused):
+    """A ``guidelines baseline`` that would write somewhere it may not, write
+    text it may not, or write a record it could not compute in full.
+
+    Raised while the write is planned, before anything is written. A
+    :class:`RenderRefused`, because the baseline is a file of the same write
+    class as the checklist, and it refuses what render refuses.
+    """
+
+
+def load_baseline(
+    ctx: RuleContext, ruleset: guidelines_reader.Ruleset
+) -> tuple[tuple[guidelines_reader.BaselineEntry, ...] | None, Verdict | None]:
+    """The recorded baseline, the failure that stands in for it, or neither.
+
+    ``(None, None)`` with ``guidelines.baseline`` null: no baseline, and every
+    pattern or boundary finding is new (DN-1). Anything short of a baseline
+    that reads in full against ``ruleset`` is ``(None, verdict)``, and the
+    caller FAILS on it: a path naming nothing inside the project, a path
+    isolation exempts (a generated file never is, ruling 13), a configured
+    file that does not exist, and a file with any line that does not parse or
+    names a rule it may not. Never a smaller record. It is read from the tree
+    in hand, as the ruleset is.
+    """
+    configured = ctx.manifest.get("guidelines.baseline")
+    if not configured:
+        return None, None
+    rel = guidelines_relpath(ctx, configured)
+    if rel is None:
+        return None, Verdict.fail(
+            f"guidelines.baseline {configured!r} names nothing inside the project",
+            detail="The baseline is reviewed with the change like the ruleset is; a "
+            "path outside every checkout of this repository is not this project's.",
+            fixes=(
+                (
+                    "set guidelines.baseline to a project-relative path, such as "
+                    "docs/guidelines/baseline.txt"
+                ),
+            ),
+        )
+    tree = guidelines_tree(ctx)
+    path = tree / rel
+    if is_exempt_path(ctx.manifest, tree, path):
+        return None, Verdict.fail(
+            f"the guidelines baseline {rel} is exempt from session isolation, and a "
+            f"generated file never is (ADR-012 ruling 13)",
+            detail="An exempt baseline could gain entries on the base branch with no "
+            "review, which is a relaxation of every pattern and boundary rule.",
+            fixes=(
+                (
+                    "move it outside session.exempt_paths and the declared stores, and "
+                    "point guidelines.baseline at it"
+                ),
+            ),
+        )
+    if not path.is_file():
+        return None, Verdict.fail(
+            f"the configured guidelines baseline {rel} does not exist",
+            detail="An absent file is not an empty baseline: it cannot be told apart "
+            "from one that was never recorded, so the gates that read it fail (DN-1).",
+            fixes=("invariant guidelines baseline --record", "or clear guidelines.baseline"),
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, Verdict.fail(
+            f"the guidelines baseline {rel} could not be read",
+            detail=f"{rel}: {exc}.",
+            fixes=(f"check {rel} is readable UTF-8 text",),
+        )
+    try:
+        entries = guidelines_reader.parse_baseline(text)
+        problems = guidelines_reader.baseline_rule_problems(entries, ruleset)
+    except guidelines_reader.BaselineError as exc:
+        problems = list(exc.problems)
+    if problems:
+        return None, Verdict.fail(
+            f"the guidelines baseline {rel} does not parse ({len(problems)} problem(s))",
+            detail="; ".join(problems) + ". The gate will not answer from a record it "
+            "read only part of: a dropped entry would stop being honoured, and with "
+            "nothing in any verdict to say so.",
+            fixes=(f"fix {rel}, or prune it: invariant guidelines baseline --prune",
+                   "or record it again: invariant guidelines baseline --record"),
+        )
+    return entries, None
+
+
+def baseline_summary(ctx: RuleContext) -> tuple[bool, str]:
+    """``doctor``'s ``guidelines baseline`` row: ``(ok, message)``.
+
+    ``ok`` false is a WARNING, never a failed diagnosis: an unreadable or
+    malformed baseline is the gates' failure at the landing, and a ruleset
+    that does not load is the ``guidelines ruleset`` row's.
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return False, f"cannot be checked: {failure.message}"
+    if ruleset is None:
+        return True, "no guidelines ruleset configured"
+    configured = ctx.manifest.get("guidelines.baseline")
+    if not configured:
+        return True, "no baseline configured: every pattern or boundary finding is new"
+    entries, broken = load_baseline(ctx, ruleset)
+    if broken is not None:
+        detail = f": {broken.detail}" if broken.detail else ""
+        return False, broken.message + detail + "".join(
+            f"; try: {fix}" for fix in broken.fixes
+        )
+    noun = "entry" if len(entries) == 1 else "entries"
+    total = sum(entry.count for entry in entries)
+    return True, (
+        f"{len(entries)} {noun} holding {total} finding(s) in "
+        f"{len({e.path for e in entries})} file(s) under "
+        f"{len({e.rule for e in entries})} guideline(s), "
+        f"{guidelines_relpath(ctx, configured)}"
+    )
+
+
+@dataclass(frozen=True)
+class BaselineChange:
+    """An entry ``guidelines baseline`` lowered or dropped, and why."""
+
+    rule: str
+    path: str
+    fingerprint: str
+    before: int
+    #: 0 when the entry is dropped.
+    after: int
+    reason: str
+
+    def describe(self) -> str:
+        what = "dropped" if self.after == 0 else f"lowered {self.before} -> {self.after}"
+        return f"{what} {self.rule} {self.path} {self.fingerprint}: {self.reason}"
+
+
+@dataclass(frozen=True)
+class BaselinePlan:
+    """Everything one ``guidelines baseline`` would write, decided first."""
+
+    #: ``record`` or ``prune``.
+    mode: str
+    #: ``new`` (no file yet), ``current`` (the text is unchanged) or ``changed``.
+    status: str
+    path: Path
+    relpath: str
+    #: The ruleset digest the findings were evaluated under.
+    ruleset: str
+    text: str
+    entries: tuple[guidelines_reader.BaselineEntry, ...] = ()
+    changes: tuple[BaselineChange, ...] = ()
+
+
+BASELINE_MODES = ("record", "prune")
+
+
+def plan_baseline(
+    ctx: RuleContext, *, mode: str, rules: tuple[str, ...] = ()
+) -> BaselinePlan | None:
+    """What ``guidelines baseline`` would write, with nothing written.
+
+    ``None`` with no ruleset configured. ``record`` scans every tracked file
+    under each pattern and boundary rule's ``applies_to`` with the evaluator
+    ``guidelines.mechanical_clean`` uses, and records what it finds; with
+    ``rules`` it replaces only those rules' entries. ``prune`` recomputes the
+    files the change touched: it lowers a count to what the file still holds,
+    and drops an entry whose count reaches zero, whose file is deleted, whose
+    rule is gone, or whose rule no longer applies to its file. It never adds
+    an entry, and never raises a count.
+
+    Every refusal is a :class:`BaselineRefused` raised before anything could
+    be written: no ``guidelines.baseline`` (DN-1); a target outside the
+    project, exempt from isolation, or another guidelines file; a rule that
+    cannot be baselined; a record or a prune resting on a file nothing could
+    answer for; an existing file a ``--rule`` record or a prune cannot read in
+    full; and a privacy finding in the text.
+    """
+    if mode not in BASELINE_MODES:
+        raise ValueError(f"mode must be one of {BASELINE_MODES}, got {mode!r}")
+    if rules and mode != "record":
+        raise BaselineRefused(
+            "--rule names the rules a --record replaces; --prune takes none",
+            "drop --rule, or record: invariant guidelines baseline --record --rule <id>",
+        )
+    ruleset = ruleset_or_refuse(ctx)
+    if ruleset is None:
+        return None
+    tree = guidelines_tree(ctx)
+    rel = _baseline_target(ctx, ruleset, tree)
+    path = tree / rel
+    try:
+        existing = path.read_text(encoding="utf-8") if path.is_file() else None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise BaselineRefused(
+            f"the guidelines baseline {rel} could not be read ({exc})",
+            f"check {rel} is readable UTF-8 text",
+        ) from exc
+    if mode == "record":
+        entries, changes = _record_baseline(ctx, tree, ruleset, rules, existing, rel)
+    else:
+        entries, changes = _prune_baseline(ctx, tree, ruleset, existing, rel)
+    try:
+        text = guidelines_reader.render_baseline(entries)
+    except guidelines_reader.BaselineError as exc:
+        raise BaselineRefused(
+            f"{'; '.join(exc.problems)}; nothing was written",
+            "rename the file so its path has no line break and no space at either end",
+        ) from exc
+    found = PrivacyScanner.from_manifest(ctx.manifest).scan_text(text)
+    if found:
+        named = ", ".join(f"{rel}:{f.line} {f.pattern} {f.redacted}" for f in found)
+        raise BaselineRefused(
+            f"the baseline text fails the privacy scan ({named}); nothing was written",
+            "rename the file the finding names, or record without its rule",
+        )
+    status = "new" if existing is None else ("current" if existing == text else "changed")
+    return BaselinePlan(
+        mode=mode, status=status, path=path, relpath=rel, ruleset=ruleset.digest,
+        text=text, entries=tuple(entries), changes=tuple(changes),
+    )
+
+
+def _baseline_target(
+    ctx: RuleContext, ruleset: guidelines_reader.Ruleset, tree: Path
+) -> str:
+    """Where the baseline is written, checked; a refusal otherwise.
+
+    Never another file of the guidelines family: the ruleset, the checklist,
+    an instruction file or a registry the ruleset names. Never exempt from
+    isolation (ruling 13).
+    """
+    configured = ctx.manifest.get("guidelines.baseline")
+    if not configured:
+        raise BaselineRefused(
+            "guidelines.baseline is not set, so there is no baseline to record or "
+            "prune; with it null every pattern or boundary finding is new (DN-1)",
+            "set guidelines.baseline to a project-relative path, such as "
+            "docs/guidelines/baseline.txt, then: invariant guidelines baseline --record",
+        )
+    rel = guidelines_relpath(ctx, configured)
+    if rel is None:
+        raise BaselineRefused(
+            f"guidelines.baseline {configured!r} names nothing inside the project",
+            "set guidelines.baseline to a project-relative path",
+        )
+    source = guidelines_relpath(ctx, ctx.manifest.get("guidelines.ruleset"))
+    others = {source: "the guidelines ruleset"}
+    checklist = _checklist_relpath(ctx, source)
+    if checklist is not None:
+        others.setdefault(checklist, "the guidelines checklist")
+    named = ctx.manifest.get("guidelines.instruction_files")
+    for entry in ctx.host_instruction_files if named is None else named:
+        spelled = guidelines_relpath(ctx, entry)
+        if spelled is not None:
+            others.setdefault(spelled, "a guidelines instruction file")
+    for registry in ruleset.registries:
+        others.setdefault(registry.path, "a registry the ruleset names")
+    if rel in others:
+        raise BaselineRefused(
+            f"guidelines.baseline {rel} is {others[rel]}; recording would overwrite it",
+            "point guidelines.baseline at a file of its own",
+        )
+    if is_exempt_path(ctx.manifest, tree, tree / rel):
+        raise BaselineRefused(
+            f"the baseline {rel} is exempt from session isolation, and a generated "
+            f"file never is (ADR-012 ruling 13)",
+            "set guidelines.baseline to a path outside session.exempt_paths and the "
+            "declared stores",
+        )
+    return rel
+
+
+def _checklist_relpath(ctx: RuleContext, source: str | None) -> str | None:
+    """The checklist's path as render would write it, or ``None`` when render
+    could not say (a ``docs.format`` with no renderer, or no ruleset path)."""
+    configured = ctx.manifest.get("guidelines.checklist")
+    if configured is not None:
+        return guidelines_relpath(ctx, configured)
+    suffix = guidelines_reader.CHECKLIST_SUFFIXES.get(ctx.manifest.get("docs.format"))
+    if suffix is None or source is None:
+        return None
+    return posixpath.join(posixpath.dirname(source), f"checklist{suffix}")
+
+
+def _baselined_rules(
+    ruleset: guidelines_reader.Ruleset, names: tuple[str, ...]
+) -> list[guidelines_reader.Guideline]:
+    """The rules a record scans: every pattern and boundary rule, or those named."""
+    if not names:
+        return [r for r in ruleset.rules if r.check.kind in guidelines_reader.BASELINE_KINDS]
+    chosen: list[guidelines_reader.Guideline] = []
+    for name in dict.fromkeys(names):
+        rule = ruleset.by_id(name)
+        if rule is None:
+            raise BaselineRefused(
+                f"the ruleset has no guideline {name!r}",
+                "name a pattern or boundary rule of the ruleset in --rule",
+            )
+        if rule.check.kind not in guidelines_reader.BASELINE_KINDS:
+            reason = (
+                "a cochange finding has no fingerprint, so no baseline can hold it (DN-4)"
+                if rule.check.kind == "cochange"
+                else f"a {rule.check.kind} rule has no finding of its own to record"
+            )
+            raise BaselineRefused(
+                f"{name} is a {rule.check.kind} rule, and only pattern and boundary "
+                f"rules are baselined: {reason}",
+                "name a pattern or boundary rule in --rule",
+            )
+        chosen.append(rule)
+    return chosen
+
+
+def _parsed_or_refuse(
+    text: str, rel: str
+) -> tuple[guidelines_reader.BaselineEntry, ...]:
+    try:
+        return guidelines_reader.parse_baseline(text)
+    except guidelines_reader.BaselineError as exc:
+        raise BaselineRefused(
+            f"the guidelines baseline {rel} does not parse ({len(exc.problems)} "
+            f"problem(s)): {'; '.join(exc.problems)}; nothing was written",
+            f"fix {rel} by hand, or record every rule again: "
+            "invariant guidelines baseline --record",
+        ) from exc
+
+
+def _gone(
+    entry: guidelines_reader.BaselineEntry, rule: guidelines_reader.Guideline | None
+) -> BaselineChange | None:
+    """The drop of an entry whose rule can no longer hold it, else ``None``."""
+    if rule is None:
+        reason = "its rule is gone from the ruleset"
+    elif rule.check.kind not in guidelines_reader.BASELINE_KINDS:
+        reason = f"its rule is now a {rule.check.kind} rule, which is never baselined"
+    else:
+        return None
+    return BaselineChange(entry.rule, entry.path, entry.fingerprint, entry.count, 0, reason)
+
+
+def _refuse_unanswerable(found: Iterable[findings_reader.Finding], what: str) -> None:
+    unanswerable = [f for f in found if f.status == "unanswerable"]
+    if unanswerable:
+        raise BaselineRefused(
+            f"{len(unanswerable)} unanswerable finding(s), so {what}: "
+            + "; ".join(f.describe() for f in unanswerable),
+            "make each file answerable (declare the ecosystem whose adapter reads it, "
+            "or fix what stops it being read), then run it again",
+        )
+
+
+def _record_baseline(
+    ctx: RuleContext,
+    tree: Path,
+    ruleset: guidelines_reader.Ruleset,
+    names: tuple[str, ...],
+    existing: str | None,
+    rel: str,
+) -> tuple[list[guidelines_reader.BaselineEntry], list[BaselineChange]]:
+    """Every tracked file scanned under the chosen rules; the entries to write.
+
+    With ``names``, every other rule's entries are kept as they are, so the
+    existing file must read in full; an entry whose rule can no longer hold
+    it is dropped and named, because the file would not load with it.
+    Without, the existing file is replaced whatever it holds.
+    """
+    selected = _baselined_rules(ruleset, names)
+    kept: list[guidelines_reader.BaselineEntry] = []
+    changes: list[BaselineChange] = []
+    if names and existing is not None:
+        replaced = {rule.id for rule in selected}
+        for entry in _parsed_or_refuse(existing, rel):
+            if entry.rule in replaced:
+                continue
+            gone = _gone(entry, ruleset.by_id(entry.rule))
+            if gone is not None:
+                changes.append(gone)
+            else:
+                kept.append(entry)
+    tracked = git.tracked_files(tree)
+    if tracked is None:
+        raise BaselineRefused(
+            "git could not list the tracked files, so nothing can be recorded",
+            "run it inside the project's repository",
+        )
+    top = git.toplevel(tree) or tree
+    files = sorted({
+        spelled
+        for name in tracked
+        if (spelled := _tree_relative(ctx, tree, top / name)) is not None
+        and (tree / spelled).is_file()
+    })
+    adapters = _ecosystem_adapters(ctx)
+    evaluation = findings_reader.evaluate(selected, files, **_finding_reads(tree, adapters))
+    _refuse_unanswerable(evaluation.findings, "a record of part of the tree is no record")
+    counts = findings_reader.counted(evaluation.findings)
+    kept.extend(
+        guidelines_reader.BaselineEntry(rule, path, stamp, count)
+        for (rule, path, stamp), count in counts.items()
+    )
+    return kept, changes
+
+
+def _prune_baseline(
+    ctx: RuleContext,
+    tree: Path,
+    ruleset: guidelines_reader.Ruleset,
+    existing: str | None,
+    rel: str,
+) -> tuple[list[guidelines_reader.BaselineEntry], list[BaselineChange]]:
+    """The baseline shrunk to what the touched files still hold. Never grown."""
+    if existing is None:
+        raise BaselineRefused(
+            f"the configured guidelines baseline {rel} does not exist; --prune only "
+            f"shrinks a baseline that exists (DN-1)",
+            "invariant guidelines baseline --record",
+        )
+    entries = _parsed_or_refuse(existing, rel)
+    changed = _changed_set(ctx)
+    if not changed.answerable:
+        raise BaselineRefused(
+            "the changed set could not be established, so prune cannot tell which "
+            "files the change touched",
+            "declare the session's files or record its base, then prune again",
+        )
+    files, gone = _changed_in_tree(ctx, changed, tree)
+    touched = set(files) | set(gone)
+    rules = [r for r in ruleset.rules if r.check.kind in guidelines_reader.BASELINE_KINDS]
+    evaluation = findings_reader.evaluate(
+        rules, files, **_finding_reads(tree, _ecosystem_adapters(ctx))
+    )
+    recorded = {(e.rule, e.path) for e in entries if e.path in touched}
+    _refuse_unanswerable(
+        [f for f in evaluation.findings if (f.rule, f.path) in recorded],
+        "prune cannot tell what those files still hold",
+    )
+    counts = findings_reader.counted(evaluation.findings)
+    kept: list[guidelines_reader.BaselineEntry] = []
+    changes: list[BaselineChange] = []
+    for entry in entries:
+        rule = ruleset.by_id(entry.rule)
+        drop = _gone(entry, rule)
+        if drop is None and not (tree / entry.path).is_file():
+            drop = BaselineChange(entry.rule, entry.path, entry.fingerprint, entry.count, 0,
+                                  "its file was deleted")
+        if drop is None and not any(
+            findings_reader.matches(entry.path, glob) for glob in rule.applies_to
+        ):
+            drop = BaselineChange(entry.rule, entry.path, entry.fingerprint, entry.count, 0,
+                                  "its rule no longer applies to the file")
+        if drop is None and entry.path in touched:
+            still = counts.get(entry.key, 0)
+            if still == 0:
+                drop = BaselineChange(entry.rule, entry.path, entry.fingerprint,
+                                      entry.count, 0, "the change fixed every finding it held")
+            elif still < entry.count:
+                changes.append(BaselineChange(
+                    entry.rule, entry.path, entry.fingerprint, entry.count, still,
+                    "the change fixed some of the findings it held",
+                ))
+                entry = guidelines_reader.BaselineEntry(
+                    entry.rule, entry.path, entry.fingerprint, still
+                )
+        if drop is not None:
+            changes.append(drop)
+        else:
+            kept.append(entry)
+    return kept, changes
 
 
 # -- test rules --------------------------------------------------------

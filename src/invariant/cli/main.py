@@ -27,6 +27,7 @@ from ..core.rules import (
     RuleContext,
     all_rules,
     apply_acknowledgements,
+    baseline_summary,
     coverage_advisory_exception,
     evaluate,
     get_rule,
@@ -920,6 +921,14 @@ def cmd_doctor(args) -> int:
         )
         if not generated.ok:
             warned.add("guidelines generated")
+        # The ratchet baseline (ADR-012 D6, A3 increment 5): its counts, or a
+        # warning when it cannot be read in full. Never a failure: the gates
+        # that read it fail at the landing, and a ruleset that does not load
+        # is the row above's.
+        baseline_ok, baseline_text = baseline_summary(ctx.rule_context())
+        checks.append(("guidelines baseline", True, baseline_text))
+        if not baseline_ok:
+            warned.add("guidelines baseline")
 
         if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
             report = ctx.memory.check()
@@ -3240,6 +3249,42 @@ def cmd_guidelines_show(args) -> int:
     return emit(args, {"ruleset": shown.ruleset, "text": shown.text}, text)
 
 
+_BASELINE_STATUS = {
+    "new": "{verb} {rel}",
+    "current": "{verb} {rel}: it is current",
+    "changed": "{verb} {rel}",
+}
+
+
+def cmd_guidelines_baseline(args) -> int:
+    mode = "record" if args.record else "prune"
+    result = _guidelines_domain(Context()).baseline(
+        mode=mode, rules=tuple(args.rule or ()), dry_run=args.dry_run
+    )
+    if result.status == "no-ruleset":
+        text = f"no guidelines ruleset configured; nothing to {mode}"
+    else:
+        verb = "would write" if args.dry_run else "wrote"
+        noun = "entry" if result.entries == 1 else "entries"
+        text = _BASELINE_STATUS[result.status].format(verb=verb, rel=result.relpath)
+        text += f": {result.entries} {noun} (ruleset {result.ruleset})"
+        text = "\n".join([text, *(f"  {c.describe()}" for c in result.changes)])
+    return emit(args, {
+        "mode": mode,
+        "status": result.status,
+        "written": result.written,
+        "dry_run": args.dry_run,
+        "path": result.relpath,
+        "ruleset": result.ruleset,
+        "entries": result.entries,
+        "changes": [
+            {"rule": c.rule, "path": c.path, "fingerprint": c.fingerprint,
+             "before": c.before, "after": c.after, "reason": c.reason}
+            for c in result.changes
+        ],
+    }, text)
+
+
 # -- rules, checks, privacy -------------------------------------------
 
 
@@ -5189,6 +5234,33 @@ def build_parser() -> argparse.ArgumentParser:
         "show", help="print the full checklist text from the ruleset, writing nothing"
     )
     q.set_defaults(func=cmd_guidelines_show)
+    q = guide.add_parser(
+        "baseline",
+        help="record or prune the ratchet baseline of pattern and boundary findings",
+    )
+    mode = q.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--record",
+        action="store_true",
+        help="scan every tracked file under each rule's applies_to and record its findings",
+    )
+    mode.add_argument(
+        "--prune",
+        action="store_true",
+        help="recompute the touched files and drop what the change fixed; never adds",
+    )
+    q.add_argument(
+        "--rule",
+        action="append",
+        metavar="ID",
+        help="with --record, replace only this rule's entries (repeatable)",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="plan, scan and report what would be written, and write nothing",
+    )
+    q.set_defaults(func=cmd_guidelines_baseline)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

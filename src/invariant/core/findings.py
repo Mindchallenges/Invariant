@@ -37,8 +37,10 @@ A file that does not decode as UTF-8 is not text: the pattern kind does not
 apply to it, nor does a cochange ``when.match``, and the evaluation names it,
 so the verdict can.
 
-No baseline exists in this build, so every finding is ``new``. The baseline
-(D6) arrives in a later increment.
+The ratchet (D6, A3 increment 5) is :func:`ratchet`: a finding a baseline
+entry records is ``baselined``, never counted, and an entry of a touched file
+that no finding holds is stale. ``core/rules`` reads the baseline and hands
+the entries in; this module only does the arithmetic.
 """
 
 from __future__ import annotations
@@ -47,11 +49,12 @@ import hashlib
 import posixpath
 import re
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from .guidelines import (
     DIGEST_LENGTH,
+    BaselineEntry,
     Guideline,
     GuidelineException,
     Registry,
@@ -66,8 +69,9 @@ EVALUATED_KINDS = ("pattern", "boundary", "cochange")
 
 #: What a finding can be. ``new`` and ``unanswerable`` count against the
 #: rule's severity; ``excepted`` is a reasoned exception that applied, named
-#: and never counted (D4).
-STATUSES = ("new", "unanswerable", "excepted")
+#: and never counted (D4); ``baselined`` is a finding the baseline records as
+#: pre-existing, named and never counted (D6).
+STATUSES = ("new", "unanswerable", "excepted", "baselined")
 _COUNTED = frozenset({"new", "unanswerable"})
 
 #: The separator between the parts a fingerprint hashes. No rule id, line or
@@ -607,3 +611,104 @@ def _first(
         (exc for exc in exceptions if applies(exc) and matches(rel, exc.path)),
         None,
     )
+
+
+
+# -- the ratchet (D6, ruling 5) ------------------------------------------------------
+
+#: A finding's key in a baseline: (rule, path, fingerprint).
+Key = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class Stale:
+    """Recorded entries of a touched file that no finding holds any more."""
+
+    rule: str
+    path: str
+    fingerprint: str
+    recorded: int
+    found: int
+
+    def describe(self) -> str:
+        return (
+            f"{self.rule} {self.path} {self.fingerprint} "
+            f"(recorded {self.recorded}, found {self.found})"
+        )
+
+
+@dataclass(frozen=True)
+class Ratcheted:
+    """The findings with the baseline applied, and what it holds that is stale."""
+
+    findings: tuple[Finding, ...]
+    stale: tuple[Stale, ...] = ()
+
+
+def ratchet(
+    found: Iterable[Finding], entries: Iterable[BaselineEntry], touched: Container[str]
+) -> Ratcheted:
+    """Apply a baseline to the findings of the changed files (D6).
+
+    For each touched file and rule, F findings of one (rule, path,
+    fingerprint) against an entry recording N give min(F, N) baselined, the
+    first in file order, and F - N new when F > N. The findings carry the same
+    fingerprint, so which of them is the pre-existing one cannot be told;
+    file order is the one answer that does not depend on anything else. An
+    entry protects its finding whether or not the change touches the file
+    (ruling 5): only changed files are scanned, so every finding here is in a
+    touched file, and it is baselined all the same.
+
+    N - F is stale when N > F, for an entry whose path the change touched.
+    An entry for a file nobody touched is never stale here, because nobody
+    looked. A (rule, path) with an unanswerable finding has no stale entries:
+    nothing could say what the file holds. Only a new, fingerprinted finding
+    is ever baselined, so an excepted finding consumes no entry, and a
+    cochange finding, which has no fingerprint, is never baselined (DN-4).
+    """
+    budget = {entry.key: entry.count for entry in entries}
+    recorded = dict(budget)
+    result: list[Finding] = []
+    seen: dict[Key, int] = {}
+    unknown: set[tuple[str, str]] = set()
+    for finding in found:
+        if finding.status == "unanswerable":
+            unknown.add((finding.rule, finding.path))
+        key = _key(finding)
+        if key is None:
+            result.append(finding)
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        if budget.get(key, 0) > 0:
+            budget[key] -= 1
+            finding = replace(finding, status="baselined")
+        result.append(finding)
+    stale = tuple(
+        Stale(rule, path, stamp, count, seen.get((rule, path, stamp), 0))
+        for (rule, path, stamp), count in recorded.items()
+        if path in touched
+        and (rule, path) not in unknown
+        and count > seen.get((rule, path, stamp), 0)
+    )
+    return Ratcheted(findings=tuple(result), stale=stale)
+
+
+def counted(found: Iterable[Finding]) -> dict[Key, int]:
+    """How many new, fingerprinted findings each (rule, path, fingerprint) has.
+
+    What ``guidelines baseline --record`` writes and ``--prune`` compares a
+    recorded count with.
+    """
+    counts: dict[Key, int] = {}
+    for finding in found:
+        key = _key(finding)
+        if key is not None:
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _key(finding: Finding) -> Key | None:
+    """The baseline key of a finding a baseline can hold, else ``None``."""
+    if finding.status != "new" or finding.fingerprint is None:
+        return None
+    return (finding.rule, finding.path, finding.fingerprint)

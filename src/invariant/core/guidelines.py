@@ -56,7 +56,7 @@ import posixpath
 import re
 import string
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from difflib import get_close_matches
 from pathlib import Path
@@ -1465,3 +1465,164 @@ def append_block(text: str, name: str, body: str) -> str:
     if not text:
         return block_text(name, body)
     return text.rstrip("\n") + "\n\n" + block_text(name, body)
+
+
+# -- the baseline (D6) ------------------------------------------------------------
+#
+# The ratchet's record of pre-existing findings, one entry per line:
+#
+#     rule-id  path  fingerprint  count
+#
+# The first field is the rule id, which holds no whitespace (increment 1). The
+# last two are a fingerprint (twelve lowercase hex digits, ``findings.
+# fingerprint``) and a count of at least 1. Everything between them is the
+# path, so a path with spaces still parses. A line is a comment only when its
+# first non-blank character is ``#``, so a path holding ``#`` is a path.
+#
+# Read in full or not at all, for the reason the coverage baseline gives: a
+# record read in part stops enforcing and stops honouring with nothing to say
+# so. Every problem is collected and named by line, and none yields a smaller
+# record. Which rules an entry may name needs the ruleset, so that check is
+# its own function; parsing the lines needs nothing but the text.
+
+#: The kinds a baseline entry may name. A cochange finding describes the
+#: change, not the tree, and has no fingerprint (DN-4); an engine rule is its
+#: registered rule's and a judgement rule is answered by a verdict, so neither
+#: has a finding of its own to record.
+BASELINE_KINDS = ("pattern", "boundary")
+
+#: The one comment the writer puts first. It carries no managed marker: the
+#: baseline is the ratchet's record, not a rendering of the ruleset.
+BASELINE_HEADER = (
+    "# rule-id  path  fingerprint  count  "
+    "(written by invariant guidelines baseline; ADR-012 D6)"
+)
+
+#: A count is a positive integer in its plain spelling: no sign, no leading
+#: zero, no decimal point.
+_COUNT = re.compile(r"[1-9][0-9]*")
+#: The rule id, then the path, then the last two fields.
+_ENTRY = re.compile(r"(\S+)\s+(.*\S)\s+(\S+)\s+(\S+)")
+
+
+class BaselineError(InvariantError):
+    """A baseline that does not parse, or cannot be written. Every problem is
+    named, by line."""
+
+    def __init__(self, problems: Iterable[str]) -> None:
+        self.problems = tuple(problems)
+        super().__init__(
+            f"the baseline has {len(self.problems)} problem(s): " + "; ".join(self.problems)
+        )
+
+
+@dataclass(frozen=True)
+class BaselineEntry:
+    """One recorded (rule, path, fingerprint) and how many findings it holds."""
+
+    rule: str
+    path: str
+    fingerprint: str
+    count: int
+    #: The line it was read from, for naming a problem; 0 for one not read.
+    line: int = field(default=0, compare=False)
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.rule, self.path, self.fingerprint)
+
+
+def parse_baseline(text: str) -> tuple[BaselineEntry, ...]:
+    """Every entry of a baseline, or :class:`BaselineError` naming every problem.
+
+    A path is kept in its canonical project-relative spelling, so ``./x`` and
+    ``x`` are one path, and recording both is a duplicate (the BUG_071 rule
+    the coverage baseline follows). A path that names nothing inside the
+    project is refused rather than dropped.
+    """
+    entries: list[BaselineEntry] = []
+    problems: list[str] = []
+    seen: dict[tuple[str, str, str], int] = {}
+    for number, raw in enumerate(text.splitlines(), start=1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        where = f"line {number} {stripped!r}"
+        matched = _ENTRY.fullmatch(stripped)
+        if matched is None:
+            problems.append(
+                f"{where}: fewer than four fields; an entry is "
+                f"'rule-id  path  fingerprint  count'"
+            )
+            continue
+        rule, written, stamp, count = matched.groups()
+        if not _FINGERPRINT.fullmatch(stamp):
+            problems.append(
+                f"{where}: {stamp!r} is not a fingerprint (twelve lowercase hex digits)"
+            )
+            continue
+        if not _COUNT.fullmatch(count):
+            problems.append(f"{where}: {count!r} is not a positive integer count")
+            continue
+        path = project_relative(written)
+        if path in (None, "."):
+            problems.append(f"{where}: the path {written!r} is outside the project")
+            continue
+        key = (rule, path, stamp)
+        if key in seen:
+            problems.append(f"{where}: already recorded on line {seen[key]}")
+            continue
+        seen[key] = number
+        entries.append(BaselineEntry(rule, path, stamp, int(count), line=number))
+    if problems:
+        raise BaselineError(problems)
+    return tuple(entries)
+
+
+def baseline_rule_problems(
+    entries: Iterable[BaselineEntry], ruleset: Ruleset
+) -> list[str]:
+    """What is wrong with the rules the entries name, against the ruleset.
+
+    A rule the ruleset lacks, and a rule whose kind has no fingerprinted
+    finding, can protect nothing, and an entry naming one would read as a
+    record that holds when it does not.
+    """
+    problems: list[str] = []
+    for entry in entries:
+        where = f"line {entry.line} ({entry.rule} {entry.path})"
+        rule = ruleset.by_id(entry.rule)
+        if rule is None:
+            problems.append(f"{where}: the ruleset has no rule {entry.rule!r}")
+        elif rule.check.kind not in BASELINE_KINDS:
+            reason = (
+                "a cochange finding has no fingerprint, so no baseline can hold it (DN-4)"
+                if rule.check.kind == "cochange"
+                else f"a {rule.check.kind} rule has no finding of its own to record"
+            )
+            problems.append(
+                f"{where}: {entry.rule} is a {rule.check.kind} rule, and only "
+                f"{' and '.join(BASELINE_KINDS)} rules are baselined; {reason}"
+            )
+    return problems
+
+
+def render_baseline(entries: Iterable[BaselineEntry]) -> str:
+    """The baseline's text: one header comment, then the entries sorted by
+    path, rule and fingerprint, so a diff of two recordings shows what moved.
+
+    A path the format cannot hold, one with a line break or with whitespace at
+    either end, is :class:`BaselineError`: written, it would read back as
+    another path or not at all.
+    """
+    ordered = sorted(entries, key=lambda e: (e.path, e.rule, e.fingerprint))
+    problems = [
+        f"the path {e.path!r} cannot be written to a baseline line"
+        for e in ordered
+        if e.path != e.path.strip() or "\n" in e.path or "\r" in e.path
+    ]
+    if problems:
+        raise BaselineError(problems)
+    lines = [BASELINE_HEADER]
+    lines.extend(f"{e.rule}  {e.path}  {e.fingerprint}  {e.count}" for e in ordered)
+    return "\n".join(lines) + "\n"

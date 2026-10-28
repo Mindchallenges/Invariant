@@ -538,6 +538,24 @@ def _unquote(text: str) -> str | None:
     return out.decode("utf-8", "surrogateescape")
 
 
+def tracked_files(cwd: Path) -> list[str] | None:
+    """Every file the index tracks, spelled from the top of the tree.
+
+    What ``guidelines baseline --record`` scans: a staged new file counts, an
+    untracked one does not, and a file deleted from the working tree but not
+    from the index is still listed (the caller asks the tree whether it is a
+    file). Read with ``-z``, so no path is quoted. ``None`` when git cannot
+    answer, which relaxes nothing.
+    """
+    top = toplevel(cwd)
+    if top is None:
+        return None
+    code, out = _run_bytes(["ls-files", "--cached", "-z"], top)
+    if code != 0:
+        return None
+    return _nul_separated(out)
+
+
 def resolve_commit(cwd: Path, rev: str) -> str | None:
     """The full hash of the commit ``rev`` names, or ``None`` if it names none.
 

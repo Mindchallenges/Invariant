@@ -298,3 +298,35 @@ class TestAFailingLeg:
         sh(repo, "checkout", "-q", "--orphan", "island")
         sh(repo, "commit", "-qm", "alone")
         assert git.merge_base(repo, "master") is None
+
+
+# -- tracked_files (A3 increment 5) ----------------------------------------------------
+
+
+class TestTrackedFiles:
+    """Every file `guidelines baseline --record` scans: the index's, from the top."""
+
+    def test_it_lists_every_tracked_file_from_the_top_of_the_tree(self, repo):
+        assert sorted(git.tracked_files(repo)) == ["app.py", "docs/notes.md", "gone.py"]
+
+    def test_it_answers_the_same_from_a_subdirectory(self, repo):
+        assert sorted(git.tracked_files(repo / "docs")) == ["app.py", "docs/notes.md", "gone.py"]
+
+    def test_a_staged_new_file_counts_and_an_untracked_one_does_not(self, repo):
+        write(repo, "staged.py", "s = 1\n")
+        write(repo, "loose.py", "l = 1\n")
+        sh(repo, "add", "staged.py")
+        files = git.tracked_files(repo)
+        assert "staged.py" in files and "loose.py" not in files
+
+    def test_a_path_with_spaces_and_unicode_is_spelled_as_it_is(self, repo):
+        write(repo, "odd dir/café file.py", "c = 1\n")
+        sh(repo, "add", "-A")
+        assert "odd dir/café file.py" in git.tracked_files(repo)
+
+    def test_outside_a_repository_it_is_none(self, tmp_path):
+        assert git.tracked_files(tmp_path) is None
+
+    def test_a_listing_git_cannot_give_is_none(self, repo, monkeypatch):
+        monkeypatch.setattr(git, "_run_bytes", lambda args, cwd: (128, b""))
+        assert git.tracked_files(repo) is None

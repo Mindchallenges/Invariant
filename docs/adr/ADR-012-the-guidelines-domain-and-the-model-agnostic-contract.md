@@ -1035,6 +1035,119 @@ missing-test scenario) and DN-13 (`core/findings` stays pure).
   fingerprint-exception refusal), `tests/test_guidelines_findings.py` (the
   record's `fix`) and `tests/test_conformance_engine.py` (`missing-test`).
 
+**As built: A3 increment 5, the baseline file and `guidelines baseline`.**
+Built to D6, D13's `guidelines.baseline`, ruling 5 (always a pure ratchet),
+ruling 13 (the generated-file write class) and the A3 rulings that bind it:
+DN-1 (null is no baseline), DN-4 (no cochange entry), DN-5 (stale entries
+are increment 6's to fail), DN-6 (admission of additions is increment 6's)
+and DN-12 (the baselined scenario).
+
+- *The manifest (DN-1).* `guidelines.baseline` is accepted: null or a
+  non-empty path, refused at load otherwise. Null means no baseline, and every
+  pattern or boundary finding is new. A configured path whose file does not
+  exist is an error at every gate that reads it, and `--record` and
+  `--prune` refuse until the key names a path. `verdicts` and
+  `injection.on_edit` are still refused by name.
+- *The format (D6), in `core/guidelines`.* `BaselineEntry`,
+  `parse_baseline`, `render_baseline` and `baseline_rule_problems`. One entry
+  per line, `rule-id  path  fingerprint  count`: the rule id is the first
+  field, the fingerprint and count the last two, and everything between is
+  the path. A line is a comment only when its first non-blank character is
+  `#`, and blank lines are ignored. The writer sorts by path, rule and
+  fingerprint under one header comment, and writes no managed marker. Read in
+  full or not at all: fewer than four fields, a bad fingerprint, a count that
+  is not a positive integer, a duplicate, a path outside the project, a rule
+  the ruleset lacks, and a rule that is not pattern or boundary (DN-4) each
+  fail every gate that reads the file. Every problem is collected and named
+  by line, as a ruleset's are.
+- *The ratchet, in `core/findings`.* `ratchet` takes the findings and the
+  entries `core/rules` read. For each touched file and rule, F findings of
+  one (rule, path, fingerprint) against N recorded give min(F, N)
+  `baselined`, F - N new when F > N, and N - F stale when N > F. A
+  baselined finding is never counted, so it does not block, and the
+  baseline protects it whether or not its file is touched (ruling 5). Only
+  changed files are scanned. `guidelines.mechanical_clean` reads the
+  baseline after the ruleset, fails on one that does not read, names the
+  baselined findings in its message and detail, and names the stale entries
+  in its detail with `invariant guidelines baseline --prune` as the fix. A
+  stale entry does not fail the rule here (DN-5). The record's `finding` is
+  `baselined` and its status `pass`.
+- *`invariant guidelines baseline`.* `--record [--rule <id>]...`, `--prune`
+  and `--dry-run`. `--record` scans every file the index tracks
+  (`core/git.tracked_files`) under each pattern and boundary rule's
+  `applies_to`, with the reads `mechanical_clean` hands `core/findings`
+  (`_finding_reads`, now shared), so a record holds exactly what the gate
+  then finds. With `--rule` it replaces only those rules' entries. `--prune`
+  recomputes the touched files: it lowers counts, and drops an entry whose
+  count reaches zero, whose file is deleted, or whose rule is gone. The plan
+  is `core.rules.plan_baseline`, the shape of `plan_render`, and
+  `domains/guidelines` writes what it decided. Admission of what `--record`
+  adds is increment 6's gate (DN-6); here it just writes.
+- *The write class (ruling 13), landed.* The baseline is the third generated
+  file. Nothing is written when the plan refuses: an exempt target, a target
+  outside the project, a target that is the ruleset or the checklist, and a
+  privacy finding in the text, scanned whatever `privacy.enabled` and
+  `privacy.scope` say. The engine never writes the baseline at the landing;
+  the gates only read it. cli.md's Conventions name the class as landed.
+- *`doctor`.* A `guidelines baseline` row: "no guidelines ruleset
+  configured" and "no baseline configured" pass, a baseline that reads
+  passes with its counts (entries, findings, files, guidelines, path), and an
+  unreadable or malformed one warns and never fails.
+- *Conformance (DN-12, A1 increment 3 completed).* The `baselined` scenario:
+  the base branch's `app.py` already prints once, and the baseline records
+  that line. The change keeps it and adds a second print. The gate holds the
+  recorded finding as baselined and blocks on the new one alone, named
+  `style.no-print app.py:3`, so the one refusal at `committed` is
+  `mechanical_clean`'s. The fixture baseline is the writer's own output.
+- *Small points the rulings left open, taken in the strict direction.*
+  - The format lives in `core/guidelines`; the arithmetic, which reads
+    `Finding`, lives beside it in `core/findings`. D12's "baseline
+    arithmetic" in `core/guidelines` is refined so, and the diagram's
+    `CFIND` label says it. Both modules stay pure: `core/rules` reads the
+    file.
+  - A count is a positive integer in its plain spelling: `01`, `+1` and
+    `1.0` are refused.
+  - A path is kept in its canonical spelling, as `coverage_baseline`'s is,
+    so `./x` and `x` recorded together are one entry twice and refused.
+  - The writer refuses a path it cannot write as one line: one with a line
+    break, or with whitespace at either end.
+  - Of F findings sharing one fingerprint, the first N in file order are the
+    baselined ones. They carry one fingerprint, so no other order can be
+    told apart.
+  - A (rule, path) with an unanswerable finding has no stale entries, since
+    nothing can say what the file holds. `--record` refuses on any
+    unanswerable file, because a record of part of the tree is no record,
+    and `--prune` refuses on one that has entries.
+  - An excepted finding consumes no entry, so an entry for it is stale.
+  - A warn rule's findings are recorded and baselined like a blocker's.
+  - The gates' read fails on a baseline isolation exempts, as well as the
+    write refusing one: an exempt baseline could gain entries unreviewed.
+  - The write also refuses a target that is an instruction file or a
+    registry the ruleset names, beside the ruleset and the checklist.
+  - `--prune` also drops an entry whose rule is no longer pattern or
+    boundary, and one whose rule's `applies_to` no longer covers its file,
+    wherever the file is. Neither can protect anything.
+  - `--prune` refuses a missing file (it shrinks; `--record` creates), a
+    file that does not parse, and a changed set that cannot be established.
+  - `--record --rule` needs the existing file to read in full, because it
+    keeps the other rules' entries; an entry whose rule is gone is dropped
+    and named, since the file would not load with it. A full `--record`
+    replaces whatever the file held.
+  - `--rule` with `--prune` is refused rather than ignored.
+  - `tracked_files` is the index (`ls-files --cached`): a staged new file
+    counts, an untracked one does not, and a path deleted from the working
+    tree but not the index is skipped.
+  - The status is `new` (no file), `current` (text unchanged, still
+    written, as render rewrites a current checklist) or `changed`.
+  - The `doctor` row warns, rather than passes, on a ruleset that does not
+    load ("cannot be checked"), as the `guidelines generated` row does.
+- *Tests.* `tests/test_guidelines_baseline.py` (the format, the writer, the
+  rules an entry may name, the ratchet, the rule, the `doctor` row, and a
+  record the gate then honours), `tests/test_guidelines_domain.py` (record,
+  prune, every refusal, and the command through `main`),
+  `tests/test_guidelines.py` (the manifest key), `tests/test_git.py`
+  (`tracked_files`) and `tests/test_conformance_engine.py` (`baselined`).
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through
@@ -1421,7 +1534,7 @@ graph TD
     end
     subgraph core["core/"]
         CGUIDE["guidelines (NEW): ruleset model, validation,<br/>selection, rendering, baseline arithmetic,<br/>verdict schema and checks"]
-        CFIND["findings (A3.3, A3.4): Finding, fingerprint,<br/>pattern, boundary and cochange evaluators; pure"]
+        CFIND["findings (A3.3 to A3.5): Finding, fingerprint,<br/>pattern, boundary and cochange evaluators,<br/>the ratchet's arithmetic; pure"]
         CAGENTS["agents (NEW, A6): host-neutral model, overlay merge"]
         RULES["rules: guidelines.* family"]
         MANIFEST[manifest]
@@ -1442,6 +1555,7 @@ graph TD
     CLI --> CGUIDE
     CLI --> CAGENTS
     GDOM --> CGUIDE
+    GDOM -- plan_render, plan_baseline --> RULES
     GDOM -- records verdicts and findings --> PIPELINE
     GDOM --> STORE
     GDOM --> GIT
@@ -1450,7 +1564,7 @@ graph TD
     RULES --> CGUIDE
     RULES --> adapters
     RULES -- evaluate, reads handed in as callables --> CFIND
-    RULES -- base-branch baseline, diff lines --> GIT
+    RULES -- base-branch baseline, diff lines, tracked files --> GIT
     CFIND --> CGUIDE
     CFIND -- project_relative, glob_matches --> MANIFEST
     CGUIDE -- project_relative --> MANIFEST

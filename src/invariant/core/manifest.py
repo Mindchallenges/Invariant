@@ -354,10 +354,15 @@ DEFAULTS: dict[str, Any] = {
     # default (CLAUDE.md for claude_code), which the CLI supplies because no
     # domain imports a host. They are generated files too, but only between
     # their markers. `injection.max_lines` caps that block (ruling DN-C).
-    # D13's other keys join as the increments that read them land; until then
-    # they are refused rather than ignored.
+    # `baseline` is the ratchet's record of pre-existing pattern and boundary
+    # findings (D6); null means no baseline, and every such finding is new
+    # (DN-1). A configured path whose file does not exist is an error. It is
+    # a generated file too, written only by `guidelines baseline`. D13's
+    # other keys join as the increments that read them land; until then they
+    # are refused rather than ignored.
     "guidelines": {
         "ruleset": None,
+        "baseline": None,
         "checklist": None,
         "instruction_files": None,
         "injection": {"max_lines": 40},
@@ -365,9 +370,9 @@ DEFAULTS: dict[str, Any] = {
 }
 
 #: The `guidelines` keys this build reads.
-_GUIDELINES_KEYS = ("ruleset", "checklist", "instruction_files", "injection")
+_GUIDELINES_KEYS = ("ruleset", "baseline", "checklist", "instruction_files", "injection")
 #: Those of them that are null or one path.
-_GUIDELINES_PATH_KEYS = ("ruleset", "checklist")
+_GUIDELINES_PATH_KEYS = ("ruleset", "baseline", "checklist")
 #: The `guidelines.injection` keys this build reads (D13's `on_edit` is A5's).
 _INJECTION_KEYS = ("max_lines",)
 
@@ -736,10 +741,10 @@ class Manifest:
 
         A key the schema does not know loads, does nothing, and reads in
         `config show` as though it had taken: the BUG_050 shape. D13 names
-        more keys than this build reads (`baseline`, `verdicts`,
-        `injection.on_edit`); each is accepted by the increment that reads it,
-        and refused, by name, before then. `ruleset` and `checklist` are null
-        or a non-empty path, `instruction_files` null or a non-empty list of
+        more keys than this build reads (`verdicts`, `injection.on_edit`);
+        each is accepted by the increment that reads it, and refused, by name,
+        before then. `ruleset`, `baseline` and `checklist` are null or a
+        non-empty path, `instruction_files` null or a non-empty list of
         them, and `injection.max_lines` an integer of at least 2. Where a path
         points is checked by whatever reads it, against the tree in hand.
         """

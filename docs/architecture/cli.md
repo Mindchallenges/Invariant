@@ -46,16 +46,18 @@ Nothing reaches the engine another way.
 
   **A third class: generated files the manifest declares** (ADR-012 ruling
   13). The guidelines domain renders files from the project's ruleset, and
-  those files are neither state nor a store: today `guidelines.checklist`
-  and the managed blocks in `guidelines.instruction_files`, and with a later
-  increment `guidelines.baseline`. Only the commands that generate them write
-  them: `guidelines render` now, and `guidelines baseline --prune` once it
-  lands. In an instruction file the class is only the text between a block's
-  markers; every other line is the project's, and render never rewrites it.
+  those files are neither state nor a store: `guidelines.checklist`, the
+  managed blocks in `guidelines.instruction_files`, and the ratchet baseline
+  `guidelines.baseline`. Only the commands that generate them write them:
+  `guidelines render` the first two, and `guidelines baseline --record` and
+  `--prune` the baseline. The engine never writes one at the landing; the
+  gates only read them. In an instruction file the class is only the text
+  between a block's markers; every other line is the project's, and render
+  never rewrites it.
   Unlike a declared store, a generated file is **never exempt from session
   isolation**. A render goes through the session's branch and its review
-  like any edit, and `guidelines render` refuses a target that
-  `session.exempt_paths` or a declared store would exempt. A store is exempt
+  like any edit, and `guidelines render` and `guidelines baseline` refuse a
+  target that `session.exempt_paths` or a declared store would exempt. A store is exempt
   because it holds data every session touches. A generated file is a
   projection of policy, and an unreviewed write to it is a policy change
   nobody reviewed. The two other ways to do this were rejected (ADR-012,
@@ -184,6 +186,16 @@ invariant doctor
     failure, not this one's. A warned row prints `warn` in the status column
     and carries `"warn": true` beside `"ok": true` in `--json`; every other
     row carries `"warn": false`.
+
+    The `guidelines baseline` row reads the ratchet baseline the way the
+    gates do (ADR-012 D6, A3 increment 5): "no guidelines ruleset
+    configured" and "no baseline configured" pass, and a baseline that reads
+    in full passes naming its entries, the findings they hold, the files and
+    guidelines they cover, and its path. A baseline that is missing,
+    unreadable, malformed, exempt or outside the project WARNS, naming every
+    problem and the fix, and never fails: the gates that read it fail at the
+    landing, and a ruleset that does not load is the `guidelines ruleset`
+    row's failure. A warned row carries `"warn": true` in `--json`.
 
     The `claude window environment` row is machine-wide and warns, never
     fails (IDEA_035). It lists every running `claude` from one `ps -axo
@@ -1077,6 +1089,65 @@ invariant guidelines show
     load is refused (exit 1); with none configured it says so and exits 0.
     --json carries the ruleset digest and the text. Selecting by phase and
     files (ADR-012 D7) arrives with A5.
+
+invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
+    Write the ratchet baseline guidelines.baseline names (ADR-012 D6, A3
+    increment 5), into the tree in hand. One entry per line,
+
+      rule-id  path  fingerprint  count
+
+    sorted by path, rule and fingerprint under one header comment, with no
+    managed marker. The path is everything between the rule id and the last
+    two fields, so a path with spaces still parses.
+
+    --record scans every file the index tracks under each pattern and
+    boundary rule's applies_to, with the evaluator
+    guidelines.mechanical_clean uses, and records each (rule, path,
+    fingerprint) it finds with how many times. A staged new file counts; an
+    untracked one does not. With --rule (repeatable) it replaces only those
+    rules' entries and keeps every other rule's, so the existing file must
+    then read in full; an entry whose rule is gone from the ruleset, or is
+    no longer pattern or boundary, is dropped and named. Without --rule the
+    file is replaced whatever it held. It creates a configured file that
+    does not exist yet. Admission of the entries it adds is
+    guidelines.baseline_only_shrinks' question (A3 increment 6), not this
+    command's.
+
+    --prune recomputes the files the change touched and only ever shrinks:
+    it lowers a count to what the file still holds, and drops an entry whose
+    count reaches zero, whose file was deleted, whose rule is gone or no
+    longer pattern or boundary, or whose rule no longer applies to its file.
+    It never adds an entry and never raises a count. Each lowered or dropped
+    entry is named with its reason.
+
+    Refused (exit 1, nothing written, each naming its fix):
+      - guidelines.baseline null (DN-1: --record refuses until it names a
+        path), or a path naming nothing inside the project;
+      - a target that is the ruleset, the checklist, an instruction file or
+        a registry the ruleset names, or that isolation exempts (ruling 13);
+      - --rule naming no guideline, or a rule that is not pattern or
+        boundary (a cochange finding has no fingerprint, DN-4); --rule with
+        --prune;
+      - a scan with an unanswerable file: a record of part of the tree is no
+        record, and a prune cannot say what such a file still holds;
+      - --prune with no file, a file that does not parse, or a changed set
+        that cannot be established; --record --rule with a file that does
+        not parse;
+      - a privacy finding in the text, scanned whatever privacy.enabled and
+        privacy.scope say, as render's is.
+
+    --dry-run plans, scans and reports, and writes nothing. With no ruleset
+    configured it reports "nothing to record" (or prune) and exits 0. --json
+    carries mode, status (new, current or changed), written, dry_run, path,
+    the ruleset digest, entries (how many the file holds after), and
+    changes: each {rule, path, fingerprint, before, after, reason}, after 0
+    for a dropped entry.
+
+    The gates read the file in full or not at all: a line with fewer than
+    four fields, a bad fingerprint, a count that is not a positive integer,
+    a duplicate, a path outside the project, a rule the ruleset lacks, and a
+    rule that is not pattern or boundary each fail guidelines.mechanical_clean
+    rather than yield a smaller record.
 ```
 
 ## Rules and gates
@@ -1098,7 +1169,15 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     status (fail, or pass for an exception that applied), finding (new,
     unanswerable or excepted), citations [{path, lines}], fingerprint, target,
     note, fix and the ruleset digest. The fingerprint is what a reasoned
-    exception names in the ruleset. A cochange finding has no line and no
+    exception names in the ruleset, and what a baseline entry records.
+    With guidelines.baseline configured (A3 increment 5), a pattern or
+    boundary finding the baseline records is `baselined`: status pass,
+    never counted, whether or not its file is touched. For each touched
+    file and rule, F findings of one fingerprint against N recorded give
+    min(F, N) baselined and F - N new; N - F stale entries are named in the
+    detail with `invariant guidelines baseline --prune` as the fix, and do
+    not fail the rule in this build. A baseline that does not read in full
+    fails the rule. A cochange finding has no line and no
     fingerprint, because it describes the change and not the tree, so no
     baseline can hold it (DN-4); its fix is what the rule owes (the files to
     change, or a registry class's fix), and the verdict's fixes carry each

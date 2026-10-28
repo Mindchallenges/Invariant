@@ -176,6 +176,11 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
                                # documented location is
                                # docs/guidelines/ruleset.yaml. Rule content never
                                # goes in the manifest (D2)
+  baseline: null               # the ratchet's record of pre-existing pattern and
+                               # boundary findings (D6); null = no baseline, every
+                               # such finding new (DN-1). A configured file that
+                               # does not exist is an error. Written only by
+                               # `guidelines baseline`; never exempt from isolation
   checklist: null              # where `guidelines render` writes the human
                                # checklist, in docs.format; null =
                                # checklist.<md|rst> beside the ruleset. A
@@ -188,9 +193,9 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
     max_lines: 40              # cap on the guidelines/index block, at least 2
 ```
 
-D13's other `guidelines` keys (`baseline`, `verdicts`, and
-`injection.on_edit`) are accepted by the increment that reads each one. Until
-then they are refused at load, by name, rather than loaded and ignored.
+D13's other `guidelines` keys (`verdicts` and `injection.on_edit`) are
+accepted by the increment that reads each one. Until then they are refused at
+load, by name, rather than loaded and ignored.
 
 ### Generated files are declared, and never exempt
 
@@ -219,6 +224,26 @@ imports a host, and a host kind with no adapter has none. The drift rule,
 `guidelines.generated_current`, reads both keys through the same render plan
 `guidelines render` writes from, so it judges exactly the outputs render
 would write.
+
+`guidelines.baseline` is the third key of that kind (A3 increment 5,
+ADR-012 D6). It is the ratchet's record: one line per (rule, path,
+fingerprint) with a count, `rule-id  path  fingerprint  count`, where the
+path is everything between the first field and the last two, so a path with
+spaces still parses. A line is a comment only when its first non-blank
+character is `#`. Null means no baseline, and every pattern or boundary
+finding is new (DN-1). A configured path whose file does not exist is an
+error. The file is read in full or not at all, like `coverage_baseline`: a
+line with fewer than four fields, a fingerprint that is not twelve lowercase
+hex digits, a count that is not a positive integer, an entry recorded twice
+(after the path is normalised), a path outside the project, a rule the
+ruleset lacks, and a rule that is not pattern or boundary (DN-4: a cochange
+finding has no fingerprint) each fail every gate that reads it, never a
+smaller record. So does a path isolation exempts, because a baseline anyone
+could widen unreviewed is a relaxation of every rule. Only `guidelines
+baseline --record` and `--prune` write it, and the engine never writes it at
+the landing. It refuses a target that is the ruleset, the checklist, an
+instruction file or a registry, outside the project, or exempt, and text
+with a privacy finding (cli.md, Guidelines). It carries no managed marker.
 
 ### A sweep cadence
 
@@ -948,8 +973,8 @@ since they would do nothing. Levels are read resolved — profile, overrides and
 refused at `block` or `ask`, with or without a cadence: the user ruled that it
 only ever warns, and the engine holds that ruling at load rather than in prose.
 `guidelines` must be a mapping whose keys this build reads (today `ruleset`,
-`checklist`, `instruction_files` and `injection`). `ruleset` and `checklist`
-are each null or a non-empty path, and `instruction_files` is null or a
+`baseline`, `checklist`, `instruction_files` and `injection`). `ruleset`,
+`baseline` and `checklist` are each null or a non-empty path, and `instruction_files` is null or a
 non-empty list of them; a bare string is refused, as for every declared list.
 `injection` is a mapping whose only key is `max_lines`, an integer of at least
 2: the block's header and the line that counts what the cap left out. Where
