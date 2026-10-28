@@ -1,7 +1,7 @@
 """Repro for BUG_098 — see the work-item entry (docs/backlog/BUG_098.md).
 
-Fails while the defect is live. When the fix lands, delete the strict
-expected-failure marker; the assertion must then pass unchanged.
+The fix has landed (close_host asks a busy tab again for a bounded time),
+and the strict expected-failure marker is gone; the assertion is unchanged.
 
 Observed: the panel's Close on a leftover Claude window ends Claude but often
 leaves its Terminal tab open. Claude's own children (``caffeinate``, a
@@ -20,14 +20,13 @@ Not asserted: the suspected cause (one ``osascript`` call and no retry in
 ``_tab_outcome``) -- the fake tab answers by the clock, as Terminal would, not
 by how many times it is asked. Also not asserted: the separable second face
 of the entry, that the outcome line never reaches the actions audit log's
-done entry; that is left for the fix's design.
+done entry; the fix's tests in tests/test_oracle_web_actions.py cover it.
 
 Every seam is a fake: nothing is signalled, no ``osascript`` runs.
 """
 
 from __future__ import annotations
 
-import pytest
 from test_oracle_closehost import PID, TTY, FakeHost, request, unbound
 
 from invariant.oracle.closehost import OUTCOMES, close_host
@@ -58,7 +57,6 @@ class LingeringChildHost(FakeHost):
         return ("closed_tab", "")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_098 is live — delete this marker with the fix")
 def test_BUG_098_close_closes_the_tab_once_claudes_lingering_child_has_gone():
     fake = LingeringChildHost()
     fake.closed = []

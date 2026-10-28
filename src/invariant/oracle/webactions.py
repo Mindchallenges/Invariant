@@ -22,7 +22,9 @@ another device needs on top is here (ADR-008 D8–D12):
   polls for its result.
 * **Every action is audited** (:class:`AuditLog`): a line when it starts and a
   line when it ends, in ``<oracle home>/web/actions.log``, owner-only from
-  creation. An action that cannot be recorded does not run.
+  creation. An action that cannot be recorded does not run. A close's end
+  line also names what happened to its tab by a fixed word
+  (``closehost.outcome_word``, BUG_098), never by its output.
 
 The confirm and every job also carry their words from ``oracle/panel``: the
 sheet's title, sentence and deed, and the result's headline (ADR-009 D3, D6).
@@ -81,6 +83,7 @@ from .actions import (
     step_for,
     terminal_request,
 )
+from .closehost import outcome_word
 from .devices import Device
 from .home import append_private
 from .recommend import INFO, TERMINAL
@@ -298,7 +301,8 @@ class AuditLog:
     is a record and lives in ``web/`` beside the paired devices, not in the
     watcher's derived ``oracle/``. Only :meth:`last` reads it back, for
     ``oracle status`` and ``doctor`` (ADR-008 D17). It holds no token, nonce,
-    environment or output.
+    environment or output; a close's end line carries only the fixed word for
+    its outcome (``tab``, BUG_098).
 
     A line's ``argv`` is the command as it ran. For a ``start`` (ADR-009 D16)
     that is the ``claude`` line, so it carries the first message the new
@@ -642,6 +646,9 @@ class RemoteActions:
         }
         if event == DONE:
             entry.update(exit=job.status, ok=job.ok, elapsed=job.elapsed)
+            tab = outcome_word(job.outcome)
+            if tab is not None:
+                entry["tab"] = tab
         return entry
 
     def job(self, device: Device, job_id: str) -> dict[str, Any] | None:

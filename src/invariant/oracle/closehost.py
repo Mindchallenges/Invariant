@@ -16,7 +16,14 @@ process to go. It never escalates to SIGKILL: a Claude that does not exit is
 reported, and its window is left as it is. Only once Claude has gone, and
 only for a host that ran in macOS's Terminal.app, the tab it ran in is
 closed, when nothing but its shell is left there (the window, when that tab
-was its only one). Anything else leaves the window open and says why.
+was its only one). Claude's own children share its tty and may outlive it by
+a moment, so a tab that answers ``busy`` is asked again every
+:data:`TAB_POLL_SECONDS` for up to :data:`TAB_SETTLE_SECONDS` (BUG_098).
+Anything else leaves the window open and says why.
+
+The last line is one of a fixed set of sentences, and :func:`outcome_word`
+names which by its code, so the actions audit log can record what happened
+without recording any output.
 
 Every fact and every effect is a seam (:class:`HostSeams`): the record
 reader, ``ps``, ``kill 0``, the signal, which app owns the window, and the
@@ -42,6 +49,14 @@ GRACE_SECONDS = 10.0
 
 #: How often the exit is looked for while waiting.
 POLL_SECONDS = 0.25
+
+#: Seconds a tab still ``busy`` after Claude has exited is asked again for:
+#: long enough for Claude's own children (``caffeinate``, a language server)
+#: to leave the tty after it, short beside :data:`GRACE_SECONDS` (BUG_098).
+TAB_SETTLE_SECONDS = 5.0
+
+#: How often a ``busy`` tab is asked again while it settles.
+TAB_POLL_SECONDS = 0.5
 
 #: A host session id is a plain name before it reaches any output.
 _PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -187,18 +202,53 @@ def _wait_for_exit(pid: int, seams: HostSeams) -> bool:
         seams.sleep(POLL_SECONDS)
 
 
+def _settled_close(tty: str, seams: HostSeams) -> tuple[str, str]:
+    """Ask Terminal to close the tab, again while it is ``busy``, up to the bound.
+
+    Only ``busy`` is asked again: every other answer is final. The script
+    itself still closes only a tab where nothing but the login shell is left.
+    """
+    deadline = seams.monotonic() + TAB_SETTLE_SECONDS
+    while True:
+        code, detail = seams.close_tab(tty)
+        if code != "busy" or seams.monotonic() >= deadline:
+            return code, detail
+        seams.sleep(TAB_POLL_SECONDS)
+
+
 def _tab_outcome(request: CloseRequest, app: bool | None, seams: HostSeams) -> str:
     """The last line: the tab closed, or why the window was left open."""
     if not request.tty:
         return LEFT_OPEN.format(why=_WHY_LEFT["no_tty"])
     if app is not True:
         return LEFT_OPEN.format(why=_WHY_LEFT["not_terminal" if app is False else "unknown_app"])
-    code, detail = seams.close_tab(request.tty)
+    code, detail = _settled_close(request.tty, seams)
     if code in OUTCOMES:
         return OUTCOMES[code]
     reason = _WHY_LEFT.get(code, _WHY_LEFT["failed"])
     why = reason.format(detail=detail or code, tty=request.tty)
     return LEFT_OPEN.format(why=why)
+
+
+def outcome_word(line: str | None) -> str | None:
+    """The code of the outcome ``line`` says, from :data:`OUTCOMES` and the left-open reasons.
+
+    ``None`` for a line that is not one of them. Only the fixed words before a
+    reason's detail are compared, so the detail (process names, an error) is
+    never part of the answer. ``not_running`` reads as ``no_tab``: both say
+    the same sentence.
+    """
+    if not line:
+        return None
+    for code, sentence in OUTCOMES.items():
+        if line == sentence:
+            return code
+    for code, reason in _WHY_LEFT.items():
+        sentence = LEFT_OPEN.format(why=reason)
+        fixed, placeholder, _ = sentence.partition("{")
+        if line == sentence or (placeholder and line.startswith(fixed)):
+            return code
+    return None
 
 
 def close_host(request: CloseRequest, seams: HostSeams,

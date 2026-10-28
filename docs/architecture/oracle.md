@@ -155,6 +155,7 @@ graph TD
     WEB -. serves the Served of .-> TLS
     CLI --> CLOSEHOST
     CLOSEHOST --> SCAN
+    WEBACT -- "outcome_word: a close's last line to its code, for the audit (BUG_098)" --> CLOSEHOST
     CLI -. injects the record reader, ps, SIGTERM and the Terminal tab closer from .-> HOST
     CLI --> START
     START --> SCAN
@@ -1569,7 +1570,8 @@ D15's; the words are [oracle-panel.md](oracle-panel.md)'s.
 
 | Module | Owns | Never does |
 |---|---|---|
-| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, the SIGTERM and the wait, the tab), `binding_refusal`, `send_sigterm`, and the outcome lines | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
+| `closehost` | `CloseRequest`, `HostSeams`, `close_host` (the checks again, the SIGTERM and the wait, the tab and its settle), `binding_refusal`, `send_sigterm`, the outcome lines and `outcome_word` (a line back to its code, BUG_098) | Import `hosts/`; send any signal but one SIGTERM to one positive pid; close a tab before Claude has exited |
+| `webactions` | Writes the close's outcome code on the audit log's done line (`tab`), through `outcome_word` | Record the outcome line or any other output |
 | `hosts/claude_code_launch` | `runs_in_terminal_app` (Terminal.app in the parent chain), `TerminalTabCloser` and `TERMINAL_TAB_SCRIPT` | Interpolate the tty into the script; start Terminal; decide whether to close |
 
 ```mermaid
@@ -1590,8 +1592,11 @@ sequenceDiagram
     Cmd->>Seams: Terminal.app in the parent chain?
     Cmd->>Seams: SIGTERM once; poll kill 0 up to 10 s
     Note over Cmd: still alive: "Claude did not exit … nothing else was done", exit 1
-    Cmd->>Seams: osascript with /dev/TTY as its argument: close the tab if only its shell is left
+    loop while the tab answers busy, every 0.5 s for up to 5 s
+        Cmd->>Seams: osascript with /dev/TTY as its argument: close the tab if only its shell is left
+    end
     Cmd-->>Srv: last line: what happened, exit 0
+    Srv->>Srv: audit done line: exit, ok, elapsed, tab (the outcome's code, never the line)
     Srv-->>Page: result sheet: What happened, or Why
 ```
 
@@ -1620,6 +1625,17 @@ Terminal is not running, so it never starts it. It finds the tab whose
 anything but a login shell, is left; the only tab of a window closes with
 the window; one tab of several is closed alone, which Terminal may refuse.
 
+**Letting the tab settle (BUG_098).** Claude's own children (`caffeinate`, a
+language server) share its tty and can outlive it by a moment, so a tab
+asked about the instant Claude has gone may still answer `busy`. A `busy`
+answer is asked again every `TAB_POLL_SECONDS` (0.5 s) for up to
+`TAB_SETTLE_SECONDS` (5 s), and the tab closes as soon as only its shell is
+left. Every other answer is final at once. Past the bound the last `busy`
+answer stands, naming what still runs. The script's own rule is unchanged:
+nothing but a login shell may be left in a tab it closes. The worst case,
+the 10 s wait, the 5 s settle and one 30-second `osascript`, stays far
+inside the 600-second limit on a page action's run (`RUN_TIMEOUT_SECONDS`).
+
 | Answer | The last line |
 |---|---|
 | `closed_tab` / `closed_window` | Claude ended, and its Terminal tab closed. / … window closed. |
@@ -1630,6 +1646,15 @@ the window; one tab of several is closed alone, which Terminal may refuse.
 | `tab_not_closable` | … because Terminal would not close one tab of several from a script (<error>). |
 | `not_allowed` (error -1743, "Not authorized", or a prompt nobody answered in 30 s) | Claude ended; macOS has not allowed the oracle to control Terminal, so the window was left open. Allow it in System Settings > Privacy & Security > Automation … |
 | anything else | … because Terminal could not be asked (<error>). |
+
+**What the audit log keeps.** The page's done line for a close that ran
+gains `tab`, the code of its last line (`closehost.outcome_word`):
+`closed_tab`, `closed_window`, `not_allowed`, `no_tty`, `not_terminal`,
+`unknown_app`, `busy`, `no_tab` (also for `not_running`, which says the same
+sentence), `tab_not_closable` or `failed`. Only the fixed words before a
+reason's detail are matched, so the processes, the tty and any error stay
+out of the log ([state_model.md](state_model.md), "The web actions' audit
+log"). A refused or failed close, and every other step, has no `tab`.
 
 **The seams.** The CLI reaches every host fact and effect through
 `_oracle_host_seams`, a `HostSeams` of Claude Code's: `ClaudeCodeProbe`'s

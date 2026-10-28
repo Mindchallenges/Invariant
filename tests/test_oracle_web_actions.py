@@ -1379,6 +1379,35 @@ class TestCloseHostFromThePage:
         nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
         job = world.remote.act(PHONE, world.key(), nonce).body["job"]
         assert job["words"]["outcome"] == ""
+        assert "tab" not in world.audit()[-1]
+
+    @pytest.mark.parametrize(("last", "word"), [
+        ("Claude ended, and its Terminal tab closed.", "closed_tab"),
+        (("Claude ended; the window was left open because something else is running in its "
+          "tab (login,-zsh,secret-tool --token abc)."), "busy"),
+    ])
+    def test_the_done_line_records_the_tab_by_its_word_never_the_output(self, world, last,
+                                                                        word):
+        """BUG_098: the audit's end line says what became of the tab, not what was said."""
+        world.document = _doc(_leftover(world.cwd))
+        world.runner.output = f"checked: process 41001 is Claude\n{last}\n"
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        world.remote.act(PHONE, world.key(), nonce)
+        start, done = world.audit()
+        assert done["tab"] == word
+        assert "tab" not in start
+        text = (world.home / AUDIT_FILE).read_text()
+        assert "checked" not in text and "Claude ended" not in text
+        assert "secret-tool" not in text and "login" not in text
+
+    def test_a_refused_close_records_no_tab(self, world):
+        world.document = _doc(_leftover(world.cwd))
+        world.runner.status = 1
+        world.runner.output = "invariant: nothing was done: process 41001 has already exited\n"
+        nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
+        world.remote.act(PHONE, world.key(), nonce)
+        done = world.audit()[-1]
+        assert done["ok"] is False and "tab" not in done
 
 
 # -- IDEA_030 increment 2: start a new session from the page (ADR-009 D16) ---------------

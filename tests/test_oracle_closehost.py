@@ -274,6 +274,28 @@ class TestClosingTheTab:
         assert lines[-1].startswith("Claude ended; the window was left open because")
         assert words in lines[-1]
 
+    def test_a_tab_busy_past_the_bound_is_left_and_names_what_runs(self):
+        """BUG_098: a busy tab is asked again, but only up to TAB_SETTLE_SECONDS."""
+        fake = FakeHost(tab=("busy", "login,-zsh,vim"))
+        lines = run(fake)
+        asks = int(closehost.TAB_SETTLE_SECONDS / closehost.TAB_POLL_SECONDS) + 1
+        assert fake.tabs_asked == [TTY] * asks
+        assert fake.slept.count(closehost.TAB_POLL_SECONDS) == asks - 1
+        assert lines[-1].endswith("something else is running in its tab (login,-zsh,vim).")
+        assert fake.signalled == [PID]
+
+    @pytest.mark.parametrize("code", ["no_tab", "not_allowed", "failed", "tab_not_closable"])
+    def test_only_busy_is_asked_again(self, code):
+        fake = FakeHost(tab=(code, "x"))
+        run(fake)
+        assert fake.tabs_asked == [TTY]
+
+    def test_the_bound_fits_well_inside_the_actions_run_timeout(self):
+        from invariant.oracle.actions import RUN_TIMEOUT_SECONDS
+
+        assert closehost.TAB_SETTLE_SECONDS <= closehost.GRACE_SECONDS
+        assert closehost.GRACE_SECONDS + closehost.TAB_SETTLE_SECONDS < RUN_TIMEOUT_SECONDS
+
     def test_macos_not_allowing_it_says_how_to_grant_it(self):
         fake = FakeHost(tab=("not_allowed", "-1743"))
         last = run(fake)[-1]
@@ -381,3 +403,33 @@ class TestTheCommand:
     def test_the_suite_never_reaches_the_real_seams(self, capsys):
         assert main(self.argv("--tty", TTY)) == 1
         assert "nothing was done" in capsys.readouterr().err
+
+
+# -- the outcome's word, for the audit log (BUG_098) -----------------------------------
+
+
+class TestOutcomeWord:
+    @pytest.mark.parametrize("code", ["closed_tab", "closed_window", "busy", "no_tab",
+                                      "tab_not_closable", "failed", "not_allowed"])
+    def test_every_tab_answer_reads_back_as_its_code(self, code):
+        fake = FakeHost(tab=(code, "some detail"))
+        assert closehost.outcome_word(run(fake)[-1]) == code
+
+    def test_not_running_reads_as_no_tab_its_same_sentence(self):
+        fake = FakeHost(tab=("not_running", ""))
+        assert closehost.outcome_word(run(fake)[-1]) == "no_tab"
+
+    @pytest.mark.parametrize(("changes", "facts", "app", "code"), [
+        ({"tty": None}, Facts(tty=None), True, "no_tty"),
+        ({}, Facts(), False, "not_terminal"),
+        ({}, Facts(), None, "unknown_app"),
+    ])
+    def test_a_window_never_asked_about_reads_as_why(self, changes, facts, app, code):
+        fake = FakeHost(facts=facts, in_terminal=app)
+        assert closehost.outcome_word(run(fake, **changes)[-1]) == code
+
+    @pytest.mark.parametrize("line", [None, "", "merged",
+                                      ("Claude ended; the window was left open because of "
+                                       "something new.")])
+    def test_any_other_line_has_no_word(self, line):
+        assert closehost.outcome_word(line) is None
