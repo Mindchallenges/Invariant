@@ -6229,6 +6229,72 @@ class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:
         assert "below the 90% floor" in verdict.message
 
 
+class TestBug103AStackedProjectHoldsANonPrimaryCodeChangeToTheFloor:
+    """Repro for BUG_103 — see the work-item entry.
+
+    Fails while the defect is live. When the fix lands, delete the strict
+    xfail marker; the assertions must then pass unchanged.
+
+    The symptom: in a project that declares `swift_xcode` first and a second
+    ecosystem after it, a real code change in a file of that second ecosystem
+    is excused from the coverage floor as comment-only. The contract asserted
+    against is the overview's: reducing too much "calls a real code change
+    cosmetic", the one mistake the comment-only exclusion must never make.
+
+    Asserts the user-visible verdict only, never the suspected cause (which
+    adapter reduced the file).
+    """
+
+    BEFORE = "x = 'http://a' + b\n"
+    AFTER = "x = 'http://zzz' + c\n"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_103 is live — delete this marker with the fix",
+    )
+    @pytest.mark.parametrize(
+        ("second", "src"),
+        [("python", "app/mod.py"), ("node", "app/mod.ts")],
+    )
+    def test_BUG_103_a_real_change_in_a_non_primary_file_is_held_to_the_floor(
+        self, ctx_factory, second, src
+    ):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        landed = main / src
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text(self.BEFORE, encoding="utf-8")
+        run(["git", "add", "-A"], main)
+        run(["git", "commit", "-qm", "base"], main)
+        run(["git", "merge", "-q", "--ff-only", "master"], wt)
+        path = wt / src
+        path.write_text(self.AFTER, encoding="utf-8")
+
+        write_manifest(
+            main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["swift_xcode", second]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        ctx = ctx_factory(
+            cwd=wt,
+            session={
+                "id": "s1",
+                "files": [src],
+                "worktree": str(wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": {str(path): 30.0}}},
+        )
+        verdict = only(evaluate(["coverage.meets_floor"], ctx)).verdict
+        assert "altered no code" not in (verdict.detail or ""), verdict.detail
+        assert not verdict.ok, verdict.message
+        assert "below the 90% floor" in verdict.message
+
+
 class TestTheNormalisedPayloadContract:
     """BUG_022 — the dependency rule the code no longer kept.
 
