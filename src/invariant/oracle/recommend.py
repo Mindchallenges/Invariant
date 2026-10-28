@@ -22,7 +22,17 @@ a refusal somebody met is an alert (ADR-007 D8).
 
 Where a command cannot name its session with ``--id`` (``pipeline gates``,
 ``pipeline test``), the recommendation carries ``INVARIANT_SESSION_ID`` in
-``env`` instead, the explicit route session resolution already honours. Every
+``env`` instead, the explicit route session resolution already honours.
+
+**A re-run is the session's own** (BUG_093). Failing tests are re-run with
+the selectors of the session's newest scoped run and, in ``env``, each value
+that run's discovery resolved, as ``INVARIANT_<KEY>``: an input to the
+project's own discovery, which still decides. A value the privacy patterns
+flag is carried masked, listed in ``masked``, and ``replay`` names the run
+its real value is read from when the confirmed step runs. With no scoped run
+on record, or one older than the record of discovered values while the
+project's scoped command needs discovery, nothing is offered to run, and
+``reason`` says why: the oracle never runs the whole suite (ADR-010). Every
 ``argv`` here is parsed by the real CLI parser in the suite, so a flag that does
 not exist cannot reach a confirm dialog.
 """
@@ -38,6 +48,7 @@ from .scan import (
     ROW_HOST,
     ROW_SESSION,
     ROW_WORKTREE,
+    SESSION_ENV,
     HostView,
     ProjectSnapshot,
     Row,
@@ -73,8 +84,11 @@ RUN = "run"
 TERMINAL = "terminal"
 INFO = "info"
 
-SESSION_ENV = "INVARIANT_SESSION_ID"
 CLI = "invariant"
+
+#: Why a failing row is offered no re-run (BUG_093), as ``Recommendation.reason``.
+RERUN_UNSCOPED = "rerun_unscoped"
+RERUN_UNRECORDED = "rerun_unrecorded"
 
 
 @dataclass(frozen=True)
@@ -88,10 +102,18 @@ class Recommendation:
     env: dict[str, str] = field(default_factory=dict)
     #: What the gate cache found owed, in words; empty when it has no answer.
     detail: str = ""
+    #: The ``env`` names whose values are shown masked (BUG_093).
+    masked: tuple[str, ...] = ()
+    #: The recorded run a masked value is read from when the step runs:
+    #: ``{project, root, session, started, run}``. ``None`` with nothing masked.
+    replay: dict[str, Any] | None = None
+    #: Why an ``info`` step offers nothing to run, for the panel's words.
+    reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         body = asdict(self)
         body["argv"] = list(self.argv)
+        body["masked"] = list(self.masked)
         return body
 
 
@@ -242,7 +264,7 @@ def _for_session(row: Row, has) -> Recommendation | None:
     pinned = {SESSION_ENV: sid}
 
     if has(ERROR, "tests"):
-        return Recommendation("re-run the suite", (CLI, "pipeline", "test"), here, RUN, pinned)
+        return _rerun(row, here, pinned)
     if has(GATE_BLOCKED):
         return Recommendation(
             "see which gates refused, and what clears them",
@@ -286,6 +308,36 @@ def _for_session(row: Row, has) -> Recommendation | None:
     if has(YOUR_TURN):
         return Recommendation("your turn, in its own terminal")
     return None
+
+
+def _rerun(row: Row, here: str, pinned: dict[str, str]) -> Recommendation:
+    """Re-run the session's own scoped tests with its own values, or say why not."""
+    scoped = row.pipeline.last_scoped if row.pipeline else None
+    if not scoped:
+        return Recommendation(
+            "run its tests from the session's own window: no scoped run is on "
+            "record, and the oracle never runs the whole suite",
+            reason=RERUN_UNSCOPED,
+        )
+    if scoped.get("needs_discovery") and not scoped.get("recorded"):
+        return Recommendation(
+            "run its tests from the session's own window: its last scoped run "
+            "predates the record of the values its discovery found",
+            reason=RERUN_UNRECORDED,
+        )
+    argv: tuple[str, ...] = (CLI, "pipeline", "test")
+    for selector in scoped.get("selectors") or ():
+        argv += ("--selector", selector)
+    masked = tuple(scoped.get("masked") or ())
+    replay = {
+        "project": row.project, "root": row.root, "session": row.session_id or "",
+        "started": scoped.get("started"), "run": scoped.get("run"),
+    } if masked else None
+    return Recommendation(
+        "re-run the session's own scoped tests, with the values its own run found",
+        argv, here, RUN, {**(scoped.get("env") or {}), **pinned},
+        masked=masked, replay=replay,
+    )
 
 
 def assess(

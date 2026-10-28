@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -938,6 +938,10 @@ class PipelineDomain:
         self._record_test_run(
             session_id, "coverage", command, outcome, selectors=selectors,
             ecosystem=ecosystem,
+            discovered=self.manifest.discovered_in(
+                "coverage_one" if selectors else "coverage",
+                ecosystem, result_bundle=str(bundle), **extra,
+            ),
         )
 
         # The suite's state at the moment of measurement, kept with it. A file
@@ -1056,6 +1060,9 @@ class PipelineDomain:
         return self._record_test_run(
             session_id, phase, command, result, read_as_red=read_as_red,
             selectors=selectors, ecosystem=ecosystem,
+            discovered=self.manifest.discovered_in(
+                command_key, ecosystem, result_bundle=str(bundle), **extra
+            ),
         )
 
     def _read_red_phase_run(
@@ -1129,6 +1136,7 @@ class PipelineDomain:
         read_as_red=False,
         selectors: Sequence[str] = (),
         ecosystem: str | None = None,
+        discovered: Mapping[str, str] | None = None,
     ):
         """Append one run to the evidence every test rule reads.
 
@@ -1150,6 +1158,12 @@ class PipelineDomain:
             # resolved command string cannot be relied on to say (ADR-010 D1).
             "selectors": list(selectors),
             "scope": _scope(selectors),
+            # The placeholders this run's discovery resolved, by key. The
+            # session's own shell may be what made them resolvable (its own
+            # exported simulator, say), and a replay from anywhere else needs
+            # them handed back to the project's discovery (BUG_093). Under the
+            # state root, machine-local, never committed.
+            "discovered": dict(discovered or {}),
             # Whose command ran and whose adapter read it (ADR-013 D2).
             "ecosystem": ecosystem or self.manifest.primary_ecosystem,
             "passed": result.passed,

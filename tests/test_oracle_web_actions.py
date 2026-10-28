@@ -474,6 +474,10 @@ class TestAct:
 
 # -- the failure summary (IDEA_027 increment 5, ADR-009 D9) ------------------------
 
+#: The WHY for a discovery that produced nothing: none found, or no choice (BUG_093).
+WHY_DISCOVERY = ("invariant could not get a value for destination_id: its discovery "
+                 "found none, or could not choose between several.")
+
 #: The motivating failure: a target's destination discovery that printed a
 #: multi-line shell script after invariant's own line. The reason names the
 #: key and drops the script.
@@ -545,7 +549,7 @@ class TestFailureSummary:
 
     @pytest.mark.parametrize("ok, status, output, why", [
         pytest.param(False, 1, _DISCOVERY,
-                     "invariant could not find a value for destination_id.",
+                     WHY_DISCOVERY,
                      id="discovery-produced-nothing"),
         pytest.param(False, 2, "invariant: discovery for \"scheme\" timed out; the command "
                      "was: sleep 99\n",
@@ -619,7 +623,7 @@ class TestFailureSummary:
         world.runner.status, world.runner.output = 1, _DISCOVERY
         nonce = world.remote.confirm(PHONE, world.key()).body["nonce"]
         job = world.remote.act(PHONE, world.key(), nonce).body["job"]
-        assert job["words"]["why"] == "invariant could not find a value for destination_id."
+        assert job["words"]["why"] == WHY_DISCOVERY
         assert job["output"] == _DISCOVERY
         assert world.remote.recent(PHONE)[0]["words"]["why"] == job["words"]["why"]
 

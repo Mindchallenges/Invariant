@@ -43,6 +43,15 @@ a process is the host, are Claude Code knowledge. The CLI hands them in as a
 :class:`HostProbe`, the shape ``CLI -. injects .-> CCTEL`` already has, so this
 package imports nothing from ``hosts/`` (ADR-007 D11).
 
+**A session's own values are replayed, never shown** (BUG_093). A test run
+records the placeholders its discovery resolved; a session's pipeline view
+carries its newest scoped run as ``last_scoped``, each value under the
+variable a replay exports for it (:func:`discovery_env`), and every value the
+project's privacy patterns flag masked by ``core/privacy``'s own redaction
+(:func:`mask_value`). Nothing this module returns holds such a value in the
+clear. :func:`replay_values` reads it back from the session's record at the
+moment a confirmed step runs, for that one run of that one pipeline only.
+
 **Cheap on a second pass.** :class:`ScanCache` keeps the git-backed answers
 (worktree lists, transcript roots) and the process-name checks for a short
 time, so a watcher calling this every few seconds re-reads only small JSON
@@ -52,17 +61,19 @@ files, directory listings and the tails of the transcripts that changed.
 from __future__ import annotations
 
 import os
+import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from ..core import git
-from ..core.errors import InvariantError, ManifestError, UnknownRuleError
+from ..core.errors import InvariantError, ManifestError, StateError, UnknownRuleError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE
 from ..core.manifest import MANIFEST_RELPATH, Manifest
+from ..core.privacy import PrivacyScanner
 from ..core.store import InertStore
 from ..domains.pipeline import PipelineDomain
 from ..domains.session import Session, SessionDomain
@@ -89,6 +100,15 @@ MERGE_GATE = "session.ff_merge_target"
 #: A host no live session claims is shown while it is alive, or for this long
 #: after its last sign of life.
 ORPHAN_WINDOW_SECONDS = 24 * 3600
+
+#: The variable a step pins its session with: ``pipeline test`` takes no ``--id``.
+SESSION_ENV = "INVARIANT_SESSION_ID"
+
+#: What a discovered placeholder is exported as when a run is replayed. The
+#: project's own discovery reads it, or not: core honours no such override.
+DISCOVERY_ENV_PREFIX = "INVARIANT_"
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: How long a git-backed answer or a process-name check is reused.
 CACHE_TTL_SECONDS = 60.0
@@ -370,6 +390,14 @@ class PipelineView:
     #: recorded without a transition, so the write time is what moves.
     transitions: int = 0
     written_ns: int | None = None
+    #: The newest run that named selectors, as a replay would repeat it
+    #: (BUG_093): ``run`` (its index in the record), ``started`` (the
+    #: pipeline's), ``selectors``, ``recorded`` (whether the run kept what its
+    #: discovery found), ``needs_discovery`` (whether the project's scoped test
+    #: command has a placeholder only discovery supplies), ``env`` (each
+    #: discovered value under its variable, masked where the privacy patterns
+    #: flag it) and ``masked`` (those variables). ``None`` with no scoped run.
+    last_scoped: dict[str, Any] | None = None
 
 
 @dataclass
@@ -629,6 +657,7 @@ class _ProjectReader:
         self.stages = session_stages(self.sessions.machine)
         self._transcripts: dict[str, float] = {}
         self._processes: dict[str, list[HostProcess]] = {}
+        self._privacy: PrivacyScanner | None = None
 
     def _row(self, kind: str, **fields: Any) -> Row:
         return Row(
@@ -703,14 +732,17 @@ class _ProjectReader:
         evidence = pipeline.evidence if isinstance(pipeline.evidence, dict) else {}
         runs = evidence.get("test_runs")
         runs = runs if isinstance(runs, list) else []
+        scanner = self._scanner()
+        last = runs[-1] if runs and isinstance(runs[-1], dict) else None
         view = PipelineView(
             methodology=pipeline.methodology,
             state=pipeline.state,
             task=pipeline.task,
             test_runs=len(runs),
-            last_test=runs[-1] if runs and isinstance(runs[-1], dict) else None,
+            last_test=_shown_run(last, scanner) if last is not None else None,
             transitions=len(pipeline.history) if isinstance(pipeline.history, list) else 0,
             written_ns=_mtime_ns(self.store.root / self.pipelines.relpath(session_id)),
+            last_scoped=self._last_scoped(pipeline.started, runs, scanner),
         )
         try:
             machine = self.pipelines.machine_for(pipeline)
@@ -721,6 +753,38 @@ class _ProjectReader:
         view.landed = view.terminal and state is not None and ABANDON_ROLE not in state.roles
         view.red_phase = machine.red_phase or view.red_phase
         return view
+
+    def _scanner(self) -> PrivacyScanner:
+        if self._privacy is None:
+            self._privacy = privacy_scanner(self.manifest)
+        return self._privacy
+
+    def _last_scoped(
+        self, started: float, runs: list[Any], scanner: PrivacyScanner
+    ) -> dict[str, Any] | None:
+        """The newest run that named selectors, as :attr:`PipelineView.last_scoped`."""
+        for index in range(len(runs) - 1, -1, -1):
+            run = runs[index]
+            if not isinstance(run, dict):
+                continue
+            selectors = [s for s in run.get("selectors") or () if isinstance(s, str) and s]
+            if not selectors:
+                continue
+            discovered = run.get("discovered")
+            recorded = isinstance(discovered, dict)
+            env, masked = shown_env(discovered if recorded else {}, scanner)
+            ecosystem = run.get("ecosystem")
+            ecosystem = ecosystem if isinstance(ecosystem, str) and ecosystem else None
+            return {
+                "run": index,
+                "started": started,
+                "selectors": selectors,
+                "recorded": recorded,
+                "needs_discovery": bool(self.manifest.discovers_for("test_one", ecosystem)),
+                "env": env,
+                "masked": masked,
+            }
+        return None
 
     # -- hosts -------------------------------------------------------------
 
@@ -910,6 +974,141 @@ def mark_rivals(snapshot: ProjectSnapshot) -> None:
             continue
         target = row.adoptable[0]
         row.adopt_rivals = sum(1 for other in live if other is not row and target in other.adoptable)
+
+
+# -- a session's own values: replayed, never shown (BUG_093) -------------------
+
+
+def privacy_scanner(manifest: Manifest) -> PrivacyScanner:
+    """The project's own privacy patterns; when they cannot be built, a mask on all.
+
+    A value is masked when the patterns flag it, so a scanner that cannot be
+    made must not read as "nothing flagged": it fails closed, masking every
+    value whole with the same redaction.
+    """
+    try:
+        return PrivacyScanner.from_manifest(manifest)
+    except (ValueError, re.error):
+        return PrivacyScanner(patterns=(), extra=(r".+",))
+
+
+def mask_value(scanner: PrivacyScanner, value: str) -> str | None:
+    """``value`` with every span the patterns flag redacted, or ``None`` if none is.
+
+    The redaction is ``core/privacy``'s own (each finding's ``redacted``: a
+    short prefix kept, the rest blocked out), so the oracle shows a flagged
+    value the way ``privacy scan`` reports one.
+    """
+    findings = scanner.scan_text(value)
+    if not findings:
+        return None
+    by_line: dict[int, list[Any]] = {}
+    for finding in findings:
+        by_line.setdefault(finding.line, []).append(finding)
+    lines = []
+    for number, line in enumerate(value.splitlines(), start=1):
+        parts, at = [], 0
+        for finding in sorted(by_line.get(number, ()), key=lambda f: (f.column, -len(f.raw))):
+            start = finding.column - 1
+            if start < at:
+                continue  # inside a span already redacted
+            parts += [line[at:start], finding.redacted]
+            at = start + len(finding.raw)
+        lines.append("".join(parts) + line[at:])
+    return "\n".join(lines)
+
+
+def discovery_env(key: str) -> str | None:
+    """The variable a replay exports a discovered ``key`` as, or ``None``.
+
+    ``None`` for a key that is no variable name, and for one that would be
+    the session pin itself, which a replay never lets a recorded value set.
+    """
+    if not isinstance(key, str) or not _ENV_NAME.fullmatch(key):
+        return None
+    name = DISCOVERY_ENV_PREFIX + key.upper()
+    return None if name == SESSION_ENV else name
+
+
+def shown_env(
+    discovered: Mapping[str, Any], scanner: PrivacyScanner
+) -> tuple[dict[str, str], list[str]]:
+    """Each discovered value under its variable, as shown; and the masked names."""
+    env: dict[str, str] = {}
+    masked: list[str] = []
+    for key, value in sorted(discovered.items()):
+        name = discovery_env(key)
+        if name is None or not isinstance(value, str):
+            continue
+        shown = mask_value(scanner, value)
+        env[name] = value if shown is None else shown
+        if shown is not None:
+            masked.append(name)
+    return env, masked
+
+
+def _shown_run(run: dict[str, Any], scanner: PrivacyScanner) -> dict[str, Any]:
+    """A recorded run as the document carries it: no flagged value in the clear.
+
+    Its ``discovered`` values are masked, and so is each one where the
+    resolved ``command`` spells it.
+    """
+    discovered = run.get("discovered")
+    if not isinstance(discovered, dict):
+        return dict(run)
+    shown = dict(run)
+    shown["discovered"] = {}
+    command = run.get("command")
+    for key, value in discovered.items():
+        masked = mask_value(scanner, value) if isinstance(value, str) else None
+        shown["discovered"][key] = value if masked is None else masked
+        if masked is not None and value and isinstance(command, str):
+            command = command.replace(value, masked)
+    if isinstance(command, str):
+        shown["command"] = command
+    return shown
+
+
+def replay_values(replay: Mapping[str, Any], names: Iterable[str],
+                  shown: Mapping[str, str]) -> dict[str, str]:
+    """The real values behind ``names``, read from the run ``replay`` names.
+
+    ``replay`` is the step's reference to one recorded run: the project
+    (``project``, its state root, and ``root``), the ``session``, the
+    pipeline's ``started`` and the run's index, ``run``. A run is appended and
+    never rewritten, and ``started`` tells one pipeline of a session from the
+    next, so the reference names one set of values for good. Each value must
+    still mask to what was ``shown``. Anything else is a :class:`StateError`
+    and nothing runs: the person confirmed that run's values, no other.
+    """
+    try:
+        root, key = Path(str(replay["root"])), Path(str(replay["project"]))
+        session_id, started, index = str(replay["session"]), replay["started"], replay["run"]
+    except (KeyError, TypeError) as exc:
+        raise StateError(f"the step names no recorded run to take its values from ({exc})") from None
+    if not (root / MANIFEST_RELPATH).is_file():
+        raise StateError(f"no manifest at {root}; the recorded values cannot be read")
+    manifest = Manifest.load(root)
+    pipeline = PipelineDomain(manifest, store=InertStore(key)).current(session_id)
+    if pipeline is None or pipeline.started != started:
+        raise StateError(
+            "the session's pipeline is not the one whose run was confirmed; "
+            "open the step again")
+    runs = (pipeline.evidence or {}).get("test_runs") or []
+    run = runs[index] if isinstance(index, int) and 0 <= index < len(runs) else None
+    discovered = run.get("discovered") if isinstance(run, dict) else None
+    if not isinstance(discovered, dict):
+        raise StateError("the confirmed run's values are not on record; open the step again")
+    by_name = {discovery_env(k): v for k, v in discovered.items() if isinstance(v, str)}
+    scanner = privacy_scanner(manifest)
+    values: dict[str, str] = {}
+    for name in names:
+        value = by_name.get(name)
+        if value is None or mask_value(scanner, value) != shown.get(name):
+            raise StateError(
+                f"{name} on record no longer matches what was confirmed; open the step again")
+        values[name] = value
+    return values
 
 
 def _latest(values: Iterable[float | None]) -> float | None:

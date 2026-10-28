@@ -293,6 +293,33 @@ class TestCommandTemplates:
         with pytest.raises(ManifestError, match="produced nothing"):
             m.command_for("test")
 
+    def test_a_run_reports_only_what_its_discovery_resolved(self, tmp_path):
+        # BUG_093: a run records its discovered values so a replay can hand
+        # them back; vars, extras and placeholders of other commands are not.
+        write_manifest(
+            tmp_path,
+            {"commands": {"test": "run {device} {scheme} {bundle}", "build": "b {other}"},
+             "vars": {"scheme": "App"},
+             "discover": {"device": "printf SIM-A", "other": "printf O", "scheme": "printf S"}},
+        )
+        m = Manifest.load(tmp_path)
+        assert m.discovered_in("test", bundle="/b") == {}
+        m.command_for("test", bundle="/b")
+        assert m.discovered_in("test", bundle="/b") == {"device": "SIM-A"}
+        assert m.discovered_in("build") == {}
+        assert m.discovered_in("lint") == {}
+
+    def test_what_only_discovery_can_supply(self, tmp_path):
+        write_manifest(
+            tmp_path,
+            {"commands": {"test_one": "run {device} {scheme} {selector}"},
+             "vars": {"scheme": "App"},
+             "discover": {"device": "printf SIM-A", "scheme": "printf S"}},
+        )
+        m = Manifest.load(tmp_path)
+        assert m.discovers_for("test_one") == ["device"]
+        assert m.discovers_for("lint") == []
+
     def test_missing_command(self, minimal):
         with pytest.raises(ManifestError, match="no command configured for 'build'"):
             minimal.command_for("build")

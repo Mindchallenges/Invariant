@@ -183,14 +183,19 @@ opacity of the content behind):
 
 1. A grabber, 36 by 5 px.
 2. The title, a question ("Re-run the tests?"), 22 px bold, and one
-   sentence: "Runs Heap's test suite in this session's folder and records
-   the result. Nothing is changed or deleted."
+   sentence: "Runs the tests this session last ran in Heap, in its own folder
+   and with its own settings, and records the result. Nothing is changed or
+   deleted."
 3. **Command** block: an uppercase "Command" label with a Copy button on
    the right, the command in 15 px monospace (horizontal scroller), and the
    place in plain words: "In Heap › session folder 4b7b00c1".
 4. A closed toggle, "Exact folder and environment": the exact `cwd` (in a
    scroller), each added variable as `NAME=value`, and "Runs as you on the
-   Mac, without the marks of any Claude window."
+   Mac, without the marks of any Claude window." A value the project's
+   privacy patterns flag is shown masked, followed by "(masked; the
+   session's recorded value is used when it runs)", and the Command block's
+   line is then a comment, "# Not runnable as shown, NAME masked: …"
+   (BUG_093).
 5. The Run button (primary, 52 px, named for the deed: "Run tests") over
    Cancel (secondary, 52 px). Cancel holds focus when the sheet opens.
 6. "This confirm expires in M:SS", counting down from the nonce's 120 s.
@@ -465,7 +470,7 @@ these (ADR-009 D3).
 
 | Recommended command | Card button | Confirm title | Confirm sentence | Run button |
 |---|---|---|---|---|
-| `pipeline test` | Re-run tests… | Re-run the tests? | Runs <project>'s test suite in this session's folder and records the result. Nothing is changed or deleted. | Run tests |
+| `pipeline test --selector …` (the session's last scoped run, BUG_093) | Re-run tests… | Re-run the tests? | Runs the tests this session last ran in <project>, in its own folder and with its own settings, and records the result. Nothing is changed or deleted. | Run tests |
 | `pipeline gates` | Show blockers… | Show what is blocking it? | Lists the checks this session still owes and what clears each. Nothing is changed. | Show blockers |
 | `context --id` | Show its instructions… | Show what the session is being told? | Prints the session's current instructions. Nothing is changed. | Show |
 | `session review --id` | Review… | Run the review checks? | Runs the review checks and marks the session reviewed if they pass. Nothing is merged. | Run review |
@@ -479,6 +484,7 @@ these (ADR-009 D3).
 | `doctor` | Check setup… | Run invariant's setup check? | Checks this project's hooks and settings. Nothing is changed. | Run check |
 | a start (`oracle start-session`, IDEA_030) | New session… | Start a new session? | A new Terminal window on the Mac runs Claude with Remote Control in <project>'s main folder. | Start session |
 | `info` step, or waiting | (no button) | — | — | — |
+| failing tests with nothing to replay (`info`, `reason` `rerun_unscoped` or `rerun_unrecorded`, BUG_093) | (no button; the detail's "What is going on" says why) | — | — | — |
 
 Increment 6 added close host. Increment 7 adds rows here for kill a leaked
 process, abandon a session, remove an orphaned worktree, and nudge or
@@ -494,6 +500,8 @@ re-dispatch a stuck agent, each with its "This deletes" lines.
 | Waiting note | Answer it in Claude on your Mac or phone. This panel never answers prompts. |
 | Detail sections | What is going on · Suggested next step · More actions · Recent · Technical details |
 | Confirm | Command · Copy · Exact folder and environment · Runs as you on the Mac, without the marks of any Claude window. · Cancel · This confirm expires in M:SS · This confirm expired. Look again |
+| A masked variable (BUG_093) | After its `NAME=value`: "  (masked; the session's recorded value is used when it runs)". Copy and the Command line: "# Not runnable as shown, <names> masked: " before the line |
+| No re-run offered (BUG_093) | no scoped run: The phone does not re-run these tests: no scoped test run is on record for this session, and the panel never runs a whole test suite. Run its tests from the session's own window. · a run older than the record: The phone does not re-run these tests yet: the last scoped run was recorded before invariant kept the settings it found, so it cannot be repeated the same way. Run its tests once from the session's own window. |
 | Destructive confirm | This deletes · Checked just now · No Claude window is using this session · Checked again the moment you press <deed> · Exact command · This cannot be undone. |
 | Close host confirm (inc 6) | This ends · Claude in <project> · window <first 8> · Process <pid> · idle <age> · Checked just now · No invariant session is using this Claude window · Checked again the moment you press Close window |
 | Result | Why · What happened · Show full output · Done · stopped after N s · Done in N s |
@@ -599,13 +607,29 @@ open:
 |---|---|
 | Where the reason is made | `webactions.evidence` reads the job's kept output (the same tail "Show full output" shows) for two facts: the last line that starts with `invariant: ` at the start of a line, which is the line the CLI writes for an error it raised, and the last meaningful line. `panel.why_words` words them, so the sentence's every word is in the panel's table. `webactions.summarise` joins the two, once, when the job ends; the job keeps it as `words.why` |
 | What counts as invariant's own line | Only `invariant: <message>` at the very start of a line, after colour codes are removed; an indented one, or another prefix such as `myinvariant:`, is the target's text. The last such line wins, and only its first line is read, so a multi-line message (a discovery's shell script) never reaches the sentence |
-| The causes the table words | A discovery that produced nothing: "invariant could not find a value for <key>." A discovery that timed out: "invariant ran out of time finding a value for <key>." Any other own line is quoted, not reworded: "invariant said: <message>" |
+| The causes the table words | A discovery that produced nothing: "invariant could not get a value for <key>: its discovery found none, or could not choose between several." (BUG_093: a discovery that refuses to guess between several, such as several booted simulators, produces nothing too, and the sentence used to hide that.) A discovery that timed out: "invariant ran out of time finding a value for <key>." Any other own line is quoted, not reworded: "invariant said: <message>" |
 | The fallback | "Failed, exit N. <last meaningful line>", or "Failed. <line>" when there is no exit status (a timeout, a command that could not start, a window that did not open, a runner that raised). Output with nothing in it reads "… It printed nothing."; output that is all noise reads "… See the full output." |
 | The last meaningful line | Not blank, not a traceback's header, frame, source line or caret line, not "During handling of the above exception…", not a progress bar (block characters, `[=====>   ]`, a trailing `[ 50%]`, `45%|`), not a rule of `=`, `-`, `_` or `*`. A line ruled on both sides, such as pytest's `=== 1 failed, 3 passed in 0.12s ===`, keeps its words. A `\r` overwrite keeps what the terminal last showed |
 | Its length | At most 160 characters of the quoted line, ending in "…" when cut |
 | Success, and a running job | `words.why` is empty, and the sheet draws no "Why" panel |
 | The sheet | The "Why" panel is an inset block under the headline, labelled from `WORDS.why`, with the sentence as text; "Show full output" stays closed under it, and the output is unchanged (the existing 64 KiB tail) |
 | The headline | Unchanged from increment 3 ("Failed, exit N", "Failed"); the mockup's "The tests did not start" would name a cause the output does not state |
+
+## As built for BUG_093: the session's own re-run
+
+The phone's "Re-run tests…" re-runs the session's own scoped tests, with the
+values its own run found (oracle.md, "`oracle/recommend`"). Where the build
+decided what this page left open:
+
+| Question | As built |
+|---|---|
+| What runs | `invariant pipeline test` with each selector of the session's newest scoped run, in its folder, with `INVARIANT_SESSION_ID` and `INVARIANT_<KEY>` for each value that run's discovery resolved. Never the whole suite |
+| A value the privacy patterns flag | Shown masked everywhere the panel shows it: the confirm's "Exact folder and environment", the Command line and Copy, and the detail's Copy. The real value reaches only the command's own environment, when it runs, read from the one run that was confirmed |
+| The Copy line with a masked value | A shell comment, "# Not runnable as shown, <names> masked: <line>": pasted, it runs nothing, since the line shown is not the command that runs |
+| A value nothing flags | Shown as before, `NAME=value` |
+| Nothing to replay | No button on the card or in the detail; the detail's "What is going on" ends with the reason, from the "No re-run offered" fixed strings |
+| The step's sentence | "Runs the tests this session last ran in <project>, in its own folder and with its own settings, …": "test suite" was no longer true |
+| The audit log | Unchanged: the argv and cwd, and no environment |
 
 ## As built in increment 6
 

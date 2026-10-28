@@ -16,6 +16,14 @@ on the step's kind:
   over the ``session handoff`` launcher);
 * ``info`` — nothing. The dialog shows the text and offers no action.
 
+**A masked value is joined when the step runs** (BUG_093). A re-run carries
+the session's own discovered values; one the project's privacy patterns flag
+is in the step masked, everywhere it is shown. ``perform`` reads the real
+value from the one recorded run the step's ``replay`` names
+(``scan.replay_values``) and puts it in the child's environment only. That
+run, and the masked value shown, are part of what is confirmed
+(:func:`command_of`), so what runs is what was confirmed or nothing runs.
+
 **The oracle never answers a prompt.** A row whose host is waiting on a
 permission prompt or a question is told to answer it in its own terminal, and
 :func:`refusal` refuses any runnable step on such a row as a second line of
@@ -40,6 +48,7 @@ from typing import Any
 
 from ..core.errors import InvariantError
 from .recommend import CLI, INFO, RUN, TERMINAL, row_label
+from .scan import replay_values
 from .signals import WAITING
 
 #: Variables of the dashboard's own environment a command must not inherit.
@@ -55,6 +64,9 @@ RUN_TIMEOUT_SECONDS = 600
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 KINDS = (RUN, TERMINAL, INFO)
+
+#: After a masked variable in the confirm: what runs is not what is shown.
+MASKED_NOTE = "   (masked; the session's recorded value is used when it runs)"
 
 #: (argv, cwd, env) -> (exit status, output)
 Runner = Callable[[tuple[str, ...], str, dict[str, str]], tuple[int, str]]
@@ -73,6 +85,10 @@ class Step:
     subject: str = ""
     session_id: str | None = None
     session_name: str | None = None
+    #: The ``env`` names shown masked, whose real values ``perform`` joins.
+    masked: tuple[str, ...] = ()
+    #: The recorded run those values are read from, as sorted pairs.
+    replay: tuple[tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,19 +115,25 @@ def step_for(row: dict[str, Any]) -> Step | None:
         subject=row_label(row),
         session_id=row.get("session_id"),
         session_name=row.get("name"),
+        masked=tuple(advice.get("masked") or ()),
+        replay=tuple(sorted((advice.get("replay") or {}).items())),
     )
 
 
 def command_of(step: Step) -> tuple[Any, ...]:
     """What confirming ``step`` agrees to run, and nothing it only says.
 
-    The kind, the ``argv``, the ``cwd``, the added environment, and for a
-    ``terminal`` step the session name the new host is launched under. The
-    label and the detail are left out: they describe the step, and the gate
-    detail in them moves while the command stays the same.
+    The kind, the ``argv``, the ``cwd``, the added environment as shown, and
+    for a ``terminal`` step the session name the new host is launched under.
+    A masked value is in it as shown, so with it go the names that are masked
+    and the recorded run their real values are read from: two runs whose
+    values mask alike are still two commands (BUG_093). The label and the
+    detail are left out: they describe the step, and the gate detail in them
+    moves while the command stays the same.
     """
     name = step.session_name if step.kind == TERMINAL else None
-    return (step.kind, step.argv, step.cwd, tuple(sorted(step.env.items())), name)
+    return (step.kind, step.argv, step.cwd, tuple(sorted(step.env.items())), name,
+            step.masked, step.replay)
 
 
 def refusal(step: Step, row: dict[str, Any]) -> str | None:
@@ -140,7 +162,10 @@ def confirm_lines(step: Step, launch: str | None) -> list[str]:
         f"in    {step.cwd}",
     ]
     if step.env:
-        lines.extend(f"env   {key}={value}" for key, value in sorted(step.env.items()))
+        lines.extend(
+            f"env   {key}={value}" + (MASKED_NOTE if key in step.masked else "")
+            for key, value in sorted(step.env.items())
+        )
     else:
         lines.append("env   (nothing added)")
     lines.append(
@@ -164,6 +189,11 @@ def child_env(
         env.pop(name, None)
     env.update(added)
     return env
+
+
+def recorded_values(step: Step) -> dict[str, str]:
+    """The real values behind ``step``'s masked variables, from its recorded run."""
+    return replay_values(dict(step.replay), step.masked, step.env)
 
 
 def terminal_request(step: Step) -> tuple[str, str]:
@@ -214,12 +244,14 @@ class Actions:
         strip: Callable[[dict[str, str]], dict[str, str]],
         terminal: Callable[[Step], str] | None = None,
         preview: Callable[[Step], str] | None = None,
+        reveal: Callable[[Step], dict[str, str]] | None = None,
     ) -> None:
         self.runner = runner
         self.environ = environ
         self.strip = strip
         self.terminal = terminal
         self.preview = preview
+        self.reveal = reveal or recorded_values
 
     def launch_line(self, step: Step) -> str | None:
         """The command a ``terminal`` step opens its window with, as previewed."""
@@ -237,7 +269,13 @@ class Actions:
     def perform(self, step: Step) -> Outcome:
         """Do ``step``, which the person has confirmed. ``info`` has no action."""
         if step.kind == RUN:
-            env = child_env(self.environ(), step.env, self.strip)
+            added = dict(step.env)
+            if step.masked:
+                try:
+                    added.update(self.reveal(step))
+                except InvariantError as exc:
+                    return Outcome(False, f"{exc}; nothing ran")
+            env = child_env(self.environ(), added, self.strip)
             try:
                 status, output = self.runner(step.argv, step.cwd or "", env)
             except subprocess.TimeoutExpired:

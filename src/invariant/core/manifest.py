@@ -872,6 +872,29 @@ class Manifest:
                 f"command {name!r} references unknown placeholder {exc}"
             ) from None
 
+    def discovered_in(self, name: str, ecosystem: str | None = None, **extra: str) -> dict[str, str]:
+        """The placeholders of ``name`` that discovery resolved, with their values.
+
+        Asked after :meth:`command_for` with the same arguments: a placeholder
+        ``vars`` or ``extra`` supplied was not discovered, and one discovery
+        has not run for is absent. A run records these so a later replay can
+        hand the same values back to the project's own discovery (BUG_093).
+        """
+        template = self.command_template(name, ecosystem) or ""
+        supplied = set(self.get("vars") or {}) | set(extra)
+        return {
+            placeholder: self._discovery_cache[placeholder]
+            for placeholder in _placeholders(template)
+            if placeholder not in supplied and placeholder in self._discovery_cache
+        }
+
+    def discovers_for(self, name: str, ecosystem: str | None = None) -> list[str]:
+        """The placeholders of ``name`` only a ``discover`` entry can supply."""
+        template = self.command_template(name, ecosystem) or ""
+        supplied = set(self.get("vars") or {})
+        discover = self.get("discover") or {}
+        return [p for p in _placeholders(template) if p not in supplied and p in discover]
+
     def _discover(self, key: str, command: str) -> str:
         if key in self._discovery_cache:
             return self._discovery_cache[key]

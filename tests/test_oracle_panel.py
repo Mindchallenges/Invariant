@@ -27,6 +27,10 @@ from invariant.oracle.index import ProjectIndex
 from invariant.oracle.recommend import assess
 from invariant.oracle.scan import ScanCache, scan_all
 
+#: The WHY for a discovery that produced nothing: none found, or no choice (BUG_093).
+WHY_DISCOVERY = ("invariant could not get a value for destination_id: its discovery "
+                 "found none, or could not choose between several.")
+
 machine_world = test_oracle_scan.machine_world
 
 NOW = 1_792_640_000.0
@@ -415,8 +419,9 @@ class TestDetail:
         ]
         assert detail["step"] == {
             "name": "Re-run the tests",
-            "sentence": "Runs Heap's test suite in this session's folder and records the "
-                        "result. Nothing is changed or deleted.",
+            "sentence": "Runs the tests this session last ran in Heap, in its own folder "
+                        "and with its own settings, and records the result. Nothing is "
+                        "changed or deleted.",
             "button": {"text": "Re-run tests…"},
             "copy": "INVARIANT_SESSION_ID=4b7b00c1 invariant pipeline test",
         }
@@ -562,8 +567,9 @@ class TestConfirmWords:
                                     {"INVARIANT_SESSION_ID": "4b7b00c1"}, launch=None)
         assert words == {
             "title": "Re-run the tests?",
-            "sentence": "Runs Heap's test suite in this session's folder and records the "
-                        "result. Nothing is changed or deleted.",
+            "sentence": "Runs the tests this session last ran in Heap, in its own folder "
+                        "and with its own settings, and records the result. Nothing is "
+                        "changed or deleted.",
             "button": "Run tests",
             "command": "INVARIANT_SESSION_ID=4b7b00c1 invariant pipeline test",
             "place": "In Heap › session folder 4b7b00c1",
@@ -632,7 +638,7 @@ class TestResultWords:
     @pytest.mark.parametrize("status, own, last, printed, why", [
         (1, "discovery for 'destination_id' produced nothing (exit 1). The command was: x",
          "4 simulators are booted", True,
-         "invariant could not find a value for destination_id."),
+         WHY_DISCOVERY),
         (2, 'discovery for "scheme" timed out; the command was: sleep 99', None, True,
          "invariant ran out of time finding a value for scheme."),
         (1, "the merge gates refused this session", "x", True,

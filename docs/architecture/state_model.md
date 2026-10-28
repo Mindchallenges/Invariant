@@ -1105,6 +1105,19 @@ Details that are load-bearing rather than incidental:
   the change's scoped run. Every recorded run says whether it was `full` or
   `scoped`, which is what lets a held path demand a full one.
 
+- **A recorded run keeps what its discovery found** (BUG_093). Every entry of
+  `test_runs`, a `pipeline test` run or a coverage run, carries
+  `discovered`: `{key: value}`, each placeholder of its command that a
+  `discover` entry resolved (`Manifest.discovered_in`), and nothing `vars` or
+  the run itself supplied. A discovery may resolve only in the session's own
+  shell (its own exported simulator, say), so the oracle replays these values
+  to the project's discovery when the phone re-runs the session's tests
+  (oracle.md, "`oracle/recommend`"). The field is additive: a record older
+  than it loads without it, and the oracle reads such a run as one it cannot
+  replay where discovery is needed. It lives under the state root, which is
+  machine-local and never committed or rendered; the oracle shows a value the
+  project's privacy patterns flag only masked.
+
 - **`sweep.fresh` rides beside a scheduled gate, by gate id.** With a cadence,
   `core/machines` adds it to every entry or exit set naming a scheduled gate
   (`Machine.inject_beside`), so the transition that once demanded whole-run
@@ -2070,7 +2083,7 @@ one when it ends:
 |---|---|
 | **A record, not derived** | Nothing else can say afterwards what was run from the phone, so the log sits in `web/` beside the paired devices, not in the watcher's `oracle/`. Only `oracle status` and `doctor` read it back, and only its last 8 KiB, for the last action (`AuditLog.last`, ADR-008 D17). It is appended to and never rewritten, rotated or locked: one process writes it, and each line is a single `O_APPEND` write. |
 | **No record, no action** | The start line is written before the action runs. If it cannot be, the action is refused and nothing runs. A server killed mid-run therefore still leaves the start line. An end line that cannot be written is reported on the page's job. |
-| **No secrets** | No token, nonce, environment or output: the device by id and name, the row by its key, and the command by its `argv` and `cwd`. `exit` is `null` for a terminal step, which has no exit status. |
+| **No secrets** | No token, nonce, environment or output (so no masked value's real value either, BUG_093): the device by id and name, the row by its key, and the command by its `argv` and `cwd`. `exit` is `null` for a terminal step, which has no exit status. |
 | **A start is an action too** | A session started from the page (IDEA_030, ADR-009 D16) writes the same two lines with `kind` `start`, `row` `<project key>\|start`, and the `argv` and `cwd` of the `claude` line it ran in the main checkout, the first message included: it is part of what ran. `exit` is `null`. |
 | **Owner-only from creation** | Opened `O_APPEND \| O_CREAT \| O_NOFOLLOW` with mode `0600` in a `0700` `web/`, so a symbolic link planted in its place is refused rather than followed. |
 | **Clock times, machine-local** | `at` is UTC to the second: ADR-007's D14 exception again, under the home and never committed. |

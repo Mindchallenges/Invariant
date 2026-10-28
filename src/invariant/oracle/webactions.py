@@ -461,7 +461,8 @@ class RemoteActions:
         launch = self.actions.launch_line(step)
         lines = confirm_lines(step, launch)
         words = panel.confirm_words(row, row.get("project_name") or "", step.argv, step.kind,
-                                    step.cwd, step.env, launch, now=self.clock())
+                                    step.cwd, step.env, launch, now=self.clock(),
+                                    masked=step.masked)
         if step.kind == TERMINAL:
             name, _ = terminal_request(step)
             lines.append(

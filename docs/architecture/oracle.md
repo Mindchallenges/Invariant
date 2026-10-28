@@ -68,6 +68,7 @@ graph TD
         MANIFEST[manifest]
         GIT[git]
         RULES[rules]
+        PRIVACY[privacy]
     end
 
     DOMAINS["domains/ (session, pipeline)"]
@@ -119,6 +120,8 @@ graph TD
     DASH --> SIGNALS
     DASH --> SCAN
     ACTIONS --> SIGNALS
+    ACTIONS -- "reads a masked value from its recorded run, at perform time (BUG_093)" --> SCAN
+    SCAN -- "masks what the project's patterns flag (BUG_093)" --> PRIVACY
     CLI --> WEB
     CLI --> DEVICES
     WEB --> DASH
@@ -516,6 +519,24 @@ list` prints `host process records: not used: <why>` under its table. An empty
 directory is a source with nothing running. The records are read once per 60
 seconds, like the other cached answers.
 
+**A session's own values, masked** (BUG_093). A pipeline view carries
+`last_scoped`, the session's newest test run that named selectors: its index
+in the record (`run`), the pipeline's `started`, its `selectors`, whether the
+run kept what its discovery found (`recorded`), whether the project's
+`test_one` command has a placeholder only `discover` supplies
+(`needs_discovery`), and `env`, each discovered value under the variable a
+replay exports it as, `INVARIANT_<KEY>` (`scan.discovery_env`; a key that is
+no variable name, or that would be `INVARIANT_SESSION_ID`, is left out).
+Each value the project's privacy patterns flag is masked with `core/privacy`'s
+own redaction, a finding's `redacted` (`scan.mask_value`: two characters kept,
+the rest blocked out, as in `A1████`), and named in `masked`. Patterns that
+cannot be built mask every value whole, so a broken setting never reads as
+"nothing flagged". `last_test` is masked the same way: its `discovered`
+values, and each one where its resolved `command` spells it. So no flagged
+value is in the scan's rows, the `assess` document or the watcher's snapshot
+in the clear. `scan.replay_values` reads it back, for one recorded run only,
+when a confirmed step runs ("Confirm-first actions" below).
+
 **Last activity** is the latest of the host transcripts' last turns, the
 attention records' modification times, the session's `heartbeat` and its
 `plan_touched`. The times are read, never stored, so the "no stored clock
@@ -691,7 +712,8 @@ table that holds wins.
 | orphan host, alive, exactly one adoptable session, and no other live orphan host here could take it (`adopt_rivals` 0) | run | `invariant session adopt <host> --id <session>` | project root |
 | orphan host, `unmanaged` and every close guard holds | run | `invariant oracle close-host …`, as above | project root |
 | orphan host, otherwise | info | none: start or resume a session from that host | — |
-| failed tests | run | `invariant pipeline test`, with `INVARIANT_SESSION_ID` | worktree, else root |
+| failed tests, a scoped run on record | run | `invariant pipeline test --selector S …`, each selector of the session's newest scoped run, with `INVARIANT_SESSION_ID` and `INVARIANT_<KEY>` for each value that run's discovery resolved (BUG_093) | worktree, else root |
+| failed tests, no scoped run on record, or one older than the record of discovered values while the project's `test_one` needs discovery | info | none: run its tests from the session's own window. The oracle never runs the whole suite (ADR-010) | — |
 | `gate_blocked` | run | `invariant pipeline gates`, with `INVARIANT_SESSION_ID` | worktree, else root |
 | `stuck` | run | `invariant context --id <session>` | worktree, else root |
 | `finished`, reviewed | run | `invariant session merge --id <session>` | project root (the merge runs from the main checkout) |
@@ -726,7 +748,40 @@ Attach waits for the panel's second action ([oracle-panel.md](oracle-panel.md),
 
 `pipeline gates` and `pipeline test` take no `--id`, so the session is pinned
 through `INVARIANT_SESSION_ID`, the explicit route session resolution already
-honours. Adopt is offered only for a host known to be alive: a project that
+honours.
+
+**A re-run is the session's own** (BUG_093). A project whose discovery reads
+a value the session's own shell exported (Heap's `INVARIANT_DESTINATION_ID`,
+which refuses to guess with several simulators booted) used to fail the
+phone's re-run with exit 2, and with a value found it would have run the whole
+suite. Each test run now records what its discovery resolved (state_model.md,
+"Domain: pipeline"), and the step replays the session's newest scoped run: its
+selectors as `--selector`, and each recorded value in `env` as
+`INVARIANT_<KEY>`. That variable is an input to the project's own discovery
+script, which still decides; core honours no `INVARIANT_<NAME>` override, so
+a script that ignores it resolves as it always did. The `pipeline test` CLI is
+unchanged. A value the project's privacy patterns flag is carried masked,
+listed in `masked`, and `replay` names the run its real value is read from:
+`{project, root, session, started, run}`. With nothing to replay the step is
+`info` with a `reason` (`rerun_unscoped`, `rerun_unrecorded`), which the panel
+words.
+
+```mermaid
+sequenceDiagram
+    participant Own as the session's own shell
+    participant P as domains/pipeline
+    participant S as oracle/scan
+    participant R as oracle/recommend
+    participant A as oracle/actions
+    Own->>P: pipeline test --selector S (INVARIANT_DESTINATION_ID exported)
+    P->>P: command_for, then discovered_in: record {destination_id: value}
+    S->>P: read the record (inert store)
+    S->>S: last_scoped: selectors, env masked where flagged, run, started
+    R->>R: argv pipeline test --selector S, env INVARIANT_SESSION_ID and INVARIANT_DESTINATION_ID (masked), replay
+    A->>A: confirm shows the masked value, command_of keeps it with masked and replay
+    A->>S: perform: replay_values(replay): the one run, its value masks as shown
+    A->>A: the child's environment gets the real value, nothing else does
+``` Adopt is offered only for a host known to be alive: a project that
 just tore several sessions down has several transcript-only hosts, and each
 would otherwise be told to adopt the same session. The suite parses every
 `argv` in the table with the real CLI parser.
@@ -1051,9 +1106,23 @@ session. Nothing runs from the key itself (ADR-007 D18):
 | Step | The modal | On `y` or Run |
 |---|---|---|
 | `info` | The label and detail. No Run button | nothing; any key closes it |
-| `run` | `run <argv>`, `in <cwd>`, each variable `env` adds, and a note that host markers and `INVARIANT_SESSION_ID` are removed. Cancel is focused | the runner starts it: no shell, no stdin, a 600 s limit. The output and exit status are shown, and the table refreshes |
+| `run` | `run <argv>`, `in <cwd>`, each variable `env` adds (a masked one as shown, marked "masked; the session's recorded value is used when it runs"), and a note that host markers and `INVARIANT_SESSION_ID` are removed. Cancel is focused | the runner starts it: no shell, no stdin, a 600 s limit. A masked variable's real value is joined first, into the child's environment only. The output and exit status are shown, and the table refreshes |
 | `terminal` | The same, plus the exact line a new Terminal window will run | a `session handoff` launch: `claude --name <session> --remote-control <session>` in the `cwd`, whose first prompt asks it to run the step's command. It counts once the successor is seen alive. No note is recorded and no host is ended |
 | refused | Why it will not run | nothing |
+
+**A masked value is joined when it runs, and only then** (BUG_093, the user's
+ruling: use it, but mask it). The real value is never in a step, a confirm,
+a Copy line, the snapshot or the audit log. `Actions.perform` asks its
+`reveal` (by default `actions.recorded_values`, which is
+`scan.replay_values`) for the values behind the step's `masked` names, from
+the run its `replay` names, and adds them to the child's environment. A run is
+appended and never rewritten, and `started` tells one pipeline of a session
+from the next, so the reference names one set of values for good; each must
+still mask to what was shown. A pipeline that moved, a run that is gone, or a
+value that no longer masks alike runs nothing, and the outcome says why.
+`command_of` keeps the masked value, the masked names and the reference, so
+two runs whose values mask alike are still two commands: a confirm for one
+does not run the other.
 
 `refusal` refuses a runnable step on a row whose host is waiting on a prompt:
 the oracle never answers one, and a waiting row recommends nothing to run in
@@ -1218,12 +1287,15 @@ the TUI's, under the TUI's rules (ADR-007 D18, ADR-008 D8–D13):
 | Step | What happens |
 |---|---|
 | press the button | `GET /api/confirm`: the server scans afresh, finds the row by its key, derives the step and answers `refusal`'s reason, or the `info` text, or the TUI's confirm lines and a nonce, with `words`: `panel.confirm_words`, the sheet's title, sentence, deed, the command as one shell line, the place in plain words, the exact folder, each added variable and a terminal's launch line (previewed once). The bottom sheet shows the question, the command with Copy, the rest behind "Exact folder and environment", the deed over Cancel, which is focused, and the nonce counting down; at zero the deed is disabled and "Look again" asks for a new confirm. A destructive step (`session teardown`) lists what it deletes, puts Cancel first and the command behind "Exact command". Nothing has run |
-| press the deed ("Run tests", "Merge", "Open window") | `POST /api/act` with `{row, nonce}` and nothing else. The nonce is spent; the server scans again, checks every refusal again and that the step is the one confirmed (`command_of`), reserves the row, writes the audit start line, and answers 202 with a job. A thread runs `Actions.perform` |
+| press the deed ("Run tests", "Merge", "Open window") | `POST /api/act` with `{row, nonce}` and nothing else. The nonce is spent; the server scans again, checks every refusal again and that the step is the one confirmed (`command_of`, which for a masked value includes the recorded run it is read from), reserves the row, writes the audit start line, and answers 202 with a job. A thread runs `Actions.perform`, which joins a masked value's real value from that run into the child's environment ("Confirm-first actions" above) |
 | afterwards | the sheet polls `/api/job` every second until the job is done, then shows its `words` (`panel.result_words`: "Done in N s", "Failed, exit N", "Opened in a new window"), for a failure a "Why" panel with `words.why`, and the output's last 64 KiB, unchanged, behind a closed "Show full output". The state loop keeps refreshing throughout, and `/api/state` carries the device's last 20 jobs, which a session's detail lists under "Recent", so a reload still shows the result |
 
 **Copy.** The detail's step and every confirm carry Copy, which puts
 `panel.copy_line` on the clipboard: `shlex.join` of the argv, its pinned
-variables leading as `NAME=value`. It runs nothing and spends no nonce. Over
+variables leading as `NAME=value`. It runs nothing and spends no nonce. A
+line with a masked variable is not the command that runs, so it is a shell
+comment that says so, "# Not runnable as shown, NAME masked: …", and pasting
+it runs nothing (BUG_093). Over
 plain HTTP the clipboard is not available, so the command is shown and
 selected instead (ADR-009 D5).
 

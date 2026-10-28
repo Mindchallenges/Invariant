@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from .recommend import CLI, RUN, TERMINAL
+from .recommend import CLI, RERUN_UNRECORDED, RERUN_UNSCOPED, RUN, TERMINAL
 from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, row_key
 from .signals import (
     ERROR,
@@ -133,6 +133,8 @@ WORDS: dict[str, str] = {
     "copied": "Copied",
     "exact": "Exact folder and environment",
     "runs_as": "Runs as you on the Mac, without the marks of any Claude window.",
+    "masked_env": "  (masked; the session's recorded value is used when it runs)",
+    "masked_copy": "# Not runnable as shown, {names} masked: ",
     "cancel": "Cancel",
     "expires": "This confirm expires in {time}",
     "expired": "This confirm expired.",
@@ -341,8 +343,9 @@ class StepWords:
 _STEPS = {
     "tests": StepWords(
         "Re-run tests…", "Re-run the tests?",
-        "Runs {project}'s test suite in this session's folder and records the result. "
-        "Nothing is changed or deleted.", "Run tests"),
+        "Runs the tests this session last ran in {project}, in its own folder and with "
+        "its own settings, and records the result. Nothing is changed or deleted.",
+        "Run tests"),
     "gates": StepWords(
         "Show blockers…", "Show what is blocking it?",
         "Lists the checks this session still owes and what clears each. Nothing is changed.",
@@ -476,10 +479,23 @@ _WHY = {
 #: unmatched message is quoted under ``said``, never reworded by a guess.
 _OWN_CAUSES = (
     (re.compile(r"discovery for (['\"])(?P<key>.+?)\1 produced nothing\b"),
-     "invariant could not find a value for {key}."),
+     ("invariant could not get a value for {key}: its discovery found none, or could "
+      "not choose between several.")),
     (re.compile(r"discovery for (['\"])(?P<key>.+?)\1 timed out\b"),
      "invariant ran out of time finding a value for {key}."),
 )
+
+#: Why a failing session is offered no "Re-run tests…" (BUG_093), by
+#: ``Recommendation.reason``. The detail says it under "What is going on".
+_NO_RERUN = {
+    RERUN_UNSCOPED: ("The phone does not re-run these tests: no scoped test run is on "
+                     "record for this session, and the panel never runs a whole test "
+                     "suite. Run its tests from the session's own window."),
+    RERUN_UNRECORDED: ("The phone does not re-run these tests yet: the last scoped run "
+                       "was recorded before invariant kept the settings it found, so it "
+                       "cannot be repeated the same way. Run its tests once from the "
+                       "session's own window."),
+}
 
 _RECENT = {
     "permission": "Claude asked for permission",
@@ -578,10 +594,19 @@ def step_words(argv: Iterable[str]) -> StepWords | None:
     return None
 
 
-def copy_line(argv: Iterable[str], env: Mapping[str, str] | None) -> str:
-    """The command as one shell line, its pinned variables leading (ADR-009 D5)."""
+def copy_line(argv: Iterable[str], env: Mapping[str, str] | None,
+              masked: Iterable[str] = ()) -> str:
+    """The command as one shell line, its pinned variables leading (ADR-009 D5).
+
+    A line with a masked variable is not the command that runs, so it is a
+    shell comment that says so: pasted, it runs nothing (BUG_093).
+    """
     pinned = [f"{name}={shlex.quote(value)}" for name, value in sorted((env or {}).items())]
-    return " ".join([*pinned, shlex.join(list(argv))])
+    line = " ".join([*pinned, shlex.join(list(argv))])
+    hidden = sorted(set(masked) & set(env or {}))
+    if hidden:
+        return WORDS["masked_copy"].format(names=", ".join(hidden)) + line
+    return line
 
 
 def _current_host(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -848,7 +873,8 @@ def _step(row: dict[str, Any], project: str, acting: bool) -> dict[str, Any] | N
         "name": words.name,
         "sentence": words.sentence.format(project=project),
         "button": {"text": words.button} if acting and not _waiting(row) else None,
-        "copy": copy_line(advice.get("argv") or (), advice.get("env")),
+        "copy": copy_line(advice.get("argv") or (), advice.get("env"),
+                          advice.get("masked") or ()),
     }
 
 
@@ -956,6 +982,9 @@ def _detail(row: dict[str, Any], project: str, now: float, acting: bool,
     key = row_key(row)
     lane = lane_text((row.get("pipeline") or {}).get("methodology"))
     going_on = _sentences(row, now)
+    no_rerun = _NO_RERUN.get((row.get("recommendation") or {}).get("reason") or "")
+    if no_rerun:
+        going_on = [*going_on, no_rerun]
     if started:
         going_on = [*going_on, _START["opened"].format(name=started)]
     return {
@@ -1280,14 +1309,17 @@ def _place(row: Mapping[str, Any], project: str, cwd: str | None) -> str:
 
 def confirm_words(row: Mapping[str, Any], project: str, argv: Iterable[str], kind: str,
                   cwd: str | None, env: Mapping[str, str] | None,
-                  launch: str | None, now: float | None = None) -> dict[str, Any] | None:
+                  launch: str | None, now: float | None = None,
+                  masked: Iterable[str] = ()) -> dict[str, Any] | None:
     """What the confirm sheet says for a step, or ``None`` for one the table lacks.
 
     The command line and the place lead; the exact folder, each added variable
     and a terminal's launch line sit behind the sheet's toggle (ADR-009 D6). A
-    destructive step lists what goes, from the row (D7).
+    destructive step lists what goes, from the row (D7). A ``masked`` variable
+    is shown masked and says so, and the command's Copy line is not runnable.
     """
     argv = tuple(argv)
+    masked = tuple(masked)
     words = step_words(argv)
     if words is None:
         return None
@@ -1308,10 +1340,11 @@ def confirm_words(row: Mapping[str, Any], project: str, argv: Iterable[str], kin
         "title": words.title,
         "sentence": sentence,
         "button": words.run,
-        "command": copy_line(argv, env),
+        "command": copy_line(argv, env, masked),
         "place": _place(row, project, cwd),
         "cwd": cwd,
-        "env": [f"{name}={value}" for name, value in sorted((env or {}).items())],
+        "env": [f"{name}={value}" + (WORDS["masked_env"] if name in masked else "")
+                for name, value in sorted((env or {}).items())],
         "launch": launch if kind == TERMINAL else None,
         "destructive": words.destructive,
         "deletes_heading": WORDS["this_ends" if words.ends else "this_deletes"],

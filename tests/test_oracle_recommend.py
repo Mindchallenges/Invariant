@@ -46,6 +46,17 @@ def advise(row: Row) -> Recommendation | None:
     return recommend(row, classify(row, NOW))
 
 
+SCOPED = {"run": 3, "started": 1.5, "selectors": ["tests/test_x.py::test_a"],
+          "recorded": True, "needs_discovery": False, "env": {}, "masked": []}
+
+
+def failing(**scoped) -> PipelineView:
+    """A failed last run, with ``scoped`` as its newest scoped run (``None``: none)."""
+    view = with_test({"phase": "green", "passed": False, "failed": 1})
+    view.last_scoped = None if scoped.get("none") else {**SCOPED, **scoped}
+    return view
+
+
 CASES = [
     pytest.param(
         session_row(hosts=[host(attention(waiting=waiting("permission")))]),
@@ -53,8 +64,9 @@ CASES = [
         id="waiting-answers-nothing",
     ),
     pytest.param(
-        session_row(pipeline=with_test({"phase": "green", "passed": False, "failed": 1})),
-        rec.RUN, ("invariant", "pipeline", "test"), WT, {"INVARIANT_SESSION_ID": "s1"},
+        session_row(pipeline=failing()),
+        rec.RUN, ("invariant", "pipeline", "test", "--selector", "tests/test_x.py::test_a"),
+        WT, {"INVARIANT_SESSION_ID": "s1"},
         id="failed-tests",
     ),
     pytest.param(
@@ -187,7 +199,7 @@ def test_a_session_with_no_worktree_runs_from_the_root():
 
 
 def test_a_stranded_worktree_is_not_a_cwd():
-    row = session_row(stranded=True, pipeline=with_test({"passed": False, "phase": "green"}))
+    row = session_row(stranded=True, pipeline=failing())
     assert advise(row).cwd == ROOT
 
 
@@ -197,16 +209,59 @@ def test_a_quiet_session_needs_nothing():
 
 def test_failed_tests_outrank_a_blocked_gate():
     row = session_row(
-        pipeline=with_test({"phase": "green", "passed": False}),
+        pipeline=failing(),
         hosts=[host(attention(turn="ended", blocked={"rules": ["test.all_pass"]}))],
     )
-    assert advise(row).argv == ("invariant", "pipeline", "test")
+    assert advise(row).argv[:3] == ("invariant", "pipeline", "test")
 
 
 def test_a_recommendation_serialises():
     body = Recommendation("l", ("a", "b"), "/c", rec.RUN, {"K": "v"}).to_dict()
     assert body == {"label": "l", "argv": ["a", "b"], "cwd": "/c", "kind": "run",
-                    "env": {"K": "v"}, "detail": ""}
+                    "env": {"K": "v"}, "detail": "", "masked": [], "replay": None,
+                    "reason": ""}
+
+
+class TestRerun:
+    """BUG_093: the phone's re-run is the session's own scoped tests and values."""
+
+    def test_every_selector_of_the_last_scoped_run_is_replayed(self):
+        advice = advise(session_row(pipeline=failing(selectors=["a.py::t", "b.py::u"])))
+        assert advice.argv == ("invariant", "pipeline", "test",
+                               "--selector", "a.py::t", "--selector", "b.py::u")
+        parsed = build_parser().parse_args(list(advice.argv[1:]))
+        assert parsed.selector == ["a.py::t", "b.py::u"]
+
+    def test_with_no_scoped_run_nothing_runs_and_it_says_why(self):
+        advice = advise(session_row(pipeline=failing(none=True)))
+        assert (advice.kind, advice.argv, advice.reason) == (rec.INFO, (), rec.RERUN_UNSCOPED)
+        assert "own window" in advice.label and "whole suite" in advice.label
+
+    def test_a_run_older_than_the_record_is_not_replayed_when_discovery_is_needed(self):
+        advice = advise(session_row(pipeline=failing(recorded=False, needs_discovery=True)))
+        assert (advice.kind, advice.argv, advice.reason) == (rec.INFO, (), rec.RERUN_UNRECORDED)
+
+    def test_a_run_older_than_the_record_replays_when_nothing_is_discovered(self):
+        advice = advise(session_row(pipeline=failing(recorded=False, needs_discovery=False)))
+        assert advice.kind == rec.RUN
+        assert advice.env == {"INVARIANT_SESSION_ID": "s1"}
+
+    def test_the_recorded_values_ride_in_env_beside_the_session_pin(self):
+        advice = advise(session_row(pipeline=failing(
+            needs_discovery=True, env={"INVARIANT_DESTINATION_ID": "SIM-A"})))
+        assert advice.env == {"INVARIANT_DESTINATION_ID": "SIM-A",
+                              "INVARIANT_SESSION_ID": "s1"}
+        assert advice.masked == () and advice.replay is None
+
+    def test_a_masked_value_names_the_run_its_real_value_is_read_from(self):
+        advice = advise(session_row(pipeline=failing(
+            needs_discovery=True, env={"INVARIANT_DESTINATION_ID": "A1████"},
+            masked=["INVARIANT_DESTINATION_ID"])))
+        assert advice.env["INVARIANT_DESTINATION_ID"] == "A1████"
+        assert advice.masked == ("INVARIANT_DESTINATION_ID",)
+        assert advice.replay == {"project": PROJECT, "root": ROOT, "session": "s1",
+                                 "started": 1.5, "run": 3}
+        assert advice.to_dict()["masked"] == ["INVARIANT_DESTINATION_ID"]
 
 
 class TestAssess:
