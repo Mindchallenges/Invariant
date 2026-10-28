@@ -2,14 +2,28 @@
 id: IDEA_035
 type: idea
 title: Launched windows end with Claude, and invariant flags hosts in a polluted environment
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: built in session 675189e4
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: built in session 675189e4
+  forced: false
+- from: in_progress
+  to: done
+  reason: shipped in e3baef8 (session 675189e4)
+  forced: false
 priority: medium
 effort: M
 tier: '5'
 area: hosts/claude_code_launch, cli/main, oracle/scan, oracle/signals
 ---
+
+**Shipped 2026-10-28** (commit e3baef8).
 
 Two leftovers of how Claude windows get started cost the user every day.
 First, a window invariant launches (`session handoff`, `oracle
