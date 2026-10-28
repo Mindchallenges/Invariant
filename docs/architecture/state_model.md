@@ -1097,6 +1097,21 @@ Details that are load-bearing rather than incidental:
   without being unstructural — a machine YAML in `data/machines/`, an API
   contract or an entry-point table changes a diagram with no code beside it,
   and still reads as source here.
+  Test code is the one kind of CODE it holds out, and only where a declared
+  ecosystem's adapter claims the path through `is_test_file` — the same
+  convention the coverage gate keys on. A bugfix whose defect lived in a test
+  harness touched nothing but the suite and the backlog, and could leave
+  `verifying` only by `--force` (BUG_102). The architecture docs describe the
+  product's components, seams and flows; the suite that measures them is not
+  one of them, which is ADR-006 D2's reading of a repro-only commit applied to
+  a fix. Chosen over an acknowledgement route (that would make every test-only
+  fix carry a manual step for a question with one answer) and over a declared
+  "test-only" pipeline flag (a claim the diff already settles with positive
+  evidence, so declaring it adds a way to be wrong and nothing to check). The
+  open cost is a project that does document its harness: each held-out test
+  path is named in the verdict, so the reviewer still sees it, and any
+  non-test path beside it keeps the block. No adapter, no claim — a project
+  declaring no ecosystem holds out nothing.
 
 - **A gate on a sweep cadence stays where the machine puts it.** Scheduling
   `coverage.meets_floor` or `test.all_pass` (`methodology.gates.schedule`,

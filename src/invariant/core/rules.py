@@ -1570,12 +1570,22 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
     source_changed, declared_non_source = _excluded_as_declared_non_source(
         ctx, {p for p in outside_docs if not _is_prose(p)}
     )
+    # Test code is the one kind of code held out, and only on an adapter's
+    # positive claim. The documented architecture is the product's: its
+    # components, seams and flows. A change confined to the suite that
+    # measures them moves none of those, so the doc it demanded was one no
+    # change could honestly write, and a bugfix whose defect lived in a test
+    # harness had `--force` as its only landing (BUG_102). ADR-006 D2 already
+    # held a repro-only commit to the same reading. Named in the verdict, as
+    # `non_source` is: a harness some project does document is still visible
+    # to the reviewer, and a code path beside the tests keeps the block.
+    source_changed, held_as_tests = _excluded_as_test_code(ctx, source_changed)
 
     if not source_changed:
         if outside_docs:
             return Verdict.clean(
                 f"no structural change ({len(outside_docs)} non-source file(s))",
-                detail="; ".join(declared_non_source) or None,
+                detail="; ".join([*declared_non_source, *held_as_tests]) or None,
             )
         return Verdict.clean("docs-only change")
     if docs_changed:
@@ -3863,6 +3873,32 @@ def _explain_absent_rows(
         else:
             unexplained.append(rel)
     return excluded, unexplained
+
+
+def _excluded_as_test_code(
+    ctx: RuleContext, source_changed: set[str]
+) -> tuple[set[str], list[str]]:
+    """Hold out the paths a declared ecosystem's adapter claims as test code.
+
+    Asked of the project-relative spelling, for the reason the coverage gate
+    gives: the directory convention is a fact about the project's layout, and
+    an absolute path can pick up a stray ``tests`` component from above the
+    root. Only ``True`` holds a path out — an adapter with no opinion leaves
+    it source, so a project declaring no ecosystem loses nothing.
+    """
+    adapters = _ecosystem_adapters(ctx)
+    if not adapters:
+        return source_changed, []
+    kept: set[str] = set()
+    excluded: list[str] = []
+    for rel in sorted(source_changed):
+        if _is_test_file(adapters, Path(rel)) is True:
+            excluded.append(
+                f"{rel} (a test file; the suite, not the architecture it measures)"
+            )
+        else:
+            kept.add(rel)
+    return kept, excluded
 
 
 def _excluded_as_declared_non_source(

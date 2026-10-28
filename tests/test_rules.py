@@ -773,6 +773,34 @@ class TestDocsUpdatedAsksWhetherSourceChanged:
         ).verdict
         assert verdict.ok, verdict.message
 
+    def declare(self, ctx_factory, ecosystems):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo", "ecosystems": ecosystems}},
+        )
+
+    def test_a_held_out_test_file_is_named_in_the_verdict(self, ctx_factory):
+        """BUG_102: test code is held out on the adapter's claim, never silently."""
+        self.declare(ctx_factory, ["python"])
+        self.stage(ctx_factory.wt, "tests/test_uploader.py")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+        assert "tests/test_uploader.py (a test file" in (verdict.detail or "")
+
+    def test_a_test_file_with_no_declared_ecosystem_is_still_source(self, ctx_factory):
+        """No adapter, no claim: the hold-out rests on positive evidence only."""
+        self.declare(ctx_factory, [])
+        self.stage(ctx_factory.wt, "tests/test_uploader.py")
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_a_harness_shipped_in_the_app_target_is_still_source(self, ctx_factory):
+        """The adapter's convention, not the word "test", decides."""
+        self.declare(ctx_factory, ["swift_xcode"])
+        self.stage(ctx_factory.wt, "Heap/Support/TestHarness.swift")
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
     def test_code_beside_prose_still_needs_a_doc(self, ctx_factory):
         """The control: the classifier narrows "source", it does not drop it."""
         self.stage(ctx_factory.wt, "app.py", "docs/backlog.rst", "LICENSE")

@@ -67,7 +67,9 @@ methodology:
                                # config suffixes are — before the missing-row
                                # check, not after it. `docs.updated` honours it
                                # too: a non_source path is not "source changed"
-                               # there, and is named the same way. For versioned design
+                               # there, and is named the same way. Not needed for
+                               # test code: both gates already hold out what an
+                               # adapter's is_test_file claims (BUG_102). For versioned design
                                # bundles, fixtures, vendored assets. Every match is
                                # named in the verdict with the pattern that spent
                                # it, because this is the project asserting

@@ -762,6 +762,10 @@ ecosystem has a row for one. `docs.updated` reads only part of this answer: the
 prose suffixes, those names and `non_source`. "Nothing could measure it" is the
 coverage question; "nothing could make a diagram wrong" is the docs question,
 and configuration and markup pass the first while failing the second (BUG_064).
+It also shares one hold-out the coverage gate makes: a path a declared
+ecosystem's adapter claims through `is_test_file` is the suite, not the
+architecture it measures, so a fix confined to test code lands without an
+architecture-doc edit, each such path named in the verdict (BUG_102).
 
 A third lever answers a question neither of those can: the floor is right for
 new code and wrong for old. A file months below it blocks a two-line, fully

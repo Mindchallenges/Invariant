@@ -63,10 +63,6 @@ def _committed_change(ctx_factory, ecosystem, paths):  # noqa: F811
     return only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_102 is live — delete this marker with the fix",
-)
 @pytest.mark.parametrize("ecosystem", sorted(TEST_ONLY_CHANGES))
 def test_BUG_102_a_test_only_change_lands_without_an_architecture_doc(
     ctx_factory,  # noqa: F811
