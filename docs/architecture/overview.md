@@ -1091,18 +1091,30 @@ answers `None`, and so does the owner for a file it cannot read to the end.
 Stacking is the classification rule: the first adapter with an answer wins. A
 file nobody can mask has no mask. It is never matched as raw text, because
 that would widen what the rule reads without anyone seeing it.
+`references(path, relative, root)` answers the `imports` engine's question:
+which project files does this file import? The answer is one `Reference` per
+import, holding the target as a project-relative file, the line number and the
+line's text, which a finding's fingerprint is taken from (ADR-012 D6). An
+import that resolves outside the project, a third-party or standard-library
+module, is outside the `boundary` kind and is not reported. `None` means the
+file cannot be answered for, and a boundary rule then fails as unanswerable
+rather than passing. The base answers `None`, and stacking is the same rule
+again: the first adapter with an answer wins (`core/rules._references`, for
+A3.3 to consume).
+
 `guideline_engines` is what an adapter offers the guidelines domain, a subset
 of `mask` and `imports`. `guidelines.ruleset_valid` refuses a pattern rule
-reading anything but `any` unless a configured adapter offers `mask`, so a
-ruleset cannot ask for a reading the project's adapters cannot give.
+reading anything but `any` unless a configured adapter offers `mask`, and a
+`boundary` rule unless one offers `imports` (DN-A14), so a ruleset cannot ask
+for a reading the project's adapters cannot give.
 
-Which adapters mask, and how:
+Which adapters mask and read imports, and how:
 
-| Adapter | `guideline_engines` | Mask and `executable_text` |
-|---|---|---|
-| `python` | `mask` | Through `tokenize`, for `.py`. An f-string or t-string is one string region, replacement fields included, on every interpreter from 3.10, so a verdict never depends on which interpreter ran. |
-| `swift_xcode` | `mask` | One region reader (`_swift_regions`) for `.swift`, consumed by the comment-and-string blanker, the coverage reducer and the mask. Known limits: a raw string's `#"…"#` delimiter and a quote inside a `\( )` interpolation are read as ordinary quotes. |
-| `node`, `generic` | none | `None`. A node lexer is IDEA_038. |
+| Adapter | `guideline_engines` | Mask and `executable_text` | `references` |
+|---|---|---|---|
+| `python` | `mask`, `imports` | Through `tokenize`, for `.py`. An f-string or t-string is one string region, replacement fields included, on every interpreter from 3.10, so a verdict never depends on which interpreter ran. | Through `ast`, for `.py`. Every import statement counts, at any depth. A relative import resolves by the file's package. An absolute one resolves against the first ancestor of the file with no `__init__.py`, then the project root, and is the project's when its first segment is a module, a package, or a directory holding Python there. `from pkg import name` is the submodule's file when `name` is one, else the package's `__init__.py`. A project import that does not resolve, and a syntax error, make the file unanswerable. |
+| `swift_xcode` | `mask` | One region reader (`_swift_regions`) for `.swift`, consumed by the comment-and-string blanker, the coverage reducer and the mask. Known limits: a raw string's `#"…"#` delimiter and a quote inside a `\( )` interpolation are read as ordinary quotes. | `None`. A Swift module's layers are folder-to-type references, which need a symbol index (ADR-012 ruling 3). |
+| `node`, `generic` | none | `None`. A node lexer is IDEA_038. | `None` (DN-9). |
 
 Both questions take text, and text is what decodes as UTF-8. A file that does
 not decode is not text: the caller asks no adapter about it, so it gets no

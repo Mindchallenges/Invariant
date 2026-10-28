@@ -599,7 +599,9 @@ CONFIGURED = {"guidelines": {"ruleset": "docs/guidelines/ruleset.yaml"}}
 
 
 def ruleset_valid(make_manifest, cwd, *, session=None):
-    manifest = make_manifest({"version": 1, "project": {"name": "demo"}, **CONFIGURED})
+    # The ruleset's boundary rules need an adapter offering imports.
+    project = {"name": "demo", "ecosystems": ["python"]}
+    manifest = make_manifest({"version": 1, "project": project, **CONFIGURED})
     (result,) = evaluate(
         ["guidelines.ruleset_valid"], RuleContext(manifest=manifest, cwd=cwd, session=session)
     )
@@ -707,3 +709,74 @@ class TestAPatternScopeNeedsAMask:
         assert parse(PATTERN_RULESET, registered=REGISTERED).rules
         with pytest.raises(RulesetError, match="needs a lexical mask"):
             parse(PATTERN_RULESET, registered=REGISTERED, engines=frozenset())
+
+
+# -- a boundary rule needs an adapter offering imports (A3.2, DN-A14) -------------
+
+
+BOUNDARY_RULESET = """\
+version: 1
+sections:
+  - id: layers
+    title: Layers
+rules:
+  - id: layers.core-never-imports-oracle
+    section: layers
+    title: Nothing in core imports the oracle
+    statement: No module under core reaches into oracle.
+    severity: blocker
+    phases: [review, landing]
+    applies_to: ["src/invariant/core/**/*.py"]
+    check: {kind: boundary, engine: imports, forbid: ["src/invariant/oracle/**"]}
+"""
+
+
+class TestABoundaryNeedsImports:
+    """DN-A14: a boundary rule is accepted only when a configured adapter's
+    ``guideline_engines`` offers ``imports``, and the refusal names why. Only
+    the python adapter offers it: Swift boundaries need symbols (ruling 3),
+    and node and generic gain nothing (DN-9)."""
+
+    @pytest.mark.parametrize(
+        "ecosystems", [None, ["generic"], ["node"], ["swift_xcode"], ["node", "swift_xcode"]]
+    )
+    def test_no_adapter_offering_imports_refuses_it(self, make_manifest, tmp_path, ecosystems):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", BOUNDARY_RULESET)
+        result = ruleset_valid_under(make_manifest, tmp_path, ecosystems)
+        assert result.blocks
+        detail = result.verdict.detail
+        assert (
+            "rule 'layers.core-never-imports-oracle' check: engine 'imports' needs "
+            "an adapter that reads the import graph, and no configured ecosystem's "
+            "adapter offers one" in detail
+        )
+
+    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode", "python"]])
+    def test_a_configured_adapter_offering_imports_passes(
+        self, make_manifest, tmp_path, ecosystems
+    ):
+        write(tmp_path, "docs/guidelines/ruleset.yaml", BOUNDARY_RULESET)
+        result = ruleset_valid_under(make_manifest, tmp_path, ecosystems)
+        assert result.verdict.ok, result.verdict.detail
+
+    def test_an_only_list_needs_imports_too(self):
+        text = BOUNDARY_RULESET.replace(
+            'forbid: ["src/invariant/oracle/**"]', 'only: ["src/invariant/core/**"]'
+        )
+        with pytest.raises(RulesetError, match="needs an adapter that reads the import graph"):
+            parse(text, registered=REGISTERED, engines=frozenset({"mask"}))
+
+    def test_parse_without_engines_checks_the_schema_only(self):
+        assert parse(BOUNDARY_RULESET, registered=REGISTERED).rules
+        assert parse(
+            BOUNDARY_RULESET, registered=REGISTERED, engines=frozenset({"imports"})
+        ).rules
+
+    def test_a_deferred_engine_is_refused_as_deferred_not_as_unoffered(self):
+        """``symbols`` is still refused by the schema; the offered check names
+        only ``imports``."""
+        text = BOUNDARY_RULESET.replace("engine: imports", "engine: symbols")
+        with pytest.raises(RulesetError) as caught:
+            parse(text, registered=REGISTERED, engines=frozenset())
+        assert "deferred" in str(caught.value.problems)
+        assert "reads the import graph" not in str(caught.value.problems)

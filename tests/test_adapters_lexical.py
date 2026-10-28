@@ -46,9 +46,12 @@ class TestTheSeam:
         assert adapter.lexical_mask(Path("a.ts"), "x // y\n", "code") is None
         assert adapter.executable_text(Path("a.ts"), "x // y\n") is None
 
-    @pytest.mark.parametrize("ecosystem", ["python", "swift_xcode"])
-    def test_python_and_swift_offer_the_mask(self, ecosystem):
-        assert get_adapter(ecosystem).guideline_engines == frozenset({"mask"})
+    @pytest.mark.parametrize(
+        ("ecosystem", "offered"),
+        [("python", {"mask", "imports"}), ("swift_xcode", {"mask"})],
+    )
+    def test_python_and_swift_offer_the_mask(self, ecosystem, offered):
+        assert get_adapter(ecosystem).guideline_engines == frozenset(offered)
 
     def test_the_base_answers_none(self):
         assert Adapter().lexical_mask(Path("a.py"), "x = 1\n", "code") is None
@@ -304,5 +307,5 @@ class TestStacking:
         assert _executable_text(stack, Path("a.ts"), "x = 1\n") is None
 
     def test_the_offered_engines_are_the_union(self):
-        assert _offered_engines(self.adapters("node", "python")) == frozenset({"mask"})
+        assert _offered_engines(self.adapters("node", "swift_xcode")) == frozenset({"mask"})
         assert _offered_engines(self.adapters("generic", "node")) == frozenset()

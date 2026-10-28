@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..adapters import Adapter, get_adapter
+from ..adapters.base import Reference
 from . import git
 from . import guidelines as guidelines_reader
 from . import plan as plan_reader
@@ -4531,6 +4532,23 @@ def _lexical_mask(
         mask = adapter.lexical_mask(relative, text, keep)
         if mask is not None:
             return mask
+    return None
+
+
+def _references(
+    adapters: list[Adapter], path: Path, relative: Path, root: Path
+) -> list[Reference] | None:
+    """The stacking rule for the ``imports`` engine: the first answer wins.
+
+    An adapter answers only for its own ecosystem's files, so the first
+    answer is the owning adapter's. ``None`` when no declared adapter can
+    answer, which leaves a boundary rule unanswerable for the file rather
+    than passing it (ADR-012 D4).
+    """
+    for adapter in adapters:
+        answer = adapter.references(path, relative, root)
+        if answer is not None:
+            return answer
     return None
 
 

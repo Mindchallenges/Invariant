@@ -349,8 +349,10 @@ def parse(
     offer (``Adapter.guideline_engines``). A pattern rule reading ``code``,
     ``comments`` or ``strings`` needs ``mask``, and is refused without it
     (ADR-012 D4): evaluated over raw text instead, it would read more than it
-    says. ``None`` asks the schema question alone; ``guidelines.ruleset_valid``
-    always passes what the configured adapters offer.
+    says. A ``boundary`` rule needs ``imports`` (DN-A14), and is refused
+    without it: no adapter could answer for any file it names. ``None`` asks
+    the schema question alone; ``guidelines.ruleset_valid`` always passes
+    what the configured adapters offer.
     """
     try:
         raw = yaml.safe_load(text)
@@ -573,6 +575,13 @@ class _Reader:
 
     def boundary(self, where: str, raw: Mapping, applies_to: tuple[str, ...]) -> Check:
         engine = self.engine(where, raw["engine"], BOUNDARY_ENGINES, "boundary")
+        if engine in BOUNDARY_ENGINES and self.engines is not None and engine not in self.engines:
+            self.problem(
+                f"{where}: engine {engine!r} needs an adapter that reads the import "
+                f"graph, and no configured ecosystem's adapter offers one; declare "
+                f"an ecosystem whose adapter does (python), or write the rule as "
+                f"judgement"
+            )
         given = [key for key in BOUNDARY_LISTS if key in raw]
         if len(given) != 1:
             self.problem(

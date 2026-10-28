@@ -107,6 +107,22 @@ class TestResult:
         return self.passed and not self.hazards and self.total != 0
 
 
+@dataclass(frozen=True)
+class Reference:
+    """One project file a source file references (ADR-012 D4, ``imports``).
+
+    ``target`` is the referenced file, project-relative in POSIX spelling, so a
+    ``boundary`` rule's globs match it as they match every other declared path.
+    ``line`` is the 1-based line the reference starts on, and ``text`` is that
+    line without its line end: a finding's fingerprint is taken from it (D6),
+    so moving the import does not make the finding new and editing it does.
+    """
+
+    target: str
+    line: int
+    text: str
+
+
 class Adapter:
     """Base adapter. ``generic`` is this class, unmodified."""
 
@@ -333,6 +349,28 @@ class Adapter:
         nothing. A rule that needs a mask and gets none cannot be answered for
         that file, which is the opposite of matching the raw text, a silent
         widening of what the rule reads. The base answers ``None``.
+        """
+        return None
+
+    def references(self, path: Path, relative: Path, root: Path) -> list[Reference] | None:
+        """Every project file ``path`` imports, one :class:`Reference` each.
+
+        The ``imports`` engine's question (ADR-012 D4, the check-kind
+        amendment): a ``boundary`` rule reads which project files a changed
+        file references. ``path`` is the file to read, ``relative`` its
+        project-relative path, which says whose language it is and where it
+        sits in its packages, and ``root`` the project tree imports resolve
+        against.
+
+        An import that resolves outside the project, a third-party or
+        standard-library module, is outside the kind and is not reported
+        (DN-A2). An empty list is a file that imports nothing of the
+        project's. ``None`` is a file this adapter cannot answer for: one
+        outside its ecosystem, one it cannot read or parse, or one whose
+        project import does not resolve. A boundary rule then fails as
+        unanswerable, never passes, for the reason a pattern rule without a
+        mask does. The base answers ``None``; an adapter that answers lists
+        ``imports`` in :attr:`guideline_engines`.
         """
         return None
 

@@ -771,6 +771,73 @@ What landed:
   refusal) and `tests/test_rules.py` (BUG_103's repro, its marker removed,
   and the Python comment-only regression).
 
+**As built: A3 increment 2, Python import references and the imports-offered
+check.** Built to the check-kind amendment (DN-A2, DN-A14) and to the A3
+rulings that bind it: ruling 3 for Swift, DN-9 for node and generic, and
+DN-14 for Python's resolution.
+
+- *The seam.* `Adapter.references(path, relative, root)` answers a list of
+  `Reference(target, line, text)`: the referenced file, project-relative in
+  POSIX spelling, the line the import starts on, and that line's text without
+  its line end, which D6's fingerprint is taken from. It refines D4's
+  `references(path) -> set[str] | None` as the amendment asked. An import
+  that resolves outside the project is outside the kind and is not
+  reported, so an empty list is a file that imports nothing of the
+  project's. `None` is a file the adapter cannot answer for, and a boundary
+  rule then fails rather than passes. The base answers `None`.
+  `core/rules._references` is the stacking rule, the first answer winning,
+  for A3.3 to consume.
+- *Who answers.* `python` offers `imports` beside `mask`. `swift_xcode`
+  gets no references, because a Swift module's boundaries are folder-to-type
+  references that need `symbols` (ruling 3). `node` and `generic` get
+  nothing (DN-9).
+- *Python's resolution (DN-14), through `ast`.*
+  - Every import statement counts, wherever it sits: in a function, under
+    `if TYPE_CHECKING:`, in a `try`.
+  - A relative import resolves by the file's package, its directory climbed
+    once per extra dot. Climbing out of the project, or naming nothing, makes
+    the file unanswerable.
+  - An absolute import resolves against the roots the tree implies: the
+    first ancestor of the file with no `__init__.py` (a src layout's `src`),
+    then the project root. The first root where the first segment is a
+    project package is the one used. A name whose first segment is a project
+    package but which does not resolve to a file makes the file
+    unanswerable.
+  - `import a.b.c` references the file of `a.b.c` alone, not the packages
+    it passes through, so an `only` list does not have to admit every
+    parent `__init__.py`.
+  - `from pkg import name` resolves to the submodule's file when `name` is
+    one, and to the package's `__init__.py` otherwise. A statement naming
+    one file twice reports it once.
+  - A file with a syntax error, one that is not UTF-8, and one that cannot
+    be read are unanswerable.
+- *Choices the rulings left open, taken in the strict direction.*
+  - A project package is a regular package, a module, or a directory holding
+    Python directly, a namespace package. A namespace package's own name
+    holds no file, so `import ns`, or `from ns import x` where `x` is no
+    submodule, is unanswerable. A directory with no Python in it is not a
+    project package, so an import that shares its name stays third-party.
+  - A multi-line import is reported at its first line, with that line's
+    text.
+- *Validation (DN-A14).* `guidelines.ruleset_valid` refuses a `boundary`
+  rule with the `imports` engine unless a configured adapter's
+  `guideline_engines` offers `imports`. The refusal names the missing
+  engine, and the fix: declare an ecosystem whose adapter offers it, or
+  write the rule as judgement. `symbols` is still refused as deferred, by the
+  schema, and not as unoffered. `parse` without `engines` asks the schema
+  question alone, as in increment 1.
+- *What is not here.* No boundary rule is evaluated. `mechanical_clean`'s
+  evaluation of both polarities over `references` is increment 3.
+- *Fixtures.* The kinds tests' gate fixture declares `ecosystems: [python]`,
+  because its ruleset carries two boundary rules; the assertions are
+  unchanged. Two lexical-seam assertions that read "python offers exactly
+  `mask`" now read the ruled set.
+- *Tests.* `tests/test_adapters_references.py` (the seam, relative,
+  absolute, package `__init__`, submodule-from, outside-project,
+  unresolvable project name, syntax error, src layout, every import
+  counting, stacking) and `tests/test_guidelines_kinds.py` (the
+  imports-offered refusal).
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through

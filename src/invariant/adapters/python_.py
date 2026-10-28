@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 import tomllib
 
-from .base import Adapter, Hazard, TestResult, masked
+from .base import Adapter, Hazard, Reference, TestResult, masked
 
 
 class PythonAdapter(Adapter):
@@ -33,7 +33,7 @@ class PythonAdapter(Adapter):
     def detect(self, root: Path) -> bool:
         return (root / "pyproject.toml").is_file() or (root / "setup.py").is_file()
 
-    guideline_engines: ClassVar[frozenset[str]] = frozenset({"mask"})
+    guideline_engines: ClassVar[frozenset[str]] = frozenset({"mask", "imports"})
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".py"]
@@ -51,6 +51,29 @@ class PythonAdapter(Adapter):
         if tokens is None:
             return None
         return masked(text, _python_regions(text, tokens), keep)
+
+    def references(self, path: Path, relative: Path, root: Path) -> list[Reference] | None:
+        """Every project file the module imports, read through ``ast`` (DN-14).
+
+        Every import statement counts, wherever it sits: at module level, in
+        a function, under ``if TYPE_CHECKING:`` or in a ``try``. A relative
+        import resolves by the file's package. An absolute one resolves
+        against the roots the tree implies, the first ancestor of the file
+        with no ``__init__.py`` and then the project root, and is the
+        project's when its first segment names a project package there. A
+        project import that does not resolve to a file makes the whole file
+        unanswerable, and so do a file that is not ``.py``, one that cannot be
+        read as UTF-8, and a syntax error.
+        """
+        relative = Path(relative)
+        if relative.suffix != ".py":
+            return None
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+            tree = ast.parse(text)
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+            return None
+        return _python_references(tree, text, relative.parent.parts, Path(root))
 
     def executable_text(self, relative: Path, source: str) -> str | None:
         """Python's tokens with comments, blank lines and layout removed (DN-10).
@@ -503,3 +526,154 @@ def _python_executable_text(text: str, tokens: Sequence[tokenize.TokenInfo]) -> 
         spelled = "" if kind in _LAYOUT else string
         lines.append(f"{tokenize.tok_name[kind]} {spelled!r}")
     return "\n".join(lines)
+
+
+# -- import references, the imports engine (IDEA_031 A3.2, DN-14) ------------------
+
+#: A project-relative location, as path parts: ``()`` is the project root.
+_Parts = tuple[str, ...]
+
+#: The line breaks ``ast`` counts lines by.
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def _python_references(
+    tree: ast.AST, text: str, folder: _Parts, root: Path
+) -> list[Reference] | None:
+    """One :class:`Reference` per project file each import names, in order.
+
+    ``None`` as soon as one project import cannot be resolved: a file whose
+    references are known in part would let a boundary rule pass on the part
+    it was shown.
+    """
+    lines = _LINE_BREAK.split(text)
+    roots = _import_roots(root, folder)
+    statements = sorted(
+        (n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))),
+        key=lambda n: (n.lineno, n.col_offset),
+    )
+    found: list[Reference] = []
+    for node in statements:
+        if isinstance(node, ast.Import):
+            resolved = _resolve_import(node, root, roots)
+        else:
+            resolved = _resolve_from(node, root, folder, roots)
+        if resolved is None:
+            return None
+        line = lines[node.lineno - 1]
+        for target in dict.fromkeys(resolved):
+            found.append(Reference("/".join(target), node.lineno, line))
+    return found
+
+
+def _import_roots(root: Path, folder: _Parts) -> list[_Parts]:
+    """The roots an absolute import resolves against, in the order tried.
+
+    The first ancestor of the file with no ``__init__.py`` is where its
+    top-level package sits, as a src layout's ``src`` is; the project root
+    follows it.
+    """
+    parts = folder
+    while parts and (root.joinpath(*parts) / "__init__.py").is_file():
+        parts = parts[:-1]
+    return [parts, ()] if parts else [()]
+
+
+def _owns(root: Path, base: _Parts, name: str) -> bool:
+    """Is ``name`` a project module or package directly under ``base``?
+
+    A regular package, a module, or a directory holding Python directly, a
+    namespace package. A directory with no Python in it is not one, so an
+    import that merely shares its name stays third-party.
+    """
+    folder = root.joinpath(*base, name)
+    if (folder / "__init__.py").is_file() or root.joinpath(*base, f"{name}.py").is_file():
+        return True
+    return folder.is_dir() and any(folder.glob("*.py"))
+
+
+def _walk(
+    root: Path, base: _Parts, segments: list[str]
+) -> tuple[_Parts | None, _Parts | None] | None:
+    """Resolve dotted ``segments`` under the package directory ``base``.
+
+    The answer is ``(file, package)``: the file the name loads (a module, a
+    package's ``__init__.py``, or ``None`` for a namespace package) and the
+    directory a submodule of it would sit in (``None`` for a module). ``None``
+    when a segment names nothing.
+    """
+    init = base + ("__init__.py",)
+    file: _Parts | None = init if root.joinpath(*init).is_file() else None
+    package: _Parts | None = base
+    for segment in segments:
+        if package is None:
+            return None
+        here = package + (segment,)
+        if root.joinpath(*here, "__init__.py").is_file():
+            file, package = here + ("__init__.py",), here
+        elif root.joinpath(*package, f"{segment}.py").is_file():
+            file, package = package + (f"{segment}.py",), None
+        elif root.joinpath(*here).is_dir():
+            file, package = None, here
+        else:
+            return None
+    return file, package
+
+
+def _root_owning(root: Path, roots: list[_Parts], name: str) -> _Parts | None:
+    """The first root where ``name`` is a project package, or ``None``."""
+    return next((base for base in roots if _owns(root, base, name)), None)
+
+
+def _resolve_import(node: ast.Import, root: Path, roots: list[_Parts]) -> list[_Parts] | None:
+    """``import a.b.c``: the file of the module named in full, per alias."""
+    targets: list[_Parts] = []
+    for alias in node.names:
+        segments = alias.name.split(".")
+        base = _root_owning(root, roots, segments[0])
+        if base is None:
+            continue
+        module = _walk(root, base, segments)
+        if module is None or module[0] is None:
+            return None
+        targets.append(module[0])
+    return targets
+
+
+def _resolve_from(
+    node: ast.ImportFrom, root: Path, folder: _Parts, roots: list[_Parts]
+) -> list[_Parts] | None:
+    """``from m import n``: a submodule ``n``'s file, else ``m``'s own file."""
+    segments = node.module.split(".") if node.module else []
+    if node.level:
+        base = folder
+        for _ in range(node.level - 1):
+            if not base:
+                return None
+            base = base[:-1]
+    else:
+        owner = _root_owning(root, roots, segments[0])
+        if owner is None:
+            return []
+        base = owner
+    module = _walk(root, base, segments)
+    if module is None:
+        return None
+    file, package = module
+    targets: list[_Parts] = []
+    for alias in node.names:
+        target = None if package is None else _submodule(root, package, alias.name)
+        target = target or file
+        if target is None:
+            return None
+        targets.append(target)
+    return targets
+
+
+def _submodule(root: Path, package: _Parts, name: str) -> _Parts | None:
+    """The file of submodule ``name`` of ``package``, or ``None``."""
+    if root.joinpath(*package, name, "__init__.py").is_file():
+        return package + (name, "__init__.py")
+    if root.joinpath(*package, f"{name}.py").is_file():
+        return package + (f"{name}.py",)
+    return None
