@@ -1172,6 +1172,125 @@ def test_no_test_here_can_end_the_host_session():
     assert os.environ.get("CLAUDE_PID") is None
 
 
+#: A fake process table for BUG_100's repro: Claude on a Terminal tab's tty,
+#: under the tab's shell, ``login`` and Terminal itself. Every pid is above
+#: macOS's largest (99998), so no real process can answer to one.
+_BUG_100_CLAUDE = 7340033
+_BUG_100_TTY = "ttys042"
+_BUG_100_TABLE = {
+    _BUG_100_CLAUDE: (7340032, "claude"),
+    7340032: (7340031, "-zsh"),
+    7340031: (7340030, "login"),
+    7340030: (1, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
+    1: (0, "/sbin/launchd"),
+}
+
+_BUG_100_FAKE_PS = '''
+import os, sys
+table = {table!r}
+tty = {tty!r}
+state = os.environ["BUG_100_STATE"]
+args, pid, fields = sys.argv[1:], None, []
+while args:
+    arg = args.pop(0)
+    if arg == "-p" and args:
+        pid = int(args.pop(0).split(",")[0])
+    elif arg == "-o" and args:
+        fields += [f.split("=")[0] for f in args.pop(0).split(",")]
+if pid not in table or os.path.exists(os.path.join(state, f"gone-{{pid}}")):
+    sys.exit(1)
+ppid, comm = table[pid]
+values = {{"pid": str(pid), "ppid": str(ppid), "comm": comm, "command": comm,
+          "args": comm, "tty": tty if pid != 1 else "??", "lstart": ""}}
+print(" ".join(v for v in (values.get(f, "?") for f in fields or ["comm"]) if v))
+'''
+
+_BUG_100_FAKE_OSASCRIPT = '''
+import json, os, sys
+with open(os.path.join(os.environ["BUG_100_STATE"], "events"), "a") as log:
+    log.write("osascript " + json.dumps(sys.argv[1:]) + "\\n")
+print("closed_window")
+'''
+
+
+@pytest.mark.xfail(
+    strict=True, reason="BUG_100 is live — delete this marker with the fix"
+)
+def test_BUG_100_handoff_close_closes_the_old_terminal_tab_after_claude_exits(
+    monkeypatch, tmp_path
+):
+    """Repro for BUG_100 — see docs/backlog/BUG_100.md.
+
+    Fails while the defect is live. When the fix lands, delete the
+    expected-failure marker; the assertion must then pass unchanged (the
+    harness may need the fix's own seam for the tty, never a weaker check).
+
+    Drives the handoff's real old-session ending path — what
+    ``DetachedCloser.close`` starts — with the OS faked at its edges: ``ps``
+    and ``osascript`` are fakes first on PATH, the shell's ``kill`` only
+    records and marks the pid gone, and every pid is one no real process can
+    have. Asserts the symptom: once Claude has exited, its Terminal tab is
+    asked to close under the panel's Close rules (``TERMINAL_TAB_SCRIPT`` on
+    the host's tty). Nothing reaches Terminal or signals a process.
+    """
+    state = tmp_path / "state"
+    state.mkdir()
+    events = state / "events"
+    events.touch()
+    fakes = tmp_path / "bin"
+    fakes.mkdir()
+    for name, body in (
+        ("ps", _BUG_100_FAKE_PS.format(table=_BUG_100_TABLE, tty=_BUG_100_TTY)),
+        ("osascript", _BUG_100_FAKE_OSASCRIPT),
+    ):
+        path = fakes / name
+        path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakes}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("BUG_100_STATE", str(state))
+
+    real_popen = subprocess.Popen
+    detached = []
+
+    def popen(argv, *rest, **kwargs):
+        if kwargs.get("start_new_session"):
+            detached.append(list(argv))
+            return None
+        return real_popen(argv, *rest, **kwargs)
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    launch.DetachedCloser().close(_BUG_100_CLAUDE, 0)
+    assert len(detached) == 1, detached
+    argv = detached[0]
+    assert "/usr/bin/osascript" not in " ".join(argv), "the real osascript must never run"
+
+    if argv[:2] == ["/bin/sh", "-c"]:
+        kill = (
+            'kill() { printf "kill %s\\n" "$*" >> "$BUG_100_STATE/events"; '
+            "for a; do :; done; "
+            'case "$1" in -0) [ ! -e "$BUG_100_STATE/gone-$a" ] ;; '
+            '*) : > "$BUG_100_STATE/gone-$a" ;; esac; }'
+        )
+        argv = [*argv[:2], f"{kill}\n{argv[2]}", *argv[3:]]
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr
+
+    lines = events.read_text(encoding="utf-8").splitlines()
+    ended = [i for i, line in enumerate(lines)
+             if line.startswith("kill ") and " -0 " not in f" {line} "]
+    tabs = [(i, json.loads(line[len("osascript "):]))
+            for i, line in enumerate(lines) if line.startswith("osascript ")]
+    assert tabs, (
+        f"BUG_100: the handoff ended the old Claude (pid {_BUG_100_CLAUDE}) but never "
+        f"asked Terminal to close its tab on {_BUG_100_TTY}, so the window stays at a "
+        f"shell prompt; the ending path did only: {lines}"
+    )
+    (at, request), *_ = tabs
+    assert request[-1] == f"/dev/{_BUG_100_TTY}", request
+    assert launch.TERMINAL_TAB_SCRIPT in request, "not the panel Close's tab rules"
+    assert not ended or at > ended[0], f"tab asked before Claude was ended: {lines}"
+
+
 # -- surfacing ---------------------------------------------------------
 
 
