@@ -991,7 +991,7 @@ class TestStartCards:
 
 
 class TestStartPicker:
-    def test_it_lists_the_registered_projects_with_their_live_sessions(self):
+    def test_it_lists_the_registered_projects_with_their_open_sessions(self):
         document = {"now": NOW, "projects": [
             {"project": {"key": "K", "name": "Heap", "root": "/r"},
              "rows": [session("s1"), session("s2"), orphan()]},
@@ -1000,10 +1000,28 @@ class TestStartPicker:
         ]}
         shown = panel.view(document, acting=True, starting=True)
         assert shown["start"] == {"projects": [
-            {"id": "K", "name": "Heap", "line": "2 live sessions"},
-            {"id": "L", "name": "Lark", "line": "1 live session"},
-            {"id": "M", "name": "Moss", "line": "No live session"},
+            {"id": "K", "name": "Heap", "line": "2 open sessions"},
+            {"id": "L", "name": "Lark", "line": "1 open session"},
+            {"id": "M", "name": "Moss", "line": "No open session"},
         ]}
+
+    def lines(self, *rows):
+        document = {"now": NOW, "projects": [
+            {"project": {"key": "K", "name": "Heap", "root": "/r"}, "rows": list(rows)},
+        ]}
+        return panel.view(document, acting=True, starting=True)["start"]["projects"][0]["line"]
+
+    def test_a_session_whose_card_reads_paused_is_counted_as_paused_too(self):
+        parked = session("s1", host_ended=True,
+                         signals=[sig("parked", alert=False, severity="info")])
+        gone = session("s2", signals=[sig("host_gone", alert=False, severity="info")])
+        working = session("s3", hosts=[host()], turn_state="busy")
+        assert self.lines(parked) == "1 open session · 1 paused"
+        assert self.lines(parked, gone, working) == "3 open sessions · 2 paused"
+
+    def test_a_session_waiting_on_background_work_is_not_paused(self):
+        waiting = session("s1", hosts=[host()], turn_state="background")
+        assert self.lines(waiting, session("s2")) == "2 open sessions"
 
     def test_a_read_only_page_or_one_without_a_starter_offers_none(self):
         assert started(acting=False)["start"] is None

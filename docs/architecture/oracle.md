@@ -362,7 +362,7 @@ file under every state root and the oracle home before and after two scans
 
 | Kind | What it is |
 |---|---|
-| `session` | A live session: any state the project's session machine does not call terminal or abandoned. The registry is not consulted; `sessions/*.json` is enumerated, because the registry can lag the records. Its hosts are nested under it, the current binding first and then `hosts`, oldest first. |
+| `session` | A live session: any state the project's session machine does not call terminal or abandoned. The registry is not consulted; `sessions/*.json` is enumerated, because the registry can lag the records. Its hosts are nested under it, the current binding first and then `hosts`, oldest first. Live here means not ended, whether or not a host is attached; the panel's Projects line calls these open sessions and names the paused ones apart (BUG_092). |
 | `host` | An orphan host: an attention record or a transcript that no live session claims, shown while the host is alive or for 24 hours after its last sign of life. A host bound only to an ended session counts, and the row names that session. A record whose host said `SessionEnd` does not. The row lists the project's live, not-stranded sessions with no live binding as `adoptable`. |
 | `worktree` | A linked worktree on disk that no live session records. |
 | `error` | A project that cannot be read (no manifest at the root, a manifest that does not parse, a machine that does not load), or one session record that cannot be. One error row never hides another row. A project an older oracle cannot read is not one ("An older oracle" below). |

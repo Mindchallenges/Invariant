@@ -640,7 +640,7 @@ class TestStartASession:
        project: find(sheet(), (n) => n.tagName === "SELECT").value});""")
         assert result["heading"] == ["Projects"]
         assert result["rows"] == ["Heap", "Lark"]
-        assert result["lines"] == ["3 live sessions", "No live session"]
+        assert result["lines"] == ["3 open sessions", "No open session"]
         assert result["pills"] == ["New session…", "New session…"]
         assert result["fetched"] == ["/api/start/confirm?project=L&label=&prompt="]
         assert result["project"] == "L"

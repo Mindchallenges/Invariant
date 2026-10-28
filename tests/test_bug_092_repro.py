@@ -23,13 +23,11 @@ with one working session and one paused one -- not the suspected cause (the
 
 from __future__ import annotations
 
-import pytest
 from test_oracle_panel import NOW, cards, host, session
 
 from invariant.oracle import panel
 
 
-@pytest.mark.xfail(strict=True, reason="BUG_092 is live — delete this marker with the fix")
 def test_BUG_092_projects_line_separates_paused_from_open_sessions():
     working = session("s1", name="fix-it-s1", hosts=[host()], turn_state="busy")
     paused = session("s2", name="other-s2",

@@ -233,6 +233,9 @@ _FACTS: dict[tuple[str, str], tuple[str, str, str, str]] = {
         "It is merged. Its folder and branch can be removed.", ""),
 }
 
+#: The signals whose card reads "Paused": no live host is working on the session.
+_PAUSED = frozenset({PARKED, HOST_GONE})
+
 #: A failing-tests chip with no count.
 _TESTS_FAILING = "Tests failing"
 
@@ -447,9 +450,10 @@ _START = {
                 "trust prompt or a login may be waiting)."),
     "opened": ("Claude is running in a new window on the Mac. Pick it up from Remote "
                "Control on your phone as {name}."),
-    "sessions_none": "No live session",
-    "sessions_one": "1 live session",
-    "sessions": "{n} live sessions",
+    "sessions_none": "No open session",
+    "sessions_one": "1 open session",
+    "sessions": "{n} open sessions",
+    "paused": " · {n} paused",
 }
 
 #: Seconds a started window has to appear in a scan before its card says it
@@ -796,7 +800,7 @@ def _note(row: dict[str, Any]) -> str | None:
         return _WAITING_NOTE
     parts = []
     kinds = {s.get("kind") for s in _signals(row)}
-    if kinds & {PARKED, HOST_GONE}:
+    if kinds & _PAUSED:
         parts.append(_WINDOW_CLOSED)
     phase = _phase(row)
     if phase:
@@ -1206,14 +1210,29 @@ def _starts(document: Mapping[str, Any], jobs: list[Mapping[str, Any]],
     return pending, named
 
 
+def _paused(row: dict[str, Any]) -> bool:
+    """A session with no live host: its host ended, or a card that reads "Paused"."""
+    return bool(row.get("host_ended")) or bool(
+        {s.get("kind") for s in _signals(row)} & _PAUSED)
+
+
 def _start_projects(document: Mapping[str, Any]) -> dict[str, Any]:
-    """The registered projects a start may name, each with its live sessions counted."""
+    """The registered projects a start may name, each with its open sessions counted.
+
+    Open is not ended: every session row, which is every session card across
+    Needs you, Problems, Working and Idle. Those with no live host are named
+    paused as well (BUG_092).
+    """
     projects = []
     for project in document.get("projects", []):
         entry = project.get("project") or {}
-        count = sum(1 for row in project.get("rows", []) if row.get("kind") == ROW_SESSION)
+        rows = [row for row in project.get("rows", []) if row.get("kind") == ROW_SESSION]
+        count = len(rows)
         line = (_START["sessions_none"] if count == 0 else _START["sessions_one"] if count == 1
                 else _START["sessions"].format(n=count))
+        paused = sum(1 for row in rows if _paused(row))
+        if paused:
+            line += _START["paused"].format(n=paused)
         projects.append({"id": entry.get("key", ""), "name": entry.get("name", ""),
                          "line": line})
     return {"projects": projects}

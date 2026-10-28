@@ -257,8 +257,14 @@ overview's top bar (left of Refresh; 44 px tall, radius 22, `surface-button`,
 15 px semibold; hidden on the detail and leftovers screens and on a page that
 cannot act) or by a project's "New session…" pill in the **Projects**
 section, the overview's last block: one 64 px list row per registered project,
-its name over "N live sessions", and the pill. The pill opens the sheet with
-that project chosen; the top bar's chooses the first.
+its name over "N open sessions", and the pill. The pill opens the sheet with
+that project chosen; the top bar's chooses the first. Open means not ended,
+not "a Claude window is attached": the count is every session row of the
+project, so it equals the sum of that project's cards in Needs you, Problems,
+Working and Idle. When any of them has no live host (its host ended, or its
+card reads "Paused": `parked` or `host_gone`), the line adds " · N paused",
+as in "2 open sessions · 1 paused" (BUG_092). A session waiting on its
+background work has a live host and is not paused.
 
 1. Grabber, the title "Start a new session?", and the sentence "A new
    Terminal window on the Mac runs Claude with Remote Control in <project>'s
@@ -494,7 +500,7 @@ re-dispatch a stuck agent, each with its "This deletes" lines.
 | Failure fallback | Failed, exit N. <last meaningful line> |
 | Leftovers | Things that outlived their session. None of them needs you; tidy them when you like. · Claude windows with no session · Left-over folders · Show N more · Close… · Remove… |
 | Leftover classes (inc 6) | leftover host: Still open on the Mac · unmanaged: Open, never had a session · recently active (leftover or unmanaged): Active, no session · gone: Already closed · record only · unknown: Process id not recorded (no pid), Still open on the Mac (alive, no activity known) · process ids disagree: Its process ids disagree |
-| New session (IDEA_030) | New session… · Projects · Project · Name · Remote Control name: <name> · First message (optional) · Claude starts with this message. Leave it empty to start without one. · Exact command and folder · Start session · N Claude windows already open here / 1 Claude window already open here / No Claude window is open here · Main folder has uncommitted changes (N files) / (1 file) / Main folder has no uncommitted changes / Could not tell whether the main folder has uncommitted changes · No live session / 1 live session / N live sessions |
+| New session (IDEA_030) | New session… · Projects · Project · Name · Remote Control name: <name> · First message (optional) · Claude starts with this message. Leave it empty to start without one. · Exact command and folder · Start session · N Claude windows already open here / 1 Claude window already open here / No Claude window is open here · Main folder has uncommitted changes (N files) / (1 file) / Main folder has no uncommitted changes / Could not tell whether the main folder has uncommitted changes · No open session / 1 open session / N open sessions, with " · N paused" appended when nonzero |
 | Starting card (IDEA_030) | Starting… · Did not start · The window did not appear on the Mac within a minute; check the Mac (a trust prompt or a login may be waiting). · Claude is running in a new window on the Mac. Pick it up from Remote Control on your phone as <name>. |
 | Back | Sessions |
 | Technical details | Session <id> · state <state> · lane <methodology>:<phase>; Host <id> · process id <pid> / process id not recorded / process ids disagree: <source> <pid> (<alive, gone or unknown>), … |
@@ -626,7 +632,7 @@ what this page and IDEA_030 left open:
 
 | Question | As built |
 |---|---|
-| Where the per-project shortcut lives | The overview groups by attention, not by project, so there is no project header to put it on. A **Projects** section after the leftovers card lists every registered project (the snapshot's list, so an unregistered folder is never offered) with its live sessions counted and a "New session…" pill |
+| Where the per-project shortcut lives | The overview groups by attention, not by project, so there is no project header to put it on. A **Projects** section after the leftovers card lists every registered project (the snapshot's list, so an unregistered folder is never offered) with its open sessions counted, the paused ones named (BUG_092), and a "New session…" pill |
 | The top bar's button | "New session…": it opens a confirm, so it ends with "…" (the wording rule above) |
 | The routes | `GET /api/start/confirm?project=<key>&label=&prompt=` answers the sheet and a nonce; `POST /api/start {project, nonce}` starts it, from this page's `Origin` only. A server without a starter, and a read-only one, answers neither, and the view's `start` is `null` (oracle.md, "From the phone") |
 | How the name is shown before the start | The Mac answers it: the slug and the `-2` suffix are `startsession.session_name`'s, never the page's. The page asks again after each pause in the typing, and "Start session" waits for the answer |
