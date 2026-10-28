@@ -34,10 +34,19 @@ from invariant.core.conformance import (
 )
 
 #: The gates a configured ruleset injects at the landing (ADR-012 D3).
-GUIDELINES = ("guidelines.ruleset_valid", "guidelines.generated_current")
+GUIDELINES = (
+    "guidelines.ruleset_valid",
+    "guidelines.generated_current",
+    "guidelines.mechanical_clean",
+)
 
 SHIPPED = [
-    "clean", "docs-first-breach", "malformed-ruleset", "red-first-breach", "valid-ruleset",
+    "clean",
+    "docs-first-breach",
+    "malformed-ruleset",
+    "red-first-breach",
+    "seeded-pattern",
+    "valid-ruleset",
 ]
 
 
@@ -60,6 +69,9 @@ def test_a_malformed_ruleset_is_the_one_refusal_at_the_landing(tmp_path):
     # Its outputs cannot be judged against a ruleset that does not load, and
     # the drift gate only ever warns (ruling 7), so it is no refusal.
     assert landing["guidelines.generated_current"] == "warn"
+    # It cannot look for findings either, and the standard profile holds it
+    # at warn (ruling 7), so it is no refusal.
+    assert landing["guidelines.mechanical_clean"] == "warn"
     assert outcome.refusals == {"land": ("guidelines.ruleset_valid",)}
 
 
@@ -74,7 +86,27 @@ def test_a_ruleset_using_every_kind_lands_like_the_clean_change(tmp_path):
     assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
     assert landing["guidelines.ruleset_valid"] == "pass"
     assert landing["guidelines.generated_current"] == "pass"
+    assert landing["guidelines.mechanical_clean"] == "pass"
     assert outcome.refusals == {}
+
+
+def test_a_seeded_pattern_blocks_naming_the_rule_and_line(tmp_path):
+    """A1 increment 3, the seeded pattern (ADR-012 D11, DN-12): one new
+    pattern violation, held at block by the scenario's manifest, is the one
+    refusal at the landing, and the refusal names the rule and the line."""
+    result = replay(load_named("seeded-pattern"), workdir=tmp_path)
+    clean = load_named("clean").expected.gates["committed"]
+    landing = result.outcome.gates["committed"]
+    assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
+    assert landing["guidelines.ruleset_valid"] == "pass"
+    assert landing["guidelines.generated_current"] == "pass"
+    assert landing["guidelines.mechanical_clean"] == "block"
+    assert result.outcome.refusals == {"land": ("guidelines.mechanical_clean",)}
+    (land,) = [step for step in result.steps if step.label == "land"]
+    (gate,) = [g for g in land.document["gates"] if g["rule"] == "guidelines.mechanical_clean"]
+    assert "style.no-print app.py:2" in gate["message"]
+    (record,) = gate["findings"]
+    assert record["citations"] == [{"path": "app.py", "lines": [2, 2]}]
 
 
 @pytest.mark.parametrize("name", SHIPPED)

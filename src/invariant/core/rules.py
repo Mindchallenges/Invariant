@@ -28,6 +28,7 @@ from typing import Any
 
 from ..adapters import Adapter, get_adapter
 from ..adapters.base import Reference
+from . import findings as findings_reader
 from . import git
 from . import guidelines as guidelines_reader
 from . import plan as plan_reader
@@ -35,7 +36,7 @@ from . import sweep as sweep_reader
 from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
-from .manifest import Level, Manifest, project_relative
+from .manifest import Level, Manifest, glob_matches, project_relative
 from .privacy import EXEMPTION_MARKER, PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -148,6 +149,11 @@ class Verdict:
     #: "nothing to check" and "checked and clean" are different facts, and
     #: conflating them is how a gate comes to look green while inert.
     skipped: bool = False
+    #: The records a rule computed, in ADR-012 D5's shape, for a rule that
+    #: has them (``guidelines.mechanical_clean``). ``None`` for every other
+    #: rule, so a payload carries the key only where it means something.
+    #: Printed, never persisted (DN-16).
+    findings: tuple[Mapping[str, Any], ...] | None = None
 
     @classmethod
     def clean(cls, message: str = "", detail: str = "") -> Verdict:
@@ -2134,6 +2140,135 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
         "This rule reports; it never renders.",
         fixes=tuple(fixes),
     )
+
+
+
+@rule(
+    "guidelines.mechanical_clean",
+    summary="No new or unanswerable blocker finding of a pattern or boundary guideline.",
+    events=(),
+)
+def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
+    """ADR-012 D4, D5 and D12, and the A3 rulings DN-2, DN-3, DN-13, DN-16.
+
+    The ``pattern`` and ``boundary`` guidelines evaluated over the changed
+    files only (D4), read from the tree in hand. ``core/findings`` evaluates
+    and this rule does every read: the bytes, the mask through the declared
+    adapters, the references through them, and the changed set. A new or
+    unanswerable finding of a blocker rule fails it. A warn rule's findings
+    are reported inside a pass. Every finding is printed in D5's record shape
+    and kept nowhere. No baseline exists yet, so every finding is new.
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return Verdict.fail(
+            f"no guideline can be evaluated: {failure.message}",
+            detail=failure.detail,
+            fixes=failure.fixes,
+        )
+    if ruleset is None:
+        return Verdict.na("no guidelines ruleset configured")
+    changed = _changed_set(ctx)
+    if not changed.answerable:
+        # Stricter than `docs.updated`, which reads a partial set when the
+        # working tree is dirty: a finding in a committed file nobody can
+        # list would pass unseen.
+        return _unestablished_changed_set(changed)
+
+    tree = guidelines_tree(ctx)
+    adapters = _ecosystem_adapters(ctx)
+    files = _changed_in_tree(ctx, changed, tree)
+    evaluation = findings_reader.evaluate(
+        ruleset.rules,
+        files,
+        read=lambda rel: _read_bytes(tree / rel),
+        mask=lambda rel, text, keep: _lexical_mask(adapters, Path(rel), text, keep),
+        references=lambda rel: _references(adapters, tree / rel, Path(rel), tree),
+    )
+    records = tuple(f.record(ruleset.digest) for f in evaluation.findings)
+    blocking = [f for f in evaluation.findings if f.blocks]
+    warned = [f for f in evaluation.findings if f.counts and not f.blocks]
+    excepted = [f for f in evaluation.findings if not f.counts]
+    detail = _mechanical_detail(evaluation, warned, excepted)
+    if blocking:
+        return Verdict(
+            ok=False,
+            message=f"{len(blocking)} new or unanswerable blocker finding(s): "
+            + "; ".join(f.describe() for f in blocking),
+            detail=detail,
+            fixes=_mechanical_fixes(blocking),
+            findings=records,
+        )
+    return Verdict(
+        ok=True,
+        message=f"no new blocker finding in {evaluation.scanned} changed file(s) "
+        f"under {evaluation.rules} pattern and boundary guideline(s), "
+        f"ruleset {ruleset.digest}",
+        detail=detail,
+        findings=records,
+    )
+
+
+def _changed_in_tree(ctx: RuleContext, changed: _ChangedSet, tree: Path) -> list[str]:
+    """The changed files that are files in the tree, project-relative.
+
+    A deleted file has nothing to match and imports nothing, so it is no
+    finding. The spelling is the one every declared glob is compared in, and
+    a declared absolute path is spelled against the project's checkouts.
+    """
+    bases = [tree, ctx.manifest.root, git.toplevel(ctx.cwd), git.main_checkout(ctx.cwd)]
+    files: set[str] = set()
+    for path in changed.paths:
+        rel = project_relative(Path(path).as_posix(), bases)
+        if rel in (None, ".") or not (tree / rel).is_file():
+            continue
+        files.add(rel)
+    return sorted(files)
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _mechanical_detail(
+    evaluation: findings_reader.Evaluation,
+    warned: list[findings_reader.Finding],
+    excepted: list[findings_reader.Finding],
+) -> str:
+    parts: list[str] = []
+    if warned:
+        parts.append(
+            f"{len(warned)} warn finding(s): " + "; ".join(f.describe() for f in warned)
+        )
+    if excepted:
+        parts.append(
+            f"{len(excepted)} excepted: "
+            + "; ".join(f"{f.describe()} ({f.note})" for f in excepted)
+        )
+    if evaluation.not_text:
+        parts.append(
+            "not UTF-8 text, so no pattern applies: " + ", ".join(evaluation.not_text)
+        )
+    return ". ".join(parts)
+
+
+def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...]:
+    fixes = []
+    if any(f.status == "new" for f in blocking):
+        fixes.append(
+            "change the code so the guideline holds, or give the finding a reasoned "
+            "exception in the ruleset (its path, and its fingerprint from "
+            "`invariant check guidelines.mechanical_clean --json`)"
+        )
+    if any(f.status == "unanswerable" for f in blocking):
+        fixes.append(
+            "make the file answerable: declare the ecosystem whose adapter reads it, "
+            "or fix what stops it being read; an unanswered file never passes"
+        )
+    return tuple(fixes)
 
 
 # -- test rules --------------------------------------------------------
@@ -4235,11 +4370,7 @@ def _first_matching_glob(rel: str, patterns: list[tuple[str, str]]) -> str | Non
     comparison is against the canonical spelling (`_declared_in_project`).
     """
     return next(
-        (
-            written
-            for written, canonical in patterns
-            if fnmatch.fnmatch(rel, canonical) or fnmatch.fnmatch(rel, f"{canonical}/*")
-        ),
+        (written for written, canonical in patterns if glob_matches(rel, canonical)),
         None,
     )
 

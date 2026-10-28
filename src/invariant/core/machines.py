@@ -117,10 +117,19 @@ FRESHNESS_GATE = "sweep.fresh"
 #: that has not opted in. With a ruleset, the landing is where a malformed one
 #: stops a change, and where drift between the ruleset and what render wrote
 #: from it is reported (``guidelines.generated_current``, warn in every
-#: profile, ruling 7). A running pipeline that pinned a ruleset at ``start``
-#: keeps them whatever the manifest says later (``guidelines=True``).
+#: profile, ruling 7). ``guidelines.mechanical_clean`` holds new findings of
+#: the pattern and boundary guidelines there (A3 increment 3); it warns in
+#: ``loose`` and ``standard`` and blocks in ``strict``. A running pipeline
+#: that pinned a ruleset at ``start`` keeps them whatever the manifest says
+#: later (``guidelines=True``).
 GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
-    "landing": {"entry": ["guidelines.ruleset_valid", "guidelines.generated_current"]},
+    "landing": {
+        "entry": [
+            "guidelines.ruleset_valid",
+            "guidelines.generated_current",
+            "guidelines.mechanical_clean",
+        ]
+    },
 }
 
 

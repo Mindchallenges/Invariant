@@ -4,8 +4,10 @@ description: >
   registry file a rule names, and judgement with a mechanical and a claimed
   N/A condition. The change renders the checklist from the ruleset. The
   guidelines gates, injected at the landing because a ruleset is configured,
-  pass beside every other landing gate: ruleset_valid, and generated_current
-  with the checklist current and no instruction-file block inserted.
+  pass beside every other landing gate: ruleset_valid, generated_current
+  with the checklist current and no instruction-file block inserted, and
+  mechanical_clean, because the change adds no print call and imports
+  nothing from the docs.
 
 manifest:
   version: 1
@@ -92,4 +94,5 @@ expect:
       agents.review_agent_ran: pass
       guidelines.ruleset_valid: pass
       guidelines.generated_current: pass
+      guidelines.mechanical_clean: pass
   refusals: {}

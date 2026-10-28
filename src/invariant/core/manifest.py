@@ -17,6 +17,7 @@ layered config that cannot explain itself is a config people disable.
 from __future__ import annotations
 
 import copy
+import fnmatch
 import os
 import posixpath
 import sys
@@ -1045,6 +1046,19 @@ def project_relative(value: Any, bases: Iterable[Path | str | None] = ()) -> str
     if normal == ".." or normal.startswith("../"):
         return None
     return normal
+
+
+def glob_matches(rel: str, canonical: str) -> bool:
+    """Does the project-relative path ``rel`` fall under the declared glob?
+
+    The one matcher a declared glob is compared with (ADR-012 D4: "the same
+    project_relative and glob matcher every other declared glob uses"). The
+    glob is in its canonical spelling (:func:`project_relative`), and it
+    matches the path itself or anything beneath it. ``fnmatch``'s ``*``
+    crosses ``/``, so ``app/*.py`` names every Python file under ``app``,
+    and ``app/**/*.py`` names only those at least one directory down.
+    """
+    return fnmatch.fnmatch(rel, canonical) or fnmatch.fnmatch(rel, f"{canonical}/*")
 
 
 def _base_spellings(base: Path) -> list[str]:

@@ -58,6 +58,7 @@ graph TD
         CSWEEP["sweep (ADR-010)"]
         CONF["conformance (ADR-012 D11)"]
         CGUIDE["guidelines (ADR-012 D3)"]
+        CFIND["findings (ADR-012 D4, A3.3)"]
     end
 
     subgraph domains["domains/ — the seven state domains"]
@@ -232,6 +233,9 @@ graph TD
     CONF --> CONFDATA
     RULES -- load, the render plan, the ruleset and drift gates --> CGUIDE
     CGUIDE -- project_relative --> MANIFEST
+    RULES -- evaluate, with the bytes, masks and references as callables --> CFIND
+    CFIND -- Guideline, the ruleset model it evaluates --> CGUIDE
+    CFIND -- project_relative, glob_matches --> MANIFEST
     CLI --> GDOM
     CLI -. injects INSTRUCTION_FILES into the rule context, PIPELINE and OGATES from .-> CC
     GDOM -- render_checklist, split_managed, for show --> CGUIDE
@@ -447,6 +451,32 @@ configured, and fails, never skips, on one that is configured and does not
 load. `core/machines` injects it at the landing state's entry only when a
 ruleset is configured, so a project that has not opted in sees no change, and
 `doctor` prints the same verdict as a row.
+
+`CFIND` is `core/findings`, the evaluators of the mechanical guidelines
+(IDEA_031 A3 increment 3, ADR-012 D4, D5 and the A3 rulings DN-2, DN-3 and
+DN-13). It holds `Finding`, the `fingerprint` every finding and every
+exception is named by (the first twelve hex digits of SHA-256 over the rule
+id and a kind-specific key, never a line number), and the `pattern` and
+`boundary` evaluators. It is pure: the file bytes, the adapters' lexical mask
+and their references arrive as callables, and it makes no file read and no
+`git` call. `RULES --> CFIND` is the one caller, `guidelines.mechanical_clean`,
+which does every read from the tree in hand, over the changed files alone
+(`_changed_set`). `CFIND --> CGUIDE` is the ruleset model it evaluates, and
+`CFIND --> MANIFEST` is the one spelling of a declared path (`project_relative`)
+and the one glob matcher (`glob_matches`, lifted out of `core/rules`'
+`_first_matching_glob`), so a guideline's globs match exactly as every other
+declared glob does. A pattern matches each line of the masked text, one
+finding per matching line. A boundary checks each reference a changed file
+under `applies_to` makes against its `forbid` or `only` list. A file no
+adapter can mask or answer references for is a failing finding, never a
+pass; a file that is not UTF-8 is not text, so no pattern applies, and the
+verdict names it. The rule fails on a new or unanswerable finding of a
+blocker guideline and reports a warn guideline's findings inside a pass. It
+warns in `loose` and `standard` and blocks in `strict`, and `core/machines`
+injects it beside the other guidelines gates at the landing. The findings are
+printed in D5's record shape on the verdict (`invariant check
+guidelines.mechanical_clean --json`) and kept nowhere. No baseline exists yet,
+so every finding is new; `cochange` is not evaluated yet.
 
 `GDOM` is `domains/guidelines`, the effects the ruleset has on the tree
 (IDEA_031 A2 increment 3, ADR-012 D12). It is not an FSM, like `stats` and
@@ -945,8 +975,8 @@ the CLI would have traded a documentation edit for an architecture violation.
 |---|---|---|
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
-| `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does) |
+| `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks and references), handed to `core/findings` as callables | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
@@ -955,6 +985,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
 | `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
+| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increment 3): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), and the `pattern` and `boundary` evaluators over the changed files, with path and fingerprint exceptions named and unanswerable files counted as findings | Read a file, call `git`, or ask an adapter directly: the bytes, the mask and the references arrive as callables. Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
@@ -1099,8 +1130,8 @@ import that resolves outside the project, a third-party or standard-library
 module, is outside the `boundary` kind and is not reported. `None` means the
 file cannot be answered for, and a boundary rule then fails as unanswerable
 rather than passing. The base answers `None`, and stacking is the same rule
-again: the first adapter with an answer wins (`core/rules._references`, for
-A3.3 to consume).
+again: the first adapter with an answer wins (`core/rules._references`, which
+`guidelines.mechanical_clean` hands to `core/findings`).
 
 `guideline_engines` is what an adapter offers the guidelines domain, a subset
 of `mask` and `imports`. `guidelines.ruleset_valid` refuses a pattern rule
@@ -1119,8 +1150,9 @@ Which adapters mask and read imports, and how:
 Both questions take text, and text is what decodes as UTF-8. A file that does
 not decode is not text: the caller asks no adapter about it, so it gets no
 mask and no reduction, and nothing is relaxed. The comment-only exclusion
-already reads the working copy that way; the pattern evaluator (A3.3) reads
-every file it masks that way.
+already reads the working copy that way; the pattern evaluator
+(`core/findings`) reads every file it masks that way, and names each file it
+set aside as not text.
 
 The `swift_xcode` adapter exists first because the originating project needs
 it, and because it carries the most instructive ecosystem traps — a build tool

@@ -54,6 +54,11 @@ rules:
   # what render would write now (ADR-012 D3). Warns in every profile, strict
   # included (ruling 7): by the time it sees a hand edit, the edit happened.
   guidelines.generated_current: warn
+  # No new or unanswerable finding of a pattern or boundary guideline in
+  # the changed files (ADR-012 D4, D12, ruling 7). Split by profile: it
+  # warns in loose and standard and blocks in strict. A project moves it to
+  # block once its baseline is recorded.
+  guidelines.mechanical_clean: warn
 
   memory.schema_valid: warn
   memory.index_current: warn

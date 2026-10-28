@@ -641,7 +641,7 @@ per pipeline") and DN-D, after the methodology pin (AUD-02, AUD-03).
 | Kind | Question it answers | Evaluated by | v1 |
 |---|---|---|---|
 | `engine` | none of its own; it points at an existing registry rule | that rule | yes |
-| `pattern` | does a match exist in the changed files, in scope? | `core/guidelines` with the adapter's lexical mask | regex: yes. Syntax tree: deferred (ruling 3) |
+| `pattern` | does a match exist in the changed files, in scope? | `core/findings` (A3.3) with the adapter's lexical mask | regex: yes. Syntax tree: deferred (ruling 3) |
 | `boundary` | does code under `applies_to` reference a project file its `forbid` list names, or one its `only` list leaves out? | an adapter dependency question | import graph where the adapter can answer: yes. Symbol index: deferred (ruling 3) |
 | `cochange` | if X changed (or is listed in registry R), did Y change too? | `core/guidelines` over the one changed set | yes |
 | `judgement` | does the change honour this rule? | a model, through a cited verdict (D5) | yes |
@@ -837,6 +837,92 @@ DN-14 for Python's resolution.
   unresolvable project name, syntax error, src layout, every import
   counting, stacking) and `tests/test_guidelines_kinds.py` (the
   imports-offered refusal).
+
+**As built: A3 increment 3, findings and `guidelines.mechanical_clean` over
+`pattern` and `boundary`.** Built to D4, D5, D6, D11, D12 and the A3 rulings
+that bind it: DN-2 (one finding per matching masked line), DN-3 (the boundary
+fingerprint), DN-12 (the seeded-pattern scenario), DN-13 (a pure module beside
+`core/guidelines`) and DN-16 (printed, kept nowhere).
+
+- *`core/findings` (DN-13).* The working name is kept. It holds `Finding`,
+  its record in D5's shape, `fingerprint`, and the `pattern` and `boundary`
+  evaluators. It is pure: the bytes, the mask and the references arrive as
+  callables, and it makes no file read and no `git` call. `core/rules` makes
+  every read, from the tree in hand, and `core/guidelines` stays `git`-free.
+  D12's diagram below drops its `CGUIDE --> GIT` arrow: the baseline and diff
+  reads are `core/rules`' when they land.
+- *The fingerprint.* The first twelve hex digits of SHA-256 over the rule id
+  and a kind-specific key, the parts joined by a NUL so no two pairs can
+  hash one text. A pattern's key is the matched raw line, whitespace
+  collapsed; a boundary's is the referencing line, collapsed, and the target
+  (DN-3). No line number is in it. An exception's `fingerprint` is this
+  function's answer.
+- *Pattern (DN-2).* The masked text and the raw text are split on line feeds
+  and matched line by line with `re.search`, one finding per matching line.
+  `in: any` is the raw text and asks no mask. A mask answer of `None` makes
+  the file unanswerable, and so does a mask that does not keep the file's
+  line count. A file that does not decode as UTF-8 is not text. No pattern
+  applies to it, and the verdict names it.
+- *Boundary (DN-A1 to DN-A3).* Each reference a changed file under
+  `applies_to` makes is checked: under `forbid`, a target matching a glob is
+  a finding; under `only`, a target matching none is. A references answer
+  of `None` makes the file unanswerable.
+- *The rule.* `guidelines.mechanical_clean` evaluates the changed files only
+  (D4, `_changed_set`), in their `project_relative` spelling. It is N/A with
+  no ruleset. It fails on a ruleset that does not load, on a changed set that
+  cannot be established, and on a new or unanswerable finding of a blocker
+  guideline. A warn guideline's findings, the exceptions that applied and the
+  files that are not text are named in the detail of a passing verdict. The
+  levels are D12's: `loose` warn, `standard` warn, `strict` block.
+  `GUIDELINES_GATES` carries it at the landing state's entry beside the
+  other two, only with a ruleset configured.
+- *Printed, not kept (DN-16).* `Verdict` gains `findings`, the records, which
+  only this rule sets. The CLI's verdict payload carries the key only when a
+  rule set it, so `invariant check guidelines.mechanical_clean --json`, and
+  the `--json` of `pipeline gates` and `pipeline advance`, print them. No
+  record is written, and no `guidelines` verb was added.
+- *Conformance (DN-12, A1 increment 3 in part).* The `seeded-pattern`
+  scenario is the clean change with one `print(` added to `app.py`, under a
+  ruleset whose blocker pattern forbids it in code. Its manifest sets
+  `guidelines.mechanical_clean: block`, so the finding is the one refusal at
+  `committed` (D11), and the refusal names `style.no-print app.py:2`.
+  `valid-ruleset`'s known answer gains `mechanical_clean: pass`. A known
+  answer is compared exactly, so `malformed-ruleset`'s gains
+  `mechanical_clean: warn`: a ruleset that does not load fails it, and
+  `standard` holds it at warn.
+- *Small points the rulings left open, taken in the strict direction.*
+  - The one matcher. `glob_matches` was lifted out of `core/rules`'
+    `_first_matching_glob` into `core/manifest`, beside `project_relative`,
+    so a guideline's globs match exactly as every other declared glob does:
+    the path itself or anything beneath it, through `fnmatch`. Two
+    consequences a ruleset author must know. `*` crosses `/`, so `app/*.py`
+    names every Python file under `app`. `**/` needs at least one directory,
+    so `src/invariant/core/**/*.py`, the amendment's own example, does not
+    name `core`'s top-level modules. A rule over every module of a
+    directory writes `src/invariant/core/*.py`, and A3.9's dogfood ruleset
+    must.
+  - A path exception with no fingerprint sets the whole file aside for its
+    rule. The file is not read, and the verdict names it with the reason. A
+    fingerprint exception passes the findings with that fingerprint alone,
+    and never excuses an unanswerable file, which has no fingerprint.
+  - A file that cannot be read is unanswerable, like one no adapter can
+    answer for.
+  - A changed set that cannot be established fails the rule even when the
+    working tree has changes. `docs.updated` reads such a partial set, but
+    a finding in a committed file nobody can list would pass unseen here.
+  - A deleted file is read by nothing. It has no line to match and imports
+    nothing.
+  - A declared absolute path is spelled against the project's checkouts,
+    and the tree in hand.
+  - A finding's citation carries no blob. A finding is computed afresh at
+    every evaluation and kept nowhere, so nothing can go stale against it.
+  - `cochange` rules are not evaluated, and the verdict's rule count names
+    the pattern and boundary rules alone (increment 4).
+- *Tests.* `tests/test_guidelines_findings.py` (the fingerprint, the matcher,
+  both kinds, exceptions, unanswerable and non-text files, the record, the
+  rule and its levels, the injection, and `check --json` through `main`) and
+  `tests/test_conformance_engine.py` (the seeded pattern and the two amended
+  known answers).
 
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
@@ -1224,6 +1310,7 @@ graph TD
     end
     subgraph core["core/"]
         CGUIDE["guidelines (NEW): ruleset model, validation,<br/>selection, rendering, baseline arithmetic,<br/>verdict schema and checks"]
+        CFIND["findings (A3.3): Finding, fingerprint,<br/>pattern and boundary evaluators; pure"]
         CAGENTS["agents (NEW, A6): host-neutral model, overlay merge"]
         RULES["rules: guidelines.* family"]
         MANIFEST[manifest]
@@ -1251,8 +1338,11 @@ graph TD
     GDOM --> adapters
     RULES --> CGUIDE
     RULES --> adapters
+    RULES -- evaluate, reads handed in as callables --> CFIND
+    RULES -- base-branch baseline, diff lines --> GIT
+    CFIND --> CGUIDE
+    CFIND -- project_relative, glob_matches --> MANIFEST
     CGUIDE -- project_relative --> MANIFEST
-    CGUIDE -- base-branch baseline, diff lines --> GIT
     FSM -. injects guidelines.* by role .-> RULES
     PIPELINE --> RULES
     CC --> CGUIDE
@@ -1263,10 +1353,15 @@ graph TD
     RULES --> PROF
 ```
 
-- **`core/guidelines`** is pure apart from file and `git` reads, like
-  `core/plan` and `core/sweep`, so `core/rules` can ask it questions without
-  importing a domain. `CGUIDE --> GIT` is two reads: the baseline at the base
-  ref, and the line numbers a diff adds (a new `git` query, `changed_lines`).
+- **`core/guidelines`** is pure apart from reading the ruleset and its
+  registries, so `core/rules` can ask it questions without importing a
+  domain. It makes no `git` call (A3 increment 3, DN-13). The two `git`
+  reads the family needs, the baseline at the base ref and the line numbers
+  a diff adds (a new `git` query, `changed_lines`), are `core/rules`'
+  (`RULES --> GIT`), as every other read of a rule is.
+- **`core/findings`** evaluates the mechanical kinds and is pure: `core/rules`
+  hands it the bytes, the masks and the references as callables
+  (`RULES --> CFIND`).
 - **`domains/guidelines`** owns the effects: render (writes the generated
   files), baseline prune, verdict submission. `GDOM --> PIPELINE` is the
   verdict write into the pipeline record, horizontal, on the `stats --> session`

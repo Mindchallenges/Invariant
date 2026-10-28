@@ -107,18 +107,23 @@ def report_verdicts(verdicts, args) -> None:
 
 
 def verdicts_payload(verdicts) -> list[dict]:
-    return [
-        {
-            "rule": v.rule_id,
-            "level": v.level.value,
-            "ok": v.verdict.ok,
-            "skipped": v.verdict.skipped,
-            "message": v.verdict.message,
-            "detail": v.verdict.detail,
-            "fixes": list(v.verdict.fixes),
-        }
-        for v in verdicts
-    ]
+    return [_verdict_payload(v) for v in verdicts]
+
+
+def _verdict_payload(v) -> dict:
+    payload = {
+        "rule": v.rule_id,
+        "level": v.level.value,
+        "ok": v.verdict.ok,
+        "skipped": v.verdict.skipped,
+        "message": v.verdict.message,
+        "detail": v.verdict.detail,
+        "fixes": list(v.verdict.fixes),
+    }
+    # Only a rule that computes findings carries them (ADR-012 D5, DN-16).
+    if v.verdict.findings is not None:
+        payload["findings"] = [dict(record) for record in v.verdict.findings]
+    return payload
 
 
 # -- context assembly --------------------------------------------------

@@ -4,7 +4,8 @@ description: >
   and guidelines.ruleset_valid, injected at the landing because a ruleset is
   configured, blocks the advance to committed. guidelines.generated_current,
   injected beside it, cannot judge outputs against a ruleset that does not
-  load, and warns.
+  load, and warns. So does guidelines.mechanical_clean, which cannot look
+  for findings either and is held at warn by the standard profile.
 
 manifest:
   version: 1
@@ -90,5 +91,6 @@ expect:
       agents.review_agent_ran: pass
       guidelines.ruleset_valid: block
       guidelines.generated_current: warn
+      guidelines.mechanical_clean: warn
   refusals:
     land: [guidelines.ruleset_valid]

@@ -1084,6 +1084,22 @@ invariant guidelines show
 ```
 invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
                                  to no particular event.
+    With --json, each verdict is {rule, level, ok, skipped, message, detail,
+    fixes}. A rule that computes findings adds "findings", and today that is
+    guidelines.mechanical_clean alone (ADR-012 D5, A3 increment 3):
+
+      invariant check guidelines.mechanical_clean [--json]
+
+    evaluates the pattern and boundary guidelines over the changed files and
+    names each finding by rule, path, line and, for a boundary, target. Under
+    --json each finding is a record in D5's shape: rule, kind, severity,
+    status (fail, or pass for an exception that applied), finding (new,
+    unanswerable or excepted), citations [{path, lines}], fingerprint, target,
+    note and the ruleset digest. The fingerprint is what a reasoned exception
+    names in the ruleset. The findings are printed and kept nowhere (DN-16).
+    The rule is N/A with no ruleset, and fails on a ruleset that does not load
+    and on a changed set that cannot be established. There is no guidelines
+    verb for this.
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
 
