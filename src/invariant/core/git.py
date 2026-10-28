@@ -538,6 +538,45 @@ def _unquote(text: str) -> str | None:
     return out.decode("utf-8", "surrogateescape")
 
 
+def renamed_files(cwd: Path, base: str) -> dict[str, str] | None:
+    """Every rename git detects in this change, old path to new.
+
+    Measured as :func:`changed_lines` measures, from the merge base of
+    ``base`` and ``HEAD`` to the working tree, so a committed, a staged and an
+    unstaged rename all count, and a rename the base made after the branch
+    left does not. Detection is git's own (``-M``), asked explicitly so the
+    answer does not depend on ``diff.renames``. A file nobody tracks is
+    outside the diff, so a move whose destination is untracked is not a
+    rename until it is staged. Copies are not renames.
+
+    Paths are spelled from the top of the tree, read with ``-z`` so none is
+    quoted. ``None`` when git cannot answer, or when the listing cannot be
+    read, never a smaller answer: a
+    rename missed reads as a deleted file and an added one.
+    """
+    mb = merge_base(cwd, base)
+    top = toplevel(cwd)
+    if mb is None or top is None:
+        return None
+    code, out = _run_bytes(
+        ["diff", "-M", "--name-status", "-z", mb, "--"], top
+    )
+    if code != 0:
+        return None
+    fields = _nul_separated(out)
+    renames: dict[str, str] = {}
+    i = 0
+    while i < len(fields):
+        status = fields[i]
+        width = 3 if status[:1] in ("R", "C") else 2
+        if i + width > len(fields):
+            return None
+        if status[:1] == "R":
+            renames[fields[i + 1]] = fields[i + 2]
+        i += width
+    return renames
+
+
 def tracked_files(cwd: Path) -> list[str] | None:
     """Every file the index tracks, spelled from the top of the tree.
 

@@ -1148,6 +1148,132 @@ and DN-12 (the baselined scenario).
   `tests/test_guidelines.py` (the manifest key), `tests/test_git.py`
   (`tracked_files`) and `tests/test_conformance_engine.py` (`baselined`).
 
+**As built: A3 increment 6, `guidelines.baseline_only_shrinks`.** Built to
+D6 ("Only shrinks"), ruling 5 (always a pure ratchet), ruling 7 and the A3
+rulings that bind it: DN-5 (a stale entry fails here), DN-6 (which growth is
+admitted), DN-7 (renames) and DN-12 (two scenarios).
+
+- *The rule.* `guidelines.baseline_only_shrinks` is graded `block` in
+  `loose`, `standard` and `strict`. It is N/A with no ruleset and with no
+  baseline. A ruleset or a baseline that does not load fails it, and so do a
+  changed set that cannot be established, no base recorded, a merge base git
+  cannot find and a rename listing git cannot give.
+- *Injection.* `core/machines` adds `BASELINE_GATES` to the landing state's
+  entry when the guidelines gates are injected (a ruleset configured, or
+  pinned) and `guidelines.baseline` is configured, on the `sweep.fresh`
+  precedent. The baseline key is read as the manifest stands, never pinned.
+  Clearing it leaves no baseline to honour, which makes every pattern or
+  boundary finding new (DN-1). That shrinks the record, so it is no amnesty.
+- *The base copy.* It is read through git at the merge base of the
+  session's base and `HEAD`, from the tree in hand. The path is the one the
+  base's own `.claude/invariant.yaml` names, read there for its two
+  `guidelines` paths and nothing else. Pointing the key at a new file
+  therefore compares the new file with the old one.
+  - A base with no manifest, or with no `guidelines.baseline`, has no base
+    copy.
+  - The base copy is read in full or not at all. Each of these fails the rule
+    with a message naming the base branch, never admitting everything:
+    - a base manifest that does not parse, or gives a `guidelines` value
+      that is not a mapping or a path;
+    - a configured baseline missing at the merge base;
+    - one git cannot read;
+    - one that is not UTF-8;
+    - one with a line that does not parse.
+  - The base copy is not checked against any ruleset. Its entries are only
+    counted.
+- *The arithmetic, in `core/findings`.* `growth(base, tip, renames)` keys
+  both sides by where a path ends up after the change's renames and sums the
+  counts. A key the tip holds more of is a `Growth`, either `added` (the
+  base held none) or `raised`. Deleting entries and lowering counts are
+  shrinking, and deleted comment or blank lines change nothing.
+- *Admission (DN-6), in `core/rules`.* Growth is admitted when one of these
+  holds:
+  - the base configured no baseline;
+  - the entry's rule is absent from the base's ruleset;
+  - the entry's rule has a different `applies_to`, `check` or `exceptions`
+    there.
+
+  The base ruleset is read only when there is growth to judge. It is parsed
+  from the merge base, with its registries read there too, through the new
+  `read` parameter of `core/guidelines.parse`, for the schema question alone.
+  A base with a baseline and no ruleset has no rules, so every rule is
+  absent from it. A base ruleset that does not parse, or is missing, fails
+  the rule. `definition_of` compares the validated model, not the text, so
+  YAML style, quoting, key order and a `./` before a glob compare equal.
+  Every admitted growth is named, with its reason, in the detail of a
+  passing verdict. A8 adds the lane and ADR requirement; nothing of it is
+  built here.
+- *Stale entries (DN-5).* The ratchet's arithmetic is the one
+  `mechanical_clean` reports in its detail. The pattern and boundary rules
+  are evaluated over the changed files, and an entry of a touched file
+  whose count exceeds what the file holds now is stale. Each stale entry is
+  named, and the fix is `invariant guidelines baseline --prune`.
+- *Renames (DN-7).* `core/git.renamed_files(cwd, base)` answers old path to
+  new for every rename git detects (`-M`) from the merge base to the working
+  tree. Committed, staged and unstaged renames all count. It answers `None`
+  when git cannot say, or when the listing cannot be read, and never gives a
+  smaller answer.
+  - `only_shrinks` accepts a moved entry while rule, fingerprint and count do
+    not grow.
+  - `--prune` rewrites a moved entry's path. It merges the entry with one
+    already recorded at the new path, then lowers or drops it there like any
+    other. Each move is a change with `moved_to`, printed as "moved ... to
+    ...", and `--json` carries the key on every change (null for the
+    others).
+- *Conformance (DN-12).* Two new scenarios, each run under the clean change's
+  steps with `mechanical_clean` at block:
+  - `baseline-grown`: the change adds a second print and writes its entry
+    into the baseline by hand. `mechanical_clean` holds both prints as
+    baselined and passes, and `baseline_only_shrinks` is the one refusal at
+    `committed`, naming the added entry.
+  - `fixed-not-pruned`: the change removes the recorded print and leaves the
+    baseline as it was. The entry is stale, so `baseline_only_shrinks` is the
+    one refusal, and it names `--prune` as its fix.
+
+  `baselined`'s known answer gains `baseline_only_shrinks: pass`, because a
+  known answer is compared exactly.
+- *Small points the rulings left open, taken in the strict direction.*
+  - Injection needs a ruleset (configured or pinned) and a baseline. With a
+    baseline and no ruleset every `guidelines.*` rule is N/A (D3), and a
+    `[skip:BLOCK]` on every landing would be noise.
+  - The base copy is read at the merge base, not at the base branch's tip,
+    so an entry the base gained after the branch left is still the change's
+    growth if the change adds it too. This matches `changed_lines`.
+  - A file the change renamed away counts as touched for the stale check,
+    so an entry left at the old path is stale whatever `diff.renames` says.
+    `_changed_set` lists only the new path when git's rename detection is
+    on, so without this the answer would depend on configuration.
+  - `growth` keys an entry left at the old path and one at the new path to
+    one budget. Keeping both is never more than the base held.
+  - An exception's `reason` is not part of the definition. An exception is
+    its path and fingerprint, and rewording the reason sets nothing else
+    aside. Wording, severity and phases are not part of it either. Globs,
+    exceptions, boundary targets, `then` globs, outcomes and fixes compare
+    as sets, because their order means nothing.
+  - A base that configures a baseline its tree does not hold fails the rule
+    rather than reading as empty, as D6 says of a configured file that does
+    not exist. The fix names repairing the base, or `invariant override`
+    for one evaluation.
+  - An untracked destination is not a rename until it is staged, because
+    git's diff does not see it. A move that is not detected reads as an
+    added entry, which blocks.
+  - `--prune` asks git about renames only when an entry's file is gone and
+    a base is recorded. With no base it drops a gone file's entry as
+    deleted, as before. With a base, an answer git cannot give refuses the
+    prune rather than dropping a moved entry.
+  - Every git path of the family is project-relative, so the project root is
+    taken to be the repository's top, as every git read of the family since
+    A3.4 assumes. The base manifest is read at `.claude/invariant.yaml`.
+- *Tests.* `tests/test_guidelines_ratchet.py` (growth, `definition_of`,
+  `parse` with a reader, the rule over real repositories, admission, stale
+  entries, renames, every failure, the injection, the levels and `check
+  --json`), `tests/test_git.py` (`renamed_files`),
+  `tests/test_guidelines_domain.py` (`--prune` following a rename, merging,
+  dropping out of scope, the refusal and `moved_to` through `main`),
+  `tests/test_rules.py` (reachability through `BASELINE_GATES`) and
+  `tests/test_conformance_engine.py` (`baseline-grown`, `fixed-not-pruned`
+  and the amended `baselined`).
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through
@@ -1534,7 +1660,7 @@ graph TD
     end
     subgraph core["core/"]
         CGUIDE["guidelines (NEW): ruleset model, validation,<br/>selection, rendering, baseline arithmetic,<br/>verdict schema and checks"]
-        CFIND["findings (A3.3 to A3.5): Finding, fingerprint,<br/>pattern, boundary and cochange evaluators,<br/>the ratchet's arithmetic; pure"]
+        CFIND["findings (A3.3 to A3.6): Finding, fingerprint,<br/>pattern, boundary and cochange evaluators,<br/>the ratchet's and only-shrinks' arithmetic; pure"]
         CAGENTS["agents (NEW, A6): host-neutral model, overlay merge"]
         RULES["rules: guidelines.* family"]
         MANIFEST[manifest]
@@ -1564,7 +1690,7 @@ graph TD
     RULES --> CGUIDE
     RULES --> adapters
     RULES -- evaluate, reads handed in as callables --> CFIND
-    RULES -- base-branch baseline, diff lines, tracked files --> GIT
+    RULES -- base-branch baseline, diff lines, tracked files, renames --> GIT
     CFIND --> CGUIDE
     CFIND -- project_relative, glob_matches --> MANIFEST
     CGUIDE -- project_relative --> MANIFEST

@@ -7,7 +7,8 @@ shipped one, so forking a methodology never means forking the library.
 The docs-first gates are injected here rather than written into every
 methodology file, and so is ``sweep.fresh`` beside each gate a sweep cadence
 schedules, and the ``guidelines.*`` landing gates on the landing state of a project
-with a guidelines ruleset. ADR-001 D12 makes docs-first core policy, so a methodology
+with a guidelines ruleset (``guidelines.baseline_only_shrinks`` only when it keeps a
+baseline too). ADR-001 D12 makes docs-first core policy, so a methodology
 cannot opt out by omission — including a methodology this library has never
 seen, which is why the injection is by state role rather than by state name.
 """
@@ -133,6 +134,21 @@ GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
 }
 
 
+#: Attached to the landing state's ENTRY beside ``GUIDELINES_GATES``, and only
+#: when ``guidelines.baseline`` is configured as well (ADR-012 D6, D12, A3
+#: increment 6). Conditional for the reason ``sweep.fresh`` is: with no
+#: baseline the rule is N/A, and it blocks in every profile, so it would
+#: render as ``[skip:BLOCK]`` on every landing of a project that keeps no
+#: baseline. It compares the baseline in the change with the base branch's
+#: committed copy and refuses growth DN-6 does not admit, and a stale entry
+#: (DN-5). The baseline key is read from the manifest as it stands, never
+#: pinned: clearing it leaves no baseline to honour, which shrinks the record
+#: rather than widening it.
+BASELINE_GATES: dict[str, dict[str, list[str]]] = {
+    "landing": {"entry": ["guidelines.baseline_only_shrinks"]},
+}
+
+
 def shipped_ids() -> list[str]:
     return sorted(p.stem for p in MACHINE_DIR.glob("*.yaml"))
 
@@ -193,6 +209,8 @@ def load_pipeline_machine(
         guidelines = manifest is not None and bool(manifest.get("guidelines.ruleset"))
     if guidelines:
         machine = machine.inject_gates(GUIDELINES_GATES)
+        if manifest is not None and manifest.get("guidelines.baseline"):
+            machine = machine.inject_gates(BASELINE_GATES)
     scheduled = manifest.scheduled_gates() if manifest is not None else frozenset()
     return machine.inject_beside(scheduled, FRESHNESS_GATE)
 

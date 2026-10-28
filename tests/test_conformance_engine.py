@@ -38,12 +38,15 @@ GUIDELINES = (
     "guidelines.ruleset_valid",
     "guidelines.generated_current",
     "guidelines.mechanical_clean",
+    "guidelines.baseline_only_shrinks",
 )
 
 SHIPPED = [
+    "baseline-grown",
     "baselined",
     "clean",
     "docs-first-breach",
+    "fixed-not-pruned",
     "malformed-ruleset",
     "missing-test",
     "red-first-breach",
@@ -129,6 +132,38 @@ def test_a_baselined_finding_does_not_block_and_a_new_one_does(tmp_path):
     assert "1 baselined" in gate["message"]
     by_line = {r["citations"][0]["lines"][0]: r["finding"] for r in gate["findings"]}
     assert by_line == {2: "baselined", 3: "new"}
+
+
+def test_a_baseline_entry_added_by_hand_blocks(tmp_path):
+    """A1 increment 3, baseline-grown (ADR-012 D6, D11, DN-12): an entry
+    written into the baseline by hand holds the new print as baselined, so
+    the finding gate passes, and the baseline gate refuses the landing,
+    naming the added entry."""
+    result = replay(load_named("baseline-grown"), workdir=tmp_path)
+    clean = load_named("clean").expected.gates["committed"]
+    landing = result.outcome.gates["committed"]
+    assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
+    assert landing["guidelines.mechanical_clean"] == "pass"
+    assert result.outcome.refusals == {"land": ("guidelines.baseline_only_shrinks",)}
+    (land,) = [step for step in result.steps if step.label == "land"]
+    (gate,) = [g for g in land.document["gates"] if g["rule"] == "guidelines.baseline_only_shrinks"]
+    assert "added style.no-print app.py 436046678e23 (count 1)" in gate["message"]
+
+
+def test_a_fixed_finding_left_in_the_baseline_blocks_with_the_prune_fix(tmp_path):
+    """A1 increment 3, fixed-not-pruned (ADR-012 D6, DN-5, DN-12): the change
+    removes the recorded print and leaves its entry, which is stale, so the
+    baseline gate refuses the landing and names the prune as the fix."""
+    result = replay(load_named("fixed-not-pruned"), workdir=tmp_path)
+    clean = load_named("clean").expected.gates["committed"]
+    landing = result.outcome.gates["committed"]
+    assert {k: v for k, v in landing.items() if k not in GUIDELINES} == clean
+    assert landing["guidelines.mechanical_clean"] == "pass"
+    assert result.outcome.refusals == {"land": ("guidelines.baseline_only_shrinks",)}
+    (land,) = [step for step in result.steps if step.label == "land"]
+    (gate,) = [g for g in land.document["gates"] if g["rule"] == "guidelines.baseline_only_shrinks"]
+    assert "style.no-print app.py 66de9fe2b4b1 (recorded 1, found 0)" in gate["message"]
+    assert "invariant guidelines baseline --prune" in gate["fixes"]
 
 
 def test_a_missing_test_blocks_naming_the_rule_and_file(tmp_path):

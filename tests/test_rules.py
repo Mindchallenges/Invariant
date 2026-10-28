@@ -170,6 +170,7 @@ class TestRegistry:
         """
         from invariant.core.machines import (
             AGENT_ROLE_GATES,
+            BASELINE_GATES,
             DOCS_FIRST_GATES,
             FRESHNESS_GATE,
             GUIDELINES_GATES,
@@ -179,7 +180,9 @@ class TestRegistry:
 
         reachable = {
             gate
-            for injected in (DOCS_FIRST_GATES, *AGENT_ROLE_GATES.values(), GUIDELINES_GATES)
+            for injected in (
+                DOCS_FIRST_GATES, *AGENT_ROLE_GATES.values(), GUIDELINES_GATES, BASELINE_GATES
+            )
             for spec in injected.values()
             for gates in spec.values()
             for gate in gates

@@ -1157,6 +1157,12 @@ Details that are load-bearing rather than incidental:
   render` would write now and warns on drift in every profile, so it reports
   and never refuses the landing. It reads the host's default instruction
   files from the rule context, which `PipelineDomain` is handed by the CLI.
+  `guidelines.mechanical_clean` rides there too (A3 increments 3 and 4).
+  `guidelines.baseline_only_shrinks` (`BASELINE_GATES`, A3 increment 6)
+  joins the same entry set only when `guidelines.baseline` is configured as
+  well. With no baseline it is N/A, and it blocks in every profile. The
+  baseline key is read as the manifest stands, not pinned, because clearing
+  it shrinks what is honoured rather than widening it.
 
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —

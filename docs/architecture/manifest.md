@@ -245,6 +245,21 @@ the landing. It refuses a target that is the ruleset, the checklist, an
 instruction file or a registry, outside the project, or exempt, and text
 with a privacy finding (cli.md, Guidelines). It carries no managed marker.
 
+The baseline only shrinks (A3 increment 6, ADR-012 D6).
+`guidelines.baseline_only_shrinks` compares it with the base branch's
+committed copy, read through git at the merge base, at the path the base's
+own manifest gives for `guidelines.baseline`. Changing the key to a new file
+is therefore compared with the old file, not with nothing. An added entry or
+a raised count fails, unless the base configured no baseline, or the entry's
+rule is absent from the base's ruleset or has a different `applies_to`,
+`check` or `exceptions` there (DN-6). A stale entry, one for a touched file
+recording more findings than the file now holds, fails it too, with
+`invariant guidelines baseline --prune` as the fix (DN-5). An entry follows a
+rename git detects, and `--prune` rewrites its path (DN-7). A base copy that
+does not parse, or that git cannot read, fails the rule rather than admitting
+everything. It blocks in every profile, is N/A with no ruleset or no
+baseline, and is injected at the landing only when both are configured.
+
 ### A sweep cadence
 
 A consuming project ruled that a change never runs the whole test suite or

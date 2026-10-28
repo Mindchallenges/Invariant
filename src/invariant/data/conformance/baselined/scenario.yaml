@@ -107,5 +107,6 @@ expect:
       guidelines.ruleset_valid: pass
       guidelines.generated_current: pass
       guidelines.mechanical_clean: block
+      guidelines.baseline_only_shrinks: pass
   refusals:
     land: [guidelines.mechanical_clean]

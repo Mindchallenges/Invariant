@@ -330,3 +330,85 @@ class TestTrackedFiles:
     def test_a_listing_git_cannot_give_is_none(self, repo, monkeypatch):
         monkeypatch.setattr(git, "_run_bytes", lambda args, cwd: (128, b""))
         assert git.tracked_files(repo) is None
+
+
+# -- renamed_files (A3 increment 6) ----------------------------------------------------
+
+
+class TestRenamedFiles:
+    """The renames a baseline entry follows (ADR-012 DN-7): git's own detection,
+    from the merge base to the working tree, old path to new."""
+
+    def test_no_rename_is_an_empty_answer(self, repo):
+        write(repo, "app.py", "a = 2\n")
+        assert git.renamed_files(repo, "master") == {}
+
+    def test_a_committed_rename_is_detected(self, repo):
+        sh(repo, "mv", "app.py", "moved.py")
+        sh(repo, "commit", "-qm", "move")
+        assert git.renamed_files(repo, "master") == {"app.py": "moved.py"}
+
+    def test_a_staged_rename_is_detected(self, repo):
+        sh(repo, "mv", "app.py", "moved.py")
+        assert git.renamed_files(repo, "master") == {"app.py": "moved.py"}
+
+    def test_a_rename_with_an_edit_is_still_a_rename(self, repo):
+        sh(repo, "mv", "app.py", "moved.py")
+        write(repo, "moved.py", "a = 1\nb = 2\nc = 3\nd = 4\n")
+        assert git.renamed_files(repo, "master") == {"app.py": "moved.py"}
+
+    def test_a_deletion_is_not_a_rename(self, repo):
+        sh(repo, "rm", "-q", "gone.py")
+        assert git.renamed_files(repo, "master") == {}
+
+    def test_an_untracked_destination_is_not_detected(self, repo):
+        (repo / "app.py").rename(repo / "loose.py")
+        assert git.renamed_files(repo, "master") == {}
+
+    def test_a_rename_on_the_base_after_the_branch_left_is_not_the_change_s(self, repo):
+        sh(repo, "checkout", "-q", "master")
+        sh(repo, "mv", "gone.py", "kept.py")
+        sh(repo, "commit", "-qm", "the base moved a file")
+        sh(repo, "checkout", "-q", "work")
+        assert git.renamed_files(repo, "master") == {}
+
+    @pytest.mark.parametrize("name", ['we"ird.py', "tab\there.py", "é.py", "sp ace.py"])
+    def test_a_path_git_would_quote_is_spelled_as_it_is(self, repo, name):
+        sh(repo, "mv", "app.py", name)
+        assert git.renamed_files(repo, "master") == {"app.py": name}
+
+    def test_it_answers_from_a_subdirectory_with_top_level_paths(self, repo):
+        sh(repo, "mv", "docs/notes.md", "docs/moved.md")
+        assert git.renamed_files(repo / "docs", "master") == {"docs/notes.md": "docs/moved.md"}
+
+    def test_it_detects_renames_whatever_diff_renames_says(self, repo):
+        sh(repo, "config", "diff.renames", "false")
+        sh(repo, "mv", "app.py", "moved.py")
+        assert git.renamed_files(repo, "master") == {"app.py": "moved.py"}
+
+    @pytest.mark.parametrize("base", ["", "no-such-branch", "-p"])
+    def test_an_unreadable_base_is_none(self, repo, base):
+        assert git.renamed_files(repo, base) is None
+
+    def test_outside_a_repository_it_is_none(self, tmp_path):
+        assert git.renamed_files(tmp_path, "master") is None
+
+    def test_a_diff_git_cannot_give_is_none(self, repo, monkeypatch):
+        real = git._run_bytes
+
+        def failing(args, cwd):
+            return (1, b"") if "--name-status" in args else real(args, cwd)
+
+        monkeypatch.setattr(git, "_run_bytes", failing)
+        assert git.renamed_files(repo, "master") is None
+
+    def test_a_listing_it_cannot_read_is_none(self, repo, monkeypatch):
+        real = git._run_bytes
+
+        def odd(args, cwd):
+            if "--name-status" in args:
+                return 0, b"R100\0only-one-path\0"
+            return real(args, cwd)
+
+        monkeypatch.setattr(git, "_run_bytes", odd)
+        assert git.renamed_files(repo, "master") is None

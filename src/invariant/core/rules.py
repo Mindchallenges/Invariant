@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import yaml
+
 from ..adapters import Adapter, get_adapter
 from ..adapters.base import Reference
 from . import findings as findings_reader
@@ -36,7 +38,7 @@ from . import sweep as sweep_reader
 from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
-from .manifest import Level, Manifest, glob_matches, project_relative
+from .manifest import MANIFEST_RELPATH, Level, Manifest, glob_matches, project_relative
 from .privacy import EXEMPTION_MARKER, PrivacyScanner
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -2509,7 +2511,7 @@ def baseline_summary(ctx: RuleContext) -> tuple[bool, str]:
 
 @dataclass(frozen=True)
 class BaselineChange:
-    """An entry ``guidelines baseline`` lowered or dropped, and why."""
+    """An entry ``guidelines baseline`` lowered, dropped or moved, and why."""
 
     rule: str
     path: str
@@ -2518,8 +2520,15 @@ class BaselineChange:
     #: 0 when the entry is dropped.
     after: int
     reason: str
+    #: The path the entry moved to, when the change renamed its file (DN-7).
+    moved_to: str | None = None
 
     def describe(self) -> str:
+        if self.moved_to is not None:
+            return (
+                f"moved {self.rule} {self.path} {self.fingerprint} to {self.moved_to}: "
+                f"{self.reason}"
+            )
         what = "dropped" if self.after == 0 else f"lowered {self.before} -> {self.after}"
         return f"{what} {self.rule} {self.path} {self.fingerprint}: {self.reason}"
 
@@ -2798,7 +2807,11 @@ def _prune_baseline(
     existing: str | None,
     rel: str,
 ) -> tuple[list[guidelines_reader.BaselineEntry], list[BaselineChange]]:
-    """The baseline shrunk to what the touched files still hold. Never grown."""
+    """The baseline shrunk to what the touched files still hold. Never grown.
+
+    An entry whose file the change renamed moves to the new path first
+    (DN-7), and is then lowered or dropped there like any other.
+    """
     if existing is None:
         raise BaselineRefused(
             f"the configured guidelines baseline {rel} does not exist; --prune only "
@@ -2815,6 +2828,7 @@ def _prune_baseline(
         )
     files, gone = _changed_in_tree(ctx, changed, tree)
     touched = set(files) | set(gone)
+    entries, changes = _follow_renames(ctx, tree, changed.base, entries)
     rules = [r for r in ruleset.rules if r.check.kind in guidelines_reader.BASELINE_KINDS]
     evaluation = findings_reader.evaluate(
         rules, files, **_finding_reads(tree, _ecosystem_adapters(ctx))
@@ -2826,7 +2840,6 @@ def _prune_baseline(
     )
     counts = findings_reader.counted(evaluation.findings)
     kept: list[guidelines_reader.BaselineEntry] = []
-    changes: list[BaselineChange] = []
     for entry in entries:
         rule = ruleset.by_id(entry.rule)
         drop = _gone(entry, rule)
@@ -2856,6 +2869,396 @@ def _prune_baseline(
         else:
             kept.append(entry)
     return kept, changes
+
+
+def _spelled_renames(
+    ctx: RuleContext, tree: Path, answer: Mapping[str, str]
+) -> dict[str, str]:
+    """``git.renamed_files``' answer in the spelling every declared path is
+    compared in, as ``_changed_in_tree`` spells the changed paths."""
+    return {
+        old: new
+        for raw_old, raw_new in answer.items()
+        if (old := _tree_relative(ctx, tree, raw_old)) is not None
+        and (new := _tree_relative(ctx, tree, raw_new)) is not None
+    }
+
+
+def _follow_renames(
+    ctx: RuleContext,
+    tree: Path,
+    base: str,
+    entries: Iterable[guidelines_reader.BaselineEntry],
+) -> tuple[list[guidelines_reader.BaselineEntry], list[BaselineChange]]:
+    """Each entry whose file the change renamed, moved to the new path (DN-7).
+
+    Git is asked only when an entry's file is gone from the tree and a base
+    is recorded; with no base there is nothing to measure a rename from, and
+    a gone file is a deleted one, as before. An answer git cannot give
+    refuses the prune rather than dropping a moved entry as deleted. A moved
+    entry that meets one already recorded at the new path is merged with it,
+    since one (rule, path, fingerprint) is one entry.
+    """
+    entries = list(entries)
+    if not base or all((tree / e.path).is_file() for e in entries):
+        return entries, []
+    answer = git.renamed_files(tree, base)
+    if answer is None:
+        raise BaselineRefused(
+            "git could not say which files this change renamed, so prune cannot tell a "
+            "moved file from a deleted one",
+            "check the session's base branch is reachable, then prune again",
+        )
+    renames = _spelled_renames(ctx, tree, answer)
+    merged: dict[tuple[str, str, str], guidelines_reader.BaselineEntry] = {}
+    changes: list[BaselineChange] = []
+    for entry in entries:
+        moved_to = renames.get(entry.path)
+        if moved_to is not None and not (tree / entry.path).is_file():
+            changes.append(BaselineChange(
+                entry.rule, entry.path, entry.fingerprint, entry.count, entry.count,
+                f"its file was renamed to {moved_to}", moved_to=moved_to,
+            ))
+            entry = guidelines_reader.BaselineEntry(
+                entry.rule, moved_to, entry.fingerprint, entry.count
+            )
+        held = merged.get(entry.key)
+        merged[entry.key] = entry if held is None else guidelines_reader.BaselineEntry(
+            entry.rule, entry.path, entry.fingerprint, held.count + entry.count
+        )
+    return list(merged.values()), changes
+
+
+@rule(
+    "guidelines.baseline_only_shrinks",
+    summary="The guidelines baseline only shrinks against the base branch's copy, "
+    "and no stale entry is left in a touched file.",
+    events=(),
+)
+def _guidelines_baseline_only_shrinks(ctx: RuleContext) -> Verdict:
+    """ADR-012 D6 ("Only shrinks"), ruling 7, and the A3 rulings DN-5 to DN-7.
+
+    The baseline in the change is compared with the base branch's committed
+    copy, read through git at the merge base, at the path the BASE's own
+    manifest names, so pointing ``guidelines.baseline`` at a new file is no
+    amnesty. An added entry or a raised count fails, unless DN-6 admits it:
+    the base configured no baseline, or the entry's rule is absent from the
+    base's ruleset, or has a different ``applies_to``, ``check`` or
+    ``exceptions`` there (``definition_of``, compared structurally). An entry
+    follows a rename git detects (DN-7), so a move is accepted while rule,
+    fingerprint and count do not grow. Deleting entries is shrinking.
+
+    A stale entry fails it too (DN-5): the ratchet's arithmetic over the
+    touched files, as ``guidelines.mechanical_clean`` reports it in its
+    detail, with ``invariant guidelines baseline --prune`` as the fix. A file
+    the change renamed away counts as touched, so an entry left at the old
+    path is stale whatever ``diff.renames`` says.
+
+    N/A with no ruleset or no baseline. A ruleset or baseline that does not
+    load, a changed set that cannot be established, no base, a merge base, a
+    rename listing or a base copy git cannot give, and a base copy that does
+    not parse each FAIL it: none of them is an answer, and admitting
+    everything would be.
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return _cannot_compare(failure)
+    if ruleset is None:
+        return Verdict.na("no guidelines ruleset configured")
+    if not ctx.manifest.get("guidelines.baseline"):
+        return Verdict.na("no baseline configured: every pattern or boundary finding is new")
+    entries, broken = load_baseline(ctx, ruleset)
+    if broken is not None:
+        return _cannot_compare(broken)
+    changed = _changed_set(ctx)
+    if not changed.answerable:
+        return _unestablished_changed_set(changed)
+    tree = guidelines_tree(ctx)
+    base = _base_point(tree, changed.base)
+    if isinstance(base, Verdict):
+        return base
+    point, renames = base[0], _spelled_renames(ctx, tree, base[1])
+    copy = _base_baseline(ctx, tree, point)
+    if isinstance(copy, Verdict):
+        return copy
+
+    grown = findings_reader.growth(copy.entries, entries, renames)
+    admitted: list[str] = []
+    refused: list[findings_reader.Growth] = []
+    if grown and copy.path is None:
+        admitted = [g.describe() for g in grown]
+    elif grown:
+        base_rules = _base_rules(ctx, tree, point, copy.ruleset)
+        if isinstance(base_rules, Verdict):
+            return base_rules
+        for item in grown:
+            why = _admitted(base_rules.get(item.rule), ruleset.by_id(item.rule))
+            if why is None:
+                refused.append(item)
+            else:
+                admitted.append(f"{item.describe()}: {why}")
+
+    files, gone = _changed_in_tree(ctx, changed, tree)
+    rules = [r for r in ruleset.rules if r.check.kind in guidelines_reader.BASELINE_KINDS]
+    evaluation = findings_reader.evaluate(
+        rules, files, **_finding_reads(tree, _ecosystem_adapters(ctx))
+    )
+    stale = findings_reader.ratchet(
+        evaluation.findings, entries, touched=set(files) | set(gone) | set(renames)
+    ).stale
+
+    detail = _shrink_detail(copy, admitted, renames)
+    if refused or stale:
+        parts, fixes = [], []
+        if refused:
+            parts.append(
+                f"{len(refused)} baseline {_entries_noun(len(refused))} grew against the base "
+                f"branch's copy: " + "; ".join(g.describe() for g in refused)
+            )
+            fixes.append(
+                "the baseline only shrinks: remove the added entries and lower the raised "
+                "counts, and fix the findings they would hold; a rule the change introduces "
+                "or redefines records its entries in the same change (DN-6)"
+            )
+        if stale:
+            parts.append(
+                f"{len(stale)} stale baseline {_entries_noun(len(stale))}, which no finding "
+                f"holds any more; prune each in this change: "
+                + "; ".join(s.describe() for s in stale)
+            )
+            fixes.append(PRUNE_FIX)
+        return Verdict.fail(". ".join(parts), detail=detail, fixes=tuple(fixes))
+    return Verdict.clean(
+        f"the baseline only shrank: {len(entries)} {_entries_noun(len(entries))} against "
+        f"{len(copy.entries)} on the base branch, none stale",
+        detail=detail,
+    )
+
+
+#: The fix every stale entry names (DN-5).
+PRUNE_FIX = "invariant guidelines baseline --prune"
+
+
+@dataclass(frozen=True)
+class _BaseCopy:
+    """The base branch's baseline as the merge base holds it.
+
+    ``path`` is ``None`` when the base configured no baseline, and every
+    entry of the change is then admitted (DN-6).
+    """
+
+    path: str | None
+    entries: tuple[guidelines_reader.BaselineEntry, ...] = ()
+    #: The base's own ``guidelines.ruleset``, as its manifest spells it.
+    ruleset: str | None = None
+
+
+def _entries_noun(count: int) -> str:
+    return "entry" if count == 1 else "entries"
+
+
+def _cannot_compare(failure: Verdict) -> Verdict:
+    return Verdict.fail(
+        f"the baseline cannot be compared: {failure.message}",
+        detail=failure.detail,
+        fixes=failure.fixes,
+    )
+
+
+def _base_fail(message: str, detail: str, *fixes: str) -> Verdict:
+    return Verdict.fail(
+        message,
+        detail=detail + " The rule will not answer without the base branch's copy: "
+        "admitting every entry would let the baseline grow unseen.",
+        fixes=fixes or ("check the session's base branch is reachable",),
+    )
+
+
+def _base_point(tree: Path, base: str) -> tuple[str, dict[str, str]] | Verdict:
+    """The merge base the base copy is read at, and the change's renames."""
+    if not base:
+        return _base_fail(
+            "no base recorded, so the base branch's baseline cannot be read",
+            "The baseline is compared with the base branch's committed copy, read at "
+            "the merge base.",
+            "start the session with its base branch named: "
+            "invariant session start <name> --base <branch>",
+        )
+    point = git.merge_base(tree, base)
+    if point is None:
+        return _base_fail(
+            f"git could not find the merge base of {base!r} and this change",
+            f"The base branch's copy is read where the branch left {base!r}.",
+        )
+    renames = git.renamed_files(tree, base)
+    if renames is None:
+        return _base_fail(
+            "git could not list this change's renames, so a moved entry cannot be "
+            "told from an added one",
+            "An entry follows a rename git detects from the merge base (DN-7).",
+        )
+    return point, renames
+
+
+def _at_base(tree: Path, point: str, rel: str, what: str) -> bytes | None | Verdict:
+    """``rel``'s bytes at the merge base, ``None`` when it was no file there,
+    or the failure when git could not say."""
+    exists = git.exists_at(tree, point, rel)
+    if exists is None:
+        return _base_fail(
+            f"git could not read the base branch's {what} {rel} at the merge base", ""
+        )
+    if not exists:
+        return None
+    data = git.blob_at(tree, point, rel)
+    if data is None:
+        return _base_fail(
+            f"git could not read the base branch's {what} {rel} at the merge base", ""
+        )
+    return data
+
+
+def _base_baseline(ctx: RuleContext, tree: Path, point: str) -> _BaseCopy | Verdict:
+    """The base branch's baseline, at the path the base's own manifest names.
+
+    The base's manifest is read for its two ``guidelines`` paths and nothing
+    else. No manifest there, or one with no ``guidelines.baseline``, is a base
+    with no baseline configured. Anything else short of a baseline that
+    parses in full is a failure, never a smaller copy: a missing file, one
+    git cannot read, one that is not UTF-8 and one with a line that does not
+    parse. The base copy is not checked against any ruleset; the entries are
+    only counted.
+    """
+    manifest_rel = MANIFEST_RELPATH.as_posix()
+    data = _at_base(tree, point, manifest_rel, "manifest")
+    if isinstance(data, Verdict):
+        return data
+    if data is None:
+        return _BaseCopy(None)
+    try:
+        raw = yaml.safe_load(data.decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        return _base_manifest_fail(f"does not parse ({exc})")
+    if not isinstance(raw, Mapping):
+        return _base_manifest_fail("is not a mapping")
+    section = raw.get("guidelines") or {}
+    if not isinstance(section, Mapping):
+        return _base_manifest_fail("gives guidelines as something other than a mapping")
+    paths: dict[str, str | None] = {}
+    for key in ("baseline", "ruleset"):
+        value = section.get(key)
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            return _base_manifest_fail(f"gives guidelines.{key} {value!r}, which is not a path")
+        paths[key] = value
+    if paths["baseline"] is None:
+        return _BaseCopy(None)
+    rel = guidelines_relpath(ctx, paths["baseline"])
+    if rel is None:
+        return _base_manifest_fail(
+            f"names guidelines.baseline {paths['baseline']!r}, which is nothing inside "
+            f"the project"
+        )
+    data = _at_base(tree, point, rel, "baseline")
+    if isinstance(data, Verdict):
+        return data
+    if data is None:
+        return _base_fail(
+            f"the base branch's baseline {rel} does not exist at the merge base",
+            "The base branch's manifest names a baseline its tree does not hold, and a "
+            "configured file that does not exist is an error, never an empty baseline.",
+            f"restore {rel} on the base branch, or pass this evaluation with "
+            "invariant override guidelines.baseline_only_shrinks",
+        )
+    try:
+        entries = guidelines_reader.parse_baseline(data.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        return _base_fail(f"the base branch's baseline {rel} is not UTF-8 text", f"{exc}.")
+    except guidelines_reader.BaselineError as exc:
+        return _base_fail(
+            f"the base branch's baseline {rel} does not parse "
+            f"({len(exc.problems)} problem(s))",
+            "; ".join(exc.problems) + ".",
+            f"repair {rel} on the base branch, or pass this evaluation with "
+            "invariant override guidelines.baseline_only_shrinks",
+        )
+    return _BaseCopy(rel, entries, paths["ruleset"])
+
+
+def _base_manifest_fail(why: str) -> Verdict:
+    return _base_fail(
+        f"the base branch's manifest {MANIFEST_RELPATH.as_posix()} {why}",
+        "The base's own manifest says where its baseline is.",
+        "repair the manifest on the base branch, or pass this evaluation with "
+        "invariant override guidelines.baseline_only_shrinks",
+    )
+
+
+def _base_rules(
+    ctx: RuleContext, tree: Path, point: str, configured: str | None
+) -> dict[str, guidelines_reader.Guideline] | Verdict:
+    """The base branch's rules by id, read from its ruleset at the merge base.
+
+    No ruleset configured there is no rule there. The ruleset is parsed as the
+    base held it, its registries read at the merge base too, for the schema
+    question alone: the engines a base's adapters offered do not change what
+    a rule is.
+    """
+    if configured is None:
+        return {}
+    rel = guidelines_relpath(ctx, configured)
+    if rel is None:
+        return _base_fail(
+            f"the base branch's ruleset {configured!r} names nothing inside the project", ""
+        )
+    data = _at_base(tree, point, rel, "ruleset")
+    if isinstance(data, Verdict):
+        return data
+    if data is None:
+        return _base_fail(f"the base branch's ruleset {rel} does not exist at the merge base", "")
+    try:
+        parsed = guidelines_reader.parse(
+            data.decode("utf-8"),
+            registered=[spec.id for spec in all_rules()],
+            read=lambda name: git.blob_at(tree, point, name),
+        )
+    except UnicodeDecodeError as exc:
+        return _base_fail(f"the base branch's ruleset {rel} is not UTF-8 text", f"{exc}.")
+    except guidelines_reader.RulesetError as exc:
+        return _base_fail(
+            f"the base branch's ruleset {rel} does not parse, so no added entry can be "
+            f"admitted ({len(exc.problems)} problem(s))",
+            "; ".join(exc.problems) + ".",
+        )
+    return {rule.id: rule for rule in parsed.rules}
+
+
+def _admitted(
+    before: guidelines_reader.Guideline | None, now: guidelines_reader.Guideline | None
+) -> str | None:
+    """Why DN-6 admits growth of this rule's entries, or ``None`` when it does not."""
+    if before is None:
+        return "its rule is absent from the base branch's ruleset"
+    if now is not None and guidelines_reader.definition_of(
+        before
+    ) != guidelines_reader.definition_of(now):
+        return "its rule has a different applies_to, check or exceptions on the base branch"
+    return None
+
+
+def _shrink_detail(copy: _BaseCopy, admitted: list[str], renames: Mapping[str, str]) -> str:
+    parts = [
+        f"compared with the base branch's {copy.path}, read at the merge base"
+        if copy.path is not None
+        else "the base branch has no baseline configured, so every entry is admitted (DN-6)"
+    ]
+    if admitted:
+        parts.append(f"{len(admitted)} admitted (DN-6): " + "; ".join(admitted))
+    if renames:
+        parts.append(
+            "renames followed (DN-7): "
+            + ", ".join(f"{old} -> {new}" for old, new in sorted(renames.items()))
+        )
+    return ". ".join(parts)
 
 
 # -- test rules --------------------------------------------------------

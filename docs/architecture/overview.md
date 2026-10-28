@@ -231,9 +231,9 @@ graph TD
     CREPLAY --> CONF
     CONF -- get_rule --> RULES
     CONF --> CONFDATA
-    RULES -- load, the render plan, the ruleset and drift gates, parse_baseline --> CGUIDE
+    RULES -- load, the render plan, the ruleset and drift gates, parse_baseline, definition_of --> CGUIDE
     CGUIDE -- project_relative --> MANIFEST
-    RULES -- evaluate, with the bytes, masks, references and the change's history as callables; ratchet --> CFIND
+    RULES -- evaluate, with the bytes, masks, references and the change's history as callables; ratchet, growth --> CFIND
     CFIND -- Guideline, the ruleset model it evaluates; BaselineEntry --> CGUIDE
     CFIND -- project_relative, glob_matches --> MANIFEST
     CLI --> GDOM
@@ -496,7 +496,8 @@ against N recorded give min(F, N) `baselined`, never counted, F - N new, and
 N - F stale. A baselined finding does not block whether or not its file is
 touched (ruling 5); a cochange finding has no fingerprint, so it is never
 baselined (DN-4). Stale entries are named in the verdict's detail and do not
-fail it in this build (DN-5). The baseline's format is `CGUIDE`'s
+fail it; failing them is `guidelines.baseline_only_shrinks`' (DN-5, below).
+The baseline's format is `CGUIDE`'s
 (`parse_baseline`, `render_baseline`, `baseline_rule_problems`): one entry
 per line, `rule-id  path  fingerprint  count`, read in full or not at all,
 so a line that does not parse, a duplicate, a path outside the project, a
@@ -505,6 +506,24 @@ every gate that reads it rather than shrinking the record. `core/rules`
 reads it from the tree in hand (`load_baseline`), as it reads the ruleset.
 With `guidelines.baseline` null there is no baseline, and every pattern or
 boundary finding is new (DN-1).
+
+`guidelines.baseline_only_shrinks` holds the baseline to D6's "only shrinks"
+(A3 increment 6). It compares the baseline in the change with the base
+branch's committed copy, read through git at the merge base, at the path the
+base's own manifest names, so pointing the key at a new file is no amnesty.
+`CFIND`'s `growth` is the arithmetic: both sides keyed by where a path ends
+up after the change's renames (`renamed_files`, DN-7), and an added entry or
+a raised count is growth. `core/rules` admits growth only as DN-6 allows: the
+base configured no baseline, or the entry's rule is absent from the base's
+ruleset or has a different `applies_to`, `check` or `exceptions` there,
+compared through `CGUIDE`'s `definition_of` on the validated model, never as
+text. The base ruleset is parsed as the merge base held it, its registries
+read there through `parse`'s `read` callable. A stale entry fails it too
+(DN-5), by `ratchet`'s arithmetic over the touched files, with `invariant
+guidelines baseline --prune` as the fix. A base copy that does not parse, or
+that git cannot give, fails it rather than admitting everything. It blocks in
+every profile, and `core/machines` injects it at the landing entry only when
+a baseline is configured beside the ruleset (`BASELINE_GATES`).
 
 `RULES --> GIT` carries the cochange kind's reads (A3 increment 4), each a
 thin query that answers `None` when git cannot: `merge_base`, the commit the
@@ -515,7 +534,10 @@ file the change touched from the merge base to the working tree, with the
 lines it added, untracked files counted whole. `core/rules` makes every one of
 these calls, from the tree in hand, and hands the answers to `core/findings`
 as `History`. A3 increment 5 adds one more, `tracked_files`, every file the
-index tracks, which `guidelines baseline --record` scans.
+index tracks, which `guidelines baseline --record` scans, and A3 increment 6
+another, `renamed_files`, every rename git detects from the merge base to the
+working tree (old path to new), which `baseline_only_shrinks` and `guidelines
+baseline --prune` follow an entry through.
 
 `GDOM` is `domains/guidelines`, the effects the ruleset has on the tree
 (IDEA_031 A2 increment 3, ADR-012 D12). It is not an FSM, like `stats` and
@@ -548,7 +570,8 @@ decides (`plan_baseline`, the same shape as `plan_render`, `GDOM --
 plan_baseline --> RULES`). `--record` scans every file the index tracks
 under each pattern and boundary rule with the evaluator the gate uses, so a
 record holds exactly what the gate then finds; `--prune` recomputes the
-files the change touched and only ever lowers or drops. The plan refuses
+files the change touched and only ever lowers or drops, moving an entry
+whose file the change renamed to its new path first (DN-7). The plan refuses
 before any write: no `guidelines.baseline` (DN-1), a target outside the
 project, exempt from isolation or another guidelines file, a rule that cannot
 be baselined, a scan with an unanswerable file, and a privacy finding in the
@@ -1029,16 +1052,16 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`) | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
-| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record` — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
+| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record`; every rename git detects from the merge base to the working tree (`renamed_files`), which a baseline entry follows (DN-7) — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
-| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`); the ratchet baseline's format (`BaselineEntry`, `parse_baseline`, `render_baseline`, and `baseline_rule_problems` against a ruleset), refused whole by line (`BaselineError`) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
-| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
+| `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`); the ratchet baseline's format (`BaselineEntry`, `parse_baseline`, `render_baseline`, and `baseline_rule_problems` against a ruleset), refused whole by line (`BaselineError`); what a rule's findings depend on, compared structurally between two copies of it (`definition_of`, DN-6); `parse` takes a `read` callable for a ruleset read as a revision held it | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
+| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`

@@ -56,7 +56,7 @@ import posixpath
 import re
 import string
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from difflib import get_close_matches
 from pathlib import Path
@@ -337,6 +337,7 @@ def parse(
     registered: Collection[str],
     root: Path | None = None,
     engines: Collection[str] | None = None,
+    read: Callable[[str], bytes | None] | None = None,
 ) -> Ruleset:
     """Validate ruleset ``text`` against schema version 1.
 
@@ -353,6 +354,11 @@ def parse(
     without it: no adapter could answer for any file it names. ``None`` asks
     the schema question alone; ``guidelines.ruleset_valid`` always passes
     what the configured adapters offer.
+
+    ``read`` answers a registry's bytes by its project-relative path, or
+    ``None`` when it cannot, and is asked instead of ``root``. It is how a
+    ruleset is read as a revision held it rather than as the tree holds it
+    (``guidelines.baseline_only_shrinks`` reads the base branch's).
     """
     try:
         raw = yaml.safe_load(text)
@@ -360,7 +366,7 @@ def parse(
         raise RulesetError([f"the ruleset is not valid YAML: {exc}"]) from exc
     if not isinstance(raw, Mapping):
         raise RulesetError(["the ruleset must be a mapping with version, sections and rules"])
-    reader = _Reader(registered, root, engines)
+    reader = _Reader(registered, root, engines, read)
     ruleset = reader.ruleset(raw, digest_of(text.encode("utf-8")))
     if reader.problems:
         raise RulesetError(reader.problems)
@@ -375,9 +381,11 @@ class _Reader:
         registered: Collection[str],
         root: Path | None,
         engines: Collection[str] | None = None,
+        read: Callable[[str], bytes | None] | None = None,
     ) -> None:
         self.registered = frozenset(registered)
         self.root = root
+        self.read = read
         self.engines = None if engines is None else frozenset(engines)
         self.problems: list[str] = []
         #: Each registry path read so far, and what it read as. ``None`` is a
@@ -796,19 +804,12 @@ class _Reader:
         return self.registries[rel]
 
     def read_registry(self, where: str, rel: str) -> Registry | None:
-        if self.root is None:
-            self.problem(f"{where}: registry {rel} cannot be read: no project tree was given")
-            return None
-        path = Path(self.root) / rel
-        if not path.is_file():
-            # A missing registry is not an empty one (DN-A9), as a missing
-            # ruleset is not.
-            self.problem(f"{where}: registry {rel} does not exist")
+        data = self.registry_bytes(where, rel)
+        if data is None:
             return None
         try:
-            data = path.read_bytes()
             raw = yaml.safe_load(data.decode("utf-8"))
-        except (OSError, UnicodeDecodeError) as exc:
+        except UnicodeDecodeError as exc:
             self.problem(f"registry {rel} could not be read: {exc}")
             return None
         except yaml.YAMLError as exc:
@@ -819,6 +820,27 @@ class _Reader:
         if len(self.problems) > before:
             return None
         return Registry(path=rel, entries=entries, digest=digest_of(data))
+
+    def registry_bytes(self, where: str, rel: str) -> bytes | None:
+        if self.read is not None:
+            data = self.read(rel)
+            if data is None:
+                self.problem(f"{where}: registry {rel} could not be read")
+            return data
+        if self.root is None:
+            self.problem(f"{where}: registry {rel} cannot be read: no project tree was given")
+            return None
+        path = Path(self.root) / rel
+        if not path.is_file():
+            # A missing registry is not an empty one (DN-A9), as a missing
+            # ruleset is not.
+            self.problem(f"{where}: registry {rel} does not exist")
+            return None
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            self.problem(f"registry {rel} could not be read: {exc}")
+            return None
 
     def registry_document(self, rel: str, raw: Any) -> tuple[RegistryEntry, ...]:
         where = f"registry {rel}"
@@ -1605,6 +1627,40 @@ def baseline_rule_problems(
                 f"{' and '.join(BASELINE_KINDS)} rules are baselined; {reason}"
             )
     return problems
+
+
+def definition_of(rule: Guideline) -> tuple[Any, ...]:
+    """What a rule's findings depend on, for comparing two copies of it (DN-6).
+
+    Its ``applies_to``, its ``check`` and its ``exceptions``, read from the
+    validated model rather than from the text, so a respelling of the YAML
+    (flow or block style, quoting, key order, ``./`` before a glob) compares
+    equal, and so does a reordered list whose order means nothing: globs,
+    exceptions, a boundary's targets, a pair's ``then`` globs and a registry
+    rule's outcomes and fixes. The wording, severity and phases are not part
+    of it: they change what a finding is called, not which findings exist.
+    Nor is an exception's ``reason``: an exception is its path and its
+    fingerprint, and rewording why it applies sets nothing else aside.
+    """
+    check = replace(
+        rule.check,
+        forbid=tuple(sorted(rule.check.forbid)),
+        only=tuple(sorted(rule.check.only)),
+        outcomes=tuple(sorted(rule.check.outcomes)),
+        fixes=tuple(sorted(rule.check.fixes)),
+        then=(
+            replace(rule.check.then, globs=tuple(sorted(rule.check.then.globs)))
+            if rule.check.then is not None
+            else None
+        ),
+    )
+    exceptions = sorted({(_spelled(e.path), e.fingerprint or "") for e in rule.exceptions})
+    return (tuple(sorted({_spelled(g) for g in rule.applies_to})), check, tuple(exceptions))
+
+
+def _spelled(declared: str) -> str:
+    """A declared path or glob in the one spelling it is matched in."""
+    return project_relative(declared) or declared
 
 
 def render_baseline(entries: Iterable[BaselineEntry]) -> str:

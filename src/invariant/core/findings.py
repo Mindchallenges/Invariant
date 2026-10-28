@@ -40,7 +40,10 @@ so the verdict can.
 The ratchet (D6, A3 increment 5) is :func:`ratchet`: a finding a baseline
 entry records is ``baselined``, never counted, and an entry of a touched file
 that no finding holds is stale. ``core/rules`` reads the baseline and hands
-the entries in; this module only does the arithmetic.
+the entries in; this module only does the arithmetic. So it is for "only
+shrinks" (A3 increment 6): :func:`growth` compares the base branch's entries
+with the change's, through the change's renames (DN-7), and which growth is
+admitted (DN-6) is ``core/rules``' question.
 """
 
 from __future__ import annotations
@@ -691,6 +694,61 @@ def ratchet(
         and count > seen.get((rule, path, stamp), 0)
     )
     return Ratcheted(findings=tuple(result), stale=stale)
+
+
+@dataclass(frozen=True)
+class Growth:
+    """A (rule, path, fingerprint) the change's baseline holds more of than
+    the base branch's copy: an added entry (``before`` 0) or a raised count."""
+
+    rule: str
+    path: str
+    fingerprint: str
+    before: int
+    after: int
+
+    def describe(self) -> str:
+        if self.before == 0:
+            return f"added {self.rule} {self.path} {self.fingerprint} (count {self.after})"
+        return (
+            f"raised {self.rule} {self.path} {self.fingerprint} "
+            f"from {self.before} to {self.after}"
+        )
+
+
+def growth(
+    base: Iterable[BaselineEntry],
+    tip: Iterable[BaselineEntry],
+    renames: Mapping[str, str] | None = None,
+) -> tuple[Growth, ...]:
+    """Every (rule, path, fingerprint) the tip's baseline holds more of than
+    the base's (D6, "Only shrinks"), in the tip's order.
+
+    An entry follows a rename (DN-7): both sides are keyed by where the path
+    ends up, so an entry the change moved with its file compares with the
+    one the base held at the old path, and an entry left behind at the old
+    path shares that one budget rather than doubling it. A move is accepted
+    while rule, fingerprint and count do not grow. Deleting an entry, or
+    lowering a count, is shrinking and is never growth.
+
+    Which growth is admitted (DN-6) needs the rulesets, and is the caller's.
+    """
+    moved = dict(renames or {})
+
+    def landed(entry: BaselineEntry) -> Key:
+        return (entry.rule, moved.get(entry.path, entry.path), entry.fingerprint)
+
+    budget: dict[Key, int] = {}
+    for entry in base:
+        budget[landed(entry)] = budget.get(landed(entry), 0) + entry.count
+    held: dict[Key, int] = {}
+    for entry in tip:
+        held[landed(entry)] = held.get(landed(entry), 0) + entry.count
+    return tuple(
+        Growth(*key, before=budget.get(key, 0), after=count)
+        for key, count in held.items()
+        if count > budget.get(key, 0)
+    )
 
 
 def counted(found: Iterable[Finding]) -> dict[Key, int]:

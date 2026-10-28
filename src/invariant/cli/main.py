@@ -3279,7 +3279,8 @@ def cmd_guidelines_baseline(args) -> int:
         "entries": result.entries,
         "changes": [
             {"rule": c.rule, "path": c.path, "fingerprint": c.fingerprint,
-             "before": c.before, "after": c.after, "reason": c.reason}
+             "before": c.before, "after": c.after, "reason": c.reason,
+             "moved_to": c.moved_to}
             for c in result.changes
         ],
     }, text)

@@ -1113,12 +1113,15 @@ invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
     guidelines.baseline_only_shrinks' question (A3 increment 6), not this
     command's.
 
-    --prune recomputes the files the change touched and only ever shrinks:
-    it lowers a count to what the file still holds, and drops an entry whose
+    --prune recomputes the files the change touched and only ever shrinks.
+    An entry whose file the change renamed (git's detection from the merge
+    base, DN-7) moves to the new path first, merging with one already
+    recorded there. Then it lowers a count to what the file still holds, and
+    drops an entry whose
     count reaches zero, whose file was deleted, whose rule is gone or no
     longer pattern or boundary, or whose rule no longer applies to its file.
-    It never adds an entry and never raises a count. Each lowered or dropped
-    entry is named with its reason.
+    It never adds an entry and never raises a count. Each lowered, dropped
+    or moved entry is named with its reason.
 
     Refused (exit 1, nothing written, each naming its fix):
       - guidelines.baseline null (DN-1: --record refuses until it names a
@@ -1131,8 +1134,9 @@ invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
       - a scan with an unanswerable file: a record of part of the tree is no
         record, and a prune cannot say what such a file still holds;
       - --prune with no file, a file that does not parse, or a changed set
-        that cannot be established; --record --rule with a file that does
-        not parse;
+        that cannot be established; --prune when an entry's file is gone,
+        a base is recorded, and git cannot say which files the change
+        renamed; --record --rule with a file that does not parse;
       - a privacy finding in the text, scanned whatever privacy.enabled and
         privacy.scope say, as render's is.
 
@@ -1140,8 +1144,9 @@ invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
     configured it reports "nothing to record" (or prune) and exits 0. --json
     carries mode, status (new, current or changed), written, dry_run, path,
     the ruleset digest, entries (how many the file holds after), and
-    changes: each {rule, path, fingerprint, before, after, reason}, after 0
-    for a dropped entry.
+    changes: each {rule, path, fingerprint, before, after, reason,
+    moved_to}, after 0 for a dropped entry, moved_to the new path for a
+    moved one and null otherwise.
 
     The gates read the file in full or not at all: a line with fewer than
     four fields, a bad fingerprint, a count that is not a positive integer,
@@ -1176,7 +1181,8 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     file and rule, F findings of one fingerprint against N recorded give
     min(F, N) baselined and F - N new; N - F stale entries are named in the
     detail with `invariant guidelines baseline --prune` as the fix, and do
-    not fail the rule in this build. A baseline that does not read in full
+    not fail this rule; guidelines.baseline_only_shrinks fails them (DN-5).
+    A baseline that does not read in full
     fails the rule. A cochange finding has no line and no
     fingerprint, because it describes the change and not the tree, so no
     baseline can hold it (DN-4); its fix is what the rule owes (the files to
@@ -1185,6 +1191,24 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     The rule is N/A with no ruleset, and fails on a ruleset that does not load
     and on a changed set that cannot be established. There is no guidelines
     verb for this.
+
+      invariant check guidelines.baseline_only_shrinks [--json]
+
+    compares the baseline in the change with the base branch's committed
+    copy, read at the merge base at the path the base's own manifest names
+    (ADR-012 D6, A3 increment 6). Each added entry is named "added <rule>
+    <path> <fingerprint> (count N)" and each raised count "raised <rule>
+    <path> <fingerprint> from N to M". Growth is admitted, and named with
+    its reason in the detail of a passing verdict, when the base configured
+    no baseline or the entry's rule is absent from the base's ruleset or
+    has a different applies_to, check or exceptions there (DN-6). An entry
+    follows a rename git detects from the merge base (DN-7). Each stale
+    entry of a touched file is named as mechanical_clean names it, and the
+    fix is `invariant guidelines baseline --prune` (DN-5). N/A with no
+    ruleset or no baseline. It fails on a ruleset or baseline that does not
+    load, a changed set that cannot be established, no base recorded, a
+    merge base or rename listing git cannot give, and a base copy that git
+    cannot read or that does not parse.
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
 

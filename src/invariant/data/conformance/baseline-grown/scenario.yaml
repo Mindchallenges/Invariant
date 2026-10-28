@@ -1,0 +1,119 @@
+description: >
+  A baseline entry added by hand blocks (ADR-012 D6, D11; DN-12). The base
+  branch's application prints once, and its baseline records that line. The
+  change adds a second print and writes an entry for it into the baseline by
+  hand, so guidelines.mechanical_clean holds both prints as baselined and
+  passes, and guidelines.baseline_only_shrinks, comparing the baseline with
+  the base branch's committed copy, finds an added entry for a rule the change
+  did not introduce or redefine and refuses the advance to committed. Every
+  other landing gate answers as it does for the clean change.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+  guidelines:
+    ruleset: docs/guidelines/ruleset.yaml
+    baseline: docs/guidelines/baseline.txt
+  enforcement:
+    rules: {guidelines.mechanical_clean: block}
+
+steps:
+  - kind: write
+    path: app.py
+    content: |
+      def answer():
+          print("answering")
+          return 41
+  - {kind: commit, message: the application prints once}
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: feature-architect}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      def answer():
+          print("answering")
+          print("answered")
+          return 42
+  - kind: write
+    in: worktree
+    path: docs/guidelines/baseline.txt
+    content: |
+      # rule-id  path  fingerprint  count  (written by invariant guidelines baseline; ADR-012 D6)
+      style.no-print  app.py  66de9fe2b4b1  1
+      style.no-print  app.py  436046678e23  1
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [guidelines, render]}
+  - {kind: cli, in: worktree, argv: [pipeline, test]}
+  - {kind: cli, in: worktree, argv: [pipeline, coverage]}
+  - {kind: commit, in: worktree, message: answer is 42}
+  - {kind: cli, id: land, in: worktree, argv: [pipeline, advance, committed]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: pass}
+    reviewing: {test.all_pass: pass}
+    committed:
+      test.all_pass: pass
+      coverage.meets_floor: pass
+      privacy.clean: pass
+      docs.updated: pass
+      docs.diagrams_current: pass
+      agents.design_agent_ran: pass
+      agents.review_agent_ran: pass
+      guidelines.ruleset_valid: pass
+      guidelines.generated_current: pass
+      guidelines.mechanical_clean: pass
+      guidelines.baseline_only_shrinks: block
+  refusals:
+    land: [guidelines.baseline_only_shrinks]

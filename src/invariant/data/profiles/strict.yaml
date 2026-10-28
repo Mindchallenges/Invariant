@@ -60,6 +60,11 @@ rules:
   # warns in loose and standard and blocks in strict. A project moves it to
   # block once its baseline is recorded.
   guidelines.mechanical_clean: block
+  # The baseline only shrinks against the base branch's committed copy, and
+  # no stale entry is left in a touched file (ADR-012 D6, DN-5 to DN-7,
+  # ruling 7). Injected at the landing only when a baseline is configured.
+  # Blocks everywhere: a grown baseline admits a violation with no review.
+  guidelines.baseline_only_shrinks: block
 
   memory.schema_valid: block
   memory.index_current: block

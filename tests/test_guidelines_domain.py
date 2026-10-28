@@ -713,7 +713,8 @@ def repo(tmp_path):
     return root
 
 
-def baseline_domain(root, *, baseline=BASELINE_REL, files=None, ruleset=RULESET_REL, **extra):
+def baseline_domain(root, *, baseline=BASELINE_REL, files=None, ruleset=RULESET_REL, base="",
+                    **extra):
     from invariant.core.manifest import Manifest
 
     cfg = {"ruleset": ruleset}
@@ -723,7 +724,7 @@ def baseline_domain(root, *, baseline=BASELINE_REL, files=None, ruleset=RULESET_
         "version": 1, "project": {"name": "demo", "ecosystems": ["python"]},
         "guidelines": cfg, **extra,
     })
-    session = None if files is None else {"files": list(files), "base": ""}
+    session = None if files is None else {"files": list(files), "base": base}
     return GuidelinesDomain(RuleContext(manifest=Manifest.load(root), cwd=root, session=session))
 
 
@@ -857,6 +858,71 @@ class TestBaselinePrune:
     def test_prune_refuses_a_changed_set_that_cannot_be_established(self, recorded):
         with pytest.raises(RenderRefused, match="changed set"):
             baseline_domain(recorded).baseline(mode="prune")
+
+
+class TestBaselinePruneFollowsRenames:
+    """DN-7: an entry follows a rename git detects from the merge base, and
+    --prune rewrites its path."""
+
+    @pytest.fixture
+    def moved(self, repo):
+        import subprocess
+
+        write(repo, BASELINE_REL, baseline_line(PRINT_ID, "app/m.py", stamp("print(x)"), 2))
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "work"], cwd=repo, check=True)
+        subprocess.run(["git", "mv", "app/m.py", "app/k.py"], cwd=repo, check=True)
+        return repo
+
+    def test_prune_moves_the_entry_to_the_new_path(self, moved):
+        result = baseline_domain(moved, files=[], base="master").baseline(mode="prune")
+        assert baseline_entries(moved) == [(PRINT_ID, "app/k.py", stamp("print(x)"), 2)]
+        (change,) = result.changes
+        assert (change.path, change.moved_to) == ("app/m.py", "app/k.py")
+        assert (change.before, change.after) == (2, 2)
+        assert "renamed" in change.reason
+        assert change.describe() == (
+            f"moved {PRINT_ID} app/m.py {stamp('print(x)')} to app/k.py: {change.reason}"
+        )
+
+    def test_a_moved_entry_is_lowered_to_what_the_new_path_holds(self, moved):
+        write(moved, "app/k.py", "print(x)\n")
+        result = baseline_domain(moved, files=[], base="master").baseline(mode="prune")
+        assert baseline_entries(moved) == [(PRINT_ID, "app/k.py", stamp("print(x)"), 1)]
+        assert [(c.path, c.before, c.after) for c in result.changes] == [
+            ("app/m.py", 2, 2), ("app/k.py", 2, 1),
+        ]
+
+    def test_a_moved_entry_merges_with_one_already_at_the_new_path(self, moved):
+        write(moved, BASELINE_REL,
+              baseline_line(PRINT_ID, "app/m.py", stamp("print(x)"), 1)
+              + baseline_line(PRINT_ID, "app/k.py", stamp("print(x)"), 1))
+        baseline_domain(moved, files=[], base="master").baseline(mode="prune")
+        assert baseline_entries(moved) == [(PRINT_ID, "app/k.py", stamp("print(x)"), 2)]
+
+    def test_a_move_out_of_the_rule_s_scope_drops_the_entry(self, moved):
+        import subprocess
+
+        subprocess.run(["git", "mv", "app/k.py", "tools/k.py"], cwd=moved, check=True)
+        result = baseline_domain(moved, files=[], base="master").baseline(mode="prune")
+        assert baseline_entries(moved) == []
+        assert any("no longer applies" in c.reason for c in result.changes)
+
+    def test_prune_refuses_when_git_cannot_say_whether_a_file_moved(self, moved, monkeypatch):
+        from invariant.core import git
+
+        monkeypatch.setattr(git, "renamed_files", lambda cwd, base: None)
+        with pytest.raises(RenderRefused, match="renamed"):
+            baseline_domain(moved, files=[], base="master").baseline(mode="prune")
+
+    def test_the_command_names_the_move(self, moved, monkeypatch, capsys):
+        monkeypatch.chdir(moved)
+        assert run("session", "start", "move", "--base", "master") == 0
+        capsys.readouterr()
+        assert run("guidelines", "baseline", "--prune", "--json") == 0
+        (change,) = payload(capsys)["changes"]
+        assert change["path"] == "app/m.py" and change["moved_to"] == "app/k.py"
 
 
 class TestBaselineRefusals:
