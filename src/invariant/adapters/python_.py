@@ -6,6 +6,7 @@ import ast
 import re
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, ClassVar
 
 import tomllib
 
@@ -15,7 +16,7 @@ from .base import Adapter, Hazard, TestResult
 class PythonAdapter(Adapter):
     id = "python"
 
-    manifest_defaults = {
+    manifest_defaults: ClassVar[dict[str, Any]] = {
         "commands": {
             "build": None,
             "test": "pytest",
@@ -32,6 +33,10 @@ class PythonAdapter(Adapter):
 
     def source_files(self, changed: list[Path]) -> list[Path]:
         return [p for p in changed if p.suffix == ".py"]
+
+    def owns_selector(self, selector: str) -> bool:
+        """A pytest node id names its file before the first ``::``."""
+        return super().owns_selector(selector.split("::", 1)[0])
 
     def join_selectors(self, selectors) -> str | None:
         """pytest takes node ids positionally, so several are just several.

@@ -430,14 +430,24 @@ class Manifest:
         provenance: dict[str, str] = {}
         _record(provenance, data, "default")
 
-        # Layer 2 — adapter defaults, primary ecosystem first.
-        ecosystems = _ecosystems(raw)
-        for eco in ecosystems:
-            adapter_defaults = _adapter_defaults(eco)
-            if adapter_defaults:
-                _merge(data, adapter_defaults, provenance, f"adapter:{eco}")
+        # Layer 2 — the primary adapter's defaults, flat `commands.*` included.
+        primary, *others = _ecosystems(raw)
+        _merge(data, _adapter_defaults(primary), provenance, f"adapter:{primary}")
 
-        # Layer 3 — the enforcement profile supplies rule levels only.
+        # Layer 3 — every further ecosystem, in listed order, without ever
+        # overwriting the primary (ADR-013 D1, D4). Its commands go under its
+        # own key, `commands.<ecosystem>`; anything else it supplies fills
+        # only a key no adapter has set. Merging them flat let the LAST
+        # ecosystem's commands replace the primary's while the primary's
+        # adapter read the output (BUG_097).
+        for eco in _secondaries(primary, others):
+            adapter_defaults = _adapter_defaults(eco)
+            commands = adapter_defaults.pop("commands", None)
+            if commands:
+                _merge(data, {"commands": {eco: commands}}, provenance, f"adapter:{eco}")
+            _fill(data, adapter_defaults, provenance, f"adapter:{eco}")
+
+        # Layer 4 — the enforcement profile supplies rule levels only.
         profile_name = str(
             _dig(raw, "enforcement", "profile") or data["enforcement"]["profile"]
         )
@@ -449,12 +459,12 @@ class Manifest:
             f"profile:{profile_name}",
         )
 
-        # Layer 4 — explicit manifest values.
+        # Layer 5 — explicit manifest values.
         _merge(data, raw, provenance, "manifest")
 
         manifest = cls(root=Path(root), path=Path(path), data=data, provenance=provenance)
 
-        # Layer 5 — environment escapes.
+        # Layer 6 — environment escapes.
         manifest._apply_env(env)
         manifest.validate()
         return manifest
@@ -547,6 +557,7 @@ class Manifest:
                     f"got {value!r}"
                 )
         self._validate_schedule(gates)
+        self._validate_ecosystem_commands()
         self._validate_freshness_level()
         self._validate_guidelines()
         backend = self.data["items"]["backend"]
@@ -564,6 +575,49 @@ class Manifest:
             find_machine_file(methodology, self)
         except ManifestError as exc:
             raise ManifestError(f"methodology.pipeline: {exc}") from exc
+
+    def _validate_ecosystem_commands(self) -> None:
+        """Refuse a per-ecosystem command block that would do nothing (ADR-013 D1).
+
+        A mapping under ``commands`` is a further ecosystem's commands, and
+        nothing else: one naming the primary, or an ecosystem the project does
+        not declare, would load and never be read, which is BUG_050's shape. A
+        command name the block does not know is refused for the same reason.
+        """
+        primary = self.primary_ecosystem
+        secondaries = self.declared_ecosystems[1:]
+        for key, value in (self.data.get("commands") or {}).items():
+            if key in secondaries:
+                if not isinstance(value, Mapping):
+                    raise ManifestError(
+                        f"commands.{key} must be a mapping of the {key!r} "
+                        f"ecosystem's commands, got {value!r}"
+                    )
+            elif not isinstance(value, Mapping):
+                continue
+            elif key == primary:
+                raise ManifestError(
+                    f"commands.{key} names the primary ecosystem, whose commands "
+                    f"are the flat commands.* keys; move them there"
+                )
+            else:
+                declared = ", ".join(self.declared_ecosystems)
+                raise ManifestError(
+                    f"commands.{key} is a block of commands for an ecosystem "
+                    f"project.ecosystems does not declare ({declared}), so "
+                    f"nothing would read it"
+                )
+            for name, command in value.items():
+                if name not in COMMAND_NAMES:
+                    raise ManifestError(
+                        f"commands.{key}.{name} is not a command this build runs; "
+                        f"the names are {', '.join(COMMAND_NAMES)}"
+                    )
+                if command is not None and not isinstance(command, str):
+                    raise ManifestError(
+                        f"commands.{key}.{name} must be a command string or "
+                        f"null, got {command!r}"
+                    )
 
     def _validate_schedule(self, gates: Mapping[str, Any]) -> None:
         """Refuse a sweep cadence that still demands whole-run evidence (ADR-010 D3).
@@ -762,17 +816,35 @@ class Manifest:
             return Level.parse(rules[rule_id])
         return Level.WARN
 
-    def command_for(self, name: str, **extra: str) -> str:
+    def command_key(self, name: str, ecosystem: str | None = None) -> str:
+        """The dotted key holding ``name`` for ``ecosystem`` (ADR-013 D1).
+
+        The primary's commands are the flat ``commands.*`` keys, as they
+        always were; every further declared ecosystem keeps its own under
+        ``commands.<ecosystem>``. ``None`` means the primary.
+        """
+        if ecosystem is None or ecosystem == self.primary_ecosystem:
+            return f"commands.{name}"
+        return f"commands.{ecosystem}.{name}"
+
+    def command_template(self, name: str, ecosystem: str | None = None) -> str | None:
+        """The unresolved template for ``name``, or ``None`` when none is set."""
+        template = self.get(self.command_key(name, ecosystem))
+        return template if isinstance(template, str) and template else None
+
+    def command_for(self, name: str, ecosystem: str | None = None, **extra: str) -> str:
         """Resolve a command template, running discovery commands as needed.
 
+        ``ecosystem`` picks whose command it is (``None``: the primary's).
         Discovery results are cached for the life of the process: a device
         identifier should be looked up once per invocation, not once per
         placeholder.
         """
-        template = self.get(f"commands.{name}")
+        template = self.command_template(name, ecosystem)
         if not template:
+            key = self.command_key(name, ecosystem)
             raise ManifestError(
-                f"no command configured for {name!r}; set commands.{name} in "
+                f"no command configured for {name!r}; set {key} in "
                 f"{MANIFEST_RELPATH} or select an adapter that supplies it"
             )
 
@@ -841,6 +913,17 @@ class Manifest:
         return list(self.get("project.ecosystems") or ["generic"])
 
     @property
+    def primary_ecosystem(self) -> str:
+        """The first declared ecosystem, whose commands are the flat keys."""
+        return self.ecosystems[0]
+
+    @property
+    def declared_ecosystems(self) -> list[str]:
+        """Every declared ecosystem once, the primary first (ADR-013)."""
+        primary, *others = self.ecosystems
+        return [primary, *_secondaries(primary, others)]
+
+    @property
     def state_root(self) -> Path:
         """Where runtime state lives — shared across every worktree.
 
@@ -870,6 +953,9 @@ class Manifest:
 #: The gates a sweep cadence may move off the per-change path (ADR-010 D1).
 #: Every other gate's evidence is per change by nature.
 SCHEDULABLE_GATES = ("coverage.meets_floor", "test.all_pass")
+
+#: The command names a `commands` block may hold, flat or per ecosystem.
+COMMAND_NAMES = tuple(DEFAULTS["commands"])
 
 
 def _is_count(value: Any, *, minimum: int) -> bool:
@@ -961,6 +1047,17 @@ def _ecosystems(raw: Mapping[str, Any]) -> list[str]:
     return [str(v) for v in value]
 
 
+def _secondaries(primary: str, others: list[str]) -> list[str]:
+    """The further ecosystems, in listed order, each once and never the primary."""
+    seen = {primary}
+    found: list[str] = []
+    for eco in others:
+        if eco not in seen:
+            seen.add(eco)
+            found.append(eco)
+    return found
+
+
 def _dig(mapping: Mapping[str, Any], *keys: str) -> Any:
     node: Any = mapping
     for key in keys:
@@ -1005,6 +1102,29 @@ def _merge(
         if isinstance(value, Mapping) and isinstance(target.get(key), Mapping):
             _merge(target[key], value, provenance, origin, f"{dotted}.")
         else:
+            target[key] = copy.deepcopy(value)
+            provenance[dotted] = origin
+            if isinstance(value, Mapping):
+                _record(provenance, value, origin, f"{dotted}.")
+
+
+def _fill(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    provenance: dict[str, str],
+    origin: str,
+    prefix: str = "",
+) -> None:
+    """Like :func:`_merge`, but sets only a leaf no adapter has set yet.
+
+    A further ecosystem's defaults fill what the library left at its default
+    and the primary did not supply; the primary wins every key it names.
+    """
+    for key, value in source.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, Mapping) and isinstance(target.get(key), Mapping):
+            _fill(target[key], value, provenance, origin, f"{dotted}.")
+        elif provenance.get(dotted, "default") == "default":
             target[key] = copy.deepcopy(value)
             provenance[dotted] = origin
             if isinstance(value, Mapping):

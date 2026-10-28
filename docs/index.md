@@ -41,6 +41,7 @@ adr/ADR-009-the-oracle-page-becomes-a-mobile-control-panel
 adr/ADR-010-whole-suite-evidence-moves-to-a-scheduled-sweep
 adr/ADR-011-a-hook-may-record-into-the-project-its-path-names
 adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract
+adr/ADR-013-each-declared-ecosystem-runs-through-its-own-adapter
 ```
 
 ```{toctree}

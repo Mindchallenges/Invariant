@@ -12,7 +12,8 @@ version: 1
 
 project:
   name: example
-  ecosystems: [swift]          # selects adapters; first is primary
+  ecosystems: [swift]          # selects adapters; the first is primary and
+                               # owns the flat commands.* keys (ADR-013)
 
 paths:
   root: .                      # repo root, relative to the manifest's parent's parent
@@ -35,6 +36,9 @@ commands:                      # adapters supply defaults; these override
   coverage_one: null             # scoped coverage, {selector} substituted: the
                                  # sibling of test_one, run by `pipeline
                                  # coverage --selector` (ADR-010)
+  # <ecosystem>:                 # a FURTHER declared ecosystem's commands, the
+  #   test_one: ...              # same names as above; its adapter fills them.
+                                 # See "Several ecosystems" (ADR-013)
 
 docs:
   format: markdown             # markdown | sphinx
@@ -256,6 +260,68 @@ also evaluated by `invariant check` and summarised in a `doctor` row. It is
 never stops a change, and the manifest refuses `block` or `ask` (Validation,
 below). Under a scheduled floor the advisory verdict also names, for each
 touched file, the last sweep's figure and commit.
+
+### Several ecosystems
+
+A project may declare more than one ecosystem, `ecosystems: [python, node]`
+for a Python package with a web front end under `web/`. The first is the
+**primary**, and the two halves of the engine treat the list the same way
+(ADR-013):
+
+- **Classification stacks.** Every declared adapter is asked whether a path
+  is a test, source or inert file, and the first with an opinion answers.
+- **Commands are per ecosystem.** The flat `commands.*` keys are the
+  primary's. Every further ecosystem keeps its own under
+  `commands.<ecosystem>`, with the same command names, filled by its adapter
+  and overridden key by key by the manifest:
+
+  ```yaml
+  commands:
+    test: uv run pytest
+    test_one: uv run pytest {selector}
+    node:
+      test_one: npx vitest run {selector}
+  ```
+
+- **A scoped run goes to the ecosystem that owns its selectors**, and that
+  ecosystem's command runs it and that ecosystem's adapter reads it:
+
+```mermaid
+graph TD
+    R["pipeline test / pipeline coverage"] --> S{"selectors given, and<br/>more than one ecosystem declared?"}
+    S -- no --> P["the primary: flat commands.*,<br/>the primary's adapter"]
+    S -- yes --> C{"for each selector: which declared<br/>adapters' owns_selector claim it?"}
+    C -- "two or more" --> X1["refused: ambiguous,<br/>nothing run or recorded"]
+    C -- "none" --> P2["the primary"]
+    C -- "exactly one" --> E["that ecosystem"]
+    P2 --> A{"all selectors in<br/>ONE ecosystem?"}
+    E --> A
+    A -- no --> X2["refused, naming each ecosystem's<br/>selectors; nothing run or recorded"]
+    A -- yes --> O["commands.&lt;eco&gt;.test_one / coverage_one,<br/>read by that ecosystem's adapter;<br/>the record names the ecosystem"]
+```
+
+`owns_selector` reads the selector as a path and answers with the adapter's
+own `is_test_file`, the convention coverage classification already uses.
+Python strips a node id's `::` suffix first. A selector no adapter claims,
+such as `-k engine` or an Xcode `-only-testing:` id, goes to the primary, so
+an ecosystem whose selectors are not paths routes correctly only as the
+primary. Selectors spanning two ecosystems are refused for BUG_031's reason:
+`test.all_pass` reads the last run, and one run per ecosystem would let a
+partial run stand for the whole requested scope.
+
+What stays with the primary: `pipeline test` and `pipeline coverage` with no
+`--selector`, and `invariant sweep run`, run and read the primary's whole suite
+only. No gate demands a further ecosystem's whole suite yet; IDEA_036 holds
+that. `sweep.no_full_run` at the hook asks each declared ecosystem about its
+own `commands.test` / `commands.coverage` templates with its own adapter, so
+`npm test` is a full run in a `[python, node]` project just as `pytest` is. A
+node coverage run is reachable and is refused as having measured nothing,
+because the node adapter cannot read coverage yet (BUG_018).
+
+Validation refuses a block that would never be read: one naming the primary,
+one naming an ecosystem the project does not declare, a non-mapping value for
+a declared further ecosystem, an unknown command name in a block, and a
+command that is neither a string nor null.
 
 ### Levels, and where each one can be delivered
 
@@ -952,11 +1018,20 @@ after, so the manifest edit takes effect from the next `pipeline start`
 For any value, later wins:
 
 1. Library defaults
-2. Primary adapter defaults (from `project.ecosystems[0]`)
-3. Additional adapters, in listed order
+2. Primary adapter defaults (from `project.ecosystems[0]`), the flat
+   `commands.*` included
+3. Additional adapters, in listed order, each once. Their `commands` go to
+   their own `commands.<ecosystem>` block; anything else they supply fills
+   only a key no adapter has set. Layer 3 never writes over layer 2, so the
+   primary wins every key it names (ADR-013 D4)
 4. Enforcement profile (for rule levels only)
 5. Explicit manifest values
 6. Environment overrides (`INVARIANT_*`), for one-off escapes
+
+Layer 3 used to merge every adapter's defaults flat, later wins, which
+contradicted "the first is primary": for `[python, node]` the flat
+`commands.test` resolved to `npm test` while the python adapter read its
+output (BUG_097).
 
 Layers 5 and 6 are where the operator exercises authority, and they are held to
 a different standard than the rest because of it: a rule id either resolves or
@@ -982,6 +1057,7 @@ class Adapter:
     def carries_executable_code(self, path: Path) -> bool | None: ...
     def expected_failures_are_strict(self, root: Path, selectors) -> bool | None: ...
     def test_scope_of(self, extra_tokens) -> str | None: ...
+    def owns_selector(self, selector: str) -> bool: ...
     def failing_test_ids(self, stdout: str, stderr: str, bundle) -> list[str] | None: ...
     def hazards(self) -> list[Hazard]: ...
 ```
@@ -995,6 +1071,11 @@ anything else. Python reads pytest's narrowing arguments (a positional, `-k`,
 `-m`, `--lf`, `--ff`, `--deselect`) and its known non-narrowing options;
 Swift reads `-only-testing:` and doubts `-skip-testing:`; node claims nothing
 past the bare script (ADR-010 D5).
+
+`owns_selector` is asked only where several ecosystems are declared, to
+route a scoped run (see "Several ecosystems"). It claims a selector only on
+positive evidence, from the adapter's test-file convention; `False` leaves
+the run with the primary.
 
 `failing_test_ids` is asked by `sweep run`: which tests failed, each named as
 a selector `commands.test_one` takes back, so a new red can be re-run alone

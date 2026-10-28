@@ -79,9 +79,10 @@ class TestLayering:
     def test_first_ecosystem_is_primary_for_overlapping_keys(self, tmp_path):
         write_manifest(tmp_path, {"project": {"ecosystems": ["python", "node"]}})
         m = Manifest.load(tmp_path)
-        # Later adapters still merge, so the last writer of a shared key wins;
-        # provenance is what makes that legible rather than mysterious.
-        assert m.source_of("commands.test") == "adapter:node"
+        # The primary wins every key it names; a further ecosystem's commands
+        # live under their own key (ADR-013 D4). Later-wins here was BUG_097.
+        assert m.source_of("commands.test") == "adapter:python"
+        assert m.source_of("commands.node.test") == "adapter:node"
 
     def test_swift_adapter_switches_the_doc_format(self, tmp_path):
         write_manifest(tmp_path, {"project": {"ecosystems": ["swift"]}})

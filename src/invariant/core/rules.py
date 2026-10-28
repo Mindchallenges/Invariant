@@ -2920,12 +2920,14 @@ def _full_run_in(ctx: RuleContext, command: str) -> str | None:
     assignments dropped. A template is matched as a token prefix, a template
     token carrying a ``{placeholder}`` matching any one token; the coverage
     template is tried first because the test template is usually a prefix of
-    it. What follows the template is the adapter's to judge.
+    it. What follows the template is the adapter's to judge — the adapter of
+    the ecosystem whose template it is, each declared ecosystem being asked
+    about its own (ADR-013 D5).
     """
     tokens = _shell_words(command)
     if not tokens:
         return None
-    adapter = get_adapter(ctx.manifest.ecosystems[0])
+    ecosystems = [(eco, get_adapter(eco)) for eco in ctx.manifest.declared_ecosystems]
     segment: list[str] = []
     for token in [*tokens, ";"]:
         if token not in _SHELL_SEPARATORS:
@@ -2933,11 +2935,12 @@ def _full_run_in(ctx: RuleContext, command: str) -> str | None:
             continue
         while segment and _ENV_ASSIGNMENT.match(segment[0]):
             segment = segment[1:]
-        for key in ("coverage", "test"):
-            template = _shell_words(str(ctx.manifest.get(f"commands.{key}") or ""))
-            extra = _after_template(template, segment)
-            if extra is not None and adapter.test_scope_of(extra) == "full":
-                return key
+        for eco, adapter in ecosystems:
+            for key in ("coverage", "test"):
+                template = _shell_words(ctx.manifest.command_template(key, eco) or "")
+                extra = _after_template(template, segment)
+                if extra is not None and adapter.test_scope_of(extra) == "full":
+                    return key
         segment = []
     return None
 

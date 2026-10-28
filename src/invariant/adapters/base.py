@@ -17,7 +17,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 
 @dataclass(frozen=True)
@@ -179,7 +179,7 @@ class Adapter:
         )
 
     id = "generic"
-    manifest_defaults: dict[str, Any] = {}
+    manifest_defaults: ClassVar[dict[str, Any]] = {}
 
     def detect(self, root: Path) -> bool:
         return False
@@ -194,6 +194,21 @@ class Adapter:
 
     def parse_coverage(self, raw: str) -> dict[str, float]:
         return {}
+
+    def owns_selector(self, selector: str) -> bool:
+        """Does this test selector name something in this ecosystem? (ADR-013 D2)
+
+        Asked only where a manifest declares more than one ecosystem, to route
+        a scoped run to the ecosystem whose command and adapter it belongs to.
+        Answered from the adapter's own test-file convention
+        (:meth:`is_test_file`), read off the selector as a path, so the run
+        path and coverage classification cannot disagree about whose a test
+        is. Not from :meth:`source_files`: the base answer there keeps every
+        path, and a generic adapter claiming every selector would make every
+        run ambiguous. ``False`` claims nothing: a selector no adapter claims
+        runs as the primary's, so only positive evidence moves a run.
+        """
+        return self.is_test_file(Path(selector)) is True
 
     def join_selectors(self, selectors: Sequence[str]) -> str | None:
         """How this ecosystem spells SEVERAL selectors in one `{selector}` slot.

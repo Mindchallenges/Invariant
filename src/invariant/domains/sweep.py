@@ -92,7 +92,10 @@ class SweepDomain:
         self.manifest = manifest
         self.store = store
         self.runner = runner or run_command
-        self.adapter = adapter or get_adapter(manifest.ecosystems[0])
+        # The sweep holds the PRIMARY ecosystem's suite: its flat commands and
+        # its adapter (ADR-013 D6). A further ecosystem's whole suite is not
+        # swept yet, and the ADR says so rather than this line implying it.
+        self.adapter = adapter or get_adapter(manifest.primary_ecosystem)
         self.today = today or core.utc_today()
         self.root = Path(manifest.root)
 

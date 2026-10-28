@@ -1,7 +1,7 @@
 """Repro for BUG_097 — see the work-item entry (docs/backlog/BUG_097.md).
 
-Both tests fail while the defect is live. When the fix lands, delete the
-expected-failure wrapper; each assertion must then pass unchanged.
+Both tests failed while the defect was live; the fix removed the
+expected-failure wrappers and left each assertion unchanged.
 
 Two faces, two symptoms:
 
@@ -19,7 +19,6 @@ project observes.
 
 import subprocess
 
-import pytest
 from test_domains import git_project
 
 from invariant.adapters.node import NodeAdapter
@@ -33,10 +32,6 @@ TWO_ECOSYSTEMS = {"version": 1, "project": {"name": "demo", "ecosystems": ["pyth
 NODE_TEST = "web/src/render.test.ts"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_097 is live — delete this marker with the fix",
-)
 def test_BUG_097_a_stacked_second_ecosystem_keeps_the_primarys_suite_command(tmp_path):
     m = Manifest.from_raw(
         {"project": {"ecosystems": ["python", "node"]}},
@@ -48,10 +43,6 @@ def test_BUG_097_a_stacked_second_ecosystem_keeps_the_primarys_suite_command(tmp
     assert m.command_for("test") == PythonAdapter.manifest_defaults["commands"]["test"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_097 is live — delete this marker with the fix",
-)
 def test_BUG_097_a_second_ecosystem_test_is_run_and_read_by_its_own_adapter(
     tmp_path, monkeypatch
 ):

@@ -149,6 +149,47 @@ def joined_selectors(adapter, selectors: Sequence[str]) -> str:
     return joined
 
 
+def ecosystem_of(manifest, selectors: Sequence[str]) -> str:
+    """The declared ecosystem a run belongs to, or a refusal (ADR-013 D2, D3).
+
+    A run with no selector, and every run in a single-ecosystem project, is
+    the primary's. Otherwise each selector goes to the one declared adapter
+    that claims it (:meth:`Adapter.owns_selector`), and to the primary when
+    none does. Two adapters claiming one selector, or selectors landing in two
+    ecosystems, are refused having run nothing: one run per ecosystem would
+    leave ``test.all_pass`` reading only the last of them, the trap BUG_031
+    refused.
+    """
+    declared = manifest.declared_ecosystems
+    primary = declared[0]
+    if not selectors or len(declared) == 1:
+        return primary
+    owned: dict[str, list[str]] = {}
+    for selector in selectors:
+        claims = [eco for eco in declared if get_adapter(eco).owns_selector(selector)]
+        if len(claims) > 1:
+            raise UsageError(
+                f"{selector} is claimed by more than one declared ecosystem "
+                f"({', '.join(claims)}), so which command runs it and which "
+                "adapter reads it cannot be told. Nothing was run and nothing "
+                "was recorded."
+            )
+        owned.setdefault(claims[0] if claims else primary, []).append(selector)
+    if len(owned) > 1:
+        raise UsageError(
+            "these selectors belong to more than one ecosystem, and one run "
+            "has one command and one adapter to read it:\n"
+            + "".join(
+                f"  - {eco}: {', '.join(found)}\n" for eco, found in owned.items()
+            )
+            + "  Run each ecosystem's selectors in its own invocation. Nothing "
+            "was run and nothing was recorded: a run covering part of the "
+            "requested scope would be read by test.all_pass as the state of "
+            "the whole of it."
+        )
+    return next(iter(owned))
+
+
 @dataclass(frozen=True)
 class Measurement:
     """What one coverage run measured, and the suite's own outcome beside it."""
@@ -173,6 +214,7 @@ def measure_coverage(
     root: Path,
     runner=None,
     selectors: Sequence[str] = (),
+    ecosystem: str | None = None,
 ) -> Measurement:
     """Run a coverage command and read it, or refuse a run that measured nothing.
 
@@ -185,13 +227,14 @@ def measure_coverage(
     (the sweep's tests); every refusal below still applies to what it returns.
     ``selectors`` says the run was scoped, which changes only the hint a
     zero-executed refusal gives: a scoped run that built and launched cleanly
-    most likely matched nothing.
+    most likely matched nothing. ``ecosystem`` is whose report leg to read
+    (``None``: the primary's), and must be the ecosystem ``adapter`` reads for.
     """
     runner = runner or run_command
     report_command: str | None = None
-    if manifest.get("commands.coverage_report"):
+    if manifest.command_template("coverage_report", ecosystem):
         report_command = manifest.command_for(
-            "coverage_report", result_bundle=str(bundle)
+            "coverage_report", ecosystem, result_bundle=str(bundle)
         )
         _refuse_chained_coverage(command, report_command, str(bundle))
 
@@ -854,7 +897,8 @@ class PipelineDomain:
         self.require(session_id)
         root = Path(cwd or self.manifest.root)
         selectors = [s for s in (selectors or ()) if s]
-        adapter = get_adapter(self.manifest.ecosystems[0])
+        ecosystem = ecosystem_of(self.manifest, selectors)
+        adapter = get_adapter(ecosystem)
 
         # A per-run path, supplied here rather than configured. Writing a
         # result-bundle path into a manifest would make it shared state between
@@ -862,9 +906,10 @@ class PipelineDomain:
         # measurements while both reported success.
         extra = {}
         if selectors:
-            if not self.manifest.get("commands.coverage_one"):
+            if not self.manifest.command_template("coverage_one", ecosystem):
+                key = self.manifest.command_key("coverage_one", ecosystem)
                 raise UsageError(
-                    "a scoped coverage run needs commands.coverage_one, the "
+                    f"a scoped coverage run needs {key}, the "
                     "coverage command with {selector} substituted, and none is "
                     "configured or supplied by the adapter. Nothing was run."
                 )
@@ -872,11 +917,13 @@ class PipelineDomain:
         bundle = self._fresh_bundle(session_id, "coverage")
         command = self.manifest.command_for(
             "coverage_one" if selectors else "coverage",
+            ecosystem,
             result_bundle=str(bundle),
             **extra,
         )
         run = measure_coverage(
-            self.manifest, adapter, command, bundle, root, selectors=selectors
+            self.manifest, adapter, command, bundle, root,
+            selectors=selectors, ecosystem=ecosystem,
         )
         outcome = run.outcome
 
@@ -888,7 +935,10 @@ class PipelineDomain:
         # one as though it were current. A whole-suite run with 625 failures
         # sat beside a rule saying "the suite is green and the pass is
         # trustworthy", because the rule was never shown this run at all.
-        self._record_test_run(session_id, "coverage", command, outcome, selectors=selectors)
+        self._record_test_run(
+            session_id, "coverage", command, outcome, selectors=selectors,
+            ecosystem=ecosystem,
+        )
 
         # The suite's state at the moment of measurement, kept with it. A file
         # at 100% measured on a run where twelve tests failed is a different
@@ -908,6 +958,8 @@ class PipelineDomain:
             # to "was this one" (ADR-010 D1, D8).
             "selectors": list(selectors),
             "scope": _scope(selectors),
+            # Whose command ran and whose adapter read it (ADR-013 D2).
+            "ecosystem": ecosystem,
             "executed": outcome.total,
             "failed": outcome.failed,
             "exit_code": run.exit_code,
@@ -975,18 +1027,21 @@ class PipelineDomain:
         what to do when they do not is this domain's, and the answer is to
         refuse. A refusal costs the caller one retry, and the alternative —
         running a subset — costs them the belief that the scope was covered
-        (BUG_031).
+        (BUG_031). The selectors also decide WHOSE run it is: in a project
+        declaring several ecosystems, the one that owns them supplies the
+        command and reads the result (ADR-013).
         """
         pipeline = self.require(session_id)
         selectors = [s for s in (selectors or ()) if s]
-        adapter = get_adapter(self.manifest.ecosystems[0])
+        ecosystem = ecosystem_of(self.manifest, selectors)
+        adapter = get_adapter(ecosystem)
         command_key = "test_one" if selectors else "test"
         extra = {}
         if selectors:
             extra["selector"] = joined_selectors(adapter, selectors)
         bundle = self._fresh_bundle(session_id, "test")
         command = self.manifest.command_for(
-            command_key, result_bundle=str(bundle), **extra
+            command_key, ecosystem, result_bundle=str(bundle), **extra
         )
 
         proc = run_command(command, Path(cwd or self.manifest.root))
@@ -1000,7 +1055,7 @@ class PipelineDomain:
 
         return self._record_test_run(
             session_id, phase, command, result, read_as_red=read_as_red,
-            selectors=selectors,
+            selectors=selectors, ecosystem=ecosystem,
         )
 
     def _read_red_phase_run(
@@ -1073,6 +1128,7 @@ class PipelineDomain:
         result,
         read_as_red=False,
         selectors: Sequence[str] = (),
+        ecosystem: str | None = None,
     ):
         """Append one run to the evidence every test rule reads.
 
@@ -1094,6 +1150,8 @@ class PipelineDomain:
             # resolved command string cannot be relied on to say (ADR-010 D1).
             "selectors": list(selectors),
             "scope": _scope(selectors),
+            # Whose command ran and whose adapter read it (ADR-013 D2).
+            "ecosystem": ecosystem or self.manifest.primary_ecosystem,
             "passed": result.passed,
             "exit_code": result.exit_code,
             "executed": result.total,

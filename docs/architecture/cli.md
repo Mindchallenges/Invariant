@@ -385,6 +385,14 @@ invariant pipeline test [--phase <state>] [--selector <sel>]...
     refusal costs one retry; a discard costs the belief that the scope was
     covered.
 
+    In a project declaring several ecosystems the selectors also decide
+    WHOSE run it is: the ecosystem whose adapter claims them supplies
+    commands.<ecosystem>.test_one and reads the result, and selectors no
+    adapter claims stay with the primary. Selectors spanning two ecosystems,
+    or one two adapters claim, are REFUSED having run and recorded nothing,
+    for the same reason as above. With no --selector the run is the primary
+    ecosystem's whole suite (ADR-013; manifest.md, "Several ecosystems").
+
     The spawned suite does NOT inherit INVARIANT_SESSION_ID. That variable
     names the session a CALLER is recording against, and the test command is a
     child program: in the one repository whose suite exercises session
@@ -396,7 +404,8 @@ invariant pipeline test [--phase <state>] [--selector <sel>]...
     (ADR-010) runs the suite the same way.
 
     Each record says which run it was: `selectors` as given, and `scope`,
-    `full` with none and `scoped` with some.
+    `full` with none and `scoped` with some, and `ecosystem`, whose command
+    ran and whose adapter read it.
 
     Under a sweep cadence that schedules test.all_pass, a run with no
     --selector is the whole suite on a change, and `sweep.no_full_run` is
@@ -412,8 +421,9 @@ invariant pipeline coverage [--selector <sel>]...
     numbers as pipeline evidence. This is what coverage.meets_floor reads.
 
     --selector runs commands.coverage_one instead, the scoped sibling
-    (ADR-010), repeatable and joined by the adapter exactly as for `pipeline
-    test`; with no coverage_one configured or supplied by the adapter it is
+    (ADR-010), repeatable, joined by the adapter and routed to its ecosystem
+    exactly as for `pipeline test` (commands.<ecosystem>.coverage_one and
+    .coverage_report for a further ecosystem, ADR-013); with no coverage_one configured or supplied by the adapter it is
     refused, having run nothing. A scoped run that executes no tests is still
     refused, but its message names the selector as the likely cause (a filter
     that matched nothing), keeps the build-or-launch alternative, and appends

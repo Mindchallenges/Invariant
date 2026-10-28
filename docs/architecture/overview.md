@@ -1031,6 +1031,13 @@ real failure from a tooling failure. Adapters are selected in the manifest and
 may be stacked; `generic` is the always-present fallback that executes literal
 commands from the manifest and parses nothing.
 
+Stacking means the same thing on both halves of the engine. Classification
+asks every declared adapter, and the first with an opinion answers. A run
+goes to ONE ecosystem: the primary for a whole-suite run, or the ecosystem
+whose adapter claims a scoped run's selectors (`owns_selector`). That
+ecosystem's command runs it and that adapter reads it. The flat `commands.*`
+are the primary's, and each further ecosystem has its own block (ADR-013).
+
 "How to read a coverage number" is the layer's quietest duty and the one whose
 failures travel furthest, because everything downstream of it behaves correctly
 on whatever picture it supplies. The Xcode adapter's row parser matched a
