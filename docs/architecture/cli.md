@@ -692,7 +692,22 @@ invariant pipeline start [--methodology <id>] [--task <text>]
     on the pipeline and every later command resolves the machine from that
     record, so neither the override nor a mid-pipeline manifest edit can
     swap a running pipeline's gate set (AUD-02/03).
+
+    With guidelines.ruleset configured, the ruleset is pinned the same way
+    (ADR-012 D3): the record's `ruleset` holds its path and digest, read
+    from the tree in hand as guidelines.ruleset_valid reads it, and start
+    prints "ruleset <path> pinned at <digest>". A ruleset that does not load
+    does not refuse the start (ruling DN-D): the record keeps the path, a
+    null digest and the reason in `error`, start names it, and the landing
+    refuses it through guidelines.ruleset_valid until it loads. The
+    guidelines landing gates stay on a pipeline that pinned a ruleset even
+    if the manifest key is cleared later. With no ruleset configured nothing
+    is pinned and `ruleset` is null.
 invariant pipeline status [--json]
+    The methodology, task, state and legal successors, and the pinned
+    ruleset: "ruleset <path> @ <digest>", or the reason it could not be
+    loaded at start. No line when nothing was pinned. --json is the record,
+    `ruleset` included.
 invariant pipeline advance <state> [--force]
     Validates the transition against the FSM and runs the gates. --force
     records an override with a required --reason rather than bypassing

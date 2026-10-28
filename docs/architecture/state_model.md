@@ -967,6 +967,55 @@ A pinned machine that can no longer be loaded fails the gates that need it
 rather than skipping; the one permitted escape is `pipeline start`, which
 archives the unusable record rather than discarding it.
 
+The guidelines ruleset is **pinned the same way** (ADR-012 D3, A2 increment
+6). With `guidelines.ruleset` configured, `start` records `ruleset` on the
+pipeline: `{"path", "digest", "error"}`, read through `core.rules.ruleset_pin`,
+which is `load_ruleset` from the tree in hand, registries included. So the pin
+is exactly what `guidelines.ruleset_valid` reads.
+
+```mermaid
+sequenceDiagram
+    participant C as CLI (pipeline start)
+    participant P as pipeline
+    participant R as rules
+    participant G as core/guidelines
+    C->>P: start(session, cwd)
+    P->>R: ruleset_pin(context: manifest, session worktree or cwd)
+    alt no guidelines.ruleset
+        R-->>P: None: nothing pinned, the manifest keeps deciding
+    else it loads
+        R->>G: load(path, registered, root)
+        G-->>R: Ruleset (digest of the ruleset's own bytes)
+        R-->>P: {path, digest, error: null}
+    else it does not load
+        R-->>P: {path, digest: null, error: why} (DN-D)
+    end
+    P->>P: save the record; the pipeline starts either way
+```
+
+- **The digest is the ruleset's own**: the first twelve hex digits of the
+  SHA-256 of its bytes, the hash every verdict will record (A4). A registry
+  a `cochange` rule names is read with the ruleset, so a broken one makes the
+  ruleset unloadable at start, but its bytes are not in the digest: a registry
+  is read as it stands after the change.
+- **An unloadable ruleset is recorded, not refused** (ruling DN-D). The
+  pipeline starts, the record says why, and the landing refuses it through
+  `guidelines.ruleset_valid`, which reads the ruleset the change lands. A
+  ruleset repaired inside the change therefore lands, which is how the
+  ruleset lane (ADR-012 D10) lands a repair; the pin keeps the record that
+  the pipeline started without one.
+- **What the pin holds on.** The `guidelines.*` landing gates ride a pipeline
+  that pinned a ruleset whatever the manifest says now, so clearing
+  `guidelines.ruleset` (an isolation-exempt manifest line, like
+  `methodology.pipeline`) cannot drop them mid-pipeline. Their verdicts then
+  say what they can see. No gate compares the pinned digest with the current
+  one yet. That comparison is A4's, for verdicts (DN-D), so editing the
+  ruleset mid-pipeline changes no obligation this build checks.
+- **Nothing pinned, nothing changes.** With no ruleset at start the field is
+  null and the manifest decides, as before. A record written before the field
+  existed loads with it null and is read the same way, so no record is
+  migrated.
+
 Shipped methodologies:
 
 | id | For | Shape |
@@ -1071,9 +1120,10 @@ Details that are load-bearing rather than incidental:
   (`GUIDELINES_GATES`) only when `guidelines.ruleset` is set, for the reason
   `sweep.fresh` is injected only under a cadence: with no ruleset the rule is
   N/A, and a `block`-level skip on every landing would be a change on every
-  project that has not opted in (ADR-012 D3, ruling 7). Like the cadence
-  injection it follows the manifest as it stands; pinning the ruleset's hash
-  on the pipeline at `start` is a later increment of the same deliverable.
+  project that has not opted in (ADR-012 D3, ruling 7). A pipeline that
+  pinned a ruleset at `start` keeps them whatever the manifest says later,
+  as it keeps its methodology; one that pinned nothing, and a record older
+  than the pin, follow the manifest as it stands (see the pin above).
   `guidelines.generated_current` rides beside it in the same set (A2
   increment 5): it compares every generated output with what `guidelines
   render` would write now and warns on drift in every profile, so it reports

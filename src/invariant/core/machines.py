@@ -117,7 +117,8 @@ FRESHNESS_GATE = "sweep.fresh"
 #: that has not opted in. With a ruleset, the landing is where a malformed one
 #: stops a change, and where drift between the ruleset and what render wrote
 #: from it is reported (``guidelines.generated_current``, warn in every
-#: profile, ruling 7).
+#: profile, ruling 7). A running pipeline that pinned a ruleset at ``start``
+#: keeps them whatever the manifest says later (``guidelines=True``).
 GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
     "landing": {"entry": ["guidelines.ruleset_valid", "guidelines.generated_current"]},
 }
@@ -151,7 +152,9 @@ def load_machine(machine_id: str, manifest=None) -> Machine:
     return Machine.load(find_machine_file(machine_id, manifest))
 
 
-def load_pipeline_machine(manifest, machine_id: str | None = None) -> Machine:
+def load_pipeline_machine(
+    manifest, machine_id: str | None = None, *, guidelines: bool | None = None
+) -> Machine:
     """A pipeline machine with the docs-first gates attached.
 
     ``machine_id`` names the machine explicitly — a RUNNING pipeline is pinned
@@ -159,6 +162,12 @@ def load_pipeline_machine(manifest, machine_id: str | None = None) -> Machine:
     manifest says today (AUD-02/AUD-03). Without it, the manifest's configured
     methodology is the answer, which is right for everything that has no
     pipeline record to read.
+
+    ``guidelines`` is the same pin for the ``guidelines.*`` landing gates:
+    ``True`` for a pipeline that pinned a ruleset at ``start``, so clearing
+    ``guidelines.ruleset`` mid-pipeline cannot drop them. ``None`` asks the
+    manifest, which is right for a pipeline that pinned nothing and for a
+    record that predates the pin.
     """
     machine_id = machine_id or manifest.get("methodology.pipeline") or "tdd"
     machine = load_machine(machine_id, manifest)
@@ -171,7 +180,9 @@ def load_pipeline_machine(manifest, machine_id: str | None = None) -> Machine:
     for required_role, by_role in AGENT_ROLE_GATES.items():
         if machine.states_with_role(required_role):
             machine = machine.inject_gates(by_role)
-    if manifest is not None and manifest.get("guidelines.ruleset"):
+    if guidelines is None:
+        guidelines = manifest is not None and bool(manifest.get("guidelines.ruleset"))
+    if guidelines:
         machine = machine.inject_gates(GUIDELINES_GATES)
     scheduled = manifest.scheduled_gates() if manifest is not None else frozenset()
     return machine.inject_beside(scheduled, FRESHNESS_GATE)

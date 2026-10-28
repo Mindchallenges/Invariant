@@ -2548,13 +2548,22 @@ def cmd_pipeline_start(args) -> int:
         # from (ADR-002 D3). Without it the first state would have a duration
         # and no spend, because there would be no earlier reading.
         host_session_id=session.host_session_id,
+        # The ruleset is pinned from the tree in hand, as its gate reads it.
+        session=session.to_dict(),
+        cwd=ctx.cwd,
     )
-    return emit(
-        args,
-        pipeline.to_dict(),
-        f"pipeline {pipeline.methodology} started in {pipeline.state}\n"
-        f"  gates here: invariant pipeline gates",
-    )
+    lines = [f"pipeline {pipeline.methodology} started in {pipeline.state}"]
+    pin = pipeline.ruleset
+    if pin is not None and pin.get("digest"):
+        lines.append(f"  ruleset {pin['path']} pinned at {pin['digest']}")
+    elif pin is not None:
+        lines.append(
+            f"  ruleset {pin['path']} could not be loaded: {pin.get('error')}\n"
+            f"  the landing refuses it until it loads: "
+            f"invariant check guidelines.ruleset_valid"
+        )
+    lines.append("  gates here: invariant pipeline gates")
+    return emit(args, pipeline.to_dict(), "\n".join(lines))
 
 
 def cmd_pipeline_ack(args) -> int:
@@ -2648,6 +2657,11 @@ def cmd_pipeline_status(args) -> int:
         f"  state   {pipeline.state}",
         f"  legal   {', '.join(machine.next_states(pipeline.state)) or '(terminal)'}",
     ]
+    pin = pipeline.ruleset
+    if pin is not None and pin.get("digest"):
+        text.append(f"  ruleset  {pin['path']} @ {pin['digest']}")
+    elif pin is not None:
+        text.append(f"  ruleset  {pin['path']} could not be loaded at start: {pin.get('error')}")
     if pipeline.overrides:
         text.append(f"  forced  {len(pipeline.overrides)} override(s) recorded")
     return emit(args, pipeline.to_dict(), "\n".join(text))

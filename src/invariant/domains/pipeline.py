@@ -28,6 +28,7 @@ from ..core.rules import (
     apply_acknowledgements,
     evaluate,
     get_rule,
+    ruleset_pin,
 )
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore, PreservesUnknownKeys
@@ -340,6 +341,12 @@ class Pipeline(PreservesUnknownKeys):
     #: is recorded with the reading rather than assumed from the session's
     #: binding at the time the report is rendered.
     usage_at_start_host: str | None = None
+    #: The guidelines ruleset this pipeline was started under, pinned like the
+    #: methodology (ADR-012 D3): ``{"path", "digest", "error"}``, with
+    #: ``digest`` null and ``error`` saying why when it could not be loaded
+    #: (ruling DN-D). ``None`` when no ruleset was configured at ``start``, and
+    #: on a record that predates the pin; both leave the manifest to decide.
+    ruleset: dict | None = None
     #: Keys a document carried that this build does not declare. See
     #: `core.store.PreservesUnknownKeys`; never written under this name.
     _extra: dict[str, Any] = field(default_factory=dict)
@@ -383,6 +390,8 @@ class PipelineDomain:
         #: ``--methodology`` override (AUD-02) nor a mid-pipeline manifest edit
         #: (AUD-03) can swap the gate set out from under a pipeline in flight.
         self.machine = load_pipeline_machine(manifest)
+        #: Whether :attr:`machine` already carries the guidelines landing gates.
+        self._configured_ruleset = bool(manifest.get("guidelines.ruleset"))
         #: Injected by the CLI (ADR-002 D2). ``None`` here is normal and
         #: harmless: transitions record ``usage: None`` and the report says so.
         self.watermarks = watermarks
@@ -438,9 +447,15 @@ class PipelineDomain:
         running pipeline's gate set (AUD-03); the change applies from the next
         ``start``.
         """
-        if not pipeline.methodology or pipeline.methodology == self.machine.id:
+        # A pinned ruleset keeps the ``guidelines.*`` landing gates on, whatever
+        # the manifest says now; nothing pinned leaves it to the manifest.
+        guidelines = True if pipeline.ruleset is not None else None
+        same_machine = not pipeline.methodology or pipeline.methodology == self.machine.id
+        if same_machine and (guidelines is None or self._configured_ruleset):
             return self.machine
-        return load_pipeline_machine(self.manifest, pipeline.methodology)
+        return load_pipeline_machine(
+            self.manifest, pipeline.methodology or None, guidelines=guidelines
+        )
 
     # -- lookup --------------------------------------------------------
 
@@ -470,7 +485,15 @@ class PipelineDomain:
         methodology: str | None = None,
         task: str = "",
         host_session_id: str | None = None,
+        session: dict | None = None,
+        cwd: Path | None = None,
     ) -> Pipeline:
+        """Start a pipeline, pinning its methodology and its guidelines ruleset.
+
+        ``session`` and ``cwd`` say which tree the ruleset is read from: the
+        session's worktree when it has one, else ``cwd`` (``load_ruleset``'s
+        tree in hand).
+        """
         existing = self.current(session_id)
         if existing:
             try:
@@ -501,6 +524,9 @@ class PipelineDomain:
         )
 
         baseline, baseline_host = self._reading(host_session_id)
+        pinned = ruleset_pin(
+            RuleContext(manifest=self.manifest, cwd=Path(cwd or Path.cwd()), session=session)
+        )
         pipeline = Pipeline(
             session_id=session_id,
             methodology=machine.id,
@@ -509,6 +535,7 @@ class PipelineDomain:
             started=self.clock(),
             usage_at_start=baseline,
             usage_at_start_host=baseline_host,
+            ruleset=pinned,
         )
         self._save(session_id, pipeline, archive=existing)
         return pipeline

@@ -588,6 +588,54 @@ rule"), ruling 7 and ruling 13.
   tested in `tests/test_guidelines_current.py`. The store refusals are
   tested in `tests/test_guidelines_domain.py`.
 
+**As built: A2 increment 6, the pin.** Built to D3 ("The ruleset is pinned
+per pipeline") and DN-D, after the methodology pin (AUD-02, AUD-03).
+
+- *The record.* `Pipeline.ruleset` is `{"path", "digest", "error"}`, or null
+  when no ruleset was configured at `start`. `core.rules.ruleset_pin` builds
+  it through `load_ruleset`, so the pin reads the tree `ruleset_valid` reads
+  (the session's worktree when there is one) and refuses what it refuses. The
+  CLI hands `start` the session and the working directory for that.
+- *What the digest covers.* The ruleset's own bytes: `Ruleset.digest`, the
+  hash every verdict records (D5). A registry is not in it, as increment 2
+  said: it is read as it stands after the change. A registry that does not
+  validate still makes the ruleset unloadable at start, because the pin reads
+  what `load_ruleset` reads.
+- *An unloadable ruleset (DN-D).* The pipeline starts. The record keeps the
+  path (as configured when it names nothing inside the project), a null
+  digest, and the failure with its detail as `error`. `pipeline start` names
+  it and points at `invariant check guidelines.ruleset_valid`. The landing
+  refuses it through `ruleset_valid`, which reads the ruleset the change
+  lands. So a ruleset repaired inside the change lands, and the pin keeps the
+  record that the pipeline started without one. The other reading, failing
+  `ruleset_valid` on a pinned error whatever the tree holds, was not taken:
+  it would refuse the ruleset lane's own repair (D10) until a fresh pipeline
+  was started, and DN-D names `ruleset_valid` as the gate, which reads the
+  tree.
+  Confirmed by the user: a ruleset fixed inside the change lands.
+- *A ruleset changed mid-pipeline.* No gate compares the pinned digest with
+  the current one in this increment. DN-D gives that comparison to A4, where
+  a verdict whose hash differs from the pin is stale (D5). The pin does not
+  move when the ruleset is edited.
+- *What the methodology precedent decided.* The gate set is pinned with the
+  record. A pipeline that pinned a ruleset keeps the `guidelines.*` landing
+  gates even if `guidelines.ruleset`, an isolation-exempt manifest line, is
+  cleared later. `load_pipeline_machine` takes `guidelines=True` from
+  `machine_for` for this. Their verdicts then report what they can see,
+  which with the key cleared is N/A, shown as `[skip:BLOCK]` and not as a
+  silent absence. A pipeline that pinned nothing, and a record older than
+  the field, follow the manifest as before, so configuring a ruleset
+  mid-pipeline still adds the gates. Adding enforcement mid-pipeline was
+  allowed before this increment and still is. Only removing it is blocked.
+  Confirmed by the user, both the pin of the gates and the skipped display.
+- *Shown.* `pipeline status` prints `ruleset <path> @ <digest>`, or the
+  reason it could not be loaded at start, and nothing when nothing was
+  pinned. `--json` is the record, `ruleset` included.
+- *No migration.* The field defaults to null, and records keep unknown keys
+  (BUG_061), so an older record loads unchanged and an older build writes
+  the field back. The state model needed no version bump.
+- *Tests.* `tests/test_guidelines_pin.py`.
+
 ### D4 — Five check kinds; v1 ships four of them in full and one in part
 
 | Kind | Question it answers | Evaluated by | v1 |

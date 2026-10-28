@@ -425,7 +425,7 @@ coding guidelines as one YAML file, by default `docs/guidelines/ruleset.yaml`,
 named by the manifest's `guidelines.ruleset`. `core/guidelines` holds the
 schema (version 1), the model (`Ruleset`, `Guideline`, `Check`) and the
 validation, which collects every problem and refuses the ruleset whole, and
-the content hash a pipeline will pin. All five check kinds are validated:
+the content hash a pipeline pins at `start`. All five check kinds are validated:
 `engine`, `pattern`, `boundary` (`forbid` or `only`, never both),
 `cochange` (`pair` or `registry`) and `judgement` (ADR-012's check-kind
 amendment). A `registry` cochange names a registry file of invariant's own
@@ -499,8 +499,17 @@ not fix that drift. It only reports; nothing renders at the landing.
 `core/machines` injects it beside `ruleset_valid` at the landing entry when a
 ruleset is configured, it warns in every profile (ruling 7), and `doctor`
 prints it as the `guidelines generated` row, which warns on drift and never
-fails the diagnosis. The pin of the ruleset's hash
-arrives with increment 6; ADR-012 D12 draws where the family sits.
+fails the diagnosis. ADR-012 D12 draws where the family sits.
+
+The ruleset is pinned on the pipeline at `start` (A2 increment 6), as the
+methodology is. `PIPELINE --> RULES` carries one more name, `ruleset_pin`,
+which reads the ruleset through `load_ruleset` from the tree in hand and
+answers its path and digest, or why it could not be loaded; the record keeps
+that answer, and the pipeline starts either way (ruling DN-D). A pipeline that
+pinned one keeps the `guidelines.*` landing gates whatever the manifest says
+later (`load_pipeline_machine`'s `guidelines` flag). No gate compares the
+pinned digest with the current one yet: that is A4's, for verdicts. See the
+state model, "Domain: pipeline".
 
 `CLI --> SCAFFOLD` is `init` reading the one piece of shipped text that is
 not a host asset: the starter architecture doc it writes when `paths.docs`
@@ -922,7 +931,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does) |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |

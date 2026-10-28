@@ -1744,6 +1744,31 @@ def load_ruleset(
         )
 
 
+def ruleset_pin(ctx: RuleContext) -> dict[str, str | None] | None:
+    """What a pipeline pins at ``start``: the ruleset's path and digest, or why not.
+
+    ``None`` with no ruleset configured, so nothing is pinned (ADR-012 D3).
+    Otherwise ``{"path", "digest", "error"}``. The ruleset is read through
+    :func:`load_ruleset`, from the tree in hand and with its registries, so
+    the pin is exactly what ``guidelines.ruleset_valid`` reads. The digest is
+    the ruleset's own, the hash every verdict records, and a registry is not
+    part of it: a registry is read as it stands after the change.
+
+    A ruleset that does not load is RECORDED, with ``digest`` null and the
+    failure as ``error`` (ruling DN-D). The pipeline still starts, and the
+    landing refuses it through ``guidelines.ruleset_valid``.
+    """
+    configured = ctx.manifest.get("guidelines.ruleset")
+    if not configured:
+        return None
+    path = guidelines_relpath(ctx, configured) or str(configured)
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        detail = f": {failure.detail}" if failure.detail else ""
+        return {"path": path, "digest": None, "error": f"{failure.message}{detail}"}
+    return {"path": path, "digest": ruleset.digest, "error": None}
+
+
 def guidelines_tree(ctx: RuleContext) -> Path:
     """The tree the guidelines are read from and rendered into.
 
