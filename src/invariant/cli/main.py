@@ -938,7 +938,73 @@ def cmd_doctor(args) -> int:
         checks.extend(_oracle_watcher_build_check())
     checks.extend(_oracle_web_checks())
 
+    # Machine-wide too: a live claude whose own environment inherited a
+    # marker from Terminal.app (IDEA_035). It warns and never fails: the
+    # remedy is the user's, and a doctor red for it would be ignored.
+    label, ok, detail, warn = _host_environment_check(_doctor_host_environments())
+    checks.append((label, ok, detail))
+    if warn:
+        warned.add(label)
+
     return _report_checks(args, checks, warned)
+
+
+def _real_host_environments() -> list[dict] | None:
+    """Every running ``claude``, its terminal and what it inherited; ``None``
+    when the process table cannot be read."""
+    from ..hosts import claude_code_launch as launch
+
+    running = launch.running_claude_processes()
+    if running is None:
+        return None
+    return [{"pid": pid, "tty": tty, "markers": launch.inherited_markers(pid)}
+            for pid, tty in running]
+
+
+def _doctor_host_environments() -> list[dict] | None:
+    """What ``doctor``'s environment row judges: each live ``claude``'s own
+    environment, never ``doctor``'s (IDEA_035). A seam, like
+    ``_oracle_names_in_use``: the suite replaces it everywhere, so no test
+    reads the process table or a real process's environment."""
+    return _real_host_environments()
+
+
+def _host_environment_check(found: list[dict] | None) -> tuple[str, bool, str, bool]:
+    """``doctor``'s ``claude window environment`` row: ``(label, ok, detail, warn)``.
+
+    It warns, naming each host by pid and terminal and the remedy, when a
+    live ``claude`` inherited ``CLAUDE_CODE_CHILD_SESSION`` or
+    ``COLORTERM=truecolor`` from Terminal.app; otherwise it passes. It never
+    fails, so it never sets the exit code. A host whose environment could not
+    be read is counted, not guessed.
+    """
+    from ..hosts.claude_code_launch import INHERITED_MARKERS, TRUECOLOR
+    from ..oracle.signals import INHERITED_REMEDY
+
+    label = "claude window environment"
+    if found is None:
+        return label, True, "the process table could not be read", False
+    if not found:
+        return label, True, "no live claude window", False
+
+    def spelled(name: str) -> str:
+        return f"{name}={TRUECOLOR}" if name == INHERITED_MARKERS[1] else name
+
+    unread = sum(1 for host in found if host.get("markers") is None)
+    tail = f"; {unread} could not be read" if unread else ""
+    polluted = [host for host in found if host.get("markers")]
+    if not polluted:
+        names = " or ".join(spelled(name) for name in INHERITED_MARKERS)
+        detail = (f"{_plural(len(found), 'live claude window')}; none inherited {names} "
+                  f"from Terminal.app{tail}")
+        return label, True, detail, False
+    parts = [
+        f"claude {host['pid']}" + (f" on {host['tty']}" if host.get("tty") else "")
+        + " inherited " + ", ".join(spelled(name) for name in host["markers"])
+        for host in polluted
+    ]
+    return (label, True,
+            "; ".join(parts) + f" from Terminal.app: {INHERITED_REMEDY}{tail}", True)
 
 
 def _oracle_watcher_build_check() -> list[tuple[str, bool, str]]:

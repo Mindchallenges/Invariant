@@ -48,7 +48,7 @@ class TestAPlanWithoutAPrompt:
             "--remote-control", "demo-1026-0930",
         )
         lines = Path(plan.launch_file).read_text(encoding="utf-8").splitlines()
-        assert tuple(shlex.split(lines[2])) == ("exec", *plan.argv)
+        assert tuple(shlex.split(lines[2])) == plan.argv
 
     def test_an_empty_prompt_is_no_prompt(self, tmp_path):
         plan = launch.plan_launch("/opt/bin/claude", "x", "", tmp_path, stage=False)
@@ -369,8 +369,9 @@ class TestTheCommand:
         (plan,) = _no_real_terminal_launch.plans
         assert plan.argv[-1] == PROMPT
         assert out["prompt"] == PROMPT
-        lines = Path(plan.launch_file).read_text(encoding="utf-8").splitlines()
-        assert shlex.split("\n".join(lines[2:]))[-1] == PROMPT
+        script = Path(plan.launch_file).read_text(encoding="utf-8")
+        command = script.split("\n", 2)[2].split("\nstatus=$?\n", 1)[0]
+        assert shlex.split(command)[-1] == PROMPT
 
     def test_the_label_names_it(
         self, project, capsys, _no_real_terminal_launch, macos_with_claude, successor

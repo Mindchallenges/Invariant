@@ -318,9 +318,11 @@ Claude does not exit, the sheet says "Claude did not exit; nothing else was
 done", and the window stays. Once Claude has ended, the Terminal tab it ran
 in is closed when only its shell is left there, with the window when that
 was its only tab. Under "What happened" the sheet says how it ended:
-"Claude ended, and its Terminal tab closed.", or "Claude ended; the window
-was left open because …" (something else runs in the tab, no Terminal tab
-matched, or the window is not Terminal's: Remote Control, VS Code, iTerm).
+"Claude ended, and its Terminal tab closed.", "Claude ended, and no
+Terminal tab is left on …" (a window the oracle or a handoff opened closes
+by itself when its Claude ends), or "Claude ended; the window was left open
+because …" (something else runs in the tab, or the window is not
+Terminal's: Remote Control, VS Code, iTerm).
 Only a window offered "Close…" can be closed: one whose process id is
 unknown or disputed, one used in the last hour, and one another project's
 session may be using are left alone.

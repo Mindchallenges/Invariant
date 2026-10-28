@@ -512,6 +512,46 @@ and `cwd` filled. The first fact that fails is kept as `unverified` (`ps`,
 `ps` naming another program makes the host not alive, as on the record
 path. A host a live session holds, or one that is gone, costs nothing more.
 
+**What a host inherited from its terminal** (IDEA_035). A Terminal.app that
+was itself started from a Claude tool shell, before BUG_068's scrub, hands
+`CLAUDE_CODE_CHILD_SESSION` and `COLORTERM=truecolor` to every window it
+opens. A Claude started there writes no transcript and no per-process record
+(the case above) and draws colour Terminal.app cannot show, as large white
+or inverse blocks. The cure is the user's: quit Terminal.app fully and
+relaunch it from the Dock. The scan names such a host on its row so the
+user sees it, from the phone too. For each live host whose pid is its own,
+the probe's `inherited_markers(pid)` (`ClaudeCodeProbe`, through
+`ScanCache.inherited`, kept for 60 seconds and dropped with the pid) reads
+the `claude` process's OWN environment, as it was started: `ps -ww -o
+command=` and `ps -E -ww -o command=` on that pid, and only what follows the
+argv, so a note on the command line that mentions a marker is not one. Only
+the two names count, `COLORTERM` only as `truecolor`, and only when the
+parent chain shows Terminal.app started the host with no other `claude`
+between: iTerm and editors set `COLORTERM` themselves, and a Claude started
+by a Claude inherits by design. The row's host gets `inherited_env`, the
+names found, sorted (`[]` for none, `null` when unread); no other variable
+and no value is read into the scan. "Its own pid" is the record's
+(`record`, `both`), or an attention pid `ps` says is `claude` and that
+started before the attention record's last write, BUG_099's ordering, so a
+reused pid's environment is never taken for this host's. That costs a
+session's attention-only host one `ps` (`process_facts`, cached) beyond its
+name check, and only with a probe that reads environments. `ps` reads the
+environment of the user's own processes without privilege, whole with
+`-ww`; anything it cannot show (another user's process, a process gone
+between the two reads) is unknown, never clean.
+
+```mermaid
+flowchart TD
+    H["live host, its own pid"] --> E{"ps -E: environment after the argv?"}
+    E -- "cannot read" --> U["inherited_env null"]
+    E -- "neither marker" --> C["inherited_env []"]
+    E -- "CLAUDE_CODE_CHILD_SESSION and/or COLORTERM=truecolor" --> T{"parent chain: Terminal.app before any claude?"}
+    T -- "cannot read" --> U
+    T -- "another app, or a claude first" --> C
+    T -- "yes" --> F["inherited_env: the names, sorted"]
+    F --> S["signal inherited_env (info): the remedy"]
+```
+
 **The oracle never picks one silently.** When both sources name a pid and the
 pids differ, or two records for one host are both alive, the row carries
 `pid_source: conflict` and `pid_conflict`, each candidate with its own
@@ -621,7 +661,8 @@ defines `HostProbe` (`transcripts(root)`, `is_host_process(pid)`, and, since
 IDEA_024, `host_processes()` and `process_facts(pid)`, and since BUG_099
 `process_cwd(pid)`), the CLI injects
 `hosts/claude_code_launch.ClaudeCodeProbe`, and the oracle imports nothing
-from `hosts/`. The start token in a record and in `process_facts` is one
+from `hosts/`. IDEA_035 adds `inherited_markers(pid)`, optional like the
+others: without it no environment is read and no row is flagged. The start token in a record and in `process_facts` is one
 UTC spelling, `YYYY-MM-DDTHH:MM:SS`: `procStart` is UTC as Claude Code writes
 it, and `process_facts` runs `ps` with `TZ=UTC`. The oracle compares the two
 for equality and never parses them.
@@ -657,6 +698,7 @@ nothing else. Alerts come first in the list it returns.
 | `stranded` | no | info | the session's recorded worktree is gone | — |
 | `teardown_pending` | no | info | the session is in its landed stage | — |
 | `orphan_host` | no | info | a `host` row; its `cause` is the class: `gone`, `unknown`, `active`, `leftover`, `unmanaged` (`orphan_class`, IDEA_025) | — |
+| `inherited_env` | no | info | the current host is alive and its `inherited_env` names a marker it inherited from Terminal.app; the detail gives the remedy, "quit Terminal.app fully and relaunch it from the Dock" (IDEA_035) | the names, joined |
 | `leaked_worktree` | no | info | a `worktree` row | — |
 
 **Mid-turn** (BUG_087). Whether a host is mid-turn is one answer,
@@ -1705,7 +1747,7 @@ inside the 600-second limit on a page action's run (`RUN_TIMEOUT_SECONDS`).
 | no tty | Claude ended; the window was left open because it has no terminal (it runs over Remote Control or inside an editor). |
 | not Terminal / cannot tell | … because it does not run in Terminal (another app, such as VS Code or iTerm, owns it). / … because invariant could not tell which app owns it. |
 | `busy <processes>` | … because something else is running in its tab (<processes>). |
-| `no_tab` / `not_running` | … because no Terminal tab is on <tty>. |
+| `no_tab` / `not_running` | Claude ended, and no Terminal tab is left on <tty>: its window closed with it, or was already closed. (A window invariant launched ends with its Claude, IDEA_035, so this is not a window left open.) |
 | `tab_not_closable` | … because Terminal would not close one tab of several from a script (<error>). |
 | `not_allowed` (error -1743, "Not authorized", or a prompt nobody answered in 30 s) | Claude ended; macOS has not allowed the oracle to control Terminal, so the window was left open. Allow it in System Settings > Privacy & Security > Automation … |
 | anything else | … because Terminal could not be asked (<error>). |
@@ -1752,6 +1794,17 @@ shell text; the tab closer finds it on `PATH`. The suite replaces
 `_handoff_closer` everywhere, and BUG_100's repro runs the real detached
 process with `ps`, `osascript` and its signals faked.
 
+**With a window that ends with Claude (IDEA_035).** A window invariant
+launched runs the launch shell in place of its own (the typed line is
+`exec`-ed, "Start a session" below), so once the SIGTERM has ended Claude
+the launch file exits without waiting (a status above 128 is an ending by
+a signal) and the tab's process is gone. The closer then finds no tab on
+the tty, the window having closed by the user's Terminal profile, or a
+finished tab with nothing but a shell, which it closes. Both rules above
+stand unchanged; the `no_tab` line now says the window closed with Claude
+rather than that it was left open. Close host meets the same window the
+same way.
+
 ```mermaid
 sequenceDiagram
     participant Cmd as session handoff
@@ -1779,7 +1832,7 @@ It is the core the panel's "New session" sheet and the TUI's `n` run
 | Module | Owns | Never does |
 |---|---|---|
 | `startsession` | `session_name` (`<project>-<label>`, slugged, `-2`, `-3` past a name in use), `default_label` (`MMDD-HHMM`, local), `open_windows` and `start_facts` (pure, over one project of the `assess` document, for the panel to reuse), `checkout_changes` (one `git status --porcelain` with optional locks off), `fact_lines` | Import `hosts/`; launch anything; block a start on a fact |
-| `hosts/claude_code_launch` | `plan_launch` with an optional prompt; `require_default_permissions` and `PERMISSION_FLAGS`; `LAUNCH_UNSET` (the host markers and `INVARIANT_HANDOFF`); `names_in_use`, `command_names_in_use` | Decide the project, the name or whether to start |
+| `hosts/claude_code_launch` | `plan_launch` with an optional prompt; the `exec`-ed typed line and the launch file that pauses on a failed Claude (`launch_script`, `LAUNCH_PAUSE`, IDEA_035); `require_default_permissions` and `PERMISSION_FLAGS`; `LAUNCH_UNSET` (the host markers and `INVARIANT_HANDOFF`); `names_in_use`, `command_names_in_use` | Decide the project, the name or whether to start |
 | CLI | `cmd_oracle_start_session`; `_open_claude_window`, the one way invariant opens a Claude window (`session handoff`, the dashboard's terminal step and this command); the `_oracle_names_in_use` seam | Pass a permission flag; accept a path the index does not name |
 
 ```mermaid
@@ -1839,7 +1892,21 @@ window claims nothing. It ends no host.
 **When the window counts.** As for a handoff: once the successor watch sees
 a new `claude` carrying the name's flags still alive 3 s after it appeared,
 within 15 s. Otherwise the command fails, removes the launch file, and
-prints the line to run by hand. The JSON's `name` is what a later scan
+prints the line to run by hand.
+
+**When the window ends** (IDEA_035). The typed line is `cd <root> && exec
+env -u … /bin/sh <launch file>`: the window's shell is replaced, so when
+Claude exits no prompt is left, and the window closes or shows itself
+finished, by the user's Terminal profile. The launch file runs `claude` as
+its child. When Claude fails (a non-zero exit up to 128) at a terminal, it
+prints "claude exited with status N. Press Return to close this window." and
+waits, so a start-up crash does not vanish with the window; an ending by a
+signal, such as a close's SIGTERM, never waits. Every path exits 0, which a
+default profile closes. A launch that fails before Claude starts is the same
+failure as before: the watch sees no successor, and the by-hand line, which
+is never `exec`-ed, is printed to paste into a shell that is already up. The
+same holds for the panel's start, the dashboard's `n` and its terminal
+step, and `session handoff`, which all open their window here. The JSON's `name` is what a later scan
 matches the window by (the record's `launched_name`), which the panel's
 "Starting…" card uses; its `label` is the label the name was made from.
 

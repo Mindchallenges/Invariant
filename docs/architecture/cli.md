@@ -185,6 +185,25 @@ invariant doctor
     and carries `"warn": true` beside `"ok": true` in `--json`; every other
     row carries `"warn": false`.
 
+    The `claude window environment` row is machine-wide and warns, never
+    fails (IDEA_035). It lists every running `claude` from one `ps -axo
+    pid=,tty=,comm=` and reads each one's OWN environment as it was started,
+    with `ps -E -ww` on that pid, never `doctor`'s: Claude Code sets markers
+    on its tool shells, so `doctor` run from a clean host's shell carries
+    them and proves nothing. A host warns when its environment carries
+    `CLAUDE_CODE_CHILD_SESSION` or `COLORTERM=truecolor` and the parent chain
+    shows Terminal.app started it with no other `claude` between: a
+    Terminal.app started from a Claude tool shell before BUG_068's scrub
+    hands both to every window it opens, so Claude draws colour Terminal.app
+    cannot show and writes no transcript and no per-process record (BUG_099).
+    The row names each such host by pid and terminal and the remedy, "quit
+    Terminal.app fully and relaunch it from the Dock"; with none it passes,
+    saying how many windows it read, and how many could not be read. Only the
+    two names are reported; no other variable and no value is shown or kept.
+    iTerm and editors set `COLORTERM` themselves and are not judged, and a
+    Claude started by a Claude inherits by design. The suite replaces the
+    read (`_doctor_host_environments`) everywhere.
+
     When the oracle's LaunchAgent is installed, one more row, `oracle agent
     interpreter`, fails if the interpreter its plist names no longer exists:
     an editable install can move, and the agent would then fail at every
@@ -559,14 +578,32 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     the user's temporary directory, never in the project — and the line
     actually typed only runs it, carrying the claim token:
 
-        cd <main> && env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>
+        cd <main> && exec env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>
 
-    The launch file removes itself and then `exec`s `claude --name <slug>
+    The launch file removes itself and then runs `claude --name <slug>
     --remote-control <slug> "<note>"`, the note still the one positional
     argument and so the first prompt, whatever its length. A launch file left
     by a failed launch is removed; any older than an hour is swept on the next
     handoff. The JSON result carries `launch_file` and `by_hand`, the same
     command as one line with the note inline, to paste into a running shell.
+
+    The window ends with Claude (IDEA_035). The typed line `exec`s the launch
+    shell, so the tab's own shell is replaced and no prompt is left once
+    Claude exits: the window closes, or shows itself finished, as the user's
+    Terminal profile says. A `cd` that fails stops before the `exec`, and that
+    window keeps its prompt. The launch file runs `claude` as its child, not
+    by `exec`, so it can still speak afterwards: when Claude fails, a
+    non-zero exit up to 128, and only at a terminal, it prints "claude exited
+    with status N. Press Return to close this window." and waits, so a
+    start-up error stays on screen. A status above 128 is Claude ended by a
+    signal, such as the closer's SIGTERM below, and never waits. Every path
+    then exits 0, which a default profile ("close if the shell exited
+    cleanly") takes as a window to close. The by-hand line is never
+    `exec`-ed: it is pasted into a shell somebody is still using. The
+    successor watch is unchanged, because it finds `claude` by its flags and
+    the launch shell's argv carries none; a Claude that fails at start is
+    gone within the grace, so the launch still fails and prints the by-hand
+    line, while its window shows why.
 
     The token names the note just recorded, so the launched host's first `session
     start` or `session resume` marks THAT note consumed and the greeting stops
@@ -615,7 +652,16 @@ invariant session handoff --note "<line>" [--name <slug>] [--dry-run] [--keep-op
     the same process: still `claude`, started at the same moment, on the same
     terminal, so a pid reused in the meantime is spared and nothing is
     signalled. `--keep-open` launches and leaves the session running. A `--dry-run`, any
-    refusal and a failed launch never end it. When `CLAUDE_PID` is unset,
+    refusal and a failed launch never end it.
+
+    The closer meets a window the handoff itself launched (IDEA_035): its
+    tab's shell was replaced by the launch shell, so once the SIGTERM has
+    ended Claude the launch file exits without waiting and the window ends
+    with it. The tab script then finds no tab on the tty, or a finished one
+    with nothing but a shell left, which it closes; nothing in the closer
+    changes. The last line for no tab says so, "Claude ended, and no Terminal
+    tab is left on <tty>: its window closed with it, or was already closed.",
+    rather than that the window was left open. When `CLAUDE_PID` is unset,
     unusable, or names something other than `claude`, the handoff still
     succeeds, prints why it is leaving the session open, and signals nothing.
     The JSON result carries `close`: `scheduled`, `pid` and `delay`.
@@ -1246,6 +1292,9 @@ invariant oracle close-host HOST_ID --pid N --start TOKEN [--tty TTY] [--json]
     has gone, and only when Terminal.app owns the window, the tab on TTY is
     closed if nothing but its login shell is left (with its window when it was
     the only tab); otherwise the window is left and the last line says why.
+    No tab on TTY once Claude has gone says the window closed with it, or was
+    already closed: a window invariant launched ends with its Claude
+    (IDEA_035).
     The last line is always the outcome; exit 0 once Claude has ended. The
     first close from the launchd agent may raise macOS's Automation prompt for
     Terminal; refused or unanswered (30 s), it says so and how to allow it.
@@ -1270,7 +1319,9 @@ invariant oracle start-session PROJECT [--prompt TEXT] [--name LABEL] [--dry-run
     locks). Claude runs in its default permission mode: the command never
     carries --dangerously-skip-permissions or --permission-mode. No invariant
     session is created, no note is recorded, and an inherited
-    INVARIANT_HANDOFF is unset in the window. It counts once the new claude
+    INVARIANT_HANDOFF is unset in the window. The window ends when its Claude
+    exits, and waits for Return first when Claude failed, as a handoff's does
+    (IDEA_035). It counts once the new claude
     is seen alive; otherwise exit 1 with the line to run by hand. Off macOS,
     or without claude on PATH, exit 1. --dry-run prints the command and the
     facts and launches nothing. JSON: {"project", "name", "label", "cwd",

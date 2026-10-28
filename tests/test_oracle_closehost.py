@@ -261,8 +261,6 @@ class TestClosingTheTab:
         ("code", "detail", "words"),
         [
             ("busy", "login,-zsh,vim", "something else is running in its tab (login,-zsh,vim)"),
-            ("no_tab", "", "no Terminal tab is on ttys004"),
-            ("not_running", "", "no Terminal tab is on ttys004"),
             ("tab_not_closable", "it would not", "would not close one tab of several"),
             ("failed", "boom", "Terminal could not be asked (boom)"),
             ("something new", "", "Terminal could not be asked"),
@@ -273,6 +271,13 @@ class TestClosingTheTab:
         lines = run(fake)
         assert lines[-1].startswith("Claude ended; the window was left open because")
         assert words in lines[-1]
+
+    @pytest.mark.parametrize("code", ["no_tab", "not_running"])
+    def test_no_tab_left_says_the_window_went_with_claude(self, code):
+        """IDEA_035: a launched window ends with its Claude, so no tab is not "left open"."""
+        lines = run(FakeHost(tab=(code, "")))
+        assert lines[-1] == closehost.OUTCOMES["no_tab"].format(tty=TTY)
+        assert "left open" not in lines[-1]
 
     def test_a_tab_busy_past_the_bound_is_left_and_names_what_runs(self):
         """BUG_098: a busy tab is asked again, but only up to TAB_SETTLE_SECONDS."""

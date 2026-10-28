@@ -169,6 +169,27 @@ def _no_real_names_in_use(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_process_environment(monkeypatch):
+    """No test reads a real process's environment (IDEA_035).
+
+    The oracle's probe and ``doctor`` read a live ``claude``'s environment
+    with ``ps -E`` for two inherited markers. The one reader,
+    ``process_environment_markers``, answers "cannot say" here, so a scan of
+    a pid that happens to be alive reads nothing; ``doctor``'s seam,
+    ``_doctor_host_environments``, finds no ``claude`` running. A test about
+    the read passes a fake ``ps`` of its own.
+    """
+    monkeypatch.setattr(
+        "invariant.hosts.claude_code_launch.process_environment_markers",
+        lambda pid, run=None: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "invariant.cli.main._doctor_host_environments", list, raising=False
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_real_notifier(monkeypatch):
     """No test posts a real macOS notification (IDEA_012 increment 4).
 

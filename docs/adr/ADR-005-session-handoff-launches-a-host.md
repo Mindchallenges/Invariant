@@ -221,6 +221,18 @@ time, ends only the same `claude` (same start, same tty), and then runs
 `TERMINAL_TAB_SCRIPT` close the oracle uses. Nothing else in this decision
 changes: the delay, `--keep-open`, and which launches end the old session.
 
+*Note (IDEA_035, implementation detail, not a new decision):* the window a
+launch opens now ends with its Claude. The typed line `exec`s the launch
+shell, so no shell prompt is left behind in any launched window; the
+launch file runs `claude` as its child and, when Claude fails (a non-zero
+exit up to 128) at a terminal, waits for Return so a start-up error stays
+readable, then exits 0. This composes with the closer above without
+changing it: after its SIGTERM the launch file exits at once (a signal's
+status is above 128), the window ends by the user's Terminal profile, and
+the tab script finds no tab, or a finished one holding only a shell, which
+it closes. The `no_tab` outcome now reads as a window that closed with
+Claude. The by-hand line is never `exec`-ed.
+
 ## Consequences
 
 - A host process is started by this library for the first time. It is macOS

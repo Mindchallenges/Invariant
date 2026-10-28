@@ -62,16 +62,29 @@ on macOS — so a long note was cut mid-quote and no ``claude`` ever ran. The
 plan writes a *launch file* instead: a three-line ``/bin/sh`` script holding
 the whole ``claude`` command, in a private directory outside the project
 (``launch_dir``, mode 0700, the file 0600). The typed line only names it —
-``cd <main> && env -u … INVARIANT_HANDOFF=<token> /bin/sh <launch file>`` — so
-its length no longer depends on the note, and ``plan_launch`` refuses a line
-that would still not fit rather than let the tty cut it. The script removes
-itself first and then ``exec``-s ``claude``, so the note is gone from disk the
-moment the successor holds it, the note stays ONE positional argument quoted
-by ``shlex`` exactly as before, and the successor keeps the script's pid. It
-is a file ``/bin/sh`` reads, not syntax the window's shell parses, so the line
-means the same in zsh, bash or fish. A file nobody ran — a launch that failed
-— is removed by the CLI, and any older than ``LAUNCH_FILE_TTL_SECONDS`` is
-swept on the next staging.
+``cd <main> && exec env -u … INVARIANT_HANDOFF=<token> /bin/sh <launch file>``
+— so its length no longer depends on the note, and ``plan_launch`` refuses a
+line that would still not fit rather than let the tty cut it. The script
+removes itself first and then runs ``claude``, so the note is gone from disk
+the moment the successor holds it, and the note stays ONE positional argument
+quoted by ``shlex`` exactly as before. It is a file ``/bin/sh`` reads, not
+syntax the window's shell parses, so the line means the same in zsh, bash or
+fish. A file nobody ran — a launch that failed — is removed by the CLI, and
+any older than ``LAUNCH_FILE_TTL_SECONDS`` is swept on the next staging.
+
+**The window ends with Claude (IDEA_035).** The typed line ``exec``-s the
+launch shell, so the tab's own shell is replaced and nothing is left at a
+prompt once Claude exits: the window closes, or shows itself finished, by the
+user's Terminal profile. A ``cd`` that fails stops before the ``exec``, and
+that window keeps its prompt. The launch file runs ``claude`` as its child
+rather than ``exec``-ing it, so it can still speak after Claude: on a failure
+— a non-zero exit up to 128, not an ending by a signal such as the closer's
+SIGTERM — and only at a terminal, it prints ``LAUNCH_PAUSE`` and waits for
+Return, so a start-up error stays readable. Every path then exits 0, which a
+default profile ("close if the shell exited cleanly") reads as a window to
+close. The successor watch is unchanged: it finds ``claude`` by its flags,
+and the shell's own argv carries none. The by-hand line is never ``exec``-ed,
+because it is pasted into a shell that is already up.
 
 **A launch counts only once a successor is seen alive.** Terminal accepting
 the script proves nothing about what the window then runs, so the CLI asks a
@@ -217,6 +230,10 @@ SUCCESSOR_GRACE_SECONDS = 3
 #: Seconds between two reads of the process table while waiting.
 SUCCESSOR_POLL_SECONDS = 0.5
 
+#: What the launch file prints when ``claude`` failed, before it waits for
+#: Return (IDEA_035). ``%s`` is the exit status.
+LAUNCH_PAUSE = "claude exited with status %s. Press Return to close this window."
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -235,9 +252,10 @@ class LaunchPlan:
     argv: tuple[str, ...]
     #: The directory the new session starts in — the main checkout.
     cwd: str
-    #: The line typed into the new window: ``cd <cwd> && env -u <marker> ...
-    #: [NAME=value ...] /bin/sh <launch_file>``, quoted for a POSIX shell. It
-    #: carries no note, so its length does not grow with one.
+    #: The line typed into the new window: ``cd <cwd> && exec env -u <marker>
+    #: ... [NAME=value ...] /bin/sh <launch_file>``, quoted for a POSIX shell.
+    #: It carries no note, so its length does not grow with one, and it
+    #: replaces the window's shell, so the window ends with Claude (IDEA_035).
     shell_line: str
     #: The script ``osascript`` runs to type ``shell_line`` into a new window.
     applescript: str
@@ -406,19 +424,30 @@ def sweep_launch_files(path: Path, now: float | None = None) -> list[Path]:
 
 
 def launch_script(launch_file: str, argv: tuple[str, ...]) -> str:
-    """The launch file: remove itself, then become ``claude``.
+    """The launch file: remove itself, run ``claude``, pause only on a failure.
 
     ``rm`` comes first, so the note leaves the disk before ``claude`` starts;
     ``/bin/sh`` already holds the file open and reads the rest from that open
-    file. ``exec`` keeps the pid, so the process the successor watch finds is
-    the one ``/bin/sh`` became. The note is one ``shlex``-quoted positional
-    argument, exactly as on the typed line before BUG_075.
+    file. The note is one ``shlex``-quoted positional argument, exactly as on
+    the typed line before BUG_075. ``claude`` is the shell's child, not its
+    replacement (IDEA_035): a non-zero exit up to 128, at a terminal, prints
+    :data:`LAUNCH_PAUSE` and waits for Return, so the window that ends with
+    Claude does not take a start-up error with it. A status above 128 is an
+    ending by a signal (the closer's SIGTERM, a closed window) and never
+    waits. The file always exits 0.
     """
     return "\n".join(
         [
             "#!/bin/sh",
             f"rm -f -- {shlex.quote(launch_file)}",
-            f"exec {shlex.join(argv)}",
+            shlex.join(argv),
+            "status=$?",
+            'if [ "$status" -ne 0 ] && [ "$status" -le 128 ] && [ -t 0 ]; then',
+            "    stty sane 2>/dev/null",
+            f"    printf '\\n{LAUNCH_PAUSE}\\n' \"$status\"",
+            "    read -r _",
+            "fi",
+            "exit 0",
             "",
         ]
     )
@@ -471,8 +500,11 @@ def plan_launch(
     env = ((HANDOFF_ENV, token),) if token else ()
     unset = "".join(f"-u {marker} " for marker in LAUNCH_UNSET)
     assign = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
-    prefix = f"cd {shlex.quote(str(cwd))} && env {unset}{assign}"
-    by_hand = prefix + shlex.join(argv)
+    into = f"cd {shlex.quote(str(cwd))} && "
+    by_hand = f"{into}env {unset}{assign}" + shlex.join(argv)
+    # The typed line replaces the window's shell (IDEA_035); the by-hand line
+    # runs in a shell somebody is still using, so it never does.
+    prefix = f"{into}exec env {unset}{assign}"
 
     # The preview path is exactly as long as the one ``mkstemp`` returns (its
     # random part is eight characters), so the length check below runs before
@@ -805,21 +837,26 @@ class ClaudeCodeProbe:
 
     The oracle's scan defines the shape it reads — a project's transcripts,
     whether a live pid is still the host, the per-process records, what
-    ``ps`` says about a pid, and the working directory ``lsof`` reads for a
-    pid no record describes (BUG_099) — and the CLI injects this. It imports
+    ``ps`` says about a pid, the working directory ``lsof`` reads for a
+    pid no record describes (BUG_099), and which of
+    :data:`INHERITED_MARKERS` a host inherited from Terminal.app (IDEA_035)
+    — and the CLI injects this. It imports
     nothing from ``oracle/``, so no ``hosts -> oracle`` arrow exists (ADR-007
     D6, D11): the host answers questions, the layer above asks them.
     """
 
     def __init__(
         self, home: Path | None = None, name_of=None, facts_of=None, platform=None,
-        cwd_of=None,
+        cwd_of=None, env_of=None,
     ) -> None:
         self.home = home
         self.name_of = name_of if name_of is not None else process_name
         self.facts_of = facts_of if facts_of is not None else process_facts
         self.platform = platform if platform is not None else host_platform
         self.cwd_of = cwd_of if cwd_of is not None else process_cwd
+        #: ``None`` reads with :func:`process_environment_markers`, looked up
+        #: when asked, so the suite's guard stands in for it.
+        self.env_of = env_of
 
     def transcripts(self, root: Path) -> ClaudeCodeTranscripts:
         return ClaudeCodeTranscripts(origin=Path(root), home=self.home)
@@ -836,6 +873,9 @@ class ClaudeCodeProbe:
 
     def process_cwd(self, pid: int) -> str | None:
         return self.cwd_of(pid)
+
+    def inherited_markers(self, pid: int) -> tuple[str, ...] | None:
+        return inherited_markers(pid, self.env_of)
 
 
 #: How far up the parent chain :func:`find_host_pid` looks. A hook is the
@@ -965,6 +1005,171 @@ def runs_in_terminal_app(pid: int, lookup=parent_process,
             return False
         current = ppid
     return None
+
+
+#: The two variables a host inherits from a polluted Terminal.app (IDEA_035):
+#: one started from a Claude tool shell before BUG_068's scrub keeps them for
+#: every window it opens. ``CLAUDE_CODE_CHILD_SESSION`` turns the host's
+#: transcripts and its per-process record off (BUG_099), and
+#: ``COLORTERM=truecolor`` makes it draw colour Terminal.app cannot show.
+#: These are the only names the check reports; no other variable and no value
+#: leaves :func:`environment_markers`.
+INHERITED_MARKERS: tuple[str, ...] = ("CLAUDE_CODE_CHILD_SESSION", "COLORTERM")
+
+#: The only ``COLORTERM`` value that counts.
+TRUECOLOR = "truecolor"
+
+def environment_markers(command: str, with_environment: str) -> frozenset[str] | None:
+    """Which of :data:`INHERITED_MARKERS` a process's environment carries.
+
+    ``command`` is ``ps -ww -o command=`` for the pid and ``with_environment``
+    ``ps -E -ww -o command=``: the same argv followed by a space and the
+    environment. Only what follows the argv is read, so a note on the command
+    line that mentions a marker is never taken for one. ``None`` when the
+    environment is not there to read: no argv, a second line that does not
+    start with it (the process changed in between), or nothing after it,
+    which is how ``ps`` shows another user's process. Words are split on
+    spaces; a value holding a space and then a marker's spelling could be
+    misread, and only as a marker, never as anything recorded.
+    """
+    command = command.rstrip("\n")
+    full = with_environment.rstrip("\n")
+    if not command or not full.startswith(command):
+        return None
+    rest = full[len(command):]
+    if not rest.startswith(" ") or not rest.strip():
+        return None
+    child, colour = INHERITED_MARKERS
+    found = set()
+    for word in rest.split(" "):
+        name, eq, value = word.partition("=")
+        if not eq:
+            continue
+        if name == child and value:
+            found.add(child)
+        elif name == colour and value == TRUECOLOR:
+            found.add(colour)
+    return frozenset(found)
+
+
+def process_environment_markers(pid: int, run=subprocess.run) -> frozenset[str] | None:
+    """:func:`environment_markers` for a live ``pid``, from two ``ps`` reads.
+
+    ``ps -E`` shows a process's environment as it was started, which a
+    process of this user lets ``ps`` read without privilege; ``-ww`` keeps it
+    whole. ``None`` when either read fails or says nothing. The output is read
+    for two names and dropped: nothing else in it is kept.
+    """
+    lines = []
+    for flags in (["-ww"], ["-E", "-ww"]):
+        try:
+            proc = run(
+                ["ps", *flags, "-o", "command=", "-p", str(int(pid))],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return None
+        lines.append(proc.stdout)
+    return environment_markers(*lines)
+
+
+def top_level_in_terminal_app(pid: int, lookup=parent_process,
+                              max_hops: int = HOST_PID_MAX_HOPS) -> bool | None:
+    """Whether ``pid`` is a ``claude`` a Terminal.app tab started, no Claude between.
+
+    The chain is read from ``pid``'s parent upward: Terminal.app reached
+    first is ``True``; another ``claude`` first is ``False``, because a
+    Claude started by Claude carries its parent's markers by design; a chain
+    that ends without either is ``False`` (another terminal, an editor).
+    ``None`` when ``ps`` cannot say, or the chain is longer than ``max_hops``.
+    """
+    row = lookup(pid)
+    if row is None:
+        return None
+    current = row[0]
+    for _ in range(max_hops):
+        if current <= 0:
+            return False
+        row = lookup(current)
+        if row is None:
+            return None
+        ppid, name = row
+        if name.strip().rsplit("/", 1)[-1] == TERMINAL_APP:
+            return True
+        if is_claude_process_name(name):
+            return False
+        if ppid == current:
+            return False
+        current = ppid
+    return None
+
+
+def inherited_markers(pid: int, environment=None,
+                      lookup=parent_process) -> tuple[str, ...] | None:
+    """The markers a live ``claude`` inherited from Terminal.app, sorted (IDEA_035).
+
+    Its OWN environment is read (``environment``, else
+    :func:`process_environment_markers`), never the caller's: Claude Code
+    sets markers on its tool shells, so a command run from a clean host's
+    shell carries them and proves nothing. A marker counts only on a host
+    Terminal.app started with no other Claude between
+    (:func:`top_level_in_terminal_app`): iTerm and editors set ``COLORTERM``
+    themselves, and a Claude started by a Claude inherits by design. ``()``
+    is clean; ``None`` is "cannot say". The chain is read only when a marker
+    was found.
+    """
+    read = environment if environment is not None else process_environment_markers
+    found = read(pid)
+    if found is None:
+        return None
+    if not found:
+        return ()
+    under = top_level_in_terminal_app(pid, lookup)
+    if under is None:
+        return None
+    return tuple(sorted(found)) if under else ()
+
+
+def claude_processes(table: str) -> list[tuple[int, str | None]]:
+    """``(pid, tty)`` of every ``claude`` in a ``ps -axo pid=,tty=,comm=`` listing."""
+    found = []
+    for line in table.splitlines():
+        words = line.split(None, 2)
+        if len(words) < 3 or not words[0].isdigit():
+            continue
+        pid, tty, comm = words
+        if is_claude_process_name(comm):
+            found.append((int(pid), None if tty in ("?", "??") else tty))
+    return found
+
+
+def running_claude_processes(run=subprocess.run) -> list[tuple[int, str | None]] | None:
+    """Every running ``claude`` and its terminal, from one ``ps``; ``None`` if it fails.
+
+    The process table, not Claude Code's per-process records: a host that
+    inherited ``CLAUDE_CODE_CHILD_SESSION`` writes no record (BUG_099), and
+    it is the one ``doctor`` is looking for.
+    """
+    try:
+        proc = run(
+            ["ps", "-axo", "pid=,tty=,comm="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return claude_processes(proc.stdout or "")
 
 
 class TerminalTabCloser:

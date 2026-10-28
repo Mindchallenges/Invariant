@@ -256,7 +256,10 @@ session here without a window could take. A row with nothing to run has no
 pill, and the folders have none until increment 7. A live leftover or
 unmanaged window that fails a close guard says which on its row, after the
 window: "Still open on the Mac · window 27885f4e · cannot close from here:
-invariant could not read its folder" (BUG_099).
+invariant could not read its folder" (BUG_099). A live window that
+inherited Claude's markers from its Terminal.app (IDEA_035) says so last:
+"… · Terminal.app needs a restart: quit it fully and relaunch it from the
+Dock".
 
 ### 7 · New session (IDEA_030)
 
@@ -451,6 +454,7 @@ with "…". A button that acts is named for the deed.
 | `your_turn` | Waiting for your next message | idle | Claude finished its turn and is waiting for you. |
 | `parked` | Paused | idle | No Claude window is working on it. Resume it to go on. |
 | `teardown_pending` | Merged, ready to clean up | idle | It is merged. Its folder and branch can be removed. |
+| `inherited_env` (IDEA_035) | Terminal.app needs a restart | idle | This Claude inherited settings from its Terminal.app that are meant for a Claude window's own tools, so it may draw white blocks and keep no transcript. Quit Terminal.app fully and relaunch it from the Dock. |
 | unknown | (none) | — | (none) |
 
 ### Lanes and phases
@@ -649,10 +653,26 @@ build decided what this page left open:
 | The pill | On the leftovers screen, by the row: the step's button ("Close…" or "Attach…") when the page may act, 36 px visible and 44 px to tap; it opens the confirm sheet over the leftovers screen, and Cancel returns there |
 | The sheet | The destructive sheet, with "This ends" for its red panel: "Claude in <project> · window <first 8>" and "Process <pid> · idle <age>" (the age only when the last activity is known), "Checked just now" with its two lines, Cancel first, "Close window" in red, and the command behind "Exact command". The sentence carries the `claude --resume` note IDEA_025 asks for |
 | What runs | `invariant oracle close-host <host> --pid N --start TOKEN [--tty ttysNNN]`, a `run` step in the project root. It checks every fact again, sends one SIGTERM, waits up to 10 s, never sends SIGKILL, and closes the tab only once Claude has gone, asking a tab still busy with Claude's lingering children again for up to 5 s (BUG_098; oracle.md, "Close host") |
-| The result | A refusal is the "Why" panel ("invariant said: nothing was done: process 41001 has already exited"). A close that ran shows "What happened", the command's last line: "Claude ended, and its Terminal tab closed.", "… its Terminal window closed.", "Claude ended; the window was left open because …", or the Automation sentence. The job's `words` gain `outcome` (`panel.outcome_words`), empty for every other step. The audit log's done line keeps only that outcome's code, `tab` (BUG_098; state_model.md, "The web actions' audit log") |
+| The result | A refusal is the "Why" panel ("invariant said: nothing was done: process 41001 has already exited"). A close that ran shows "What happened", the command's last line: "Claude ended, and its Terminal tab closed.", "… its Terminal window closed.", "Claude ended, and no Terminal tab is left on <tty>: its window closed with it, or was already closed." (IDEA_035), "Claude ended; the window was left open because …", or the Automation sentence. The job's `words` gain `outcome` (`panel.outcome_words`), empty for every other step. The audit log's done line keeps only that outcome's code, `tab` (BUG_098; state_model.md, "The web actions' audit log") |
 | A window that fails a close guard (BUG_099) | No pill; its row's line gains "· cannot close from here: <why>" after the window, by the step's `reason` (`panel._NO_CLOSE`): `close_ps` "invariant could not read its process", `close_start` "invariant could not read when its process started", `close_newer` "its process may be a newer one", `close_records` "invariant could not read Claude's process records", `close_other` "its process now runs another Claude conversation", `close_cwd` "invariant could not read its folder", `close_not_rooted` "it was started outside this project", `close_claimed` "a session in another project uses it". The generic "start or resume" line is left to the rows no guard applies to |
 | A conflict row | "Its process ids disagree" on the leftovers screen, and "process ids disagree: attention 3 (gone), record 4 (alive)" under Technical details, instead of "process id not recorded" |
 | Close beside Attach (a known gap) | Not offered. A row has one step, the one `recommend` derives, and the confirm and the action are keyed by the row alone (ADR-008 D9), so a window offered "Attach…" cannot also reach "Close…" from the panel. A second action per row needs the route of its own that "More actions" waits for: a step selector bound into the nonce, re-derived on the server, and a second pill on the leftovers row. Until then the unique-attach rule keeps Attach rare, and a window that is attached can be closed through its session. Asked for 2026-10-25; left for increment 7 |
+
+## As built for IDEA_035: a host in a polluted Terminal.app
+
+A Claude window whose own environment inherited `CLAUDE_CODE_CHILD_SESSION`
+or `COLORTERM=truecolor` from its Terminal.app (oracle.md, "What a host
+inherited from its terminal") raises `inherited_env`, an info marker that
+never alerts and moves no card between groups. A session's card shows the
+chip "Terminal.app needs a restart" in the idle tone, and its detail the
+sentence in the States table above, so the cause of the white blocks and the
+missing transcript, and the cure, reach the phone. A leftover window's row
+ends with "· Terminal.app needs a restart: quit it fully and relaunch it
+from the Dock", after any close guard. The variable names stay out of the
+panel's words; the signal's detail, the TUI and `doctor` carry them. A close
+that finds no Terminal tab once Claude has ended now says "Claude ended, and
+no Terminal tab is left on <tty>: its window closed with it, or was already
+closed.", because a window invariant launched ends with its Claude.
 
 ## As built in IDEA_030 increment 2
 

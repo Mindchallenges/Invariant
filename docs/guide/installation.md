@@ -142,6 +142,9 @@ you like, and check the name, the exact command, the Claude windows already
 open there and the main checkout's uncommitted changes before you press
 Start. The phone page's "New session…" sheet is the same start. Claude runs
 in its default permission mode, and the oracle answers none of its prompts.
+The window closes by itself when Claude exits (or shows itself finished, if
+your Terminal profile keeps finished windows). If Claude fails to start, the
+window waits for Return so you can read why first.
 
 **After upgrading, run `invariant oracle install --web` again** if you serve
 the page, from a shell where `claude` resolves (`command -v claude` prints a

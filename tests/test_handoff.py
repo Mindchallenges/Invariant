@@ -429,23 +429,23 @@ class TestTheLaunchPlan:
         plan = self.plan()
         tokens = shlex.split(plan.shell_line)
         unset = [arg for name in launch.LAUNCH_UNSET for arg in ("-u", name)]
-        assert tokens[:4] == ["cd", "/work/a dir/it's here", "&&", "env"]
-        assert tokens[4 : 4 + len(unset)] == unset
-        assert tokens[4 + len(unset) :] == [launch.LAUNCH_SHELL, plan.launch_file]
+        assert tokens[:5] == ["cd", "/work/a dir/it's here", "&&", "exec", "env"]
+        assert tokens[5 : 5 + len(unset)] == unset
+        assert tokens[5 + len(unset) :] == [launch.LAUNCH_SHELL, plan.launch_file]
 
     def test_the_launch_file_round_trips_the_command_through_shlex(self):
         plan = self.plan()
         lines = Path(plan.launch_file).read_text(encoding="utf-8").splitlines()
         assert lines[0] == "#!/bin/sh"
         assert shlex.split(lines[1]) == ["rm", "-f", "--", plan.launch_file]
-        assert tuple(shlex.split(lines[2])) == ("exec", *plan.argv)
+        assert tuple(shlex.split(lines[2])) == plan.argv
         assert plan.script == "\n".join(lines) + "\n"
 
     def test_the_by_hand_line_carries_the_note_inline(self):
         plan = self.plan()
         tokens = shlex.split(plan.by_hand)
         assert tuple(tokens[-len(plan.argv) :]) == plan.argv
-        assert plan.shell_line.split(" env ", 1)[0] == plan.by_hand.split(" env ", 1)[0]
+        assert plan.shell_line.split(" exec env ", 1)[0] == plan.by_hand.split(" env ", 1)[0]
 
     def test_the_applescript_string_round_trips(self):
         plan = self.plan()

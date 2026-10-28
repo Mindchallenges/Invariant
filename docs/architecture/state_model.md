@@ -687,8 +687,8 @@ stateDiagram-v2
 ```
 
 - **Claimed — by the token the launcher set.** The launched line is
-  `cd <main> && env -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>`,
-  and the launch file `exec`s `claude` (BUG_075), so the variable reaches that
+  `cd <main> && exec env -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>`,
+  and the launch file runs `claude` (BUG_075, IDEA_035), so the variable reaches that
   one `claude` process and every hook it spawns. On the
   PostToolUse that brackets the host's first `session start` or
   `session resume` — the binding path under "Host binding" above —

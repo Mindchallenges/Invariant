@@ -8,7 +8,8 @@ ask it the same question and get the same answer.
 on the person, a gate that refused the turn, a turn gone silent, work finished
 and awaiting the next step, and an error. **Markers** are shown and never
 interrupt: parked, stranded, a leaked worktree, an orphan host, a host gone
-without ``SessionEnd``, an idle "your turn", and a merge awaiting teardown.
+without ``SessionEnd``, an idle "your turn", a merge awaiting teardown, and a
+host started with variables inherited from its Terminal.app.
 
 **Every signal has a stable key**, ``project|subject|kind|discriminator``. The
 discriminator changes exactly when the condition is a new occurrence rather
@@ -48,6 +49,14 @@ ORPHAN_HOST = "orphan_host"
 HOST_GONE = "host_gone"
 YOUR_TURN = "your_turn"
 TEARDOWN_PENDING = "teardown_pending"
+#: A live host started with variables it inherited from its Terminal.app
+#: (``HostView.inherited_env``, IDEA_035). A marker: it never alerts.
+INHERITED_ENV = "inherited_env"
+
+#: What the person does about :data:`INHERITED_ENV`, in the signal's detail
+#: and ``doctor``'s row: a Terminal.app started afresh has a clean
+#: environment, and so has every window it opens.
+INHERITED_REMEDY = "quit Terminal.app fully and relaunch it from the Dock"
 
 #: An orphan host's class, its ``orphan_host`` marker's cause (IDEA_025,
 #: IDEA_027 increment 6). None of them alerts.
@@ -310,6 +319,11 @@ def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:
             WAITING_INPUT, WAITING_INPUT)
     elif state == TURN_IDLE and not gone and wait_kind == _IDLE:
         add(YOUR_TURN, INFO, False, "idle at the prompt: your turn")
+    if host.alive is True and host.inherited_env:
+        names = ", ".join(host.inherited_env)
+        add(INHERITED_ENV, INFO, False,
+            f"started with {names} inherited from its Terminal.app: {INHERITED_REMEDY}",
+            ",".join(host.inherited_env))
     if not record:
         return
 

@@ -213,6 +213,17 @@ class HostProbe(Protocol):
         """
         ...
 
+    def inherited_markers(self, pid: int) -> Iterable[str] | None:
+        """The names of the variables the live host ``pid`` inherited from its
+        terminal that change how it runs, ``()`` for none, ``None`` when
+        that cannot be read (IDEA_035).
+
+        Optional: a probe without it reports nothing. The host decides which
+        names count and reads the host process's own environment; only the
+        names reach the scan, never a value.
+        """
+        ...
+
 
 def pid_exists(pid: int | None) -> bool:
     """Whether a process ``pid`` exists. Signal 0 sends nothing."""
@@ -292,7 +303,8 @@ class ScanCache:
         if not isinstance(pid, int) or isinstance(pid, bool):
             return None
         if not self.pid_alive(pid):
-            self._entries.pop(("host", pid), None)
+            for kind in ("host", "env"):
+                self._entries.pop((kind, pid), None)
             return False
         if self.probe is None:
             return True
@@ -354,6 +366,24 @@ class ScanCache:
             return None
         return cwd if isinstance(cwd, str) and cwd else None
 
+    def inherited(self, pid: int) -> list[str] | None:
+        """The markers the live host ``pid`` inherited, sorted, kept for ``ttl``
+        and dropped when the pid is seen dead (IDEA_035).
+
+        ``[]`` is clean; ``None`` is a probe without the read, a read that
+        raises, or one that cannot say.
+        """
+        ask = getattr(self.probe, "inherited_markers", None)
+        if ask is None:
+            return None
+        try:
+            found = self._cached("env", pid, lambda: ask(pid))
+        except Exception:  # noqa: BLE001 - an unread environment is unknown, never clean
+            return None
+        if found is None:
+            return None
+        return sorted(name for name in found if isinstance(name, str))
+
     def process_alive(self, pid: int | None, start: str | None) -> tuple[bool | None, str | None]:
         """Whether a recorded pid is still that host, and its terminal.
 
@@ -367,7 +397,7 @@ class ScanCache:
         if not isinstance(pid, int) or isinstance(pid, bool):
             return None, None
         if not self.pid_alive(pid):
-            for kind in ("facts", "host", "cwd"):
+            for kind in ("facts", "host", "cwd", "env"):
                 self._entries.pop((kind, pid), None)
             return False, None
         ask = getattr(self.probe, "process_facts", None)
@@ -435,6 +465,12 @@ class HostView:
     #: Fresher than the attention ``turn``, which a missed Stop leaves
     #: ``running`` for ever (BUG_087).
     status: str | None = None
+    #: The names of the variables this live host inherited from Terminal.app
+    #: that change how it runs (the probe's ``inherited_markers``: Claude
+    #: Code's ``CLAUDE_CODE_CHILD_SESSION`` and ``COLORTERM``), ``[]`` for
+    #: none, ``None`` when unread: not alive, a pid not verified as this
+    #: host's, or a read that could not say (IDEA_035). Names only.
+    inherited_env: list[str] | None = None
 
 
 @dataclass
@@ -866,7 +902,33 @@ class _ProjectReader:
             transcript_written=self._transcripts.get(host_id),
         )
         self._liveness(view, pid, self._processes.get(host_id, []))
+        self._inherited(view)
         return view
+
+    def _inherited(self, view: HostView) -> None:
+        """Read what a live host inherited, once its pid is known to be its own.
+
+        A pid the per-process record verified (``record``, ``both``) is read.
+        A pid only the attention record names is read when ``ps`` says it is
+        ``claude`` and it started before that record's last write: the
+        ordering BUG_099 vouches with, so a reused pid's environment is never
+        taken for this host's. That is the case that matters, because a host
+        that inherited ``CLAUDE_CODE_CHILD_SESSION`` writes no record. A probe
+        without the read costs nothing more, so a session's host still costs
+        no ``ps`` beyond its name check there.
+        """
+        if view.alive is not True or view.pid is None:
+            return
+        if getattr(self.cache.probe, "inherited_markers", None) is None:
+            return
+        if view.pid_source == PID_ATTENTION:
+            facts = self.cache.facts(view.pid)
+            started = getattr(facts, "started", None)
+            written = view.attention_written
+            if (facts is None or not facts.is_host or not isinstance(started, (int, float))
+                    or written is None or started > written):
+                return
+        view.inherited_env = self.cache.inherited(view.pid)
 
     def _liveness(self, view: HostView, pid: int | None, records: list[HostProcess]) -> None:
         """Join the attention record's pid with the per-process records.

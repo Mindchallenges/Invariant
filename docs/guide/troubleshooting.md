@@ -236,6 +236,18 @@ stayed open, macOS has not yet allowed the oracle to control Terminal; allow
 it under System Settings > Privacy & Security > Automation. The full table of
 messages is in [The oracle on your phone, Troubleshooting](oracle-web.md#troubleshooting).
 
+### Claude draws white blocks, says "Transcript saving is off", or has no "Close…"
+
+The window's Terminal.app was started from a Claude tool shell, and hands
+that shell's `CLAUDE_CODE_CHILD_SESSION` and `COLORTERM=truecolor` to every
+window it opens. `invariant doctor` names each such window on its `claude
+window environment` row (a `warn`, never a failure), and the oracle shows
+"Terminal.app needs a restart" on its card. Quit Terminal.app fully
+(Terminal > Quit Terminal, not just its windows) and relaunch it from the
+Dock; then resume the sessions in the new windows. The check reads each
+Claude's own environment, so running `doctor` from inside a Claude window
+does not trip it.
+
 ### The phone page will not load, or says "not paired"
 
 Pairing, Tailscale, certificates and the Local Network prompt each have a row

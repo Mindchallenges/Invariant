@@ -1163,7 +1163,7 @@ relationship: `claude_code` drives a running host, the telemetry reader reads
 back what one wrote, and this one STARTS one. It turns a handoff into a
 `LaunchPlan` — the `claude --name <slug> --remote-control <slug> "<note>"`
 argv, a *launch file* holding that whole command, the
-`cd <main checkout> && env -u <marker> … INVARIANT_HANDOFF=<token> /bin/sh <launch file>`
+`cd <main checkout> && exec env -u <marker> … INVARIANT_HANDOFF=<token> /bin/sh <launch file>`
 line quoted with `shlex` (the token is set only once the note is recorded), and
 the AppleScript that types that line into a new macOS Terminal window — and
 `TerminalLauncher` runs `osascript` on it. Claude Code has no flag for a
@@ -1179,10 +1179,13 @@ goes into the launch file: a three-line `/bin/sh` script, written by
 `plan_launch` with `mkstemp` (mode 0600) into `launch_dir()` — a directory
 under the user's temporary directory, mode 0700 and proved to be the user's
 own, never under the project, so the file cannot be committed. The script
-removes itself and then `exec`s `claude`, so the note leaves the disk the
-moment the successor holds it, it stays ONE positional argument — the initial
-prompt — quoted by `shlex` as before, and the successor keeps the script's
-pid. A program reads the file, not the window's shell, so the line means the
+removes itself and then runs `claude`, so the note leaves the disk the
+moment the successor holds it, and it stays ONE positional argument — the
+initial prompt — quoted by `shlex` as before. The typed line `exec`s the
+launch shell, so the window's own shell is replaced and the window ends
+with Claude (IDEA_035); the launch file runs `claude` as its child so that a
+failed Claude (a non-zero exit up to 128) can pause for Return at the
+terminal before the window goes, and always exits 0. A program reads the file, not the window's shell, so the line means the
 same in zsh, bash or fish. The typed line no longer grows with the note, and
 `plan_launch` refuses one that would still exceed `MAX_CANON` (only a very
 long checkout path can) rather than let the tty cut it. A launch file nobody
@@ -1214,8 +1217,9 @@ sequenceDiagram
     CLI->>L: plan_launch(stage) writes the 0600 launch file
     CLI->>L: watch.running(slug) before the launch
     CLI->>L: launcher.launch(plan)
-    L->>T: osascript do script "cd … && env -u … /bin/sh <file>"
-    T->>C: /bin/sh <file>: rm the file, exec claude --name --remote-control "<note>"
+    L->>T: osascript do script "cd … && exec env -u … /bin/sh <file>"
+    T->>C: /bin/sh <file> (in place of the tab's shell): rm the file, run claude --name --remote-control "<note>"
+    C-->>T: claude exits: a failure (1 to 128) at a terminal waits for Return; then exit 0 and the window ends
     CLI->>L: watch.wait_for(slug) — new pid, alive after the grace
     alt successor alive
         CLI->>L: closer.close(CLAUDE_PID) unless --keep-open

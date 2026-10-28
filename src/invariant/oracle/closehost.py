@@ -67,9 +67,16 @@ _PLAIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 #: What the run ended in, by the tab closer's answer. The last line the
 #: command prints, which the panel's result sheet shows as what happened.
+#: No tab on the tty once Claude has ended is not a window left open: a
+#: window invariant launched ends with its Claude, because the typed line
+#: replaced its shell (IDEA_035), so ``no_tab`` says nothing was left.
 OUTCOMES: dict[str, str] = {
     "closed_tab": "Claude ended, and its Terminal tab closed.",
     "closed_window": "Claude ended, and its Terminal window closed.",
+    "no_tab": ("Claude ended, and no Terminal tab is left on {tty}: its window closed "
+               "with it, or was already closed."),
+    "not_running": ("Claude ended, and no Terminal tab is left on {tty}: its window closed "
+                    "with it, or was already closed."),
     "not_allowed": (
         "Claude ended; macOS has not allowed the oracle to control Terminal, so the window "
         "was left open. Allow it in System Settings > Privacy & Security > Automation "
@@ -85,8 +92,6 @@ _WHY_LEFT = {
                     "owns it)",
     "unknown_app": "invariant could not tell which app owns it",
     "busy": "something else is running in its tab ({detail})",
-    "no_tab": "no Terminal tab is on {tty}",
-    "not_running": "no Terminal tab is on {tty}",
     "tab_not_closable": "Terminal would not close one tab of several from a script ({detail})",
     "failed": "Terminal could not be asked ({detail})",
 }
@@ -258,7 +263,7 @@ def _tab_outcome(tty: str | None, app: bool | None, seams: HostSeams) -> str:
         return LEFT_OPEN.format(why=_WHY_LEFT["not_terminal" if app is False else "unknown_app"])
     code, detail = _settled_close(tty, seams)
     if code in OUTCOMES:
-        return OUTCOMES[code]
+        return OUTCOMES[code].format(tty=tty)
     reason = _WHY_LEFT.get(code, _WHY_LEFT["failed"])
     why = reason.format(detail=detail or code, tty=tty)
     return LEFT_OPEN.format(why=why)
@@ -274,11 +279,9 @@ def outcome_word(line: str | None) -> str | None:
     """
     if not line:
         return None
-    for code, sentence in OUTCOMES.items():
-        if line == sentence:
-            return code
-    for code, reason in _WHY_LEFT.items():
-        sentence = LEFT_OPEN.format(why=reason)
+    sentences = [*OUTCOMES.items(),
+                 *((code, LEFT_OPEN.format(why=reason)) for code, reason in _WHY_LEFT.items())]
+    for code, sentence in sentences:
         fixed, placeholder, _ = sentence.partition("{")
         if line == sentence or (placeholder and line.startswith(fixed)):
             return code

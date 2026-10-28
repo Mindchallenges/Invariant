@@ -69,6 +69,7 @@ from .signals import (
     HIGH,
     HOST_GONE,
     INFO,
+    INHERITED_ENV,
     LOW,
     MEDIUM,
     ORPHAN_HOST,
@@ -247,6 +248,11 @@ _FACTS: dict[tuple[str, str], tuple[str, str, str, str]] = {
     (TEARDOWN_PENDING, ""): (
         "Merged, ready to clean up", TONE_IDLE,
         "It is merged. Its folder and branch can be removed.", ""),
+    (INHERITED_ENV, ""): (
+        "Terminal.app needs a restart", TONE_IDLE,
+        ("This Claude inherited settings from its Terminal.app that are meant for a "
+         "Claude window's own tools, so it may draw white blocks and keep no "
+         "transcript. Quit Terminal.app fully and relaunch it from the Dock."), ""),
 }
 
 #: The signals whose card reads "Paused": no live host is working on the session.
@@ -572,6 +578,7 @@ _LEFTOVER = {
     "active": "Active, no session",
     "window": "{state} · window {id}",
     "no_close": "{state} · window {id} · cannot close from here: {why}",
+    "inherited": " · Terminal.app needs a restart: quit it fully and relaunch it from the Dock",
     "folder_title": "{project} · {name}",
     "branch": "On branch {branch}",
     "no_branch": "Not on a branch",
@@ -1064,6 +1071,8 @@ def _host_leftover(row: dict[str, Any], project: str, now: float,
     why = _NO_CLOSE.get((row.get("recommendation") or {}).get("reason") or "")
     line = (_LEFTOVER["no_close"].format(state=_host_state(row, host), id=window, why=why)
             if why else _LEFTOVER["window"].format(state=_host_state(row, host), id=window))
+    if any(s.get("kind") == INHERITED_ENV for s in _signals(row)):
+        line += _LEFTOVER["inherited"]
     return {"row": row_key(row), "title": title, "line": line,
             "button": {"text": words.button} if acting and words else None}
 
