@@ -67,6 +67,11 @@ enforcement:
     agents.design_agent_ran: block
     agents.review_agent_ran: block
 
+    # The dogfood ruleset's layering rules (docs/guidelines/ruleset.yaml) hold
+    # at landing, as ruled for IDEA_031 A3 (DN-17). Set only after the rule was
+    # on main: a manifest naming a rule the installed build lacks does not load.
+    guidelines.mechanical_clean: block
+
 session:
   exempt_paths:
     - ".claude/*"

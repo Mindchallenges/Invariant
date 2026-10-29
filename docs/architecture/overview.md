@@ -262,8 +262,9 @@ project's. It sits below the CLI and beside `domains/`, and the arrows into it
 come from the CLI alone: **nothing in `core/`, `domains/`, `adapters/` or
 `hosts/` imports it**. This repository's own guidelines ruleset holds that as
 the boundary rule `layers.only-the-cli-imports-the-oracle`, checked at the
-landing by `guidelines.mechanical_clean` (`docs/guidelines/ruleset.yaml`,
-IDEA_031 A3 increment 9), beside the import scan in
+landing by `guidelines.mechanical_clean`, which this repository's manifest
+raises to `block` (`docs/guidelines/ruleset.yaml`, IDEA_031 A3 increment 9),
+beside the import scan in
 `tests/test_oracle_index.py` that predates it. The
 engine therefore works identically whether or not the oracle is ever used, and
 the oracle can read every project without any project knowing it exists.

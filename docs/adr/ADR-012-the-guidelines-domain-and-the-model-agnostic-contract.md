@@ -1473,7 +1473,8 @@ hand-written layering scans become ruleset entries.
   a manifest naming a rule the build lacks does not load (BUG_050). That
   would leave every hook re-rooted into this worktree unable to load its
   manifest until the merge. Raising it to `block` is a one-line manifest
-  change once the rule is on the main checkout.
+  change once the rule is on the main checkout; a follow-up chore made it
+  right after the merge, so here the rule blocks as DN-17 ruled.
 - *Rendered.* `guidelines render` wrote `docs/guidelines/checklist.md`.
   This repository has no `CLAUDE.md`, and render inserts a block only on
   `--insert`, which would create the file, so no `guidelines/index` block
