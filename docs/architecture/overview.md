@@ -1052,7 +1052,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
@@ -1280,6 +1280,23 @@ have been evidence for `docs.read_architecture`, so it calls
 Two local answers to "is this an architecture doc" is exactly the disjointness
 BUG_046 was: two steps preferring opposite spellings of one file, with a
 `block` gate closed against every read the track could perform in between.
+
+The same direction carries the guidelines advisory at an edit (ADR-012
+ruling 9, D7, A3 increment 8). After an edit tool's call lands,
+`_post_tool_use` asks `core.rules.edit_advisory` what the edited file adds at
+the landing gate `guidelines.mechanical_clean`: its new pattern and boundary
+findings, with the baseline ratchet applied, never a cochange. The engine
+decides; the adapter only formats the answer as `additionalContext`, one line
+per finding (rule id, severity, `path:line`, the matched line, the fix), and
+caps it at `guidelines.injection.max_lines` with a last line counting what was
+left out and naming `invariant check guidelines.mechanical_clean`. It is never
+a `permissionDecision`. The rule context is passed as a builder the engine
+calls only when a ruleset is configured, so a project without one pays
+nothing. An edit outside the session's tree, a file no guideline covers and a
+clean file are silent; a file nobody could answer for, a ruleset or baseline
+that does not load, and an exception inside the projection are one short line;
+an exception in the adapter's own step is silence. None of it can fail the
+call, which has already happened.
 
 The contract has been widened once since, deliberately and for the same class
 of reason. `agent_type` — the acting agent, which Claude Code stamps on every

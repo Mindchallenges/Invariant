@@ -41,7 +41,9 @@ from ..core.rules import (
     AGENT_TOOLS,
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
+    EditAdvisory,
     dispatched_agent,
+    edit_advisory,
     evaluate_event,
     is_architecture_doc,
     standdown_in_force,
@@ -1390,6 +1392,8 @@ class ClaudeCodeHost:
 
         self._record_acting_agent(payload, ctx)
 
+        if tool in EDIT_TOOLS:
+            return self._edit_advisory(payload, ctx)
         if tool != "Read" and tool not in AGENT_TOOLS:
             return {}
 
@@ -1453,6 +1457,35 @@ class ClaudeCodeHost:
             # than a gate missing one data point.
             pass
         return {}
+
+    @staticmethod
+    def _edit_advisory(payload: dict, ctx) -> dict:
+        """What the edit that just landed adds at the guidelines landing gate.
+
+        ADR-012 ruling 9, D7 and DN-8: advisory context after the edit, never a
+        deny. The engine decides what to say (``core.rules.edit_advisory``),
+        and the rule context is built only once it knows a ruleset is
+        configured, so a project without one pays nothing here. This only
+        formats the answer, capped by ``guidelines.injection.max_lines``. The
+        edit has already happened, so nothing that goes wrong here may fail
+        the call: any exception leaves the hook silent.
+        """
+        target = _edit_target(payload)
+        manifest = getattr(ctx, "manifest", None)
+        if target is None or manifest is None:
+            return {}
+        try:
+            advisory = edit_advisory(
+                manifest, target, lambda: ctx.rule_context(payload=payload)
+            )
+            if advisory is None:
+                return {}
+            cap = manifest.get("guidelines.injection.max_lines", ADVISORY_MAX_LINES)
+            return _context_response(
+                "PostToolUse", "\n".join(render_advisory(advisory, int(cap)))
+            )
+        except Exception:  # noqa: BLE001 - an advisory may never fail its hook
+            return {}
 
     @staticmethod
     def _report_unplaced(tool: str, payload: dict, unplaced) -> dict:
@@ -1880,6 +1913,44 @@ def _bind_claimed_session_id(response: str) -> str | None:
             return str(session["id"])
     match = _STARTED_ID.search(response or "")
     return match.group(1) if match else None
+
+
+#: The cap on the advisory's lines when the manifest gives none: the
+#: ``guidelines.injection.max_lines`` default (ADR-012 DN-C).
+ADVISORY_MAX_LINES = 40
+
+#: Where the findings past the cap are read in full.
+ADVISORY_MORE = "invariant check guidelines.mechanical_clean"
+
+
+def render_advisory(advisory: EditAdvisory, max_lines: int) -> list[str]:
+    """The advisory as plain facts, at most ``max_lines`` lines.
+
+    A header naming the file and the gate, then the problem line if there is
+    one, then one line per finding: rule id, severity, path:line, the matched
+    line and the fix. A problem alone is that one line. Past the cap the last
+    line counts what was left out and names where to read it, as the managed
+    block does (DN-C), so N counts lines and items alike.
+    """
+    label = "guidelines advisory: "
+    items = [f"- {advisory.problem}"] if advisory.problem else []
+    for found in advisory.findings:
+        where = found.path if found.line is None else f"{found.path}:{found.line}"
+        target = f" (references {found.target})" if found.target else ""
+        items.append(
+            f"- {found.rule} ({found.severity}) {where}: {found.text}{target}; "
+            f"fix: {found.fix}"
+        )
+    if not advisory.findings:
+        return [label + advisory.problem] if advisory.problem else []
+    header = (
+        f"{label}{len(advisory.findings)} new finding(s) in {advisory.path}, which "
+        f"guidelines.mechanical_clean evaluates at landing"
+    )
+    if 1 + len(items) <= max_lines:
+        return [header, *items]
+    kept = items[: max(max_lines - 2, 0)]
+    return [header, *kept, f"- {len(items) - len(kept)} more: {ADVISORY_MORE}"]
 
 
 def _context_response(event_name: str, text: str) -> dict:

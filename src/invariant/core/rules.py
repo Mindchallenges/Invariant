@@ -2497,6 +2497,158 @@ def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...
     return tuple(fixes)
 
 
+# -- the edit-time advisory (ADR-012 ruling 9, D7, DN-8) -----------------------
+
+#: The kinds advised at an edit: a finding about one file's lines. A cochange
+#: describes the whole change, so it is judged only at the landing.
+ADVISED_KINDS = ("pattern", "boundary")
+
+#: How much of a matched line an advised finding quotes.
+ADVISED_LINE_CHARS = 160
+
+
+@dataclass(frozen=True)
+class AdvisedFinding:
+    """One finding the landing gate would count as new, stated as plain facts."""
+
+    rule: str
+    severity: str
+    path: str
+    line: int | None
+    #: The matched line, its whitespace collapsed and its length capped.
+    text: str
+    target: str | None
+    fix: str
+
+
+@dataclass(frozen=True)
+class EditAdvisory:
+    """What one landed edit adds that ``guidelines.mechanical_clean`` would hold."""
+
+    path: str
+    findings: tuple[AdvisedFinding, ...] = ()
+    #: One short line: the file, the ruleset or the baseline could not be read.
+    problem: str | None = None
+
+
+def edit_advisory(
+    manifest: Manifest, target: Path, context: Callable[[], RuleContext]
+) -> EditAdvisory | None:
+    """What the edit that just landed on ``target`` adds at the landing gate.
+
+    ADR-012 ruling 9, D7 and DN-8. A projection of ``guidelines.mechanical_clean``
+    over one file: its ``pattern`` and ``boundary`` guidelines, with the
+    baseline ratchet applied, so only a finding the landing would count as new
+    is named. Never a deny, a rule event or a verdict, so no level applies.
+    ``cochange`` is never evaluated here: it describes the whole change, and
+    its second file may come later.
+
+    ``None`` is silence: no ruleset (decided from the manifest alone, so no
+    file is read, no git is asked and ``context`` is never called), an edit
+    outside the tree the gate reads, a file no advised guideline covers, or
+    no new finding. An unanswerable file, and a ruleset or baseline that does
+    not load, is one short ``problem`` line. Any exception inside is caught
+    and becomes that line too, so a hook that asks this can never fail on it.
+    """
+    if not manifest.get("guidelines.ruleset"):
+        return None
+    try:
+        return _edit_advisory(context(), target)
+    except Exception as exc:  # noqa: BLE001 - an advisory may never fail its hook
+        return EditAdvisory(
+            path=target.name,
+            problem=(
+                f"the guidelines advisory could not be computed for this edit "
+                f"({type(exc).__name__}); guidelines.mechanical_clean still "
+                f"evaluates it at landing"
+            ),
+        )
+
+
+def _edit_advisory(ctx: RuleContext, target: Path) -> EditAdvisory | None:
+    tree = guidelines_tree(ctx)
+    rel = _inside_tree(tree, target if target.is_absolute() else ctx.cwd / target)
+    if rel is None:
+        return None
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return EditAdvisory(
+            path=rel,
+            problem=f"the guidelines ruleset does not load, so {rel} was not checked: "
+            f"{failure.message}; see invariant check guidelines.ruleset_valid",
+        )
+    advised = [
+        rule for rule in ruleset.rules
+        if rule.check.kind in ADVISED_KINDS
+        and any(findings_reader.matches(rel, glob) for glob in rule.applies_to)
+    ]
+    if not advised or not (tree / rel).is_file():
+        return None
+    baseline, broken = load_baseline(ctx, ruleset)
+    if broken is not None:
+        return EditAdvisory(
+            path=rel,
+            problem=f"the guidelines baseline does not load, so {rel} was not checked: "
+            f"{broken.message}",
+        )
+    raw = _read_bytes(tree / rel)
+    reads = _finding_reads(tree, _ecosystem_adapters(ctx))
+    reads["read"] = lambda _rel: raw
+    evaluation = findings_reader.evaluate(advised, [rel], **reads)
+    ratcheted = findings_reader.ratchet(evaluation.findings, baseline or (), touched={rel})
+    lines = (raw or b"").decode("utf-8", errors="replace").split("\n")
+    new = tuple(
+        _advised(f, lines) for f in ratcheted.findings if f.status == "new"
+    )
+    unanswerable = [f for f in ratcheted.findings if f.status == "unanswerable"]
+    problem = None
+    if unanswerable:
+        ids = ", ".join(dict.fromkeys(f.rule for f in unanswerable))
+        notes = "; ".join(dict.fromkeys(f.note for f in unanswerable))
+        problem = f"{rel} could not be checked against {ids}: {notes}"
+    if not new and problem is None:
+        return None
+    return EditAdvisory(path=rel, findings=new, problem=problem)
+
+
+def _inside_tree(tree: Path, target: Path) -> str | None:
+    """``target`` relative to ``tree`` in POSIX spelling, or ``None`` outside it.
+
+    Resolved on both sides, so a symlinked prefix does not move a file out of
+    the tree. The spelling is taken as git and the gate's changed set give
+    it, without trimming, so a name with whitespace at an end is read as the
+    file it is.
+    """
+    try:
+        relative = target.resolve().relative_to(tree.resolve())
+    except (OSError, ValueError):
+        return None
+    rel = relative.as_posix()
+    return None if rel in ("", ".") else rel
+
+
+def _advised(finding: findings_reader.Finding, lines: list[str]) -> AdvisedFinding:
+    line = finding.line or 0
+    text = findings_reader.collapse(lines[line - 1]) if 0 < line <= len(lines) else ""
+    if len(text) > ADVISED_LINE_CHARS:
+        text = text[: ADVISED_LINE_CHARS - 3] + "..."
+    where = f"path {finding.path}, fingerprint {finding.fingerprint}"
+    if finding.target is not None:
+        fix = (
+            f"remove the reference to {finding.target}, or give it a reasoned "
+            f"exception in the ruleset ({where})"
+        )
+    else:
+        fix = (
+            f"change line {line} so {finding.rule} holds, or give it a reasoned "
+            f"exception in the ruleset ({where})"
+        )
+    return AdvisedFinding(
+        rule=finding.rule, severity=finding.severity, path=finding.path,
+        line=finding.line, text=text, target=finding.target, fix=fix,
+    )
+
+
 # -- the baseline (ADR-012 D6) ------------------------------------------------
 #
 # The ratchet's record of pre-existing pattern and boundary findings, named by

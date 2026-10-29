@@ -1358,6 +1358,85 @@ shape a rule's grant already has, with the guideline id as its `rule`.
   `tests/test_authority.py` covers the family gate's override route and a
   hook leaving a guideline grant unspent.
 
+**As built: A3 increment 8, the edit-time advisory at `PostToolUse`.** Built
+to ruling 9 (advisory at the edit, held at the landing), D7, D12's host row
+for `guidelines.mechanical_clean`, `guidelines.injection.max_lines` (DN-C) and
+DN-8. D7's `PreToolUse` wording is corrected to `PostToolUse` above, as
+ruled. A3 does not touch `PreToolUse`.
+
+- *The projection, in `core/rules` (DN-8).* `edit_advisory(manifest, target,
+  context)` answers an `EditAdvisory`: the file's project-relative path, its
+  `AdvisedFinding`s, and at most one `problem` line, or `None` for silence.
+  It evaluates the `pattern` and `boundary` guidelines (`ADVISED_KINDS`)
+  whose `applies_to` covers the one edited file, through `core/findings`
+  with the reads `_finding_reads` hands the gate, and applies the ratchet
+  with the file as the touched set. Only a finding the ratchet leaves `new`
+  is advised, at either severity. `cochange` is never evaluated: it
+  describes the whole change. It is never a deny, a rule event or a
+  verdict, so no level applies, and it writes nothing.
+- *Silence.* `None` when no ruleset is configured, when the edited file is
+  outside the tree the gate reads (`guidelines_tree`: the session's
+  worktree when it has one), when no advised guideline's `applies_to`
+  covers it, and when nothing new is found.
+- *Cost (DN-8).* The ruleset key is read from the manifest before anything
+  else. With none configured, `context` is never called, so no rule context
+  is built, no file is read and no `git` is asked.
+- *One short line.* An unanswerable file names the guidelines that could
+  not answer and why. A ruleset that does not load names its failure and
+  `invariant check guidelines.ruleset_valid`. Any exception inside the
+  projection is caught and becomes a line naming its type and that the
+  landing gate still evaluates the edit.
+- *The host only formats (`hosts/claude_code`).* `_post_tool_use` asks the
+  projection for every edit tool, after the binding, the first-edit report
+  and the actor are recorded, passing the rule-context builder as a
+  callable. `render_advisory` writes a header naming the file and the gate,
+  the problem line, then one line per finding. The text is
+  `additionalContext`, never a `permissionDecision`. Past
+  `guidelines.injection.max_lines` it keeps `max_lines - 2` items and ends
+  with "- N more: `invariant check guidelines.mechanical_clean`", the shape
+  of the managed block's overflow (DN-C). A context with no manifest is
+  silent, and an exception anywhere in the step leaves the hook silent and
+  every recording it made in place.
+- *Model-agnostic (D1).* Each finding line is plain facts: rule id,
+  severity, `path:line`, the matched line, and a fix naming the line or the
+  referenced file and the finding's path and fingerprint. Nothing names a
+  host, a model or a tier.
+- *Small points the rulings left open, taken in the strict direction.*
+  - A warn guideline's new findings are advised beside a blocker's, with
+    the severity named, because the landing gate reports them too.
+  - A live grant naming a guideline is not applied. A grant passes one
+    evaluation of the landing gate and is spent there, so at the edit the
+    finding is still new.
+  - A baseline that does not load gets one short line, like a ruleset that
+    does not load. Without it no finding can be told new from baselined.
+  - "The session's tree" is the tree the gate reads. An edit in the main
+    checkout while the session works in a worktree is silent, and so is any
+    path that resolves outside the tree. With no session, that tree is the
+    checkout the hook runs in.
+  - The path is the edited file resolved against the resolved tree, with no
+    trimming, so a name with whitespace at an end is read as itself
+    (BUG_104 stays open for the gates). A relative path is read against the
+    working directory.
+  - A path that is no file, and a file that is not UTF-8 text, are silent.
+    Neither holds a finding at landing.
+  - An unanswerable guideline beside a new finding of another gives both:
+    the problem line and the findings.
+  - The matched line is quoted with its whitespace collapsed, as its
+    fingerprint is, and cut at 160 characters ending in `...`.
+  - The fix is the projection's, not the gate's general fix, so each line
+    stands alone. It names what to change and the exception that would set
+    the finding aside.
+  - An exception inside the projection gives a line. One in the host's own
+    step (building the response) gives silence, since nothing is left that
+    could be trusted to say it.
+- *Tests.* `tests/test_guidelines_advisory.py` (what is advised, the
+  ratchet, exceptions, cochange left out, each silence including the
+  no-ruleset cost, and each short line) and `tests/test_host_claude_code.py`
+  (the format, the cap and its overflow line, each silence, an exception
+  leaving the hook silent and the edit recorded, and against a real
+  repository through `handle` and through `invariant hook post-tool-use`: a
+  worktree edit advised, a main-checkout edit and a clean edit silent).
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through
@@ -1507,10 +1586,14 @@ What is injected, and where (ruling 8: layered and capped):
   that apply to the session's declared or touched files, as ids and titles,
   capped at a line budget. `invariant guidelines show --phase R [--files ...]`
   prints the full text on demand.
-- **Just in time, on an edit** (`PreToolUse` on an edit tool whose target
-  matches `applies_to`): the statements of the matching rules for the current
-  phase, as context, capped. This is the point where the rule can still change
-  the code at no cost.
+- **Just in time, on an edit** (`PostToolUse` on an edit tool whose target
+  matches `applies_to`, once the edit has landed): the statements of the
+  matching rules for the current phase, as context, capped. This is the point
+  where the rule can still change the code at no cost. The record first said
+  `PreToolUse` here. Ruling 9 and DN-8 place everything said at an edit after
+  it lands, so it is never a deny and a host that cannot deny can still carry
+  it; A3 increment 8 built the mechanical half there, and A5 adds the
+  statements on the same event.
 - **The design agent** asks `guidelines show --phase design` for the
   build-time subset it applies while designing. **The review agent** asks
   `--phase review` for every applicable rule and answers each judgement rule
@@ -1522,10 +1605,11 @@ the injected text a projection of state, reproducible with one command, as
 ADR-001 asks of everything injected.
 
 Mechanical checks are evaluated at the landing gate. On an edit they report
-advisory context ("this edit adds a new finding of X"). In v1 no finding
-denies an edit, at any severity (ruling 9): the edit is advised and the
-landing gate holds. A `cochange` finding could not be judged at the edit
-anyway, since its second file may come later.
+advisory context at `PostToolUse` ("this edit adds a new finding of X"). In
+v1 no finding denies an edit, at any severity (ruling 9): the edit is advised
+and the landing gate holds. A `cochange` finding could not be judged at the
+edit anyway, since its second file may come later, so the advisory never
+covers one (A3 increment 8, below).
 
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 
@@ -1781,6 +1865,7 @@ graph TD
     FSM -. injects guidelines.* by role .-> RULES
     PIPELINE --> RULES
     CC --> CGUIDE
+    CC -- edit_advisory, A3.8 --> RULES
     CC --> CAGENTS
     CCREN --> CAGENTS
     CC --> AGENTS
@@ -1804,7 +1889,9 @@ graph TD
   everything rendered before it is written.
 - **`hosts/`** gains rendering of host-neutral agents and the transport of
   injected text. `CC --> CGUIDE` is downward, the same shape as `CC --> PLAN`
-  and `CC --> RULES`: the turn projection asks `select` directly.
+  and `CC --> RULES`: the turn projection asks `select` directly. The
+  edit-time advisory (A3 increment 8) is `CC --> RULES`: `PostToolUse` asks
+  `edit_advisory` and only formats what it answers.
 - **`core/machines`** injects the landing gates by role, as it injects
   docs-first and the agent-role gates.
 
@@ -1853,7 +1940,7 @@ guidelines:
                              # generated-file write class (D3, ruling 13)
   injection:
     max_lines: 40            # cap on injected guideline text per turn or edit (D7)
-    on_edit: true            # just-in-time statements at PreToolUse
+    on_edit: true            # just-in-time statements at PostToolUse (D7)
   verdicts:
     note_max_chars: 280      # the inert note's cap (D5)
 

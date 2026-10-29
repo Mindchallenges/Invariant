@@ -28,9 +28,9 @@ from invariant.core.errors import InvariantError
 from invariant.hosts import claude_code
 from invariant.hosts.claude_code import (
     CHECK_AGENTS_CURRENT,
+    CHECK_AGENTS_LOADABLE,
     CHECK_HOOKS,
     CHECK_HOOKS_RUN,
-    CHECK_AGENTS_LOADABLE,
     ClaudeCodeHost,
     agent_frontmatter,
     loadability_problem,
@@ -2112,7 +2112,7 @@ class TestHooksActuallyRun:
         import subprocess
 
         proc = subprocess.run(
-            ["bash", str(shim)], input="{}", capture_output=True, text=True
+            ["bash", str(shim)], input="{}", capture_output=True, text=True, check=False
         )
         assert proc.returncode == 0            # looks healthy
         assert json.loads(proc.stdout)         # looks healthy
@@ -2226,3 +2226,273 @@ class TestStopDeliversTheCloseoutDemand:
     def test_the_liveness_probe_cannot_block_the_caller(self):
         """A check that could halt a real turn is worse than the outage it hunts."""
         assert claude_code._PROBE_PAYLOADS["stop"]["stop_hook_active"] is True
+
+
+class TestTheEditTimeGuidelinesAdvisory:
+    """IDEA_031 A3.8 (ADR-012 ruling 9, D7, DN-8).
+
+    After an edit lands, PostToolUse carries what `guidelines.mechanical_clean`
+    would count as new in that one file, as additional context. The engine
+    computes it (`core/rules.edit_advisory`, tested in
+    tests/test_guidelines_advisory.py); the host only formats it, capped by
+    `guidelines.injection.max_lines`. It is never a deny, and nothing it does
+    can fail the hook.
+    """
+
+    HOST_ID = "host-a38-advisory"
+
+    @staticmethod
+    def found(n, *, rule="style.no-print", target=None):
+        from invariant.core.rules import AdvisedFinding
+
+        return AdvisedFinding(
+            rule=rule, severity="blocker", path="app/m.py", line=n,
+            text=f"print({n})", target=target, fix=f"fix {n}",
+        )
+
+    class Manifest:
+        def __init__(self, values=None):
+            self.values = values or {}
+
+        def get(self, dotted, default=None):
+            return self.values.get(dotted, default)
+
+    def fake(self, monkeypatch, advisory, values=None):
+        """A context with a manifest, and the projection answering ``advisory``."""
+        seen = []
+
+        def project(manifest, target, context):
+            seen.append(target)
+            return advisory
+
+        monkeypatch.setattr(claude_code, "edit_advisory", project)
+        ctx = FakeCtx(host_session_id=None)
+        ctx.manifest = self.Manifest(values)
+        return ctx, seen
+
+    @staticmethod
+    def edit(target, tool="Write"):
+        return {"tool_name": tool, "tool_input": {"file_path": str(target), "content": "x"}}
+
+    @staticmethod
+    def lines(response):
+        assert "permissionDecision" not in json.dumps(response)
+        output = response["hookSpecificOutput"]
+        assert output["hookEventName"] == "PostToolUse"
+        return output["additionalContext"].split("\n")
+
+    # -- the host formats ------------------------------------------------------
+
+    def test_a_finding_is_rendered_as_plain_facts(self, host, monkeypatch):
+        from invariant.core.rules import EditAdvisory
+
+        ctx, seen = self.fake(
+            monkeypatch, EditAdvisory("app/m.py", findings=(self.found(2),))
+        )
+        lines = self.lines(host._post_tool_use(self.edit("/proj/app/m.py"), ctx))
+        assert seen == [Path("/proj/app/m.py")]
+        assert lines == [
+            (
+                "guidelines advisory: 1 new finding(s) in app/m.py, which "
+                "guidelines.mechanical_clean evaluates at landing"
+            ),
+            "- style.no-print (blocker) app/m.py:2: print(2); fix: fix 2",
+        ]
+
+    def test_a_boundary_finding_names_its_target(self):
+        from invariant.core.rules import EditAdvisory
+
+        advisory = EditAdvisory(
+            "app/m.py", findings=(self.found(1, rule="layers.x", target="tools/x.py"),)
+        )
+        assert claude_code.render_advisory(advisory, 40)[1] == (
+            "- layers.x (blocker) app/m.py:1: print(1) (references tools/x.py); fix: fix 1"
+        )
+
+    def test_every_edit_tool_is_advised(self, host, monkeypatch):
+        from invariant.core.rules import EDIT_TOOLS, EditAdvisory
+
+        ctx, seen = self.fake(monkeypatch, EditAdvisory("a", problem="p"))
+        for tool in sorted(EDIT_TOOLS):
+            host._post_tool_use(self.edit("/proj/a", tool), ctx)
+        assert len(seen) == len(EDIT_TOOLS)
+
+    def test_a_problem_alone_is_one_line(self, host, monkeypatch):
+        from invariant.core.rules import EditAdvisory
+
+        ctx, _ = self.fake(
+            monkeypatch, EditAdvisory("app/m.py", problem="app/m.py could not be checked")
+        )
+        lines = self.lines(host._post_tool_use(self.edit("/proj/app/m.py"), ctx))
+        assert lines == ["guidelines advisory: app/m.py could not be checked"]
+
+    def test_a_problem_beside_findings_follows_the_header(self):
+        from invariant.core.rules import EditAdvisory
+
+        advisory = EditAdvisory("app/m.py", findings=(self.found(1),), problem="half")
+        lines = claude_code.render_advisory(advisory, 40)
+        assert lines[1] == "- half"
+        assert lines[2].startswith("- style.no-print")
+
+    def test_the_cap_names_how_many_more_and_where(self, host, monkeypatch):
+        from invariant.core.rules import EditAdvisory
+
+        advisory = EditAdvisory("app/m.py", findings=tuple(self.found(n) for n in range(1, 11)))
+        ctx, _ = self.fake(monkeypatch, advisory, {"guidelines.injection.max_lines": 4})
+        lines = self.lines(host._post_tool_use(self.edit("/proj/app/m.py"), ctx))
+        assert len(lines) == 4
+        assert lines[1].endswith("app/m.py:1: print(1); fix: fix 1")
+        assert lines[2].endswith("app/m.py:2: print(2); fix: fix 2")
+        assert lines[3] == "- 8 more: invariant check guidelines.mechanical_clean"
+
+    def test_the_cap_defaults_to_forty_lines(self):
+        from invariant.core.rules import EditAdvisory
+
+        advisory = EditAdvisory("app/m.py", findings=tuple(self.found(n) for n in range(1, 61)))
+        lines = claude_code.render_advisory(advisory, 40)
+        assert len(lines) == 40
+        assert lines[-1] == "- 22 more: invariant check guidelines.mechanical_clean"
+
+    def test_exactly_at_the_cap_nothing_is_cut(self):
+        from invariant.core.rules import EditAdvisory
+
+        advisory = EditAdvisory("app/m.py", findings=tuple(self.found(n) for n in range(1, 4)))
+        lines = claude_code.render_advisory(advisory, 4)
+        assert len(lines) == 4 and "more:" not in lines[-1]
+
+    # -- silence, and never failing the hook --------------------------------------
+
+    def test_no_advisory_is_silent(self, host, monkeypatch):
+        ctx, _ = self.fake(monkeypatch, None)
+        assert host._post_tool_use(self.edit("/proj/app/m.py"), ctx) == {}
+
+    def test_a_context_with_no_manifest_is_silent(self, host):
+        assert host._post_tool_use(self.edit("/proj/app/m.py"), FakeCtx(None)) == {}
+
+    def test_an_edit_naming_no_file_is_silent(self, host, monkeypatch):
+        from invariant.core.rules import EditAdvisory
+
+        ctx, seen = self.fake(monkeypatch, EditAdvisory("a", problem="p"))
+        assert host._post_tool_use({"tool_name": "Write", "tool_input": {}}, ctx) == {}
+        assert seen == []
+
+    def test_a_read_is_never_advised(self, host, monkeypatch):
+        from invariant.core.rules import EditAdvisory
+
+        ctx, seen = self.fake(monkeypatch, EditAdvisory("a", problem="p"))
+        host._post_tool_use({"tool_name": "Read", "tool_input": {"file_path": "/x/a"}}, ctx)
+        assert seen == []
+
+    def test_no_ruleset_never_builds_a_rule_context(self, host):
+        """The real projection: FakeCtx.rule_context raises if it is asked."""
+        ctx = FakeCtx(host_session_id=None)
+        ctx.manifest = self.Manifest()
+        assert host._post_tool_use(self.edit("/proj/app/m.py"), ctx) == {}
+
+    def test_an_exception_never_fails_the_hook_and_the_edit_is_still_recorded(
+        self, host, monkeypatch
+    ):
+        def explode(manifest, target, context):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(claude_code, "edit_advisory", explode)
+        ctx = FakeCtx(host_session_id=None)
+        ctx.manifest = self.Manifest()
+        assert host.handle("post-tool-use", json.dumps(self.edit("/proj/a.py")), ctx) == {}
+        assert [Path(str(target)) for target, _, _ in ctx.sessions.edits] == [
+            Path("/proj/a.py")
+        ]
+
+    # -- through the hook's entry, against a real repository -----------------------
+
+    @pytest.fixture
+    def world(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from test_guidelines_findings import RULESET
+
+        from invariant.cli.main import Context
+        from invariant.core.manifest import MANIFEST_RELPATH
+
+        monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+        (tmp_path / MANIFEST_RELPATH).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo", "ecosystems": ["python"]},
+                    "session": {"worktree_dir": ".claude/worktrees"},
+                    "guidelines": {"ruleset": "docs/guidelines/ruleset.yaml"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "guidelines").mkdir(parents=True)
+        (tmp_path / "docs" / "guidelines" / "ruleset.yaml").write_text(
+            RULESET, encoding="utf-8"
+        )
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "m.py").write_text("x = 1\n", encoding="utf-8")
+
+        def git(*args):
+            subprocess.run(
+                ["git", *args], cwd=str(tmp_path), check=True, capture_output=True
+            )
+
+        git("init", "-q", "-b", "master")
+        git("config", "user.email", "dev@example.invalid")
+        git("config", "user.name", "Dev")
+        git("add", "-A")
+        git("commit", "-qm", "init")
+
+        ctx = Context(cwd=tmp_path, host_session_id=self.HOST_ID)
+        session = ctx.sessions.start("edit-advisory")
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.sessions.isolate(session.id, execute=True)
+        worktree = Path(Context(cwd=tmp_path).sessions.get(session.id).worktree)
+        return tmp_path, worktree
+
+    def hook(self, root, payload):
+        from invariant.cli.main import Context
+
+        return ClaudeCodeHost(root).handle(
+            "post-tool-use",
+            json.dumps({"session_id": self.HOST_ID, **payload}),
+            Context(cwd=root, host_session_id=self.HOST_ID),
+        )
+
+    def test_a_landed_edit_in_the_worktree_is_advised(self, world):
+        root, worktree = world
+        target = worktree / "app" / "m.py"
+        target.write_text("x = 1\nprint(x)\n", encoding="utf-8")
+        lines = self.lines(self.hook(root, self.edit(target)))
+        assert lines[0].startswith("guidelines advisory: 1 new finding(s) in app/m.py")
+        assert lines[1].startswith("- style.no-print (blocker) app/m.py:2: print(x); fix: ")
+
+    def test_an_edit_in_the_main_checkout_is_silent(self, world):
+        root, _ = world
+        target = root / "app" / "m.py"
+        target.write_text("print(x)\n", encoding="utf-8")
+        assert self.hook(root, self.edit(target)) == {}
+
+    def test_a_clean_edit_is_silent(self, world):
+        root, worktree = world
+        target = worktree / "app" / "m.py"
+        target.write_text("x = 2\n", encoding="utf-8")
+        assert self.hook(root, self.edit(target)) == {}
+
+    def test_the_cli_hook_entry_carries_it(self, world, capsys, monkeypatch):
+        from test_cli import _Stdin, payload, run
+
+        root, worktree = world
+        target = worktree / "app" / "m.py"
+        target.write_text("print(x)\n", encoding="utf-8")
+        monkeypatch.chdir(root)
+        monkeypatch.setattr(
+            "sys.stdin",
+            _Stdin(json.dumps({"session_id": self.HOST_ID, **self.edit(target)})),
+        )
+        assert run("hook", "post-tool-use") == 0
+        context = payload(capsys)["hookSpecificOutput"]["additionalContext"]
+        assert "- style.no-print (blocker) app/m.py:1: print(x)" in context
