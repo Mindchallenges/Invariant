@@ -570,6 +570,9 @@ class TestSessionStartRegisters:
 
 
 class TestLayering:
+    # The ruleset rule layers.only-the-cli-imports-the-oracle now covers this
+    # (docs/guidelines/ruleset.yaml). The scan is kept for now (DN-17);
+    # retiring it is a later step.
     def test_nothing_in_core_or_domains_imports_the_oracle(self):
         src = Path(__file__).resolve().parent.parent / "src" / "invariant"
         offenders = [

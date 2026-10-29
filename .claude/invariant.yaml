@@ -121,3 +121,10 @@ privacy:
 
 memory:
   managed: false
+
+# ADR-012 D4 names this repository as the first user of the boundary kind:
+# the layering the suite checked with hand-written import scans is a ruleset
+# (IDEA_031 A3 increment 9). The python ecosystem above offers the imports
+# engine its boundary rules need. No baseline: the tree has no finding.
+guidelines:
+  ruleset: docs/guidelines/ruleset.yaml

@@ -1,0 +1,58 @@
+# invariant's own guidelines ruleset (ADR-012 D3, IDEA_031 A3 increment 9).
+# The checklist beside it is generated: edit this file, then run
+# `invariant guidelines render`.
+version: 1
+sections:
+  - id: layers
+    title: Layering
+rules:
+  - id: layers.only-the-cli-imports-the-oracle
+    section: layers
+    title: Only the CLI imports the oracle
+    statement: >
+      No module under core, domains, adapters or hosts imports anything from
+      the oracle. The arrows into the oracle come from the CLI alone, so the
+      engine works identically whether or not the oracle is ever used, and a
+      host only says what happened while the CLI writes the sidecar.
+    severity: blocker
+    phases: [design, review, landing]
+    applies_to:
+      - src/invariant/core/*.py
+      - src/invariant/domains/*.py
+      - src/invariant/adapters/*.py
+      - src/invariant/hosts/*.py
+    check:
+      kind: boundary
+      engine: imports
+      forbid: ["src/invariant/oracle/*"]
+    rationale: >
+      To fix a finding, move the call up into the CLI, which may import the
+      oracle, and hand what the lower layer needs down to it as a value or a
+      callable. docs/architecture/overview.md draws every arrow into oracle/
+      from the CLI, and ADR-007 D6 is why there is no hosts-to-oracle arrow.
+    links:
+      - docs/architecture/overview.md
+      - docs/adr/ADR-007-a-machine-wide-read-only-oracle.md
+  - id: layers.oracle-never-imports-hosts
+    section: layers
+    title: The oracle never imports a host
+    statement: >
+      No module under oracle imports anything from hosts. Host facts and
+      effects reach the oracle through a protocol the oracle defines and the
+      CLI injects an implementation of.
+    severity: blocker
+    phases: [design, review, landing]
+    applies_to:
+      - src/invariant/oracle/*.py
+    check:
+      kind: boundary
+      engine: imports
+      forbid: ["src/invariant/hosts/*"]
+    rationale: >
+      To fix a finding, define the shape the oracle reads (as HostProbe and
+      HostSeams are), implement it in hosts, and have the CLI inject it.
+      docs/architecture/overview.md records that no oracle-to-hosts arrow
+      exists, and ADR-007 D11 is the probe the CLI injects.
+    links:
+      - docs/architecture/overview.md
+      - docs/adr/ADR-007-a-machine-wide-read-only-oracle.md

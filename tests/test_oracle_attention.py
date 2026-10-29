@@ -849,6 +849,9 @@ class TestCliRefusal:
 
 
 class TestLayering:
+    # The ruleset rule layers.only-the-cli-imports-the-oracle now covers this
+    # (docs/guidelines/ruleset.yaml). The scan is kept for now (DN-17);
+    # retiring it is a later step.
     def test_hosts_do_not_import_the_oracle(self):
         """ADR-007 D6: the CLI writes the sidecar; the host only says what happened."""
         import ast

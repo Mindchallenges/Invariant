@@ -1437,6 +1437,57 @@ ruled. A3 does not touch `PreToolUse`.
   repository through `handle` and through `invariant hook post-tool-use`: a
   worktree edit advised, a main-checkout edit and a clean edit silent).
 
+**As built: A3 increment 9, the dogfood ruleset.** D4 names this repository
+as the first user of `boundary`, and the user ruled (option A) on how its
+hand-written layering scans become ruleset entries.
+
+- *The ruling.* The suite held five import scans. Four are about layers of
+  this package, and two boundary rules cover them together:
+  - `layers.only-the-cli-imports-the-oracle`, over
+    `src/invariant/{core,domains,adapters,hosts}/*.py`, forbidding
+    `src/invariant/oracle/*`. It covers the scans in `test_oracle_index.py`
+    (core, domains and adapters) and `test_oracle_attention.py` (hosts).
+  - `layers.oracle-never-imports-hosts`, over `src/invariant/oracle/*.py`,
+    forbidding `src/invariant/hosts/*`. It covers the scans in
+    `test_oracle_scan.py` and `test_oracle_watcher.py`, the second a subset
+    of the first.
+
+  The fifth, "only the dashboard module imports Textual"
+  (`test_oracle_tui.py`), is about a third-party package. DN-A2 puts that
+  outside the kind, so no rule expresses it and the scan stays as it is.
+- *The ruleset.* `docs/guidelines/ruleset.yaml`, one `layers` section, both
+  rules `blocker` and `imports`, each with a rationale that says how to fix a
+  finding and links `docs/architecture/overview.md` and ADR-007 (D6 for the
+  hosts direction, D11 for the probe). The globs are `*.py` under each
+  layer, not `**/*.py`: `*` crosses `/` in the one matcher, so nested
+  modules are covered, and `**/` would miss each layer's top-level modules
+  (A3.3's glob note).
+- *The manifest.* `guidelines.ruleset` names it. `ecosystems: [python]`
+  already gives the `imports` engine (DN-A14). No baseline is configured
+  (DN-1): the whole tree has no finding under either rule and no file either
+  rule cannot answer for, so there is nothing to record and every finding
+  would be new.
+- *The level.* `guidelines.mechanical_clean` stays at the `standard`
+  profile's `warn` in this change. The build installed here runs the main
+  checkout's code, which carries no such rule until this branch merges, and
+  a manifest naming a rule the build lacks does not load (BUG_050). That
+  would leave every hook re-rooted into this worktree unable to load its
+  manifest until the merge. Raising it to `block` is a one-line manifest
+  change once the rule is on the main checkout.
+- *Rendered.* `guidelines render` wrote `docs/guidelines/checklist.md`.
+  This repository has no `CLAUDE.md`, and render inserts a block only on
+  `--insert`, which would create the file, so no `guidelines/index` block
+  was written. An absent block is no drift.
+- *The scans are kept (DN-17).* Each of the four carries a comment naming
+  the rule that now covers it. Their assertions are unchanged. Retiring them
+  is a later step.
+- *Tests.* `tests/test_dogfood_ruleset.py`: the manifest names the ruleset,
+  it passes `ruleset_valid` and holds exactly the two boundary rules with
+  the ruled globs and no `**`, no baseline is configured, every module
+  under `src/invariant` gives no finding, and a fixture copy with a seeded
+  import is found for each layer, for a nested core module and for the
+  oracle importing a host, while the CLI importing the oracle is not.
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through

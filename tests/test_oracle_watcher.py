@@ -676,6 +676,9 @@ class TestRowLabel:
 
 
 class TestLayering:
+    # The ruleset rule layers.oracle-never-imports-hosts now covers this
+    # (docs/guidelines/ruleset.yaml). The scan is kept for now (DN-17);
+    # retiring it is a later step.
     def test_the_watcher_and_notifier_do_not_import_hosts(self):
         import ast
 

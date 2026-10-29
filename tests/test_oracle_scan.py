@@ -811,6 +811,9 @@ class TestOracleList:
 
 
 class TestLayering:
+    # The ruleset rule layers.oracle-never-imports-hosts now covers this
+    # (docs/guidelines/ruleset.yaml). The scan is kept for now (DN-17);
+    # retiring it is a later step.
     def test_the_oracle_does_not_import_hosts(self):
         """ADR-007 D11: host facts reach the oracle through the probe the CLI injects."""
         import ast

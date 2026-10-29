@@ -259,8 +259,12 @@ disagree.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
-come from the CLI alone: **nothing in `core/`, `domains/` or `adapters/` imports
-it**, which `tests/test_oracle_index.py` enforces with an import scan. The
+come from the CLI alone: **nothing in `core/`, `domains/`, `adapters/` or
+`hosts/` imports it**. This repository's own guidelines ruleset holds that as
+the boundary rule `layers.only-the-cli-imports-the-oracle`, checked at the
+landing by `guidelines.mechanical_clean` (`docs/guidelines/ruleset.yaml`,
+IDEA_031 A3 increment 9), beside the import scan in
+`tests/test_oracle_index.py` that predates it. The
 engine therefore works identically whether or not the oracle is ever used, and
 the oracle can read every project without any project knowing it exists.
 `OINDEX --> STORE` reuses `JsonStore`'s atomic write and advisory lock for the
@@ -282,8 +286,9 @@ That store is why the file lands in the project's state root, and why the
 probe's inert store discards it. The gated CLI commands write a refusal the
 same way. The host pid the record carries comes from `claude_code_launch`
 (`host_pid`, else `find_host_pid`), which is the existing dotted
-`CLI → CCLAUNCH` arrow carrying two more names. A test scans `hosts/` for
-oracle imports, so no `hosts → oracle` arrow can appear unnoticed.
+`CLI → CCLAUNCH` arrow carrying two more names. The same ruleset rule and a
+test both scan `hosts/` for oracle imports, so no `hosts → oracle` arrow can
+appear unnoticed.
 
 `OSCAN` is the read the whole oracle rests on (increment 3), and its arrows
 are all reads. `OSCAN --> SESSION` and `OSCAN --> PIPELINE` reuse the domains'
@@ -301,8 +306,9 @@ project's, and whether a live pid is still `claude` — reaches it the way
 telemetry reaches `domains/stats`: the scan defines the shape it reads
 (`HostProbe`), `hosts/claude_code_launch` implements it as `ClaudeCodeProbe`,
 and the CLI injects it (`CLI -. injects ClaudeCodeProbe .-> CCLAUNCH`). No
-`oracle → hosts` arrow exists either, and `tests/test_oracle_scan.py` scans
-for one (ADR-007 D11). `CCLAUNCH --> CCTEL` is the probe composing the
+`oracle → hosts` arrow exists either: the ruleset rule
+`layers.oracle-never-imports-hosts` forbids one at the landing, and
+`tests/test_oracle_scan.py` scans for one too (ADR-007 D11). `CCLAUNCH --> CCTEL` is the probe composing the
 transcript reader that already knew the host's on-disk layout; it is an arrow
 inside `hosts/`.
 
