@@ -44,6 +44,11 @@ the entries in; this module only does the arithmetic. So it is for "only
 shrinks" (A3 increment 6): :func:`growth` compares the base branch's entries
 with the change's, through the change's renames (DN-7), and which growth is
 admitted (DN-6) is ``core/rules``' question.
+
+Override by guideline id (A3.7, ruling 4) is :func:`overridden`: a live grant
+naming a guideline passes that guideline's new blocker findings for one
+evaluation, as ``overridden``, named and never counted. ``core/rules`` reads
+the grants and hands them in; spending one is the CLI's.
 """
 
 from __future__ import annotations
@@ -73,8 +78,10 @@ EVALUATED_KINDS = ("pattern", "boundary", "cochange")
 #: What a finding can be. ``new`` and ``unanswerable`` count against the
 #: rule's severity; ``excepted`` is a reasoned exception that applied, named
 #: and never counted (D4); ``baselined`` is a finding the baseline records as
-#: pre-existing, named and never counted (D6).
-STATUSES = ("new", "unanswerable", "excepted", "baselined")
+#: pre-existing, named and never counted (D6); ``overridden`` is a new blocker
+#: finding a live grant naming its guideline passes for one evaluation, named
+#: and never counted (D12, ruling 4).
+STATUSES = ("new", "unanswerable", "excepted", "baselined", "overridden")
 _COUNTED = frozenset({"new", "unanswerable"})
 
 #: The separator between the parts a fingerprint hashes. No rule id, line or
@@ -186,6 +193,29 @@ class Finding:
             "fix": self.fix,
             "ruleset": ruleset,
         }
+
+
+def overridden(found: Iterable[Finding], grants: Mapping[str, str]) -> tuple[Finding, ...]:
+    """The findings with each granted guideline's new blocker findings passed.
+
+    ``grants`` maps a guideline id to the reason its live grant gives (ADR-012
+    D12, ruling 4). A ``new`` finding at ``blocker`` of a granted guideline
+    becomes ``overridden``, which is named and never counted, and its note
+    carries the reason. Nothing else moves: a warn finding never blocked, a
+    baselined or excepted one is not counted already, and an unanswerable
+    file is no finding about the code, so a grant never passes one. Applied
+    after :func:`ratchet`, so a finding the baseline holds stays baselined.
+    """
+    passed = []
+    for finding in found:
+        reason = grants.get(finding.rule)
+        if reason is None or finding.status != "new" or finding.severity != "blocker":
+            passed.append(finding)
+            continue
+        why = f"passed by override: {reason}"
+        note = f"{finding.note}; {why}" if finding.note else why
+        passed.append(replace(finding, status="overridden", note=note))
+    return tuple(passed)
 
 
 @dataclass(frozen=True)

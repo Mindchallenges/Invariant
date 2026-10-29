@@ -898,3 +898,33 @@ class TestACochangeExceptionHasNoFingerprint:
         )
         (rule,) = parse(text, registered=REGISTERED).rules
         assert rule.exceptions[0].path == "app/container.py"
+
+
+# -- a guideline id is never a registered rule id (A3.7, DN-15) --------------------
+
+
+def colliding(rule_id: str) -> str:
+    return PATTERN_RULESET.replace("quality.no-inline-todo", rule_id)
+
+
+class TestAGuidelineIdIsNeverARuleId:
+    """DN-15: `invariant override <id>` names a rule or a guideline, never
+    both, so a guideline id equal to a registered rule id is refused."""
+
+    def test_a_guideline_named_after_a_registered_rule_is_refused(self):
+        with pytest.raises(RulesetError) as caught:
+            parse(colliding("privacy.clean"), registered=REGISTERED)
+        (problem,) = caught.value.problems
+        assert "rule 'privacy.clean'" in problem
+        assert "registered rule" in problem
+        assert "invariant override" in problem
+
+    def test_a_guideline_id_no_rule_holds_loads(self):
+        (rule,) = parse(colliding("quality.no-privacy-leaks"), registered=REGISTERED).rules
+        assert rule.id == "quality.no-privacy-leaks"
+
+    def test_ruleset_valid_refuses_it(self, make_manifest, tree):
+        write(tree, "docs/guidelines/ruleset.yaml", colliding("test.all_pass"))
+        result = ruleset_valid(make_manifest, tree)
+        assert result.blocks
+        assert "rule 'test.all_pass'" in result.verdict.detail

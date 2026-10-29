@@ -342,7 +342,7 @@ def parse(
     """Validate ruleset ``text`` against schema version 1.
 
     ``registered`` is every rule id the registry carries, which is what an
-    ``engine`` check must name. ``root`` is the project tree a registry path
+    ``engine`` check must name, and what no guideline id may be (DN-15). ``root`` is the project tree a registry path
     is read from. With none, a ruleset naming a registry is refused, because
     a registry nobody read cannot be said to validate (DN-A9).
 
@@ -455,6 +455,15 @@ class _Reader:
             where = f"rule {rule_id!r}"
             if any(r.id == rule_id for r in found):
                 self.problem(f"{where} is declared twice; a rule id is never reused")
+                continue
+            if rule_id in self.registered:
+                # DN-15: `invariant override <id>` names a registered rule or a
+                # guideline, and must never be able to mean both.
+                self.problem(
+                    f"{where} is the id of a registered rule; a guideline id is never "
+                    f"one, so `invariant override <id>` names one thing. Rename the "
+                    f"guideline, or point at the rule with check kind engine"
+                )
                 continue
             rule = self.rule(where, item, sections)
             if rule is not None:

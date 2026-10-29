@@ -1274,6 +1274,90 @@ admitted), DN-7 (renames) and DN-12 (two scenarios).
   `tests/test_conformance_engine.py` (`baseline-grown`, `fixed-not-pruned`
   and the amended `baselined`).
 
+**As built: A3 increment 7, override by guideline id.** Built to ruling 4,
+D12 ("A single guideline's level"), DN-15 and the four properties of the
+override token in manifest.md. No new record shape: a guideline grant is held
+in `session.pending_overrides` and spent into `session.overrides` in the
+shape a rule's grant already has, with the guideline id as its `rule`.
+
+- *DN-15.* `core/guidelines.parse` refuses a guideline whose id is a
+  registered rule id, naming the collision. `guidelines.ruleset_valid` and
+  every gate that loads the ruleset refuse it with it, so
+  `invariant override <id>` never means both.
+- *The grant.* `invariant override <guideline-id> --reason` is held when the
+  id names no registered rule and names a guideline in the ruleset of the
+  tree in hand, read through `load_ruleset` as the gate reads it
+  (`core/rules.guideline_override_refusal`). An unknown id is refused with
+  the nearest guideline id, and so is any id when no ruleset is configured
+  or the ruleset does not load. `--reason` stays required.
+- *The effect.* `guidelines.mechanical_clean` reads the live grants
+  (`core/rules.guideline_grants`) and `core/findings.overridden` turns each
+  granted guideline's `new` finding at `blocker` into `overridden`, after
+  the ratchet, so a baselined finding stays baselined. An overridden finding
+  is named and never counted. Its record is `status: pass`,
+  `finding: overridden`, and its note carries the grant's reason. The
+  message counts them, and the detail names each one with the grant and its
+  reason. A gate that still fails on another guideline names them in its
+  message too. A new blocker finding's fixes name
+  `invariant override <guideline-id> --reason '<why>'`, and the refusal
+  `pipeline ack` gives for the family gate names the same route beside the
+  forced advance.
+- *Spending (manifest.md's four properties).* `cli/main` spends the grant
+  after a `pipeline advance` that succeeded, when the family gate's level
+  blocks or asks and its verdict passed with the guideline's findings
+  overridden. That is the one case where the grant decided the advance. The
+  spend goes into `session.overrides` with surface `cli`, and the command
+  prints what the gate would have blocked on. `pipeline gates`, `check`,
+  `doctor` and the oracle's gate cache evaluate the gate and never reach the
+  spend. A hook spends grants by rule id, and no guideline id is one, so no
+  hook spends a guideline grant either. An unspent grant is loud:
+  `session status` prints it as a guideline grant, and every evaluation of
+  the family gate names it, used or unused.
+- *`guidelines.baseline_only_shrinks` is not overridable by guideline id.*
+  Its growth and stale failures concern the baseline, not a guideline, and it
+  reads no grant. A3.6's fix text named `invariant override
+  guidelines.baseline_only_shrinks` for a base copy that cannot be read. No
+  surface spends a rule grant at a transition, so that advice could not
+  help. It now names the route that can:
+  `invariant pipeline advance <state> --force --reason '<why>'`, recorded as
+  every forced advance is.
+- *Small points the rulings left open, taken in the strict direction.*
+  - A grant does not cover the guideline's unanswerable findings. D12 says a
+    grant passes the guideline's findings. An unanswerable file is not a
+    finding about the code: nothing could say what it holds, and "an
+    unanswered file never passes" (A3.3).
+  - A grant is refused when nothing could ever spend it, as an override
+    naming no rule is (ADR-001 D25, BUG_050). That covers:
+    - an `engine` guideline, whose refusal names the rule to override instead;
+    - a `judgement` guideline, until A4 builds the gate that evaluates
+      verdicts;
+    - a `warn` guideline, since a registry class's outcome never exceeds its
+      rule's severity, so its findings never block.
+  - `--calls` above one is refused for a guideline. Ruling 4 makes the grant
+    one-shot.
+  - The grant is not spent when the gate's level is `warn` (nothing was
+    stopped). It is not spent when the gate still fails on another
+    guideline's finding either, because a forced advance went past it and
+    the grant decided nothing. In both cases the command prints that the
+    grant is held.
+  - A grant whose guideline has no new blocker finding is named in the
+    detail as unused, with `--clear` as the way to withdraw it.
+  - A grant's guideline is matched against the ruleset as the gate reads it
+    at each evaluation. A grant whose guideline was later removed from the
+    ruleset is named as unused rather than refused after the fact.
+  - The base branch's ruleset, read by `baseline_only_shrinks` for
+    admission, is parsed under the same DN-15 refusal, so a base whose
+    guideline collides with a rule id fails that read like any other base
+    ruleset that does not parse.
+- *Tests.* `tests/test_guidelines_override.py` covers the arithmetic, the
+  gate reading the grant, the baseline gate ignoring it and its forced-advance
+  fix, each grant refusal, spending at the CLI surface, the seeded-pattern
+  scenario replayed with a grant (spent at `committed`, and held under
+  `standard`), and the command and status text.
+  `tests/test_guidelines_kinds.py` covers the DN-15 refusal, and
+  `tests/test_authority.py` covers the family gate's override route and a
+  hook leaving a guideline grant unspent.
+
 ### D5 — Judgement rules are answered by cited verdicts, and the engine checks the citations, never the prose
 
 **The schema.** One verdict per applicable judgement rule, submitted through
@@ -1747,7 +1831,9 @@ profile decides what a blocker does. `invariant override` may name a
 guideline id as well as a rule id, and a grant naming a guideline passes that
 guideline's findings or verdict in one evaluation of the family gate, leaving
 every other guideline under that gate in force. The rule registry stays fixed:
-no guideline is minted as a registry rule.
+no guideline is minted as a registry rule. A3 increment 7 builds it for
+`guidelines.mechanical_clean` (D4, "As built: A3 increment 7"); the verdict
+half waits for A4's `guidelines.verdicts_complete`.
 
 ### D13 — Manifest keys
 

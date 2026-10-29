@@ -1206,6 +1206,10 @@ class PipelineDomain:
         )
 
 
+#: The family gate an override naming a guideline reaches (ADR-012 ruling 4).
+GUIDELINE_FAMILY_GATE = "guidelines.mechanical_clean"
+
+
 def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) -> str:
     """The commands that can actually pass THIS rule, and only those.
 
@@ -1231,6 +1235,13 @@ def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) ->
             f"      (it fires on {', '.join(events)}; one call, then it is spent)"
         )
     if rule_id in machine.gate_ids():
+        if rule_id == GUIDELINE_FAMILY_GATE:
+            # ADR-012 ruling 4: one guideline at a time, the others in force.
+            routes.append(
+                "    invariant override <guideline-id> --reason '<why>'\n"
+                "      (passes that guideline's new findings in one evaluation; "
+                "the advance it lets through spends it)"
+            )
         routes.append(
             "    invariant pipeline advance <state> --force --reason '<why>'\n"
             f"      (it gates a state of the {machine.id!r} pipeline)"

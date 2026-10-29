@@ -440,6 +440,47 @@ Four properties are deliberate:
   because a held override is enforcement the operator turned off and may well
   have forgotten.
 
+**A grant naming a guideline** (ADR-012 ruling 4, IDEA_031 A3.7). The id may
+name a guideline of the project's ruleset instead of a rule:
+
+```
+invariant override <guideline-id> --reason '<why>'
+```
+
+The rule registry stays fixed, so the grant passes one guideline inside its
+family gate, `guidelines.mechanical_clean`, for one evaluation. In that
+evaluation the guideline's new blocker findings are reported as passed by
+override, naming the grant, and do not block. Everything else stands: its
+unanswerable findings, its baselined and excepted ones, every warn finding and
+every other guideline's. `guidelines.baseline_only_shrinks` reads no such
+grant, because its failures concern the baseline, not a guideline. The grant
+is refused unless the id names a pattern, boundary or cochange guideline at
+`blocker` in the ruleset of the tree in hand, and `--calls` above one is
+refused. No guideline id may equal a registered rule id
+(`guidelines.ruleset_valid` refuses one), so the id never means both.
+
+The four properties hold as they do for a rule:
+
+- **Spending it is recorded** in `session.overrides`, in the shape a rule's
+  spend has, with surface `cli`.
+- **It is spent only where the verdict actually stops something:** at a
+  `pipeline advance` that succeeds while the family gate blocks or asks in
+  this project and passed only because of the grant. At `warn`, or when the
+  gate still fails on another finding, the grant is held and the command says
+  so.
+  A held grant belongs to the session, not to the pipeline: it stays until
+  spent or withdrawn, so a later pipeline in the same session whose change has
+  a new blocker finding of that guideline spends it, announced in that
+  advance. It cannot do so quietly, because `session status` and every
+  evaluation of the family gate name it; withdraw one you no longer mean with
+  `--clear`.
+- **It is consumed at the delivery surface:** the CLI spends it after the
+  advance. The gate reads it and never spends it, so `pipeline gates`,
+  `check`, `doctor` and the oracle's gate cache can evaluate the gate as often
+  as they like.
+- **An unspent grant is loud:** `session status` prints it, and every
+  evaluation of the family gate names it, used or not.
+
 `ask` and the token are not alternatives. `ask` puts the human in the loop at
 `pre-tool-use` and reaches nothing else; the token reaches `stop` too and
 leaves a record, which a host-side approval does not — a human approval arrives

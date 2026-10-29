@@ -81,12 +81,18 @@ def project(tmp_path, monkeypatch):
 class HookHarness:
     """One session, bound to one host id, so attribution is never the variable."""
 
-    def setup(self, project, capsys, *, isolate=False, rules=None):
+    def setup(self, project, capsys, *, isolate=False, rules=None, ruleset=None):
         assert run("init", "--name", "demo") == 0
-        if rules:
+        if rules or ruleset:
             path = project / MANIFEST_RELPATH
             body = yaml.safe_load(path.read_text(encoding="utf-8"))
-            body.setdefault("enforcement", {}).setdefault("rules", {}).update(rules)
+            if rules:
+                body.setdefault("enforcement", {}).setdefault("rules", {}).update(rules)
+            if ruleset:
+                target = project / "docs" / "guidelines" / "ruleset.yaml"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(ruleset, encoding="utf-8")
+                body.setdefault("guidelines", {})["ruleset"] = "docs/guidelines/ruleset.yaml"
             path.write_text(yaml.safe_dump(body), encoding="utf-8")
         commit_all(project, "invariant")
         run("session", "start", "task", "--json")
@@ -124,6 +130,23 @@ class HookHarness:
 #: test that grants an override for that gate is testing the override rather
 #: than the arithmetic of how many gates happened to fire.
 RULE = "session.no_edit_in_main_checkout"
+
+#: One blocker pattern guideline, for the grant a hook must never spend.
+GUIDELINE_RULESET = """\
+version: 1
+sections:
+  - id: style
+    title: Style
+rules:
+  - id: style.no-print
+    section: style
+    title: No print calls
+    statement: The application never prints.
+    severity: blocker
+    phases: [review]
+    applies_to: ["*.py"]
+    check: {kind: pattern, engine: regex, in: any, match: 'print\\('}
+"""
 
 
 class TestABlockingHookVerdictCanBePassedDeliberately(HookHarness):
@@ -232,6 +255,21 @@ class TestABlockingHookVerdictCanBePassedDeliberately(HookHarness):
         capsys.readouterr()
         self.hook("pre-tool-use", self.edit(project / "app.py"))
         assert self.decision(capsys)["permissionDecision"] == "deny"
+
+    def test_a_guideline_grant_is_never_spent_at_a_hook(self, project, capsys):
+        """IDEA_031 A3.7. A guideline grant is one evaluation of its family
+        gate at a pipeline advance. A hook spends grants by rule id, and no
+        guideline id is a rule id (DN-15), so a hook verdict neither passes
+        on it nor spends it."""
+        sid = self.setup(project, capsys, ruleset=GUIDELINE_RULESET)
+        assert run("override", "style.no-print", "--reason", "why", "--id", sid) == 0
+        capsys.readouterr()
+        self.hook("pre-tool-use", self.edit(project / "app.py"))
+        assert self.decision(capsys)["permissionDecision"] == "deny"
+        run("session", "status", "--id", sid, "--json")
+        session = payload(capsys)["session"]
+        assert [p["rule"] for p in session["pending_overrides"]] == ["style.no-print"]
+        assert session["overrides"] == []
 
 
 class TestTheOverrideReachesTheStopSurfaceToo(HookHarness):
@@ -396,6 +434,27 @@ class TestAcknowledgeAdviceRoutesSomewhereThatCanHelp:
         text = self._refusal(m, "item.bug_reproduced_before_fix")
         assert "Nothing can override it here" in text
         assert "pipeline advance" not in text
+
+    def test_the_guidelines_family_gate_names_the_override_by_guideline_id(
+        self, tmp_path
+    ):
+        """IDEA_031 A3.7, ruling 4: one guideline's findings are passed for
+        one evaluation by naming the guideline, and the gate's other
+        guidelines stay in force. The forced advance still passes them all."""
+        root = tmp_path / "proj"
+        ruleset = root / "docs" / "guidelines" / "ruleset.yaml"
+        ruleset.parent.mkdir(parents=True)
+        ruleset.write_text("version: 1\nsections: []\nrules: []\n", encoding="utf-8")
+        m = git_project(root, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "guidelines": {"ruleset": "docs/guidelines/ruleset.yaml"},
+            "enforcement": {"profile": "strict"},
+        })
+        text = self._refusal(m, "guidelines.mechanical_clean")
+        assert "invariant override <guideline-id> --reason" in text
+        assert "pipeline advance" in text
+        assert "invariant override guidelines.mechanical_clean" not in text
 
 
 class TestAcknowledgementReachesTheHookSurface(HookHarness):

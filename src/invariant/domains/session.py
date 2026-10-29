@@ -24,7 +24,14 @@ from ..core import plan as plan_reader
 from ..core.errors import GateFailure, StateError, TransitionError, UsageError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_session_machine
-from ..core.rules import Evaluated, RuleContext, evaluate, get_rule, is_exempt_path
+from ..core.rules import (
+    Evaluated,
+    RuleContext,
+    evaluate,
+    get_rule,
+    guideline_override_refusal,
+    is_exempt_path,
+)
 from ..core.stats import Usage, WatermarkSource
 from ..core.store import JsonStore, PreservesUnknownKeys
 
@@ -1314,27 +1321,56 @@ class SessionDomain:
     # property that makes it an override rather than a hole.
 
     def grant_override(
-        self, session_id: str, rule_id: str, reason: str, calls: int = 1
+        self,
+        session_id: str,
+        rule_id: str,
+        reason: str,
+        calls: int = 1,
+        cwd: Path | None = None,
     ) -> Session:
-        """Let the next ``calls`` evaluations of ``rule_id`` at a hook through."""
+        """Let the next ``calls`` evaluations of ``rule_id`` at a hook through.
+
+        ``rule_id`` may name a guideline instead (ADR-012 ruling 4, D12): the
+        grant then passes that guideline's new blocker findings in one
+        evaluation of ``guidelines.mechanical_clean``, and the pipeline advance
+        it lets through spends it. The id is checked against the ruleset of
+        the tree in hand, read from ``cwd`` as the gate reads it, and no
+        guideline id is a rule id (DN-15), so the grant is held in the same
+        shape either way.
+        """
         if not reason or not reason.strip():
             raise UsageError(
                 "an override requires --reason. An override with no stated "
                 "reason is indistinguishable from the gate never having run, "
                 "which is the thing this library exists to remove."
             )
+        session = self.require(session_id)
         if get_rule(rule_id) is None:
             # The same loudness `core.rules.evaluate` already applies to a gate
             # naming a rule that does not exist, for the same reason: a typo
             # here is an authority the operator believes they exercised and did
-            # not (BUG_050 is this fault at the configuration layer).
-            raise UsageError(
-                f"no rule {rule_id!r}; 'invariant rules list' shows them all"
+            # not (BUG_050 is this fault at the configuration layer). An id
+            # naming no rule is held only when it names a guideline a gate can
+            # be stopped by.
+            refusal = guideline_override_refusal(
+                RuleContext(
+                    manifest=self.manifest,
+                    cwd=Path(cwd or self.manifest.root),
+                    session=session.to_dict(),
+                ),
+                rule_id,
             )
+            if refusal is not None:
+                raise UsageError(refusal)
+            if calls != 1:
+                raise UsageError(
+                    f"a grant naming the guideline {rule_id!r} is good for one "
+                    f"evaluation of guidelines.mechanical_clean (ADR-012 ruling 4); "
+                    f"drop --calls"
+                )
         if calls < 1:
             raise UsageError("--calls must be at least 1")
 
-        session = self.require(session_id)
         session.pending_overrides = [
             o for o in session.pending_overrides if o.get("rule") != rule_id
         ]

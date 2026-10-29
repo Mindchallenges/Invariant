@@ -1248,12 +1248,27 @@ invariant standdown --clear [--id <sid>]
     discoverable only by noticing that nothing is stopping you.
 
 invariant override <rule-id> --reason "<why>" [--calls N] [--id <sid>]
-invariant override <rule-id> --clear [--id <sid>]
+invariant override <guideline-id> --reason "<why>" [--id <sid>]
+invariant override <rule-id | guideline-id> --clear [--id <sid>]
     Pass a rule that fires at a HOOK, deliberately, with the decision
     recorded. The next N evaluations of that rule at `pre-tool-use` or `stop`
     are let through; spending one appends to the session's `overrides` — the
     same list a forced transition writes to — naming the rule, the reason and
     the surface. An unspent grant shows in `session status`.
+
+    Naming a GUIDELINE instead (ADR-012 ruling 4) passes that guideline's
+    new blocker findings in one evaluation of `guidelines.mechanical_clean`,
+    reported as passed by override and naming the grant; every other finding
+    of the gate stands, the guideline's unanswerable ones included. The id
+    must name a pattern, boundary or cochange guideline at `blocker` in the
+    ruleset of the tree in hand, and the grant covers one evaluation, so
+    `--calls` above one is refused. `pipeline advance` spends it, with
+    surface `cli`, only when the advance succeeds while the gate blocks or
+    asks here and passed because of the grant; otherwise the command says it
+    is held. `pipeline gates`, `check`, `doctor` and the oracle never spend
+    one, and the gate names an unspent grant on every evaluation.
+    `guidelines.baseline_only_shrinks` is not passed by any guideline grant;
+    its route is a forced advance.
 
     This is the appeal for the surface the operator actually meets. Everything
     the CLI evaluates already had one; the twelve rules that fire from hooks

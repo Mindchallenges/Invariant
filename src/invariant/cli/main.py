@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..core import plan as plan_reader
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
-from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Manifest
+from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Level, Manifest
 from ..core.rules import (
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
@@ -1516,10 +1516,13 @@ def cmd_session_status(args) -> int:
             f"(until this {held['until']} ends; invariant standdown --clear)"
         )
     for grant in session.pending_overrides:
-        text.append(
-            f"  override   {grant['rule']} — {grant['reason']} "
+        reach = (
             f"({grant.get('calls', 1)} call(s) left)"
+            if get_rule(grant["rule"]) is not None
+            else f"(guideline; one evaluation of {MECHANICAL_RULE}, spent by the "
+            f"pipeline advance it lets through)"
         )
+        text.append(f"  override   {grant['rule']} — {grant['reason']} {reach}")
     return emit(
         args,
         {"session": session.to_dict(), "pipeline": pipeline.to_dict() if pipeline else None},
@@ -1528,7 +1531,8 @@ def cmd_session_status(args) -> int:
 
 
 def cmd_override(args) -> int:
-    """Grant, or withdraw, a one-shot pass for a rule that fires at a hook.
+    """Grant, or withdraw, a one-shot pass for a rule that fires at a hook,
+    or for one guideline in the next evaluation of its family gate.
 
     Deliberately a top-level command rather than a flag on something. There is
     nothing for it to be a flag ON: the call it covers is a tool call the agent
@@ -1548,8 +1552,21 @@ def cmd_override(args) -> int:
         )
 
     updated = ctx.sessions.grant_override(
-        session.id, args.rule, args.reason, calls=args.calls
+        session.id, args.rule, args.reason, calls=args.calls, cwd=ctx.cwd
     )
+    if get_rule(args.rule) is None:
+        level = ctx.manifest.rule_level(MECHANICAL_RULE).value
+        return emit(
+            args,
+            updated.to_dict(),
+            f"override granted for guideline {args.rule}\n"
+            f"  reason: {args.reason}\n"
+            f"  good for one evaluation of {MECHANICAL_RULE} ({level} in this "
+            f"project): {args.rule}'s new blocker findings are passed there, and "
+            f"every other finding stands\n"
+            f"  spent by the pipeline advance it lets through, and recorded on "
+            f"this session; withdraw it with --clear",
+        )
     level = ctx.manifest.rule_level(args.rule).value
     return emit(
         args,
@@ -2810,11 +2827,74 @@ def cmd_pipeline_advance(args) -> int:
         raise
     _lift_cli_refusal(ctx, session)
     report_verdicts(verdicts, args)
+    _spend_guideline_overrides(ctx, session, verdicts)
     return emit(
         args,
         {"advanced": True, "pipeline": pipeline.to_dict(), "gates": verdicts_payload(verdicts)},
         f"pipeline -> {pipeline.state}  ({summarise(verdicts)})",
     )
+
+
+#: The family gate a grant naming a guideline passes for one evaluation
+#: (ADR-012 ruling 4, D12).
+MECHANICAL_RULE = "guidelines.mechanical_clean"
+
+
+def _spend_guideline_overrides(ctx, session, verdicts) -> None:
+    """Spend each guideline grant the advance that just succeeded relied on.
+
+    ADR-012 ruling 4, and manifest.md's four properties of the token. The
+    family gate reads a live grant and reports the guideline's new blocker
+    findings as passed by override; it never spends one, because asking a
+    rule must not change the world. This is the delivery surface, so the
+    grant is spent HERE, after the advance succeeded, and recorded in
+    ``session.overrides`` with surface ``cli``.
+
+    Only where it decided something. At ``warn`` the gate would not have
+    stopped the advance, and a gate still failing on another finding was not
+    passed by the grant (a forced advance went past it); in both the grant
+    is held, and said to be. ``pipeline gates``, ``check``, ``doctor`` and
+    the oracle evaluate the same gate and never reach this.
+    """
+    for evaluated in verdicts:
+        if evaluated.rule_id != MECHANICAL_RULE or not evaluated.verdict.findings:
+            continue
+        passed: dict[str, list[str]] = {}
+        for record in evaluated.verdict.findings:
+            if record.get("finding") == "overridden":
+                passed.setdefault(str(record["rule"]), []).append(_cited(record))
+        if not passed:
+            continue
+        stopping = evaluated.level in (Level.BLOCK, Level.ASK)
+        decided = stopping and evaluated.verdict.ok and not evaluated.verdict.skipped
+        for guideline, places in passed.items():
+            if not decided:
+                why = (
+                    f"{MECHANICAL_RULE} still failed on other findings, so the "
+                    f"grant passed nothing"
+                    if stopping
+                    else f"{MECHANICAL_RULE} is {evaluated.level.value} here, so "
+                    f"nothing was stopped"
+                )
+                print(f"[override] {guideline}: held, not spent — {why}", file=sys.stderr)
+                continue
+            spent = ctx.sessions.consume_override(session.id, guideline, surface="cli")
+            if spent is None:
+                continue
+            print(
+                f"[override] {guideline}: passed deliberately — "
+                f"{spent.get('reason', 'overridden')} (spent)\n"
+                f"        it would have blocked {MECHANICAL_RULE}: "
+                + ", ".join(places),
+                file=sys.stderr,
+            )
+
+
+def _cited(record: Mapping) -> str:
+    """Where a finding record points: its path, and its line when it has one."""
+    (citation,) = record.get("citations") or [{"path": "?", "lines": None}]
+    lines = citation.get("lines")
+    return citation["path"] if not lines else f"{citation['path']}:{lines[0]}"
 
 
 def cmd_pipeline_test(args) -> int:
@@ -5428,11 +5508,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = sub.add_parser(
         "override",
-        help="pass a rule that fires at a hook, once, with the decision recorded",
+        help="pass a rule that fires at a hook, or one guideline at the next "
+        "advance, once, with the decision recorded",
     )
-    q.add_argument("rule")
+    q.add_argument("rule", help="a rule id, or a guideline id from the ruleset")
     q.add_argument("--reason", help="required unless --clear")
-    q.add_argument("--calls", type=int, default=1, help="how many calls it covers")
+    q.add_argument(
+        "--calls", type=int, default=1,
+        help="how many calls it covers; a guideline grant covers one",
+    )
     q.add_argument("--clear", action="store_true", help="withdraw an unspent grant")
     q.add_argument("--id")
     q.set_defaults(func=cmd_override)

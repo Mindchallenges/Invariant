@@ -23,6 +23,7 @@ import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -2170,6 +2171,13 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     in (DN-4). A recorded entry of a touched file that no finding holds is
     stale, and is reported in the detail only: failing it is
     ``guidelines.baseline_only_shrinks``' (DN-5).
+
+    A live grant naming a guideline (A3.7, ruling 4) passes that guideline's
+    new blocker findings in this evaluation, as ``overridden``, and the
+    verdict names the grant; an unused grant is named too. Every other
+    finding stands, an unanswerable one of that guideline included. The
+    grant is read here and never spent: the CLI spends it at the advance it
+    lets through.
     """
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
@@ -2208,15 +2216,23 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     ratcheted = findings_reader.ratchet(
         evaluation.findings, baseline or (), touched=set(files) | set(gone)
     )
-    found = ratcheted.findings
+    grants = guideline_grants(ctx)
+    found = findings_reader.overridden(ratcheted.findings, grants)
     records = tuple(f.record(ruleset.digest) for f in found)
     blocking = [f for f in found if f.blocks]
     warned = [f for f in found if f.counts and not f.blocks]
     baselined = [f for f in found if f.status == "baselined"]
     excepted = [f for f in found if f.status == "excepted"]
-    detail = _mechanical_detail(evaluation, warned, excepted, baselined, ratcheted.stale)
-    held = f" ({len(baselined)} baselined)" if baselined else ""
+    passed = [f for f in found if f.status == "overridden"]
+    detail = _mechanical_detail(
+        evaluation, warned, excepted, baselined, ratcheted.stale,
+        overridden=passed, grants=grants,
+    )
+    counted = [f"{len(baselined)} baselined"] if baselined else []
+    if passed:
+        counted.append(f"{len(passed)} passed by override")
     if blocking:
+        held = f" ({', '.join(counted)})" if counted else ""
         return Verdict(
             ok=False,
             message=f"{len(blocking)} new or unanswerable blocker finding(s){held}: "
@@ -2229,10 +2245,83 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
         ok=True,
         message=f"no new blocker finding in {evaluation.scanned} changed file(s) "
         f"under {evaluation.rules} mechanical guideline(s), "
-        f"ruleset {ruleset.digest}" + (f"; {len(baselined)} baselined" if baselined else ""),
+        f"ruleset {ruleset.digest}" + "".join(f"; {part}" for part in counted),
         detail=detail,
         findings=records,
     )
+
+
+def guideline_grants(ctx: RuleContext) -> dict[str, str]:
+    """The live grants naming a guideline, each with the reason it gives.
+
+    ADR-012 D12, ruling 4. A grant is held in ``session.pending_overrides``
+    beside the grants that name a rule, in the same shape; one naming no
+    registered rule names a guideline, since no guideline id may be a rule
+    id (DN-15). This only READS the grant: spending it is the delivery
+    surface's, the CLI's at a pipeline advance, and asking a rule must not
+    change the world.
+    """
+    grants: dict[str, str] = {}
+    for held in (ctx.session or {}).get("pending_overrides") or ():
+        if not isinstance(held, Mapping):
+            continue
+        rule_id = held.get("rule")
+        if isinstance(rule_id, str) and rule_id not in _REGISTRY:
+            grants[rule_id] = str(held.get("reason") or "no reason given")
+    return grants
+
+
+def guideline_override_refusal(ctx: RuleContext, guideline_id: str) -> str | None:
+    """Why ``invariant override <guideline_id>`` may not be granted, or ``None``.
+
+    ADR-012 ruling 4 and D12. The id must name a guideline in the ruleset of
+    the tree in hand, read as ``guidelines.mechanical_clean`` reads it, and
+    the guideline must be one that gate can be stopped by. A grant nothing
+    could ever spend is refused rather than held: a control handed back that
+    silently does nothing is worse than one never offered (ADR-001 D25).
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        detail = f" ({failure.detail})" if failure.detail else ""
+        return (
+            f"no rule {guideline_id!r}, and no guideline can be named: "
+            f"{failure.message}{detail}"
+        )
+    if ruleset is None:
+        return (
+            f"no rule {guideline_id!r}, and no guidelines ruleset is configured, so "
+            f"it names no guideline either; 'invariant rules list' shows the rules"
+        )
+    guideline = ruleset.by_id(guideline_id)
+    if guideline is None:
+        ids = [r.id for r in ruleset.rules]
+        near = get_close_matches(guideline_id, ids, n=1, cutoff=0.6)
+        hint = f"; did you mean {near[0]!r}?" if near else ""
+        return (
+            f"no rule or guideline {guideline_id!r}{hint} 'invariant rules list' "
+            f"shows the rules, and 'invariant guidelines show' the guidelines"
+        )
+    kind = guideline.check.kind
+    if kind == "engine":
+        return (
+            f"guideline {guideline_id!r} is enforced by the rule "
+            f"{guideline.check.rule}, so override that: "
+            f"invariant override {guideline.check.rule} --reason '<why>'"
+        )
+    if kind not in findings_reader.EVALUATED_KINDS:
+        return (
+            f"guideline {guideline_id!r} is a {kind} guideline, answered by a "
+            f"verdict, and no gate evaluates verdicts yet (A4); a grant for it "
+            f"could never be spent"
+        )
+    if guideline.severity != "blocker":
+        # A registry class's outcome never exceeds its rule's severity, so a
+        # warn guideline's findings never block, whatever its kind.
+        return (
+            f"guideline {guideline_id!r} is a warn guideline whose findings never "
+            f"block, so there is nothing for a grant to pass"
+        )
+    return None
 
 
 def _finding_reads(tree: Path, adapters: list[Adapter]) -> dict[str, Any]:
@@ -2331,8 +2420,29 @@ def _mechanical_detail(
     excepted: list[findings_reader.Finding],
     baselined: Iterable[findings_reader.Finding] = (),
     stale: Iterable[findings_reader.Stale] = (),
+    *,
+    overridden: Iterable[findings_reader.Finding] = (),
+    grants: Mapping[str, str] | None = None,
 ) -> str:
     parts: list[str] = []
+    overridden = list(overridden)
+    grants = dict(grants or {})
+    for guideline, reason in grants.items():
+        mine = [f for f in overridden if f.rule == guideline]
+        if mine:
+            parts.append(
+                f"{len(mine)} passed by override: "
+                + "; ".join(f.describe() for f in mine)
+                + f", granted with `invariant override {guideline}` (reason: {reason}); "
+                "the pipeline advance this lets through spends the grant"
+            )
+        else:
+            parts.append(
+                f"override held for {guideline} (reason: {reason}), unused here: "
+                f"{guideline} has no new blocker finding in this change, so "
+                f"nothing spends it; withdraw it with "
+                f"invariant override {guideline} --clear"
+            )
     baselined = list(baselined)
     if baselined:
         parts.append(
@@ -2369,6 +2479,12 @@ def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...
             "change the code so the guideline holds, or give the finding a reasoned "
             "exception in the ruleset (its path, and its fingerprint from "
             "`invariant check guidelines.mechanical_clean --json`)"
+        )
+    passable = sorted({f.rule for f in blocking if f.status == "new"})
+    for guideline in passable:
+        fixes.append(
+            f"or pass {guideline}'s new findings for one advance, recorded: "
+            f"invariant override {guideline} --reason '<why>'"
         )
     if any(f.status == "unanswerable" for f in blocking):
         fixes.append(
@@ -3166,8 +3282,8 @@ def _base_baseline(ctx: RuleContext, tree: Path, point: str) -> _BaseCopy | Verd
             f"the base branch's baseline {rel} does not exist at the merge base",
             "The base branch's manifest names a baseline its tree does not hold, and a "
             "configured file that does not exist is an error, never an empty baseline.",
-            f"restore {rel} on the base branch, or pass this evaluation with "
-            "invariant override guidelines.baseline_only_shrinks",
+            f"restore {rel} on the base branch, or pass this landing deliberately, "
+            f"recorded: {_FORCED_LANDING}",
         )
     try:
         entries = guidelines_reader.parse_baseline(data.decode("utf-8"))
@@ -3178,8 +3294,8 @@ def _base_baseline(ctx: RuleContext, tree: Path, point: str) -> _BaseCopy | Verd
             f"the base branch's baseline {rel} does not parse "
             f"({len(exc.problems)} problem(s))",
             "; ".join(exc.problems) + ".",
-            f"repair {rel} on the base branch, or pass this evaluation with "
-            "invariant override guidelines.baseline_only_shrinks",
+            f"repair {rel} on the base branch, or pass this landing deliberately, "
+            f"recorded: {_FORCED_LANDING}",
         )
     return _BaseCopy(rel, entries, paths["ruleset"])
 
@@ -3188,9 +3304,16 @@ def _base_manifest_fail(why: str) -> Verdict:
     return _base_fail(
         f"the base branch's manifest {MANIFEST_RELPATH.as_posix()} {why}",
         "The base's own manifest says where its baseline is.",
-        "repair the manifest on the base branch, or pass this evaluation with "
-        "invariant override guidelines.baseline_only_shrinks",
+        "repair the manifest on the base branch, or pass this landing deliberately, "
+        f"recorded: {_FORCED_LANDING}",
     )
+
+
+#: The route past ``guidelines.baseline_only_shrinks``. It gates a pipeline
+#: transition and fires at no hook, so no ``invariant override`` grant is ever
+#: spent on it; and its failures concern the baseline, not a guideline, so no
+#: grant naming a guideline reaches it either (A3.7).
+_FORCED_LANDING = "invariant pipeline advance <state> --force --reason '<why>'"
 
 
 def _base_rules(
