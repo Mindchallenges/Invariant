@@ -134,9 +134,42 @@ scenarios. A1 increments 2–6 are tracked here, not in a session.
 * Increment 2: after A2 (ruleset fixtures, malformed-ruleset scenario). The
   malformed-ruleset scenario landed with A2 increment 1; the fixtures for the
   kinds A2 increment 2 validates are still owed.
-* Increment 3: after A3 (seeded pattern, baselined, missing-test scenarios).
+* Increment 3: done, landed with A3: the seeded-pattern, missing-test,
+  baselined, baseline-grown and fixed-not-pruned scenarios.
 * Increment 4: after A4 (vague-verdict and judgement-fail scenarios), with the
   model/host permutation test arriving with A7.
 * Increment 5: the scripted CLI driver plus `invariant conformance run|show`,
   after A4.
 * Increment 6: Claude Code under two or more models, after A4 and A6.
+
+**A3 landed** on main on 2026-10-29 from session 864db3ee, in nine
+increments; the final commit is 3d41370. What landed:
+
+* lexical masks and a path-aware `executable_text`, which fixed
+  [BUG_103](BUG_103.md);
+* Python import references;
+* the `guidelines.mechanical_clean` gate over pattern, boundary and cochange;
+* the baseline file with `guidelines baseline --record/--prune`;
+* `guidelines.baseline_only_shrinks`;
+* override by guideline id;
+* an edit-time advisory at PostToolUse;
+* this repository's dogfood ruleset: two layering boundary rules, no
+  baseline.
+
+A follow-up chore (303c85b) raised `guidelines.mechanical_clean` to block in
+this repository. A1 increment 3's conformance scenarios landed with A3.
+
+User rulings: all 17 A3 design recommendations accepted, recorded in
+[ADR-012](../adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract.md)'s
+as-built notes. The dogfood ruleset is two rules covering all four
+hand-written layering scans. No `CLAUDE.md` for now; revisit with A5.
+
+Known accepted gap: removing `guidelines.baseline` in one landing and
+re-adding a grown one in a later landing is admitted. A8's gated ruleset
+edits close it.
+
+Follow-ups filed, both unscheduled: [BUG_104](BUG_104.md) (a
+whitespace-named file is invisible to the gates) and
+[IDEA_038](IDEA_038.md) (a node lexer).
+
+Next: A4 (verdict contract), in design in session c181f22d.
