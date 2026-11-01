@@ -3771,27 +3771,105 @@ def _guidelines_verdicts_complete(ctx: RuleContext) -> Verdict:
     missing. It fails on a missing or stale verdict, and on a current
     ``fail`` at blocker severity; a ``fail`` at warn is reported inside a
     pass. It never reads which agent submitted a verdict (D1 item 2, DN-12).
+
+    The reads are :func:`read_standings`', and the verdict is
+    :func:`standings_verdict` over them: ``guidelines verdicts show`` prints
+    that same read (A4 increment 4), so the command and the gate cannot
+    disagree.
+    """
+    return standings_verdict(read_standings(ctx))
+
+
+class StandingsRefused(InvariantError):
+    """``guidelines verdicts show`` cannot say how the verdicts stand (exit 1).
+
+    Raised where the gate fails without standings to show (a ruleset that
+    does not load, a changed set that cannot be established), carrying the
+    gate's own message, detail and fixes, and with no session to read.
+    """
+
+    exit_code = 1
+
+    def __init__(self, message: str, detail: str = "", fixes: Iterable[str] = ()) -> None:
+        self.message = message
+        self.detail = detail
+        self.fixes = tuple(fixes)
+        lines = [f"no verdict standing can be shown: {message}"]
+        if detail:
+            lines.append(f"  {detail}")
+        lines.extend(f"  try: {fix}" for fix in self.fixes)
+        super().__init__("\n".join(lines))
+
+
+@dataclass(frozen=True)
+class StandingsRead:
+    """What ``guidelines.verdicts_complete`` sees, read once (A4 increment 4).
+
+    The gate's verdict is :func:`standings_verdict` over this read, and
+    ``guidelines verdicts show`` prints the same read, so the two cannot
+    disagree about how a verdict stands.
+    """
+
+    #: ``standings``; ``no-ruleset`` or ``no-pipeline`` (the gate is N/A);
+    #: or ``unanswerable`` (the gate fails, and ``failure`` says why).
+    status: str
+    #: Each owed judgement rule's standing, in ruleset order.
+    standings: tuple[verdicts_reader.Standing, ...] = ()
+    #: Recorded verdicts on rules the change does not owe one.
+    unowed: tuple[verdicts_reader.Unowed, ...] = ()
+    #: The digest verdicts are judged against: the pin, or the tree's.
+    ruleset: str | None = None
+    state: str | None = None
+    failure: Verdict | None = None
+
+
+def read_standings(ctx: RuleContext) -> StandingsRead:
+    """Every read the gate makes, and ``core/verdicts``' answers over them.
+
+    The ruleset through ``load_ruleset``, the changed set through
+    ``_changed_set``, every other fact through ``_verdict_facts`` (the reads
+    ``plan_verdicts`` makes), and ``evidence["verdicts"]``. Nothing recorded.
     """
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
-        return Verdict.fail(
+        return StandingsRead(status="unanswerable", failure=Verdict.fail(
             f"no verdict can be judged: {failure.message}",
             detail=failure.detail,
             fixes=failure.fixes,
-        )
+        ))
     if ruleset is None:
-        return Verdict.na("no guidelines ruleset configured")
+        return StandingsRead(status="no-ruleset")
     pipeline = ctx.pipeline
     if not pipeline:
-        return Verdict.na("no pipeline is running, so no verdict is owed")
+        return StandingsRead(status="no-pipeline", ruleset=ruleset.digest)
     changed = _changed_set(ctx)
     if not changed.answerable:
-        return _unestablished_changed_set(changed)
+        return StandingsRead(
+            status="unanswerable", failure=_unestablished_changed_set(changed),
+            ruleset=ruleset.digest, state=str(pipeline.get("state") or ""),
+        )
     facts = _verdict_facts(ctx, ruleset, pipeline, changed)
     recorded = ctx.evidence("verdicts") or ()
     records = tuple(recorded) if isinstance(recorded, list) else ()
-    found = verdicts_reader.standings(ruleset, records, facts)
-    digest = facts.pin or facts.tree_digest
+    return StandingsRead(
+        status="standings",
+        standings=verdicts_reader.standings(ruleset, records, facts),
+        unowed=verdicts_reader.unowed(ruleset, records, facts),
+        ruleset=facts.pin or facts.tree_digest,
+        state=facts.state,
+    )
+
+
+def standings_verdict(read: StandingsRead) -> Verdict:
+    """``guidelines.verdicts_complete``'s verdict over one read of the standings."""
+    if read.failure is not None:
+        return read.failure
+    if read.status == "no-ruleset":
+        return Verdict.na("no guidelines ruleset configured")
+    if read.status == "no-pipeline":
+        return Verdict.na("no pipeline is running, so no verdict is owed")
+    found = read.standings
+    digest = read.ruleset
     if not found:
         return Verdict.clean(
             f"no judgement guideline is owed a verdict by this change, ruleset {digest}"
@@ -3800,7 +3878,7 @@ def _guidelines_verdicts_complete(ctx: RuleContext) -> Verdict:
     detail = "; ".join(
         s.describe() for s in found if not s.blocks
         and (s.warns or s.standing == verdicts_reader.ENGINE)
-    ) or None
+    ) or ""
     if blocking:
         return Verdict.fail(
             f"{len(blocking)} of {len(found)} owed judgement guideline(s) lack a verdict "

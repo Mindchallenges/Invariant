@@ -1865,7 +1865,8 @@ deriving either again.
   the profile's level: naming the gate in `enforcement.rules` before the
   installed build registers it would fail to load (BUG_050), so raising it
   is a chore after this lands.
-- *Left for later increments.* `guidelines verdicts show` (A4.4), a grant
+- *Left for later increments.* `guidelines verdicts show` (A4.4, built
+  below), a grant
   naming a judgement guideline (A4.5; the override refusal now says no
   grant passes the gate yet), and the landing's records in pipeline
   evidence (A4.6).
@@ -1885,6 +1886,70 @@ deriving either again.
   N/A and failing preconditions, a deleted file, a comment-only change, an
   edit after the verdict, a ruleset edited mid-pipeline).
   `tests/test_conformance_engine.py` carries the new gate.
+
+**As built: A4 increment 4, `guidelines verdicts show`.** Built to D5 ("The
+gate", "Staleness", item 5), the user's ruling on a pass or fail the
+engine's N/A sets aside (A4.3), and DN-2, DN-3 and DN-12. The ADR sketched no
+shape for the command, so it follows cli.md's conventions and the other
+guidelines commands.
+
+- *One read, not two (`core/rules`).* The gate's body became two functions:
+  `read_standings` makes every read the gate made (`load_ruleset`,
+  `_changed_set`, `_verdict_facts`, `evidence["verdicts"]`) and answers a
+  `StandingsRead` (`standings`, `no-ruleset`, `no-pipeline` or
+  `unanswerable` with the gate's failure); `standings_verdict` is the gate's
+  verdict over it, unchanged in wording. `guidelines.verdicts_complete` is
+  `standings_verdict(read_standings(ctx))`, and the command prints the same
+  read and renders that same verdict, so the two cannot disagree. A test
+  pins the gate's verdict equal to `standings_verdict` over the read.
+- *Why a rule is not owed (`core/verdicts`, DN-2, DN-3).* `not_owed` answers
+  the reason, or `None` for an owed rule: not a judgement guideline, phases
+  naming neither review, landing nor always, no changed set, or no changed
+  file meeting it through `findings.meets`. `owed` is now every rule
+  `not_owed` finds no reason for, so the gate and the listing read one
+  predicate. `unowed` lists each rule with a recorded verdict the change no
+  longer owes, in first-recorded order, with its latest status, how many were
+  recorded and the reason (or that the rule is gone from the ruleset). The
+  gate never reads it.
+- *The command (`domains/guidelines`, the CLI).* `GuidelinesDomain.
+  verdict_standings` resolves the session as a submission does and returns
+  the read, raising `StandingsRefused` (exit 1) with the gate's message,
+  detail and "try:" fixes where the gate fails with no standings to show,
+  or with no session. The text is one line per owed rule led by its
+  standing (current, stale, missing, engine) and `Standing.describe`, then
+  the rules no longer owed, then the gate's line as a gate renders it at
+  the manifest's level. `--json` carries the same, per cli.md.
+- *Readings taken where the ADR is silent.*
+  - It exits 0 whenever it shows the standings, a failing gate included, as
+    `pipeline gates` does. It is a read; `invariant check
+    guidelines.verdicts_complete` is the gate's exit, and a script wanting
+    "would the landing pass" asks that.
+  - Where the gate is N/A (no ruleset, no running pipeline) it says no
+    verdict is owed and exits 0, as `guidelines show` does with no ruleset.
+    Where the gate fails without standings (a ruleset that does not load,
+    a changed set that cannot be established) it refuses, exit 1, since it
+    has nothing true to show beyond the gate's failure.
+  - It answers in any state. The gate re-checks without the review-role
+    predicate (DN-2), so the standing does not depend on where the pipeline
+    is.
+  - It does not show `agent` (DN-12). Nothing sets it before increment 8,
+    and showing it is not owed; no logic reads it.
+- *Boy-Scout, the gate's fix for an edited citation.* At the gate a cited
+  file whose blob changed was named with submission's fix, "leave the blob
+  out; the engine records it", which is wrong advice for a recorded verdict.
+  `citation_problems` now takes `submitting`, and at the gate names both
+  blobs and asks for the rule again. Submission's wording is unchanged.
+- *Left for later increments.* A grant naming a judgement guideline
+  (A4.5), the landing's records in pipeline evidence (A4.6), the conformance
+  scenarios (A4.7) and the agent stamp (A4.8).
+- *Tests.* `tests/test_guidelines_verdicts_show.py`: `not_owed` for each
+  reason and as the one reading `owed` asks, `unowed` (owed rules left out,
+  a rule gone, the latest status and count, order, records naming no rule),
+  the gate-time citation fix, `read_standings` for every status and equal
+  to the gate's verdict, and the command through `main` (each standing, the
+  set-aside fail, the rules no longer owed, exit 0 on a failing gate,
+  `--json`, any state, no session, no pipeline, no ruleset, a ruleset that
+  does not load, and that it writes nothing).
 
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
@@ -2186,7 +2251,7 @@ graph TD
         CCREN["agent rendering + injection transport (A5, A6)"]
     end
     subgraph cli["cli/"]
-        CLI["invariant CLI<br/>guidelines render | show | verdict | baseline"]
+        CLI["invariant CLI<br/>guidelines render | show | verdict | baseline<br/>verdicts submit | verdicts show"]
     end
     subgraph domains["domains/ (seven)"]
         GDOM["guidelines (NEW, not an FSM)"]
@@ -2217,7 +2282,7 @@ graph TD
     CLI --> CGUIDE
     CLI --> CAGENTS
     GDOM --> CGUIDE
-    GDOM -- plan_render, plan_baseline, plan_verdicts --> RULES
+    GDOM -- plan_render, plan_baseline, plan_verdicts, read_standings --> RULES
     GDOM -- record_verdicts --> PIPELINE
     GDOM --> STORE
     GDOM --> GIT
@@ -2226,8 +2291,8 @@ graph TD
     RULES --> CGUIDE
     RULES --> adapters
     RULES -- evaluate, reads handed in as callables --> CFIND
-    RULES -- plan_verdicts asks check_all, the reads handed in as Facts --> CVERD
-    CVERD -- matches --> CFIND
+    RULES -- plan_verdicts asks check_all, read_standings asks standings and unowed, the reads handed in as Facts --> CVERD
+    CVERD -- meets, NaAnswer --> CFIND
     CVERD -- Guideline, Ruleset, digest_of --> CGUIDE
     CVERD -- project_relative --> MANIFEST
     RULES -- base-branch baseline, diff lines, tracked files, renames --> GIT

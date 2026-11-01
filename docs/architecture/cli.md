@@ -985,7 +985,8 @@ at `block` or `ask`.
 
 The project's coding guidelines live in one YAML ruleset (ADR-012 D3). Render
 and baseline write the generated-file class from Conventions, and nothing
-else; a verdict writes only the pipeline's evidence, under the state root.
+else; a verdict writes only the pipeline's evidence, under the state root;
+`show` and `verdicts show` write nothing.
 
 ```
 invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local]
@@ -1214,6 +1215,48 @@ invariant guidelines verdicts submit <file.json>
     digest in the tree), the pinned ruleset digest, the state and surface
     "cli", and no clock time. Nothing is written into the tree. --json
     carries recorded (the records), ruleset and state.
+
+invariant guidelines verdicts show
+    Show what guidelines.verdicts_complete sees over the change in hand
+    (ADR-012 D5, A4 increment 4), for the session resolved by working
+    directory, in any state. It writes nothing. The command and the gate
+    ask one read, core.rules.read_standings, and the gate's verdict is
+    core.rules.standings_verdict over that read, so the two cannot
+    disagree.
+
+    One line per judgement guideline the change owes a verdict, in ruleset
+    order, led by its standing:
+      current  the latest verdict still holds: "pass", or "fail at blocker"
+               or "fail at warn";
+      stale    the latest verdict no longer holds, naming every predicate it
+               now fails and its fix. A cited file edited after the verdict
+               names both blobs and asks for the rule again;
+      missing  no verdict;
+      engine   answered by a mechanical N/A condition the engine finds true,
+               with its reason, and "the pass (or fail) recorded on it is
+               set aside" when one was.
+    Then, under "recorded on guidelines the change no longer owes:", each
+    rule with a recorded verdict that is not owed now: the latest status,
+    how many were recorded, and why it is not owed (core/verdicts.not_owed,
+    the reading owed asks: no changed file meets its applies_to, its phases
+    name neither review, landing nor always, it is not a judgement
+    guideline, or it is gone from the ruleset). Last, the gate's own line,
+    rendered as a gate prints, with its "try:" fixes.
+
+    Exits 0 whenever it can show the standings, whatever the gate would
+    say, as `pipeline gates` does; `invariant check
+    guidelines.verdicts_complete` is the gate's own exit. With no ruleset
+    configured, or no running pipeline, it says no verdict is owed and
+    exits 0, where the gate is N/A. Refused (exit 1), naming the gate's
+    message and its "try:" fixes: no session; a ruleset that does not
+    load; a changed set that cannot be established.
+
+    --json carries status (standings, no-ruleset or no-pipeline), ruleset
+    (the digest verdicts are judged against), state, owed (each {rule,
+    severity, standing, status, reason, problems: [{predicate, message,
+    fix}], set_aside, blocks, warns}), not_owed (each {rule, status,
+    recorded, reason}) and gate (the verdict payload). It never reads or
+    shows the acting agent (DN-12).
 ```
 
 ## Rules and gates

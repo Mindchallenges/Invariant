@@ -1059,6 +1059,10 @@ one invalid entry enters nothing (DN-11). One entry:
   acting agent (DN-12). It is absent until then, never read by a gate, and
   needs no migration: a record without it loads unchanged.
 
+`invariant guidelines verdicts show` reads the list and writes nothing (A4
+increment 4): it prints the standing the gate reads for each owed rule, and
+the records on rules the change no longer owes.
+
 The key is additive. A record older than it has no `verdicts`, which reads as
 "no verdict submitted", and no record is migrated.
 

@@ -58,6 +58,11 @@ against D5's predicates and recorded into the running pipeline's evidence
 through ``PipelineDomain.record_verdicts``. It writes nothing into the tree.
 A submission is recorded whole or refused whole (DN-11), and a refusal is
 ``VerdictRefused``, naming each entry's failed predicate and its fix.
+
+It also shows how the verdicts stand without writing anything (A4 increment
+4): ``verdict_standings`` returns ``core.rules.read_standings``, the read
+``guidelines.verdicts_complete`` judges, so the command and the gate cannot
+disagree.
 """
 
 from __future__ import annotations
@@ -71,11 +76,14 @@ from ..core.rules import (
     BaselineChange,
     BlockRendered,
     RuleContext,
+    StandingsRead,
+    StandingsRefused,
     VerdictRefused,
     guidelines_relpath,
     plan_baseline,
     plan_render,
     plan_verdicts,
+    read_standings,
     ruleset_or_refuse,
 )
 
@@ -194,7 +202,6 @@ class GuidelinesDomain:
             ruleset=plan.ruleset, entries=len(plan.entries), changes=plan.changes,
         )
 
-
     def submit_verdicts(self, submission: Any) -> VerdictsRecorded:
         """Check a verdict submission and record it whole, or refuse it whole.
 
@@ -222,6 +229,29 @@ class GuidelinesDomain:
         records = tuple(record.record() for record in plan.records)
         self.pipelines.record_verdicts(str(session["id"]), records)
         return VerdictsRecorded(records=records, ruleset=plan.ruleset, state=plan.state)
+
+    def verdict_standings(self) -> StandingsRead:
+        """How each judgement guideline the change owes a verdict stands, as
+        ``guidelines.verdicts_complete`` sees it (A4 increment 4). Writes nothing.
+
+        The read is ``core.rules.read_standings``, the gate's own, so the two
+        cannot disagree. The session is the rule context's, resolved by
+        working directory as for a submission. Where the gate fails with no
+        standings to show, this raises :class:`StandingsRefused` carrying the
+        gate's message and fixes.
+        """
+        session = self.ctx.session
+        if not session or not session.get("id"):
+            raise StandingsRefused(
+                "no session is active here, so there is no pipeline to read",
+                fixes=("invariant session start <task-name>",),
+            )
+        read = read_standings(self.ctx)
+        if read.failure is not None:
+            raise StandingsRefused(
+                read.failure.message, read.failure.detail, read.failure.fixes
+            )
+        return read
 
 
 @dataclass(frozen=True)

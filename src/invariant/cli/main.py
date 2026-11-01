@@ -3271,9 +3271,13 @@ def host_instruction_files(manifest) -> tuple[str, ...]:
 
 def _guidelines_domain(ctx: Context):
     """The guidelines domain over the CLI's rule context, host default included."""
+    return _guidelines_domain_over(ctx.rule_context())
+
+
+def _guidelines_domain_over(rule_context):
     from ..domains.guidelines import GuidelinesDomain
 
-    return GuidelinesDomain(ctx.rule_context())
+    return GuidelinesDomain(rule_context)
 
 
 def _block_line(block, verb: str, overwrite_local: bool) -> str:
@@ -3444,6 +3448,65 @@ def cmd_guidelines_verdicts_submit(args) -> int:
             f"fix: write a JSON list of verdict objects"
         )]) from exc
     return _submit_verdicts(args, submission)
+
+
+VERDICTS_RULE = "guidelines.verdicts_complete"
+
+
+def _standing_payload(s) -> dict:
+    return {
+        "rule": s.rule, "severity": s.severity, "standing": s.standing,
+        "status": s.status, "reason": s.reason,
+        "problems": [
+            {"predicate": p.predicate, "message": p.message, "fix": p.fix}
+            for p in s.problems
+        ],
+        "set_aside": s.set_aside, "blocks": s.blocks, "warns": s.warns,
+    }
+
+
+def cmd_guidelines_verdicts_show(args) -> int:
+    """How each owed judgement guideline stands, as the gate sees it. Writes nothing.
+
+    One read, ``core.rules.read_standings``, and the gate's verdict over it,
+    so the command and ``guidelines.verdicts_complete`` cannot disagree. It
+    exits 0 whenever it can show the standings, whatever the gate would
+    say, as ``pipeline gates`` does; ``invariant check`` is the gate's exit.
+    """
+    from ..core.rules import Evaluated, standings_verdict
+
+    rc = Context().rule_context()
+    read = _guidelines_domain_over(rc).verdict_standings()
+    gate = Evaluated(VERDICTS_RULE, rc.manifest.rule_level(VERDICTS_RULE),
+                     standings_verdict(read))
+    if read.status == "no-ruleset":
+        text = "no guidelines ruleset configured; no verdict is owed"
+    elif read.status == "no-pipeline":
+        text = "no pipeline is running for this session, so no verdict is owed"
+    else:
+        where = f"(ruleset {read.ruleset}, state {read.state})"
+        lines = [
+            f"{len(read.standings)} judgement guideline(s) owed a verdict by this "
+            f"change {where}" if read.standings
+            else f"no judgement guideline is owed a verdict by this change {where}",
+            *(f"  {s.standing:<8} {s.describe()}" for s in read.standings),
+        ]
+        if read.unowed:
+            lines.append("recorded on guidelines the change no longer owes:")
+            lines.extend(f"  {u.describe()}" for u in read.unowed)
+        lines.append(gate.render())
+        text = "\n".join(lines)
+    return emit(args, {
+        "status": read.status,
+        "ruleset": read.ruleset,
+        "state": read.state,
+        "owed": [_standing_payload(s) for s in read.standings],
+        "not_owed": [
+            {"rule": u.rule, "status": u.status, "recorded": u.recorded, "reason": u.reason}
+            for u in read.unowed
+        ],
+        "gate": _verdict_payload(gate),
+    }, text)
 
 
 # -- rules, checks, privacy -------------------------------------------
@@ -5457,6 +5520,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("file", help="a JSON file holding a list of verdict objects")
     q.set_defaults(func=cmd_guidelines_verdicts_submit)
+    q = verdicts.add_parser(
+        "show",
+        help="show how each judgement guideline the change owes a verdict stands, "
+        "as guidelines.verdicts_complete sees it; writes nothing",
+    )
+    q.set_defaults(func=cmd_guidelines_verdicts_show)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

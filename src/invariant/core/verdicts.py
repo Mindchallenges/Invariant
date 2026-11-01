@@ -34,7 +34,10 @@ verdict (:func:`owed`, DN-2 and DN-3), lets a mechanical N/A condition the
 engine finds true answer a rule itself (D5 item 5), and checks the latest
 recorded verdict on every other owed rule again with :func:`check`, so a
 verdict whose citations, tests, N/A or ruleset no longer hold is stale, and a
-stale verdict is a missing one (D5, "Staleness").
+stale verdict is a missing one (D5, "Staleness"). :func:`not_owed` is the one
+reading of why a rule is or is not owed, and :func:`unowed` names the recorded
+verdicts on rules the change no longer owes, for ``guidelines verdicts show``
+(A4.4), which prints the gate's own read.
 
 A refused verdict never enters evidence (ruling 6): a check answers the record
 only when no predicate failed, and names every problem when one did. The
@@ -476,9 +479,14 @@ def _line_count(text: str) -> int:
 
 
 def citation_problems(
-    sub: Submitted, rule: Guideline, facts: Facts
+    sub: Submitted, rule: Guideline, facts: Facts, *, submitting: bool = True
 ) -> tuple[tuple[Citation, ...], list[Problem]]:
-    """P3. Each citation checked, with its blob; the diff asked for ``scope: diff``."""
+    """P3. Each citation checked, with its blob; the diff asked for ``scope: diff``.
+
+    A blob that is not the file's is a submitter's slip at submission, and at
+    the gate (``submitting=False``) the file changed after the verdict, which
+    a fresh verdict answers (D5, "Staleness").
+    """
     citations: list[Citation] = []
     problems: list[Problem] = []
     touched = set(facts.touched or ())
@@ -519,6 +527,12 @@ def citation_problems(
             problems.append(Problem(
                 "P3", f"{where} names blob {cited.blob}, and the file in the tree is {blob}",
                 "leave the blob out; the engine records it",
+            ) if submitting else Problem(
+                "P3",
+                f"{where}: the file is {blob} in the tree, and was {cited.blob} when the "
+                f"verdict was recorded",
+                f"answer {rule.id} again on the file as it is now: "
+                f"invariant guidelines verdict {rule.id}",
             ))
             continue
         citations.append(Citation(cited.path, cited.first, cited.last, blob))
@@ -700,7 +714,7 @@ def check(
     if rule is None or rule.check.kind != "judgement":
         return Checked(index=index, rule=sub.rule, record=None, problems=tuple(problems))
     problems += evidence_problems(sub, rule)
-    citations, cited = citation_problems(sub, rule, facts)
+    citations, cited = citation_problems(sub, rule, facts, submitting=submitting)
     problems += cited
     problems += selector_problems(sub, facts.test_runs)
     problems += na_problems(sub, rule, facts)
@@ -800,22 +814,38 @@ class Standing:
         return f"{self.rule}: {self.status}"
 
 
-def owed(ruleset: Ruleset, facts: Facts) -> tuple[Guideline, ...]:
-    """The judgement rules this change owes a verdict, in ruleset order.
+def not_owed(rule: Guideline, facts: Facts) -> str | None:
+    """Why the change owes ``rule`` no verdict, or ``None`` when it owes one.
 
-    A rule is owed when its phases name review, landing or always (DN-2) and
-    a changed file present in the tree meets it (DN-3, ``findings.meets``):
-    under ``applies_to``, not path-excepted; a deleted file owes nothing.
-    With no changed set there is nothing to ask, and the gate refuses first.
+    The one reading of DN-2 and DN-3, which :func:`owed` asks too, so a rule
+    ``guidelines verdicts show`` calls not owed is one the gate does not ask
+    about. A rule is owed when it is a judgement guideline, its phases name
+    review, landing or always (DN-2), and a changed file present in the tree
+    meets it (DN-3, ``findings.meets``): under ``applies_to``, not
+    path-excepted; a deleted file owes nothing. With no changed set nothing
+    is owed, and the gate refuses first.
     """
+    if rule.check.kind != "judgement":
+        return f"it is a {rule.check.kind} guideline, which the engine answers"
+    if not set(rule.phases) & OWED_PHASES:
+        return (
+            f"its phases ({', '.join(rule.phases)}) name neither review, landing "
+            f"nor always"
+        )
     if facts.touched is None:
-        return ()
-    return tuple(
-        rule for rule in ruleset.rules
-        if rule.check.kind == "judgement"
-        and set(rule.phases) & OWED_PHASES
-        and any(meets(rule, rel) for rel in facts.touched)
-    )
+        return "the changed set could not be established"
+    if not any(meets(rule, rel) for rel in facts.touched):
+        return (
+            f"no changed file in the tree falls under its applies_to "
+            f"({', '.join(rule.applies_to)}) outside its path exceptions"
+        )
+    return None
+
+
+def owed(ruleset: Ruleset, facts: Facts) -> tuple[Guideline, ...]:
+    """The judgement rules this change owes a verdict, in ruleset order:
+    every rule :func:`not_owed` finds no reason for."""
+    return tuple(rule for rule in ruleset.rules if not_owed(rule, facts) is None)
 
 
 def resubmitted(record: Mapping[str, Any]) -> tuple[Submitted | None, tuple[Problem, ...]]:
@@ -881,3 +911,53 @@ def standing_of(rule: Guideline, records: Sequence[Any], facts: Facts) -> Standi
 def standings(ruleset: Ruleset, records: Sequence[Any], facts: Facts) -> tuple[Standing, ...]:
     """Every owed judgement rule's standing, in ruleset order (D5, "The gate")."""
     return tuple(standing_of(rule, records, facts) for rule in owed(ruleset, facts))
+
+
+# -- recorded verdicts the change no longer owes (A4.4) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class Unowed:
+    """Verdicts recorded on a rule the change does not owe one, and why not.
+
+    The gate never reads them; ``guidelines verdicts show`` lists them so a
+    verdict that stopped counting does not vanish without a word.
+    """
+
+    rule: str
+    #: The latest record's status as recorded; ``None`` when it is not text.
+    status: str | None
+    #: How many records name the rule.
+    recorded: int
+    reason: str
+
+    def describe(self) -> str:
+        said = self.status if self.status is not None else "an unreadable record"
+        return f"{self.rule}: {said}, {self.recorded} recorded; not owed: {self.reason}"
+
+
+def unowed(ruleset: Ruleset, records: Sequence[Any], facts: Facts) -> tuple[Unowed, ...]:
+    """Each rule with a recorded verdict that the change does not owe one, in
+    the order each was first recorded. A record naming no rule names nothing.
+    Why it is not owed is :func:`not_owed`'s answer, or the rule is gone from
+    the ruleset."""
+    owing = {rule.id for rule in owed(ruleset, facts)}
+    by_rule: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        if isinstance(record, Mapping) and isinstance(record.get("rule"), str):
+            by_rule.setdefault(record["rule"], []).append(record)
+    found: list[Unowed] = []
+    for rule_id, mine in by_rule.items():
+        if rule_id in owing:
+            continue
+        rule = ruleset.by_id(rule_id)
+        reason = (
+            f"no guideline {rule_id!r} in the ruleset" if rule is None
+            else not_owed(rule, facts) or ""
+        )
+        status = mine[-1].get("status")
+        found.append(Unowed(
+            rule=rule_id, status=status if isinstance(status, str) else None,
+            recorded=len(mine), reason=reason,
+        ))
+    return tuple(found)
