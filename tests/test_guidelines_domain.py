@@ -1118,3 +1118,165 @@ class TestBaselineEdges:
         with pytest.raises(RenderRefused, match="cannot be written"):
             baseline_domain(repo).baseline(mode="record", rules=("style.no-secret",))
         assert not (repo / BASELINE_REL).exists()
+
+
+# -- guidelines verdict and verdicts submit, through main (A4 increment 1) ----------
+
+
+def _review(root: Path) -> tuple[str, object]:
+    """Move the running pipeline to its review state, as an advance would."""
+    from invariant.core.manifest import Manifest
+    from invariant.domains.pipeline import PipelineDomain
+    from invariant.domains.session import SessionDomain
+
+    manifest = Manifest.load(root)
+    session = SessionDomain(manifest).current(root)
+    pipelines = PipelineDomain(manifest)
+    record = pipelines.current(session.id)
+    record.state = "reviewing"
+    pipelines._save(session.id, record)
+    return session.id, pipelines
+
+
+def _stored(root: Path) -> list:
+    from invariant.core.manifest import Manifest
+    from invariant.domains.pipeline import PipelineDomain
+    from invariant.domains.session import SessionDomain
+
+    manifest = Manifest.load(root)
+    session = SessionDomain(manifest).current(root)
+    return PipelineDomain(manifest).current(session.id).evidence.get("verdicts", [])
+
+
+class TestVerdictCommands:
+    @pytest.fixture
+    def project(self, tmp_path, monkeypatch, capsys):
+        from test_domains import git_project
+        from test_guidelines_verdicts import PYTHON, sh
+        from test_guidelines_verdicts import RULESET as VERDICTS
+
+        root = tmp_path / "proj"
+        root.mkdir()
+        write(root, RULESET_REL, VERDICTS)
+        write(root, "app/m.py", "one\ntwo\nthree\n")
+        git_project(root, {"version": 1, "project": PYTHON,
+                           "guidelines": {"ruleset": RULESET_REL}})
+        sh(root, "checkout", "-q", "-b", "work")
+        monkeypatch.chdir(root)
+        assert run("session", "start", "verdicts") == 0
+        assert run("pipeline", "start", "--task", "t") == 0
+        write(root, "app/m.py", "one\nTWO\nthree\n")
+        capsys.readouterr()
+        return root
+
+    def test_a_cited_verdict_is_recorded(self, project, capsys):
+        _review(project)
+        code = run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--cite", "app/m.py", "2", "2", "--note", "closes first")
+        assert code == 0
+        text = capsys.readouterr().out
+        assert "recorded 1 verdict" in text and "data.single-open pass" in text
+        (stored,) = _stored(project)
+        assert stored["citations"][0]["lines"] == [2, 2]
+        assert stored["surface"] == "cli" and stored["state"] == "reviewing"
+        assert stored["note"] == "closes first"
+
+    def test_json_carries_the_records(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--cite", "app/m.py", "2", "2", "--json") == 0
+        body = payload(capsys)
+        assert [r["rule"] for r in body["recorded"]] == ["data.single-open"]
+        assert body["state"] == "reviewing" and len(body["ruleset"]) == 12
+
+    def test_a_vague_verdict_is_refused_and_nothing_is_recorded(self, project, capsys):
+        _review(project)
+        code = run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--cite", "app/m.py", "1", "1")
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "P3" in err and "nothing was recorded" in err
+        assert _stored(project) == []
+
+    def test_a_line_that_is_not_a_number_is_refused(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--cite", "app/m.py", "two", "2") == 1
+        assert "two integers" in capsys.readouterr().err
+
+    def test_an_na_names_its_claim(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdict", "data.single-open", "--status", "na",
+                   "--na-condition", "read-only") == 0
+        (stored,) = _stored(project)
+        assert stored["na_condition"] == "read-only" and stored["citations"] == []
+
+    def test_a_test_no_run_named_is_refused(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdict", "data.tested", "--status", "pass",
+                   "--test", "tests/test_m.py::test_open") == 1
+        assert "P4" in capsys.readouterr().err
+
+    def test_outside_a_review_state_it_is_refused(self, project, capsys):
+        assert run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--cite", "app/m.py", "2", "2") == 1
+        assert "P1" in capsys.readouterr().err
+        assert _stored(project) == []
+
+    def test_a_bulk_submission_is_recorded_whole(self, project, capsys):
+        import json
+
+        _review(project)
+        path = project / "verdicts.json"
+        path.write_text(json.dumps([
+            {"rule": "data.single-open", "status": "pass",
+             "citations": [{"path": "app/m.py", "lines": [1, 2]}]},
+            {"rule": "data.single-open", "status": "na", "na_condition": "read-only"},
+        ]), encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path)) == 1
+        assert "twice" in capsys.readouterr().err
+        path.write_text(json.dumps([
+            {"rule": "data.single-open", "status": "pass",
+             "citations": [{"path": "app/m.py", "lines": [1, 2]}]},
+            {"rule": "data.either", "status": "fail",
+             "citations": [{"path": "app/m.py", "lines": [3, 3]}]},
+        ]), encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path)) == 0
+        assert "recorded 2 verdicts" in capsys.readouterr().out
+        assert [v["rule"] for v in _stored(project)] == ["data.single-open", "data.either"]
+
+    def test_a_bulk_submission_with_an_invalid_entry_records_nothing(self, project, capsys):
+        import json
+
+        _review(project)
+        path = project / "verdicts.json"
+        path.write_text(json.dumps([
+            {"rule": "data.single-open", "status": "pass",
+             "citations": [{"path": "app/m.py", "lines": [2, 2]}]},
+            {"rule": "data.tested", "status": "pass"},
+        ]), encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path)) == 1
+        err = capsys.readouterr().err
+        assert "entry 2 (data.tested): P2" in err
+        assert _stored(project) == []
+
+    def test_a_file_that_is_not_json_is_refused(self, project, capsys):
+        _review(project)
+        path = project / "verdicts.json"
+        path.write_text("[{", encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path)) == 1
+        assert "is not JSON" in capsys.readouterr().err
+
+    def test_a_file_that_cannot_be_read_is_refused(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdicts", "submit", str(project / "missing.json")) == 1
+        assert "could not be read" in capsys.readouterr().err
+
+    def test_no_pipeline_is_refused(self, project, capsys):
+        sid, pipelines = _review(project)
+        raw = pipelines.store.read(pipelines.relpath(sid), {})
+        raw["current"] = None
+        pipelines.store.write(pipelines.relpath(sid), raw)
+        assert run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--cite", "app/m.py", "2", "2") == 1
+        assert "no pipeline is running" in capsys.readouterr().err

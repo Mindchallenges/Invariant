@@ -1009,12 +1009,54 @@ sequenceDiagram
   `guidelines.ruleset` (an isolation-exempt manifest line, like
   `methodology.pipeline`) cannot drop them mid-pipeline. Their verdicts then
   say what they can see. No gate compares the pinned digest with the current
-  one yet. That comparison is A4's, for verdicts (DN-D), so editing the
-  ruleset mid-pipeline changes no obligation this build checks.
+  one yet. That comparison is A4's, for verdicts (DN-D). A verdict submission
+  already makes it: one is refused while the tree's digest differs from the
+  pin (A4 DN-6, below). No landing gate reads it until A4 increment 3.
 - **Nothing pinned, nothing changes.** With no ruleset at start the field is
   null and the manifest decides, as before. A record written before the field
   existed loads with it null and is read the same way, so no record is
   migrated.
+
+**Judgement verdicts are evidence too** (ADR-012 D5, A4 increment 1).
+`evidence["verdicts"]` is an append-only list of the cited verdicts accepted
+by `invariant guidelines verdict` and `invariant guidelines verdicts submit`.
+`domains/guidelines` checks a submission through `core.rules.plan_verdicts`
+and records what it accepted through `PipelineDomain.record_verdicts`. A
+refused verdict never enters the list (ruling 6), and a bulk submission with
+one invalid entry enters nothing (DN-11). One entry:
+
+```json
+{
+  "rule": "data.single-open",
+  "status": "pass",
+  "citations": [{"path": "app/store.py", "lines": [42, 58], "blob": "9c41e07ab2d3"}],
+  "tests": [],
+  "na_condition": null,
+  "note": "close() runs before the next open on every path",
+  "ruleset": "5be0c2d91f7a",
+  "state": "reviewing",
+  "surface": "cli"
+}
+```
+
+- **`blob`** is `digest_of` the cited file's bytes in the tree at
+  submission. A later edit of the file makes the verdict stale, which is the
+  gate's to read (A4 increment 3).
+- **`ruleset`** is the pin, and a verdict is accepted only while the tree's
+  ruleset has the pinned digest (DN-6). With no pin, or a pin whose digest is
+  null, the tree's digest stands in for it.
+- **`state`** is the state the verdict was checked in, always a review-role
+  state (DN-2). `record_verdicts` refuses, with nothing written, a record
+  whose state the pipeline has since left.
+- **No clock time.** The record is evidence about the change, ordered by
+  position. A later verdict on a rule is appended beside the earlier one, and
+  which one answers the rule is the gate's question.
+- **`agent`** is reserved for A4 increment 8, where the host stamps the
+  acting agent (DN-12). It is absent until then, never read by a gate, and
+  needs no migration: a record without it loads unchanged.
+
+The key is additive. A record older than it has no `verdicts`, which reads as
+"no verdict submitted", and no record is migrated.
 
 Shipped methodologies:
 

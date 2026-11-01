@@ -867,6 +867,34 @@ class PipelineDomain:
         self._save(session_id, pipeline)
         return RECORDED
 
+    def record_verdicts(self, session_id: str, records: Sequence[Mapping[str, Any]]) -> int:
+        """Append accepted judgement verdicts to ``evidence["verdicts"]`` (ADR-012 D5).
+
+        Append-only: a later verdict on a rule is added beside the earlier
+        one, never written over it, so the record keeps what was said and
+        when in the order it was said. Which one answers a rule is the gate's
+        question (A4.3). The records come from ``core.rules.plan_verdicts``,
+        through ``domains/guidelines``, already checked; this only writes.
+
+        Each record names the state it was checked in. A pipeline that has
+        moved since is refused, with nothing written: the review-role check
+        (DN-2) was made against a state the pipeline is no longer in.
+        """
+        from ..core.rules import VerdictRefused
+
+        pipeline = self.require(session_id)
+        moved = sorted({
+            str(r.get("state")) for r in records if r.get("state") != pipeline.state
+        })
+        if moved:
+            raise VerdictRefused([(
+                f"pipeline: the pipeline moved to {pipeline.state!r} after the verdicts "
+                f"were checked in {', '.join(moved)}; fix: submit them again"
+            )])
+        pipeline.evidence.setdefault("verdicts", []).extend(dict(r) for r in records)
+        self._save(session_id, pipeline)
+        return len(records)
+
     def _fresh_bundle(self, session_id: str, kind: str) -> Path:
         """A per-run result-bundle path, per SESSION and per KIND, never shared.
 

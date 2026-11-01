@@ -191,11 +191,24 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
                                # Generated between the block's markers only
   injection:
     max_lines: 40              # cap on the guidelines/index block, at least 2
+  verdicts:
+    note_max_chars: 280        # cap on a judgement verdict's inert note, a
+                               # positive integer (ADR-012 D5, A4 increment 1)
 ```
 
-D13's other `guidelines` keys (`verdicts` and `injection.on_edit`) are
-accepted by the increment that reads each one. Until then they are refused at
-load, by name, rather than loaded and ignored.
+D13's last other `guidelines` key, `injection.on_edit`, is accepted by the
+increment that reads it (A5). Until then it is refused at load, by name,
+rather than loaded and ignored, as every key the build does not know is.
+
+`guidelines.verdicts.note_max_chars` caps the note a judgement verdict
+carries (A4 increment 1). The note is inert: recorded for audit and read by
+no gate (ADR-012 D5, item 6). `invariant guidelines verdict` and `invariant
+guidelines verdicts submit` refuse a note longer than the cap, and one the
+privacy scan flags. That scan runs whatever `privacy.enabled` and
+`privacy.scope` say, because the note is about to be written into evidence.
+`guidelines.verdicts` is a mapping with this one key. Any other key, and a
+cap that is not a positive integer (zero, negative, a string, a boolean), is
+refused at load.
 
 ### Generated files are declared, and never exempt
 

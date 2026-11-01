@@ -983,8 +983,9 @@ at `block` or `ask`.
 
 ## Guidelines
 
-The project's coding guidelines live in one YAML ruleset (ADR-012 D3). These
-commands write the generated-file class from Conventions, and nothing else.
+The project's coding guidelines live in one YAML ruleset (ADR-012 D3). Render
+and baseline write the generated-file class from Conventions, and nothing
+else; a verdict writes only the pipeline's evidence, under the state root.
 
 ```
 invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local]
@@ -1153,6 +1154,61 @@ invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
     a duplicate, a path outside the project, a rule the ruleset lacks, and a
     rule that is not pattern or boundary each fail guidelines.mechanical_clean
     rather than yield a smaller record.
+
+invariant guidelines verdict <rule-id> --status pass|fail|na
+    [--cite <path> <first> <last>]... [--test <selector>]...
+    [--na-condition <id>] [--note "<text>"]
+invariant guidelines verdicts submit <file.json>
+    Answer a judgement guideline with a cited verdict (ADR-012 D5, A4
+    increment 1). The first form is one verdict; the second is a JSON list
+    of D5 objects, each {rule, status, citations: [{path, lines: [first,
+    last]}], tests, na_condition, note}. An object may also carry ruleset
+    and a citation's blob, and each must then equal what the engine
+    records. The session is resolved by working directory, and both need a
+    running pipeline.
+
+    Checked by core.rules.plan_verdicts, the one validation the
+    guidelines.verdicts_complete gate (A4 increment 3) will ask too. A
+    verdict is accepted only when every predicate holds:
+      P1  the rule is a judgement guideline; the ruleset in the tree has
+          the digest the pipeline pinned (no pin, or a null one, takes the
+          tree's); a changed file present in the tree falls under the
+          rule's applies_to outside its path exceptions (a deleted file
+          does not count); the state carries the review role, and the
+          rule's phases name review, landing or always.
+      P2  a pass or fail rests on the evidence the rule's `evidence` names:
+          citation, test, either or both. A kind it does not name is
+          refused, not ignored.
+      P3  each citation is spelled project-relative and names a UTF-8 text
+          file the change touched, present in the tree (any touched file,
+          under applies_to or not), with 1 <= first <= last <= its line
+          count. For scope: diff, one cited range meets a line the change
+          added (git, from the merge base to the working tree). No base,
+          no merge base, or lines git cannot give: unanswerable, refused.
+      P4  each test is a selector equal to an entry of `selectors` on a
+          run `pipeline test` recorded in this pipeline. A full run never
+          vouches for a named test. For a pass, the latest run naming it
+          passed and was not read as red.
+      P5  an na names one of the rule's claim conditions with
+          --na-condition, and carries no citations and no tests. A
+          mechanical condition is the engine's to answer, and is refused.
+      P6  the note is at most guidelines.verdicts.note_max_chars characters
+          (default 280), and the privacy scan finds nothing in it, whatever
+          privacy.scope says. A note may not carry the exemption marker.
+
+    Refused (exit 1, nothing recorded): any failed predicate, named per
+    entry with its fix ("entry 2 (data.tested): P2: ..."); no session, no
+    running pipeline, no ruleset configured, a ruleset that does not load;
+    a file that cannot be read or is not JSON, not a list, or empty; a
+    shape the schema does not have (an unknown key, a line that is not an
+    integer); one rule answered twice. A bulk submission with any invalid
+    entry records none of them (DN-11).
+
+    Accepted verdicts are appended to the pipeline's evidence["verdicts"]
+    (state_model.md), each with its citations' blobs (the cited file's
+    digest in the tree), the pinned ruleset digest, the state and surface
+    "cli", and no clock time. Nothing is written into the tree. --json
+    carries recorded (the records), ruleset and state.
 ```
 
 ## Rules and gates

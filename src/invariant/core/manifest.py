@@ -357,24 +357,31 @@ DEFAULTS: dict[str, Any] = {
     # `baseline` is the ratchet's record of pre-existing pattern and boundary
     # findings (D6); null means no baseline, and every such finding is new
     # (DN-1). A configured path whose file does not exist is an error. It is
-    # a generated file too, written only by `guidelines baseline`. D13's
-    # other keys join as the increments that read them land; until then they
-    # are refused rather than ignored.
+    # a generated file too, written only by `guidelines baseline`.
+    # `verdicts.note_max_chars` caps the inert note a judgement verdict
+    # carries (D5 item 6, A4 increment 1). D13's other keys join as the
+    # increments that read them land; until then they are refused rather
+    # than ignored.
     "guidelines": {
         "ruleset": None,
         "baseline": None,
         "checklist": None,
         "instruction_files": None,
         "injection": {"max_lines": 40},
+        "verdicts": {"note_max_chars": 280},
     },
 }
 
 #: The `guidelines` keys this build reads.
-_GUIDELINES_KEYS = ("ruleset", "baseline", "checklist", "instruction_files", "injection")
+_GUIDELINES_KEYS = (
+    "ruleset", "baseline", "checklist", "instruction_files", "injection", "verdicts",
+)
 #: Those of them that are null or one path.
 _GUIDELINES_PATH_KEYS = ("ruleset", "baseline", "checklist")
 #: The `guidelines.injection` keys this build reads (D13's `on_edit` is A5's).
 _INJECTION_KEYS = ("max_lines",)
+#: The `guidelines.verdicts` keys this build reads (A4 increment 1).
+_VERDICTS_KEYS = ("note_max_chars",)
 
 
 @dataclass
@@ -741,11 +748,12 @@ class Manifest:
 
         A key the schema does not know loads, does nothing, and reads in
         `config show` as though it had taken: the BUG_050 shape. D13 names
-        more keys than this build reads (`verdicts`, `injection.on_edit`);
-        each is accepted by the increment that reads it, and refused, by name,
-        before then. `ruleset`, `baseline` and `checklist` are null or a
-        non-empty path, `instruction_files` null or a non-empty list of
-        them, and `injection.max_lines` an integer of at least 2. Where a path
+        more keys than this build reads (`injection.on_edit`); each is
+        accepted by the increment that reads it, and refused, by name, before
+        then. `ruleset`, `baseline` and `checklist` are null or a non-empty
+        path, `instruction_files` null or a non-empty list of them,
+        `injection.max_lines` an integer of at least 2, and
+        `verdicts.note_max_chars` a positive integer. Where a path
         points is checked by whatever reads it, against the tree in hand.
         """
         section = self.data.get("guidelines")
@@ -789,6 +797,21 @@ class Manifest:
             raise ManifestError(
                 f"guidelines.injection.max_lines must be an integer of at least 2, "
                 f"got {cap!r}"
+            )
+        verdicts = section.get("verdicts")
+        if not isinstance(verdicts, Mapping):
+            raise ManifestError(f"guidelines.verdicts must be a mapping, got {verdicts!r}")
+        for key in verdicts:
+            if key not in _VERDICTS_KEYS:
+                raise ManifestError(
+                    f"guidelines.verdicts.{key} is not a key this build reads; it "
+                    f"reads {', '.join('guidelines.verdicts.' + k for k in _VERDICTS_KEYS)}."
+                )
+        note_cap = verdicts.get("note_max_chars")
+        if isinstance(note_cap, bool) or not isinstance(note_cap, int) or note_cap < 1:
+            raise ManifestError(
+                f"guidelines.verdicts.note_max_chars must be a positive integer, "
+                f"got {note_cap!r}"
             )
 
     def scheduled_gates(self) -> frozenset[str]:

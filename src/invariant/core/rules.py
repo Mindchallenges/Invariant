@@ -36,6 +36,7 @@ from . import git
 from . import guidelines as guidelines_reader
 from . import plan as plan_reader
 from . import sweep as sweep_reader
+from . import verdicts as verdicts_reader
 from .errors import InvariantError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
@@ -3534,6 +3535,196 @@ def _shrink_detail(copy: _BaseCopy, admitted: list[str], renames: Mapping[str, s
             + ", ".join(f"{old} -> {new}" for old, new in sorted(renames.items()))
         )
     return ". ".join(parts)
+
+
+# -- verdicts (ADR-012 D5, A4 increment 1) ---------------------------------------
+
+
+#
+# The verdict plan: a submission parsed and every D5 predicate checked, with
+# nothing recorded. `domains/guidelines` records what the plan accepted, and
+# the `guidelines.verdicts_complete` gate (A4.3) asks the same plan, so a
+# verdict the command accepts is one the gate reads as valid. It lives here,
+# beside `plan_render` and `plan_baseline`, because a rule will ask it and
+# `core/` may not import a domain. `core/verdicts` checks; this does every
+# read: the ruleset and its pin, the machine's roles for the state, the
+# changed set, the cited files' bytes, the lines git says the change added,
+# the pipeline's test runs and the privacy scan.
+
+
+class VerdictRefused(InvariantError):
+    """A verdict submission refused before anything was recorded (exit 1).
+
+    Each line names the entry, the predicate that failed and its fix (DN-11).
+    """
+
+    exit_code = 1
+
+    def __init__(self, problems: Iterable[str]) -> None:
+        self.problems = tuple(problems)
+        super().__init__(
+            "the verdict submission is refused; nothing was recorded:\n  "
+            + "\n  ".join(self.problems)
+        )
+
+
+@dataclass(frozen=True)
+class VerdictPlan:
+    """A submission checked: each entry's answer, or why it cannot be had."""
+
+    checked: tuple[verdicts_reader.Checked, ...] = ()
+    #: Problems of the whole: no pipeline, no ruleset, a shape the
+    #: submission as a whole does not have. Each entry's are on ``checked``.
+    whole: tuple[str, ...] = ()
+    #: The digest the accepted verdicts record, and the state they were
+    #: submitted in; ``None`` when the plan could not get that far.
+    ruleset: str | None = None
+    state: str | None = None
+
+    @property
+    def problems(self) -> tuple[str, ...]:
+        """Every problem named, the whole's first, then each entry's in order."""
+        return self.whole + tuple(
+            line for checked in self.checked for line in checked.describe()
+        )
+
+    @property
+    def ok(self) -> bool:
+        """Accepted only whole: one invalid entry refuses every entry (DN-11)."""
+        return bool(self.checked) and not self.problems
+
+    @property
+    def records(self) -> tuple[verdicts_reader.VerdictRecord, ...]:
+        if not self.ok:
+            return ()
+        return tuple(c.record for c in self.checked if c.record is not None)
+
+    def refusal(self) -> VerdictRefused:
+        return VerdictRefused(self.problems)
+
+
+#: The predicate a refusal of the whole submission is named by.
+_PRECONDITION = "pipeline"
+
+
+def plan_verdicts(ctx: RuleContext, submission: Any) -> VerdictPlan:
+    """Check a verdict submission against D5, recording nothing (A4.1, DN-1).
+
+    ``submission`` is the decoded JSON: a list of D5 objects. The ruleset is
+    read from the tree in hand, as every guidelines gate reads it, and the
+    pipeline is ``ctx.pipeline``. Every refusal is named, per entry; a plan
+    with any problem accepts nothing (DN-11).
+    """
+    pipeline = ctx.pipeline
+    if not pipeline:
+        return VerdictPlan(whole=((
+            f"{_PRECONDITION}: no pipeline is running for this session, so a verdict "
+            f"has no evidence to enter; fix: invariant pipeline start --task "
+            f"\"<what you are doing>\""
+        ),))
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        detail = f" ({failure.detail})" if failure.detail else ""
+        fixes = "; ".join(failure.fixes) or "fix the ruleset"
+        return VerdictPlan(whole=((
+            f"{_PRECONDITION}: no guideline can receive a verdict: "
+            f"{failure.message}{detail}; fix: {fixes}"
+        ),))
+    if ruleset is None:
+        return VerdictPlan(whole=((
+            f"{_PRECONDITION}: no guidelines ruleset is configured, so no guideline "
+            f"can receive a verdict; fix: set guidelines.ruleset"
+        ),))
+    parsed = verdicts_reader.parse_submission(submission)
+    whole = tuple(f"submission: {p.describe()}" for p in parsed.problems)
+    facts = _verdict_facts(ctx, ruleset, pipeline)
+    checked = verdicts_reader.check_all(parsed, ruleset, facts)
+    return VerdictPlan(
+        checked=checked, whole=whole,
+        ruleset=facts.pin or facts.tree_digest, state=facts.state,
+    )
+
+
+def _verdict_facts(
+    ctx: RuleContext, ruleset: guidelines_reader.Ruleset, pipeline: Mapping[str, Any]
+) -> verdicts_reader.Facts:
+    """Every read the checks need, from the tree in hand (DN-1)."""
+    pinned = pipeline.get("ruleset")
+    pin = pinned.get("digest") if isinstance(pinned, Mapping) else None
+    state = str(pipeline.get("state") or "")
+    roles: tuple[str, ...] = ()
+    roles_problem = None
+    try:
+        machine = load_pipeline_machine(ctx.manifest, pipeline.get("methodology") or None)
+        roles = tuple(machine.state(state).roles)
+    except InvariantError as exc:
+        roles_problem = str(exc)
+
+    tree = guidelines_tree(ctx)
+    changed = _changed_set(ctx)
+    touched: tuple[str, ...] | None = None
+    if changed.answerable:
+        # A changed path gone from the tree is no file to meet applies_to
+        # through, nor one to cite (DN-3, DN-4).
+        files, _gone = _changed_in_tree(ctx, changed, tree)
+        touched = tuple(files)
+    base = changed.base
+    asked: dict[str, Any] = {}
+
+    def added() -> Mapping[str, Any] | None:
+        if "lines" not in asked:
+            asked["lines"] = _added_lines(ctx, tree, base)
+        return asked["lines"]
+
+    runs = (ctx.evidence("test_runs") or ()) if ctx.pipeline else ()
+    scanner = PrivacyScanner.from_manifest(ctx.manifest)
+    return verdicts_reader.Facts(
+        tree_digest=ruleset.digest,
+        pin=pin,
+        state=state,
+        roles=roles,
+        touched=touched,
+        read=lambda rel: _read_bytes(tree / rel),
+        added=added,
+        test_runs=tuple(runs) if isinstance(runs, list) else (),
+        note_max_chars=int(ctx.manifest.get("guidelines.verdicts.note_max_chars")),
+        scan=lambda note: _note_findings(scanner, note),
+        roles_problem=roles_problem,
+    )
+
+
+def _added_lines(ctx: RuleContext, tree: Path, base: str) -> dict[str, Any] | None:
+    """The lines the change added, per file, spelled as the touched set is.
+
+    ``None`` with no base recorded, or when git cannot answer from the merge
+    base: a ``scope: diff`` verdict is then unanswerable, never accepted.
+    """
+    if not base or git.merge_base(tree, base) is None:
+        return None
+    answer = git.changed_lines(tree, base)
+    if answer is None:
+        return None
+    spelled: dict[str, Any] = {}
+    for path, lines in answer.items():
+        rel = _tree_relative(ctx, tree, path)
+        if rel is not None:
+            spelled[rel] = lines
+    return spelled
+
+
+def _note_findings(scanner: PrivacyScanner, note: str) -> list[str]:
+    """The privacy findings in a note, scanned whatever ``privacy.scope`` says.
+
+    The note is about to be written into evidence, so it is scanned as render
+    scans what it writes. The exemption marker is a finding here: a note
+    cannot exempt itself, since nothing it says is read by any gate.
+    """
+    found = [
+        f"line {f.line} {f.pattern} {f.redacted}" for f in scanner.scan_text(note)
+    ]
+    if EXEMPTION_MARKER in note:
+        found.append(f"the privacy exemption marker {EXEMPTION_MARKER!r}")
+    return found
 
 
 # -- test rules --------------------------------------------------------

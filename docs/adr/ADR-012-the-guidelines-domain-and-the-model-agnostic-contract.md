@@ -1571,6 +1571,160 @@ whoever wrote it.
 findings are recorded in the same shape (rule, status, citations computed by
 the engine), so a review report, the harness and an audit read one format.
 
+**The A4 rulings (DN-1 to DN-12).** A design-only architect run drafted A4,
+and the user ruled on its twelve decisions. The user took the recommendation
+on DN-1 to DN-11 and overrode it on DN-12. A4 is built in eight increments,
+recorded on its session's plan: the record and its submission; the
+mechanical N/A conditions; the `guidelines.verdicts_complete` gate;
+`guidelines verdicts show`; override by guideline id for judgement
+guidelines; the landing's guidelines records in pipeline evidence; the
+`vague verdict` and `judgement fail` scenarios (A1 increment 4); and the
+host's stamp of the acting agent.
+
+| # | Question | Ruling |
+|---|---|---|
+| DN-1 | Where the verdict logic lives | A new pure module, `core/verdicts`, beside `core/findings`. It holds the verdict record, the parsing of a submission and the pure checks behind D5's predicates. File bytes, added lines, test runs and the pin arrive as values or callables, and it does no I/O. |
+| DN-2 | Where a verdict is accepted, and which rules owe one | Only in a review-role state. A rule is owed when its `phases` name `review`, `landing` or `always`, so a design-only rule owes none. |
+| DN-3 | How a change meets a judgement rule's `applies_to` | Through a changed file that is present in the tree, under `applies_to`, and not path-excepted. A deleted file does not count. |
+| DN-4 | Where a `scope: file` citation may point | Into a touched file only. |
+| DN-5 | Whether a cited path must be under the rule's `applies_to` | No. Any touched file may be cited. |
+| DN-6 | A ruleset edited mid-pipeline | Submission is refused while the tree's ruleset digest differs from the pipeline's pin, and the refusal names both. The verdict is stale at the gate, and nothing repins. A pin with a null digest, or no pin, compares against the tree's digest. |
+| DN-7 | The landing's guidelines records | Saved into pipeline evidence (increment 6). |
+| DN-8 | When a test counts | Only when its selector exactly equals an entry in the `selectors` of a `test_runs` record in this pipeline. For a pass, the latest run naming that selector must be green: passed, and not `read_as_red`. A full run never vouches for a named test. |
+| DN-9 | What a grant naming a judgement guideline covers | All of that guideline's failures, a warn guideline's included (increment 5). |
+| DN-10 | The review agent's text | Not edited until A6 renders the agents host-neutrally. |
+| DN-11 | A bulk submission with an invalid entry | Refused whole. Every problem is named per entry, and nothing is recorded. |
+| DN-12 | Who submitted a verdict | **The host stamps the acting agent onto each verdict**, overriding the recommendation to leave it unrecorded. It is increment 8. It is audit only: no gate may ever read it (D1 item 2). |
+
+**As built: A4 increment 1, the verdict record and its submission.** Built
+to D5, ruling 6 and DN-1 to DN-6, DN-8, DN-11 and DN-12. There is no gate
+yet: `guidelines.verdicts_complete` is increment 3.
+
+- *The commands.* `invariant guidelines verdict <rule-id> --status
+  pass|fail|na [--cite <path> <first> <last>]... [--test <selector>]...
+  [--na-condition <id>] [--note "<text>"]`, and `invariant guidelines
+  verdicts submit <file.json>`, a JSON list of D5 objects. The single form
+  builds a list of one, so both take one path through the checks. The
+  session is the CLI's rule context's, resolved by working directory, which
+  is why BUG_082 does not touch it. Both refuse without a running pipeline.
+- *`core/verdicts` (DN-1).* `Submitted` and `Cited` are a submission as
+  written; `parse_entry` and `parse_submission` read one, naming every
+  problem of its shape. `Facts` carries every read the checks need, as values
+  and callables. One function per predicate (`applies_problems`,
+  `evidence_problems`, `citation_problems`, `selector_problems`,
+  `na_problems`, `note_problems`) answers `Problem`s, each with its
+  predicate and its fix. `check` runs them all over one entry, and
+  `check_all` over a submission. It imports the ruleset model, `digest_of`,
+  `project_relative`, and `core/findings`' `matches`, so a judgement rule's
+  globs match as every other guideline's do.
+- *The plan, `core.rules.plan_verdicts`.* It is the one validation, so A4.3's
+  gate can ask the same plan, as `plan_render` serves render and the drift
+  gate. It does every read from the tree in hand, as every guidelines gate
+  reads it:
+  - the ruleset, through `load_ruleset`;
+  - the pin, from the pipeline record;
+  - the state's roles, from the pinned methodology;
+  - the changed set, through `_changed_set`, and its files present in the
+    tree;
+  - the cited files' bytes;
+  - the lines the change added (`git.changed_lines` from the merge base);
+  - the pipeline's `test_runs`;
+  - the privacy scan of the note.
+
+  It records nothing. `VerdictPlan.ok` holds only when there is an entry and
+  no problem anywhere.
+- *The predicates.* Every refusal exits 1, names its predicate and its fix,
+  and writes nothing.
+  - P1: the rule is a judgement guideline; the tree's digest equals the pin
+    (DN-6); the change meets `applies_to` (DN-3); the state carries the
+    `review` role and the rule's phases name review, landing or always
+    (DN-2).
+  - P2: a `pass` or `fail` rests on the evidence kinds `evidence` allows.
+  - P3: each citation is spelled project-relative and names a UTF-8 text
+    file in the touched set, present in the tree (DN-4, DN-5), with
+    1 <= first <= last <= its line count. For `scope: diff`, at least one
+    cited range meets a line in `git.changed_lines`. No base recorded, no
+    merge base, or added lines git cannot give make the verdict unanswerable,
+    and it is refused.
+  - P4: tests, per DN-8.
+  - P5: an `na` names a claim condition of the rule. Naming a mechanical one
+    is refused, because the engine answers it (increment 2). An `na` carries
+    no citations and no tests.
+  - P6: the note is at most `guidelines.verdicts.note_max_chars` characters
+    and privacy-scanned whatever `privacy.scope` says. A finding refuses.
+- *The record.* `Pipeline.evidence["verdicts"]` is an append-only list,
+  written by `PipelineDomain.record_verdicts`, with `domains/guidelines`
+  performing the submit (`GDOM --> PIPELINE`, on the `stats --> session`
+  precedent). Each entry holds `rule`, `status`, `citations` (`path`, `lines`
+  `[first, last]`, `blob`), `tests`, `na_condition`, `note`, `ruleset`,
+  `state` and `surface` (`cli`). `blob` is `digest_of` the cited file's
+  bytes in the tree. `ruleset` is the pin, and `state` the state the verdict
+  was checked in. There is no clock time. A later verdict on a rule is
+  appended beside the earlier one; which answers the rule is the gate's
+  question.
+- *DN-12's extension point.* `VerdictRecord.agent` is optional and `None`
+  in this increment. It is written only when set, so the record keeps its
+  ruled shape until increment 8 sets it, and no record is reshaped then. No
+  check reads it.
+- *The manifest.* `guidelines.verdicts` is accepted, with one key,
+  `note_max_chars`, default 280. `injection.on_edit` is still refused by
+  name.
+- *The reading of DN-6 taken.* "A pin with a null digest, or no pin,
+  compares against the tree's digest" is read as "the tree's digest stands
+  as the pin". The digest check then passes, and the verdict records the
+  tree's digest. The other reading, refusing every verdict, would wedge the
+  ruleset lane's own repair, as A2 increment 6 found for `ruleset_valid`. A
+  ruleset that does not load in the tree is refused whole, whatever the pin
+  says.
+- *Small points the rulings left open, taken in the strict direction.*
+  - A kind of evidence the rule does not allow is refused, not ignored: a
+    test on a `citation` rule, a citation on a `test` rule. It would be
+    evidence on record that no check had weighed.
+  - A submitted object may carry `ruleset` and a citation's `blob`, as D5's
+    example does, and each must equal what the engine records. `state`,
+    `surface` and `agent` are the engine's alone and are refused as unknown
+    keys.
+  - One rule answered twice in one submission is refused at its second
+    entry. A submission that is not a list, or is empty, is refused whole.
+    A null `citations` or `tests` is refused rather than read as an empty
+    list; leaving the key out is how an entry says it has none.
+  - A `pass` or `fail` naming an `na_condition` is refused, and so is an
+    `na` on a rule that declares no condition.
+  - The diff predicate is asked over the citations that held, and only when
+    one did. A verdict with no valid citation is refused already, so git is
+    not asked.
+  - A path exception with a fingerprint excuses a finding, and a verdict has
+    none, so it sets no file aside under DN-3.
+  - A cited path must be its own canonical spelling. `./app/m.py` is refused
+    naming `app/m.py`, and nothing is trimmed (BUG_104 stays open for the
+    gates).
+  - A file's lines are counted on line feeds, as findings count them. A last
+    line without a line feed counts, and an empty file has no line to cite.
+  - A `fail` resting on a test needs a run that named it, red or green; only
+    a `pass` needs the latest run green. A run record whose `selectors` is
+    not a list names nothing.
+  - A note carrying the privacy exemption marker is refused. A note cannot
+    exempt itself, since nothing it says is read by any gate. The scan runs
+    whatever `privacy.enabled` says too, as render's does.
+  - `note_max_chars` is a positive integer. Zero is refused.
+  - `record_verdicts` refuses records checked in a state the pipeline has
+    since left, with nothing written. The DN-2 check was made against a
+    state the pipeline is no longer in.
+  - A refusal of the whole (no session, no pipeline, no ruleset configured,
+    a ruleset that does not load, a file that cannot be read or is not JSON)
+    is the same `VerdictRefused`, exit 1, named `pipeline` or `submission`.
+    A `--cite` line that is not an integer is refused by the plan, exit 1,
+    not by the argument parser.
+  - A mechanical guideline named in a verdict is refused at P1, naming the
+    gate that answers it.
+- *Tests.* `tests/test_guidelines_verdicts.py` covers the record and its
+  blob, the agent extension point, the parsing, each predicate and each
+  refusal, `plan_verdicts` over real repositories (scope diff, no base, an
+  unknown base, a deleted file, test-run selectors, the pin, the roles, the
+  privacy scan, the cap), the domain's append-only record, and bulk
+  submission. `tests/test_guidelines_domain.py` covers both commands through
+  `main`, and `tests/test_guidelines.py` the manifest key.
+
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
 **Format.** A baseline file the manifest names, one entry per line, with `#`
@@ -1879,7 +2033,8 @@ graph TD
         SESSION[session]
     end
     subgraph core["core/"]
-        CGUIDE["guidelines (NEW): ruleset model, validation,<br/>selection, rendering, baseline arithmetic,<br/>verdict schema and checks"]
+        CGUIDE["guidelines (NEW): ruleset model, validation,<br/>selection, rendering, baseline format"]
+        CVERD["verdicts (A4.1, DN-1): the verdict record,<br/>submission parsing, D5's checks; pure"]
         CFIND["findings (A3.3 to A3.6): Finding, fingerprint,<br/>pattern, boundary and cochange evaluators,<br/>the ratchet's and only-shrinks' arithmetic; pure"]
         CAGENTS["agents (NEW, A6): host-neutral model, overlay merge"]
         RULES["rules: guidelines.* family"]
@@ -1901,8 +2056,8 @@ graph TD
     CLI --> CGUIDE
     CLI --> CAGENTS
     GDOM --> CGUIDE
-    GDOM -- plan_render, plan_baseline --> RULES
-    GDOM -- records verdicts and findings --> PIPELINE
+    GDOM -- plan_render, plan_baseline, plan_verdicts --> RULES
+    GDOM -- record_verdicts --> PIPELINE
     GDOM --> STORE
     GDOM --> GIT
     GDOM --> PRIVACY
@@ -1910,6 +2065,10 @@ graph TD
     RULES --> CGUIDE
     RULES --> adapters
     RULES -- evaluate, reads handed in as callables --> CFIND
+    RULES -- plan_verdicts asks check_all, the reads handed in as Facts --> CVERD
+    CVERD -- matches --> CFIND
+    CVERD -- Guideline, Ruleset, digest_of --> CGUIDE
+    CVERD -- project_relative --> MANIFEST
     RULES -- base-branch baseline, diff lines, tracked files, renames --> GIT
     CFIND --> CGUIDE
     CFIND -- project_relative, glob_matches --> MANIFEST

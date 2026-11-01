@@ -3366,6 +3366,86 @@ def cmd_guidelines_baseline(args) -> int:
     }, text)
 
 
+def _cited_line(text: str):
+    """A ``--cite`` line number as an int, or as written so the plan names it.
+
+    Not converted by argparse: a usage error would exit 2 with argparse's
+    words, and a citation that is not two integers is a shape the plan
+    refuses like any other, exit 1, naming the entry.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def _submit_verdicts(args, submission) -> int:
+    """Check and record a submission through the guidelines domain (ADR-012 D5).
+
+    The session is resolved by working directory, like every command an
+    agent calls (BUG_082 is why it is not by hook payload); the domain
+    refuses without one, and the plan without a running pipeline.
+    """
+    from ..domains.guidelines import GuidelinesDomain
+
+    ctx = Context()
+    result = GuidelinesDomain(ctx.rule_context(), pipelines=ctx.pipelines).submit_verdicts(
+        submission
+    )
+    noun = "verdict" if len(result.records) == 1 else "verdicts"
+    lines = [
+        (
+            f"recorded {len(result.records)} {noun} (ruleset {result.ruleset}, "
+            f"state {result.state})"
+        ),
+        *(f"  {r['rule']} {r['status']}" for r in result.records),
+    ]
+    return emit(args, {
+        "recorded": list(result.records),
+        "ruleset": result.ruleset,
+        "state": result.state,
+    }, "\n".join(lines))
+
+
+def cmd_guidelines_verdict(args) -> int:
+    """One verdict, built into a list of one so it takes the bulk path's checks."""
+    entry: dict = {"rule": args.rule, "status": args.status}
+    if args.cite:
+        entry["citations"] = [
+            {"path": path, "lines": [_cited_line(first), _cited_line(last)]}
+            for path, first, last in args.cite
+        ]
+    if args.test:
+        entry["tests"] = list(args.test)
+    if args.na_condition is not None:
+        entry["na_condition"] = args.na_condition
+    if args.note is not None:
+        entry["note"] = args.note
+    return _submit_verdicts(args, [entry])
+
+
+def cmd_guidelines_verdicts_submit(args) -> int:
+    """A JSON list of D5 objects, recorded whole or refused whole (DN-11)."""
+    from ..core.rules import VerdictRefused
+
+    path = Path(args.file)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise VerdictRefused([(
+            f"submission: {args.file} could not be read ({exc.__class__.__name__}); "
+            f"fix: name a UTF-8 JSON file"
+        )]) from exc
+    try:
+        submission = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise VerdictRefused([(
+            f"submission: {args.file} is not JSON (line {exc.lineno}: {exc.msg}); "
+            f"fix: write a JSON list of verdict objects"
+        )]) from exc
+    return _submit_verdicts(args, submission)
+
+
 # -- rules, checks, privacy -------------------------------------------
 
 
@@ -5342,6 +5422,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="plan, scan and report what would be written, and write nothing",
     )
     q.set_defaults(func=cmd_guidelines_baseline)
+    q = guide.add_parser(
+        "verdict",
+        help="submit one cited verdict on a judgement guideline (ADR-012 D5)",
+    )
+    q.add_argument("rule", help="the judgement guideline's id")
+    q.add_argument("--status", required=True, choices=("pass", "fail", "na"))
+    q.add_argument(
+        "--cite",
+        action="append",
+        nargs=3,
+        metavar=("PATH", "FIRST", "LAST"),
+        help="a cited line range in a file the change touched (repeatable)",
+    )
+    q.add_argument(
+        "--test",
+        action="append",
+        metavar="SELECTOR",
+        help="a test selector a recorded run in this pipeline named (repeatable)",
+    )
+    q.add_argument(
+        "--na-condition",
+        metavar="ID",
+        help="with --status na, the id of the rule's claim condition",
+    )
+    q.add_argument("--note", help="an inert note, capped and privacy-scanned")
+    q.set_defaults(func=cmd_guidelines_verdict)
+    verdicts = guide.add_parser(
+        "verdicts", help="verdicts on judgement guidelines, in bulk"
+    ).add_subparsers(dest="verdicts_sub", required=True)
+    q = verdicts.add_parser(
+        "submit",
+        help="submit a JSON list of verdicts; one invalid entry refuses the whole file",
+    )
+    q.add_argument("file", help="a JSON file holding a list of verdict objects")
+    q.set_defaults(func=cmd_guidelines_verdicts_submit)
 
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)

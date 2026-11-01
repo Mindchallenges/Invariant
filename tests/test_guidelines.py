@@ -405,7 +405,12 @@ class TestManifestKey:
             ({"baseline": 3}, "guidelines.baseline must be null or a path"),
             ({"baseline": ""}, "guidelines.baseline must be null or a path"),
             ({"baseline": ["docs/guidelines/baseline.txt"]}, "guidelines.baseline must be null or a path"),
-            ({"verdicts": {"note_max_chars": 280}}, "guidelines.verdicts is not a key this build reads"),
+            ({"verdicts": 280}, "guidelines.verdicts must be a mapping"),
+            ({"verdicts": {"cap": 280}}, "guidelines.verdicts.cap is not a key this build reads"),
+            ({"verdicts": {"note_max_chars": 0}}, "guidelines.verdicts.note_max_chars must be a positive integer"),
+            ({"verdicts": {"note_max_chars": -5}}, "guidelines.verdicts.note_max_chars must be a positive integer"),
+            ({"verdicts": {"note_max_chars": "280"}}, "guidelines.verdicts.note_max_chars must be a positive integer"),
+            ({"verdicts": {"note_max_chars": True}}, "guidelines.verdicts.note_max_chars must be a positive integer"),
             ({"instruction_files": "CLAUDE.md"}, "guidelines.instruction_files must be null or a list of paths"),
             ({"instruction_files": []}, "guidelines.instruction_files must be null or a list of paths"),
             ({"instruction_files": ["CLAUDE.md", ""]}, "guidelines.instruction_files must be null or a list of paths"),
@@ -455,6 +460,19 @@ class TestManifestKey:
     def test_a_configured_injection_cap_is_kept(self, make_manifest):
         manifest = make_manifest({"version": 1, "guidelines": {"injection": {"max_lines": 12}}})
         assert manifest.get("guidelines.injection.max_lines") == 12
+
+    def test_the_note_cap_defaults_to_280_characters(self, make_manifest):
+        """D13's `guidelines.verdicts.note_max_chars` (A4 increment 1)."""
+        manifest = make_manifest({"version": 1})
+        assert manifest.get("guidelines.verdicts.note_max_chars") == 280
+        assert manifest.source_of("guidelines.verdicts.note_max_chars") == "default"
+
+    def test_a_configured_note_cap_is_kept(self, make_manifest):
+        manifest = make_manifest(
+            {"version": 1, "guidelines": {"verdicts": {"note_max_chars": 1}}}
+        )
+        assert manifest.get("guidelines.verdicts.note_max_chars") == 1
+        assert manifest.source_of("guidelines.verdicts.note_max_chars") == "manifest"
 
 
 # -- the generated checklist (A2 increment 3, DN-B) -----------------------------------

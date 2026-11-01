@@ -51,23 +51,36 @@ nothing written anywhere:
 Every output is decided, scanned and checked before the first write, so a
 refusal leaves the tree as it was. Every refusal is the plan's
 ``RenderRefused``.
+
+The third effect is the verdict submission (A4 increment 1, ADR-012 D5): a
+cited verdict on a judgement guideline, checked by ``core.rules.plan_verdicts``
+against D5's predicates and recorded into the running pipeline's evidence
+through ``PipelineDomain.record_verdicts``. It writes nothing into the tree.
+A submission is recorded whole or refused whole (DN-11), and a refusal is
+``VerdictRefused``, naming each entry's failed predicate and its fix.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ..core import guidelines
 from ..core.rules import (
     BaselineChange,
     BlockRendered,
     RuleContext,
+    VerdictRefused,
     guidelines_relpath,
     plan_baseline,
     plan_render,
+    plan_verdicts,
     ruleset_or_refuse,
 )
+
+if TYPE_CHECKING:
+    from .pipeline import PipelineDomain
 
 
 @dataclass(frozen=True)
@@ -93,13 +106,25 @@ class Shown:
     ruleset: str | None = None
 
 
+@dataclass(frozen=True)
+class VerdictsRecorded:
+    """What one verdict submission recorded."""
+
+    records: tuple[dict, ...] = ()
+    ruleset: str | None = None
+    state: str | None = None
+
+
 class GuidelinesDomain:
-    def __init__(self, ctx: RuleContext) -> None:
+    def __init__(self, ctx: RuleContext, pipelines: PipelineDomain | None = None) -> None:
         #: The rule context carries the host adapter's instruction files,
         #: the default of ``guidelines.instruction_files``; the CLI supplies
         #: them, because no domain imports a host.
         self.ctx = ctx
         self.manifest = ctx.manifest
+        #: Where an accepted verdict is recorded (``GDOM --> PIPELINE``, on
+        #: the ``stats --> session`` precedent). Only the submission needs it.
+        self.pipelines = pipelines
 
     def render(
         self,
@@ -168,6 +193,35 @@ class GuidelinesDomain:
             status=plan.status, written=not dry_run, mode=mode, relpath=plan.relpath,
             ruleset=plan.ruleset, entries=len(plan.entries), changes=plan.changes,
         )
+
+
+    def submit_verdicts(self, submission: Any) -> VerdictsRecorded:
+        """Check a verdict submission and record it whole, or refuse it whole.
+
+        ADR-012 D5 and the A4 rulings. ``submission`` is a decoded list of D5
+        objects; ``guidelines verdict`` builds a list of one. The checks are
+        ``core.rules.plan_verdicts``', the one plan the gate will ask too.
+        Any problem in any entry raises :class:`VerdictRefused` naming every
+        problem per entry, and nothing is recorded (DN-11, ruling 6). The
+        session is the rule context's, resolved by working directory.
+        """
+        session = self.ctx.session
+        if not session or not session.get("id"):
+            raise VerdictRefused([(
+                "pipeline: no session is active here, so a verdict has no pipeline "
+                "to enter; fix: invariant session start <task-name>"
+            )])
+        if self.pipelines is None:
+            raise VerdictRefused([(
+                "pipeline: this guidelines domain was built without the pipeline "
+                "domain a verdict is recorded in; fix: submit through the CLI"
+            )])
+        plan = plan_verdicts(self.ctx, submission)
+        if not plan.ok:
+            raise plan.refusal()
+        records = tuple(record.record() for record in plan.records)
+        self.pipelines.record_verdicts(str(session["id"]), records)
+        return VerdictsRecorded(records=records, ruleset=plan.ruleset, state=plan.state)
 
 
 @dataclass(frozen=True)
