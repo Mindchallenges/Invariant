@@ -669,6 +669,21 @@ ruleset is configured, it warns in every profile (ruling 7), and `doctor`
 prints it as the `guidelines generated` row, which warns on drift and never
 fails the diagnosis. ADR-012 D12 draws where the family sits.
 
+The same plan answers whether the block's standing layer is missing (A5
+increment 4, the A5 ruling D12). The plan carries the ids of the ruleset's
+`always` rules. When there are some and no instruction file holds a
+`guidelines/index` block, `generated_current` adds a note to its detail
+naming the count, the files it looked in and `invariant guidelines render
+--insert guidelines/index`, and does not fail on it: the turn index still
+lists the always rules on every turn. `doctor` prints the same text as a
+`guidelines always layer` row that warns (`core.rules.always_layer_summary`).
+A block that is present counts whatever its state, since a stale or edited
+one is the gate's own finding. With no always rules, with a block present,
+or with a plan that is refused, there is no row and no note. The files are
+the plan's, so `guidelines.instruction_files` or the host adapter's default
+on the rule context; with neither, the fix names that key. The core never
+names a host's file.
+
 The ruleset is pinned on the pipeline at `start` (A2 increment 6), as the
 methodology is. `PIPELINE --> RULES` carries one more name, `ruleset_pin`,
 which reads the ruleset through `load_ruleset` from the tree in hand and
@@ -1213,7 +1228,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set` | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set` | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
@@ -1787,6 +1802,20 @@ statement and no verdict standing (D10). No pipeline lists the always rules
 alone; a landing or abandon state lists nothing. A ruleset that does not load,
 a tree digest that differs from the pin (DN-6), and an exception inside the
 projection are one line each; an exception in the host's own step is silence.
+
+With that, all three of ruling 8's layers are built (ADR-012 D7; A5 closed
+with increment 4):
+
+| Layer | Carries | Where | Decided by | Written by |
+|---|---|---|---|---|
+| Block | the rule index, the `always` rules with their statements | the `guidelines/index` block in each instruction file, rendered by `guidelines render` (A2 increment 4) | `core/rules.plan_render` | `core/guidelines.render_index_block` |
+| Turn | the always rules, then the current state's rules over the session's files, ids and titles | `UserPromptSubmit`, the `SessionStart` greeting and `invariant context` (A5 increment 2) | `core/rules.turn_guidelines` | `core/guidelines.render_turn_index` |
+| Edit | the edit's new pattern and boundary findings, then the statements of the judgement rules the edited file brings into play | `PostToolUse`, after an edit lands (A3 increment 8, A5 increment 3) | `core/rules.edit_advisory`, `edit_guidelines` | `core/guidelines.render_edit` |
+
+All three share the one cap, `guidelines.injection.max_lines`. When the
+ruleset has always rules and no instruction file carries the block, `doctor`
+and `guidelines.generated_current` say so (A5 increment 4), since only the
+turn layer then carries them.
 
 ## Where things live at rest
 

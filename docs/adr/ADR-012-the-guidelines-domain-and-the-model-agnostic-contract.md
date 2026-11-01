@@ -7,8 +7,9 @@
   and each increment's as-built note records what landed. The check-kind
   amendment was accepted the same day, with its own rulings table (DN-A1 to
   DN-A14). A4 closed with increment 8, whose design and three rulings
-  (a to c) are the user's. A5 is built to the user's twelve A5 rulings
-  (D1 to D12, under D7).
+  (a to c) are the user's. A5 closed with increment 4, built to the user's
+  twelve A5 rulings (D1 to D12, under D7): all three layers of ruling 8 are
+  built.
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -2651,6 +2652,51 @@ Built to D7, rulings 8 and 9, D13 and the A5 rulings D4 to D9.
   response with the context built once, and against a real repository
   through `handle`. `tests/test_guidelines.py`: the key's default, a kept
   value beside the default cap, and each refusal.
+
+**As built: A5 increment 4, the always-layer warning, and A5 closed.** Built
+to D3, D7, ruling 8 and the A5 rulings D11 and D12.
+
+- *Status.* A5 is closed. Its four increments are built: selection and
+  `guidelines show --phase` (A5.1), the turn layer (A5.2), the edit layer and
+  `on_edit` (A5.3), and this one. All three of ruling 8's layers stand: the
+  `guidelines/index` block (A2.4), the turn index (A5.2) and what an edit
+  carries (A3.8, A5.3).
+- *One reading, from the render plan.* `RenderPlan` now carries `always`,
+  the ids of the ruleset's `always` rules. `core/rules._always_layer_gap`
+  reads the plan: always rules, and no planned block whose status is other
+  than `absent`, is the gap. A block that is present counts whatever its
+  state, since a stale or edited block is the drift gate's own finding. It
+  answers a message (the count, the files looked in, and that the turn index
+  still lists them on every turn) and a fix,
+  `invariant guidelines render --insert guidelines/index`.
+- *Host-neutral.* The files are the plan's: `guidelines.instruction_files`,
+  or with that key null the host adapter's default, which the CLI already
+  hands every rule context as `RuleContext.host_instruction_files` (A2.5).
+  Nothing in `core/` names `CLAUDE.md`. With no file to look in (the key null
+  and a host kind with no adapter) the message says no instruction file is
+  configured, and the fix names `guidelines.instruction_files` before the
+  render command.
+- *`guidelines.generated_current` notes it (D12).* The note joins the detail,
+  beside the absent blocks a passing verdict already named, and never changes
+  the verdict: a passing rule stays passing. A failing verdict carries it
+  after its own detail, and its fixes are unchanged.
+- *`doctor` warns (D12).* `core.rules.always_layer_summary` is the row's
+  text, or `None` for no row: no ruleset, no always rules, a block present,
+  or a refused plan (the `guidelines generated` row already warns on a
+  refusal, and the `guidelines ruleset` row fails a ruleset that does not
+  load). The row, `guidelines always layer`, warns and never sets the exit
+  code, as the drift row does. `--json` marks it `"ok": true, "warn": true`.
+- *D11.* This repository gets no `CLAUDE.md`. Its ruleset has no always
+  rules, so neither the row nor the note appears here.
+- *Tests.* `tests/test_guidelines_always_layer.py`: the note with one and
+  with several always rules, beside the absent-block detail, none with the
+  block inserted, with a hand-edited block, with no always rules, or with a
+  block in one of several files; the configured files named over the host's;
+  no instruction file at all; a failing verdict that keeps its fixes;
+  `always_layer_summary` for no ruleset, a refused plan, a gap and a present
+  block; and the `doctor` row through `main`, its `--json` warning, the exit
+  code unchanged, and no row with the block, without always rules or
+  without a ruleset.
 
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 

@@ -174,3 +174,19 @@ whitespace-named file is invisible to the gates) and
 [IDEA_038](IDEA_038.md) (a node lexer).
 
 Next: A4 (verdict contract), in design in session c181f22d.
+
+**A5 closed** in session 59bb4d65, in four increments: phase-scoped
+selection and `guidelines show --phase` (ed52faf), the turn layer
+(991fe2a), the edit layer and `guidelines.injection.on_edit` (145e6a5), and
+the always-layer warning with this closure (A5.4). All three layers of
+ADR-012 ruling 8 are built: the managed `guidelines/index` block, the turn
+index, and the statements an edit carries beside its findings. When a
+ruleset has `always` rules and no instruction file carries the block,
+`doctor` warns and `guidelines.generated_current` notes it, both naming
+`invariant guidelines render --insert guidelines/index`.
+
+User rulings: the twelve A5 rulings (D1 to D12), recorded in
+[ADR-012](../adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract.md)
+under D7. Per D11 this repository still has no `CLAUDE.md`, and its ruleset
+has no always rules; revisit when one is added. Subagents get only the edit
+layer until A6 renders the agents (D9).

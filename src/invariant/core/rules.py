@@ -2001,6 +2001,9 @@ class RenderPlan:
     #: The checklist as it will be written.
     text: str
     blocks: tuple[BlockPlan, ...] = ()
+    #: The ids of the ruleset's ``always`` rules, which the block carries in
+    #: full: what the always-layer note counts (A5 ruling D12).
+    always: tuple[str, ...] = ()
 
 
 def plan_render(
@@ -2074,6 +2077,7 @@ def plan_render(
     return RenderPlan(
         status=status, path=path, relpath=rel, ruleset=ruleset.digest, text=text,
         blocks=tuple(blocks),
+        always=tuple(r.id for r in ruleset.rules if "always" in r.phases),
     )
 
 
@@ -2211,6 +2215,64 @@ def _checklist_status(path: Path, rel: str, fmt: str, text: str) -> str:
     return "current" if existing == text else "stale"
 
 
+def _always_layer_gap(plan: RenderPlan) -> tuple[str, str] | None:
+    """``(message, fix)`` when always rules exist and no block carries them.
+
+    The A5 ruling D12. The managed block is where a host reads the always
+    rules as standing instructions, so a ruleset with always rules and no
+    instruction file carrying the block has lost that layer, though the turn
+    index still lists them (A5.2). The files are the plan's, so the manifest's
+    ``guidelines.instruction_files`` or the host default the context carries;
+    nothing here names a host's file. A block that is present counts whatever
+    its state: a stale or hand-edited one is drift, the gate's own finding.
+    ``None`` with no always rules or with a block present.
+    """
+    if not plan.always or any(b.result.status != "absent" for b in plan.blocks):
+        return None
+    name = guidelines_reader.INDEX_BLOCK
+    count = len(plan.always)
+    rules = f"{count} always rule{'' if count == 1 else 's'}"
+    command = f"invariant guidelines render --insert {name}"
+    if not plan.blocks:
+        return (
+            (
+                f"{rules} but no instruction file is configured to carry the {name} "
+                f"block; the turn index still lists them on every turn"
+            ),
+            (
+                f"set guidelines.instruction_files to the project's instruction file, "
+                f"then: {command}"
+            ),
+        )
+    files = ", ".join(b.result.relpath for b in plan.blocks)
+    return (
+        (
+            f"{rules} but no instruction file carries the {name} block ({files}); "
+            f"the turn index still lists them on every turn"
+        ),
+        command,
+    )
+
+
+def always_layer_summary(ctx: RuleContext) -> str | None:
+    """``doctor``'s ``guidelines always layer`` row, ``None`` for no row.
+
+    A warning, never a failure (the A5 ruling D12). No row with no ruleset,
+    with no always rules, with a block present, or when the render plan is
+    refused: that refusal is the ``guidelines generated`` row's warning, and
+    a ruleset that does not load is the ``guidelines ruleset`` row's failure.
+    """
+    try:
+        plan = plan_render(ctx)
+    except RenderRefused:
+        return None
+    gap = None if plan is None else _always_layer_gap(plan)
+    if gap is None:
+        return None
+    message, fix = gap
+    return f"{message}; try: {fix}"
+
+
 @rule(
     "guidelines.generated_current",
     summary="Every generated guidelines output matches what render would write now.",
@@ -2223,7 +2285,9 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
     render plan, so "current" is what ``guidelines render --dry-run`` says. A
     block nobody inserted is no finding: render never inserts one unasked.
     A refusal fails the rule as well, because drift render refuses to fix
-    cannot be fixed by the command this rule points at.
+    cannot be fixed by the command this rule points at. Always rules that no
+    instruction file's block carries are noted in the detail and never fail
+    it (the A5 ruling D12).
     """
     try:
         plan = plan_render(ctx)
@@ -2257,12 +2321,14 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
             edited_block = True
         elif result.status == "absent":
             absent.append(f"no {result.name} block in {result.relpath} (none inserted)")
+    gap = _always_layer_gap(plan)
+    note = [f"{gap[0]}; try: {gap[1]}"] if gap else []
 
     if not findings:
         current = 1 + len(plan.blocks) - len(absent)
         return Verdict.clean(
             f"{current} generated output(s) current against ruleset {plan.ruleset}",
-            detail="; ".join(absent) or None,
+            detail="; ".join(absent + note) or None,
         )
     hand_edited = plan.status == "edited" or edited_block
     fixes = [
@@ -2280,8 +2346,13 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
     return Verdict.fail(
         f"{len(findings)} generated guidelines output(s) not current against ruleset "
         f"{plan.ruleset}: " + "; ".join(findings),
-        detail="The ruleset is the source of every generated output (ADR-012 D3). "
-        "This rule reports; it never renders.",
+        detail=" ".join([
+            (
+                "The ruleset is the source of every generated output (ADR-012 D3). "
+                "This rule reports; it never renders."
+            ),
+            *(f"Also: {line}" for line in note),
+        ]),
         fixes=tuple(fixes),
     )
 

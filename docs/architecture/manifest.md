@@ -252,7 +252,11 @@ pipeline domain and to the oracle's gate cache, because nothing below the CLI
 imports a host, and a host kind with no adapter has none. The drift rule,
 `guidelines.generated_current`, reads both keys through the same render plan
 `guidelines render` writes from, so it judges exactly the outputs render
-would write.
+would write. These files are also where the always-layer warning looks (A5
+increment 4): with `always` rules in the ruleset and no block in any of them,
+`doctor` warns and the drift rule notes it, naming the files and
+`invariant guidelines render --insert guidelines/index`; with no file to look
+in, the fix names this key.
 
 `guidelines.baseline` is the third key of that kind (A3 increment 5,
 ADR-012 D6). It is the ratchet's record: one line per (rule, path,

@@ -27,6 +27,7 @@ from ..core.rules import (
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
     all_rules,
+    always_layer_summary,
     apply_acknowledgements,
     baseline_summary,
     coverage_advisory_exception,
@@ -924,6 +925,14 @@ def cmd_doctor(args) -> int:
         )
         if not generated.ok:
             warned.add("guidelines generated")
+        # Always rules no instruction file's block carries (the A5 ruling D12).
+        # A row only when that is so, and one that warns: the turn index still
+        # lists them on every turn. The files are the rule context's, so the
+        # manifest's or the host adapter's default, never a name kept here.
+        always = always_layer_summary(ctx.rule_context())
+        if always is not None:
+            checks.append(("guidelines always layer", True, always))
+            warned.add("guidelines always layer")
         # The ratchet baseline (ADR-012 D6, A3 increment 5): its counts, or a
         # warning when it cannot be read in full. Never a failure: the gates
         # that read it fail at the landing, and a ruleset that does not load

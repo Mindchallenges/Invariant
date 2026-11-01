@@ -187,6 +187,17 @@ invariant doctor
     and carries `"warn": true` beside `"ok": true` in `--json`; every other
     row carries `"warn": false`.
 
+    The `guidelines always layer` row appears only when the ruleset has
+    `always` rules and no instruction file carries the guidelines/index
+    block (ADR-012, the A5 ruling D12, A5 increment 4). It WARNS, naming how
+    many always rules there are, the instruction files it looked in and the
+    fix, `invariant guidelines render --insert guidelines/index`; with no
+    instruction file configured (guidelines.instruction_files null and a
+    host kind with no default) the fix names that key first. It never
+    fails: the turn index still lists the always rules on every turn. With
+    no ruleset, no always rules, a block present in any instruction file
+    (whatever its state) or a render plan that is refused, there is no row.
+
     The `guidelines baseline` row reads the ratchet baseline the way the
     gates do (ADR-012 D6, A3 increment 5): "no guidelines ruleset
     configured" and "no baseline configured" pass, and a baseline that reads
@@ -1041,7 +1052,11 @@ invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local
     findings, each named by file with `invariant guidelines render` as the
     fix, and `--overwrite-local` for an edited block. An absent block is not
     a finding. Anything this command refuses fails the rule as well. The
-    rule warns in every profile and never renders.
+    rule warns in every profile and never renders. When the ruleset has
+    `always` rules and no instruction file carries the block, its detail
+    says so, with the count, the files and
+    `invariant guidelines render --insert guidelines/index`, and the rule
+    does not fail on that alone (A5 increment 4).
 
     With no ruleset configured it reports "nothing to render" and exits 0
     (ADR-012 D3, "No ruleset, no change"). --json carries status, written,
@@ -1906,6 +1921,22 @@ invariant hook <event>
     PostToolUse additionalContext. The hook still exits zero and never
     denies on that account. The attention sidecar and the SessionStart
     registration stay with the host's project.
+
+    With guidelines.ruleset configured, post-tool-use on an edit tool, once
+    the edit has landed, carries the guidelines edit layer (ADR-012 D7,
+    A3 increment 8 and A5 increment 3) as additionalContext, never as a
+    permission decision: the edited file's new pattern and boundary findings
+    with the baseline applied, then the statements of the judgement rules
+    the current state's phases select for that file (off with
+    guidelines.injection.on_edit false). One cap,
+    guidelines.injection.max_lines, covers both, and its last line names
+    `invariant check guidelines.mechanical_clean`,
+    `invariant guidelines show --phase <role> --files <path>`, or both. An
+    edit outside the session's tree, or one no rule covers, is silent.
+    user-prompt-submit and session-start carry the turn layer, the lines
+    `invariant context` prints (below). The third layer, the
+    guidelines/index block, is `guidelines render`'s; when always rules
+    exist and no instruction file carries it, `doctor` warns.
 
     A payload carrying `invariantProbe: true` is `doctor`'s liveness probe,
     never something a host sends. It is evaluated in full — same rules, same
