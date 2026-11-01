@@ -1207,10 +1207,7 @@ class ClaudeCodeHost:
         if not _SESSION_CLAIM.search(command):
             return
 
-        response = payload.get("tool_response")
-        if isinstance(response, dict):
-            response = response.get("stdout") or response.get("output") or ""
-        session_id = _bind_claimed_session_id(str(response or ""))
+        session_id = _bind_claimed_session_id(_response_text(payload))
         if not session_id:
             return
 
@@ -1358,7 +1355,9 @@ class ClaudeCodeHost:
         # Three facts get recorded here, for the same reason: a gate that reads
         # what happened is a gate that cannot be satisfied by assertion.
         # Reading an architecture doc feeds the docs-first gate; dispatching a
-        # subagent feeds the agent-role gates; and so does being one.
+        # subagent feeds the agent-role gates; and so does being one. A fourth
+        # is recorded for audit and read by no gate: the agent that submitted
+        # a verdict (ADR-012 DN-12).
         tool = str(payload.get("tool_name", ""))
 
         # A session registered through the CLI cannot see the host identifier:
@@ -1391,6 +1390,10 @@ class ClaudeCodeHost:
             self._report_landed_edit(payload, ctx)
 
         self._record_acting_agent(payload, ctx)
+        if tool == "Bash":
+            # After the actor row, and through the same place check: the agent
+            # stamped on a verdict is the agent the actor row would name.
+            self._stamp_verdict_agent(payload, ctx)
 
         if tool in EDIT_TOOLS:
             return self._edit_advisory(payload, ctx)
@@ -1626,6 +1629,45 @@ class ClaudeCodeHost:
         except InvariantError:
             pass
 
+    def _stamp_verdict_agent(self, payload: dict, ctx) -> None:
+        """Stamp the acting agent on the verdicts this shell call recorded.
+
+        ADR-012 DN-12, A4 increment 8. A verdict is recorded by the CLI child
+        of a shell call, and a shell call carries no hook payload, so the CLI
+        cannot know who submitted it. This event can: Claude Code stamps
+        ``agent_type`` on a subagent's own tool calls. It is the
+        `_bind_claimed_session` shape: the call is matched by its command,
+        and the records by the submission's token read out of that command's
+        own output (the user's ruling c), never by a guess about which
+        records are recent.
+
+        The session is placed by `_actor_session`, the check an actor row
+        clears, because the stamp claims the same thing an actor row does:
+        this agent worked here. A main-loop turn names no agent, and a host
+        that cannot name one sends none; either way nothing is stamped and
+        the verdict, already accepted, stands. Silent, like the actor row:
+        evidence for audit is never a reason to fail a completed call.
+        """
+        agent_type = payload.get("agent_type")
+        if not isinstance(agent_type, str) or not agent_type:
+            return
+        tool_input = payload.get("tool_input") or {}
+        command = str(tool_input.get("command", ""))
+        if not _VERDICT_SUBMISSION.search(command):
+            return
+        tokens = _submission_tokens(_response_text(payload))
+        if not tokens:
+            return
+        try:
+            resolution = ctx.resolution_for_payload(payload)
+            session = self._actor_session(resolution, payload, ctx)
+            if session is None:
+                return
+            for token in tokens:
+                ctx.pipelines.stamp_verdict_agent(session.id, token, agent_type)
+        except InvariantError:
+            pass
+
     @staticmethod
     def _actor_session(resolution, payload: dict, ctx):
         """The session this agent is *working in*, or ``None``.
@@ -1753,6 +1795,18 @@ _UNRECORDED_DISPATCH = (
 #: the caller was only looking at. `session status`, `session list`,
 #: `session sync` and `context` all print the same sequence.
 _SESSION_CLAIM = re.compile(r"\binvariant\b[^|;&]*?\bsession\s+(start|resume)\b")
+
+#: The two commands that RECORD verdicts: `invariant guidelines verdict` and
+#: `invariant guidelines verdicts submit`, however reached. `verdicts show`
+#: is a read and is left out, as the claim pattern above leaves out every
+#: session query: `verdict\b` does not match `verdicts`.
+_VERDICT_SUBMISSION = re.compile(
+    r"\binvariant\b[^|;&]*?\bguidelines\s+(?:verdict\b|verdicts\s+submit\b)"
+)
+
+#: The submission token those commands print: `token <hex>` in the text form,
+#: `"token": "<hex>"` under `--json` (`domains/guidelines.new_submission_token`).
+_SUBMISSION_TOKEN = re.compile(r'(?:\btoken |"token":\s*")([0-9a-f]{32})\b')
 
 #: The identifier a claiming command prints. Parsed rather than guessed, so
 #: the binding names the session that command actually created or picked up.
@@ -1899,6 +1953,28 @@ def _override_notice(verdict, record: dict) -> str:
         f"{record.get('reason', 'overridden')} ({tail})\n"
         f"        it would have said: {verdict.verdict.message}"
     )
+
+
+def _response_text(payload: dict) -> str:
+    """A shell call's output, however the host spelled it.
+
+    The tool response is either the text itself or an object holding it as
+    ``stdout`` or ``output``. One reading, for both commands whose output the
+    hook reads: the session claim and the verdict submission.
+    """
+    response = payload.get("tool_response")
+    if isinstance(response, dict):
+        response = response.get("stdout") or response.get("output") or ""
+    return str(response or "")
+
+
+def _submission_tokens(response: str) -> tuple[str, ...]:
+    """Each submission token a verdict command printed, in order, once each.
+
+    Two submissions chained in one call print two, and both are stamped. A
+    refused submission prints none.
+    """
+    return tuple(dict.fromkeys(_SUBMISSION_TOKEN.findall(response or "")))
 
 
 def _bind_claimed_session_id(response: str) -> str | None:

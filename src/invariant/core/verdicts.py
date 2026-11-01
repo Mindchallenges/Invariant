@@ -44,7 +44,8 @@ and :func:`unused_grants` names each grant that passes nothing.
 A refused verdict never enters evidence (ruling 6): a check answers the record
 only when no predicate failed, and names every problem when one did. The
 engine never reads the note (D5, item 6), and no check reads the acting agent
-(D1 item 2, DN-12): :attr:`VerdictRecord.agent` is audit only.
+(D1 item 2, DN-12): :attr:`VerdictRecord.agent` and the submission's
+:attr:`VerdictRecord.token` are audit only.
 """
 
 from __future__ import annotations
@@ -65,7 +66,8 @@ STATUSES = ("pass", "fail", "na")
 OWED_PHASES = frozenset({"review", "landing", "always"})
 #: The role a state must carry for a verdict to be accepted there (DN-2).
 ACCEPTING_ROLE = "review"
-#: Where the CLI's submissions come from. The host's own stamp is A4.8's.
+#: Where the CLI's submissions come from. The acting agent, where the host
+#: can name one, is stamped on afterwards (A4.8), and the surface stays this.
 SURFACE_CLI = "cli"
 
 #: The keys of one submitted object (D5's schema). ``ruleset`` and a
@@ -167,10 +169,12 @@ class VerdictRecord:
     """A verdict the checks accepted, as ``Pipeline.evidence["verdicts"]`` holds it.
 
     No clock time (the record is evidence about the change, not about when it
-    was written). ``agent`` is the extension point DN-12 reserves for A4.8,
-    where the host stamps the acting agent: it is written only when set, so
-    the record keeps its ruled shape until then, and no gate may ever read
-    it (D1 item 2).
+    was written). ``token`` is the submission's: one random value on every
+    record one submission writes, set by ``domains/guidelines`` and printed
+    by the command, so the host can find these records again (A4.8, the
+    user's ruling b). ``agent`` is what the host then stamps there, once
+    (DN-12, ruling a). Each is written only when set, and no gate may ever
+    read either (D1 item 2).
     """
 
     rule: str
@@ -185,6 +189,7 @@ class VerdictRecord:
     state: str
     surface: str
     agent: str | None = None
+    token: str | None = None
 
     def record(self) -> dict[str, Any]:
         recorded: dict[str, Any] = {
@@ -200,6 +205,8 @@ class VerdictRecord:
         }
         if self.agent is not None:
             recorded["agent"] = self.agent
+        if self.token is not None:
+            recorded["token"] = self.token
         return recorded
 
 
@@ -805,7 +812,7 @@ STALE = "stale"
 ENGINE = "engine"
 
 #: The keys of a record the engine writes and a submission may not carry.
-_RECORD_ONLY_KEYS = frozenset({"state", "surface", "agent"})
+_RECORD_ONLY_KEYS = frozenset({"state", "surface", "agent", "token"})
 
 
 @dataclass(frozen=True)
@@ -939,8 +946,8 @@ def owed(ruleset: Ruleset, facts: Facts) -> tuple[Guideline, ...]:
 def resubmitted(record: Mapping[str, Any]) -> tuple[Submitted | None, tuple[Problem, ...]]:
     """A recorded verdict read back as the submission it was, to check again.
 
-    The keys only the engine writes (``state``, ``surface``, ``agent``) are
-    dropped. The recorded ``ruleset`` and blobs stay, so the checks compare
+    The keys only the engine writes (``state``, ``surface``, ``agent``,
+    ``token``) are dropped. The recorded ``ruleset`` and blobs stay, so the checks compare
     them with the tree in hand: that is what makes a drifted ruleset or an
     edited cited file stale.
     """

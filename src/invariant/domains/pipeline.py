@@ -904,6 +904,40 @@ class PipelineDomain:
         self._save(session_id, pipeline)
         return len(records)
 
+    def stamp_verdict_agent(self, session_id: str, token: Any, agent: Any) -> int:
+        """Set the acting agent on the verdicts one submission recorded (A4.8).
+
+        ADR-012 DN-12 and the user's rulings: a host that can name the agent
+        acting in a verdict command reads the submission's ``token`` out of
+        that command's output and passes it here with the agent, an opaque
+        string this never interprets. Every record in
+        ``evidence["verdicts"]`` carrying exactly that token and no agent yet
+        gets it. Set once (ruling a): a record that has an agent keeps it, and
+        nothing else on any record changes. Returns how many were stamped.
+
+        Audit only (D1 item 2): no gate, standing or landing record reads
+        ``agent`` or ``token``. An empty token or agent, no pipeline, or no
+        record carrying the token stamps nothing and writes nothing; none of
+        them is a refusal, because the verdict was accepted already.
+        """
+        if not isinstance(token, str) or not token or not isinstance(agent, str) or not agent:
+            return 0
+        pipeline = self.current(session_id)
+        if pipeline is None:
+            return 0
+        stamped = 0
+        for record in pipeline.evidence.get("verdicts") or ():
+            if (
+                isinstance(record, dict)
+                and record.get("token") == token
+                and record.get("agent") is None
+            ):
+                record["agent"] = agent
+                stamped += 1
+        if stamped:
+            self._save(session_id, pipeline)
+        return stamped
+
     def _fresh_bundle(self, session_id: str, kind: str) -> Path:
         """A per-run result-bundle path, per SESSION and per KIND, never shared.
 

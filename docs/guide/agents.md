@@ -99,6 +99,13 @@ warns *before* the agent starts and names the fix
 (`invariant pipeline start --methodology <m>`). The dispatch still goes ahead.
 Other agents, such as the backlog curator, get no warning.
 
+A judgement verdict records who submitted it, for audit only. When a
+subagent runs `invariant guidelines verdict` or `verdicts submit`, the
+command prints a submission token. The `PostToolUse` hook reads that token
+and stamps the agent's name on those verdicts, once. A verdict you submit
+yourself from the main conversation carries no agent. No gate reads the
+agent, so who submitted a verdict never changes whether it counts.
+
 ## Keeping them current, and making them yours
 
 Library agents are **managed** files: the frontmatter carries a digest of

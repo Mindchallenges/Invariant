@@ -499,6 +499,14 @@ names a **live** binding only, so a spent one goes straight through to
 kept. What the hook owes is the half the CLI could not do, which is *which*
 host session claimed it, and nothing more.
 
+The verdict commands are the second place a command's output links a shell
+call to what it wrote (ADR-012 A4 increment 8, ruling c). `invariant
+guidelines verdict` and `verdicts submit` print the submission's token. The
+hook reads it from `tool_response` (`_response_text`, the one reading both
+use) and stamps the acting agent on the records carrying it. The command
+pattern is narrow for the reason the claim's is: `verdicts show` is a read
+and is not matched.
+
 The one other thing that call carries is the handoff claim. A host launched by
 `session handoff` inherits `INVARIANT_HANDOFF`, and the same PostToolUse that
 binds its first `start` or `resume` passes that token to
@@ -1051,7 +1059,9 @@ one invalid entry enters nothing (DN-11). One entry:
   "note": "close() runs before the next open on every path",
   "ruleset": "5be0c2d91f7a",
   "state": "reviewing",
-  "surface": "cli"
+  "surface": "cli",
+  "token": "<32 hex digits, one per submission>",
+  "agent": "compliance-reviewer"
 }
 ```
 
@@ -1071,9 +1081,42 @@ one invalid entry enters nothing (DN-11). One entry:
   position. A later verdict on a rule is appended beside the earlier one.
   The latest answers the rule at the gate; an earlier one is never brought
   back over a latest one gone stale (A4 increment 3).
-- **`agent`** is reserved for A4 increment 8, where the host stamps the
-  acting agent (DN-12). It is absent until then, never read by a gate, and
-  needs no migration: a record without it loads unchanged.
+- **Append-only, with one set-once exception.** No record is rewritten or
+  removed, except that the host may set `agent` once on a record that has
+  none (the user's A4.8 ruling a). Nothing else on a record ever changes.
+- **`token`** is the submission's: 32 random hex digits, the same on every
+  record one accepted submission wrote, and printed by the command (A4
+  increment 8). The engine owns it, so a submission naming it is refused as
+  an unknown key (ruling b). A record written before A4.8 has none.
+- **`agent`** is the acting agent, stamped by the host after the command
+  returns (DN-12, A4 increment 8). The verdict command runs through a shell,
+  and a shell call carries no hook payload, so the CLI cannot see who
+  submitted it. The host's `PostToolUse` sees `agent_type`. For a verdict
+  command, it reads the token out of the command's own output (ruling c,
+  the same link the host binding below uses) and calls
+  `PipelineDomain.stamp_verdict_agent(session, token, agent)`. The session
+  is placed by the check an actor row clears. The stamp lands only on
+  records carrying that token with no agent yet, and never overwrites. A
+  main-loop turn, or a host that cannot name the agent, stamps nothing, and
+  the verdict stands as accepted.
+- **Audit only.** No gate, standing, staleness check or landing record reads
+  `agent` or `token` (D1 item 2). The gate's re-check drops both with
+  `state` and `surface`. `invariant pipeline status --json` prints them.
+  Neither needs a migration: a record without them loads unchanged.
+
+```mermaid
+sequenceDiagram
+    participant A as subagent (Bash)
+    participant C as invariant CLI
+    participant P as pipeline evidence
+    participant H as PostToolUse hook
+    A->>C: invariant guidelines verdict ...
+    C->>P: record_verdicts (each record carries the token)
+    C-->>A: recorded 1 verdict (..., token <hex>)
+    H->>H: agent_type on the payload, verdict command, token in the output
+    H->>H: _actor_session (the actor row's place check)
+    H->>P: stamp_verdict_agent(session, token, agent), set once
+```
 
 `invariant guidelines verdicts show` reads the list and writes nothing (A4
 increment 4): it prints the standing the gate reads for each owed rule, and

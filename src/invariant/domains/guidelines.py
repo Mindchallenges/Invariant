@@ -57,7 +57,12 @@ cited verdict on a judgement guideline, checked by ``core.rules.plan_verdicts``
 against D5's predicates and recorded into the running pipeline's evidence
 through ``PipelineDomain.record_verdicts``. It writes nothing into the tree.
 A submission is recorded whole or refused whole (DN-11), and a refusal is
-``VerdictRefused``, naming each entry's failed predicate and its fix.
+``VerdictRefused``, naming each entry's failed predicate and its fix. An
+accepted submission puts one random token on every record it writes and
+returns it, so a host that can name the acting agent can find those records
+again from the command's output and stamp the agent on them (A4 increment 8,
+the user's rulings a to c). The token is the engine's alone: a submitter
+naming it is refused as an unknown key.
 
 It also shows how the verdicts stand without writing anything (A4 increment
 4): ``verdict_standings`` returns ``core.rules.read_standings``, the read
@@ -67,7 +72,8 @@ disagree.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import secrets
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -121,6 +127,20 @@ class VerdictsRecorded:
     records: tuple[dict, ...] = ()
     ruleset: str | None = None
     state: str | None = None
+    #: The submission's token, on every record above (A4.8). The command
+    #: prints it, and a host that can name the acting agent reads it back
+    #: out of that output to stamp these records.
+    token: str | None = None
+
+
+def new_submission_token() -> str:
+    """One submission's token: 32 lowercase hex digits, unguessable (A4.8).
+
+    Random rather than derived, so a call that did not make the submission
+    cannot compute it, and a host stamping the agent finds exactly the
+    records one command wrote.
+    """
+    return secrets.token_hex(16)
 
 
 class GuidelinesDomain:
@@ -226,9 +246,12 @@ class GuidelinesDomain:
         plan = plan_verdicts(self.ctx, submission)
         if not plan.ok:
             raise plan.refusal()
-        records = tuple(record.record() for record in plan.records)
+        token = new_submission_token()
+        records = tuple(replace(record, token=token).record() for record in plan.records)
         self.pipelines.record_verdicts(str(session["id"]), records)
-        return VerdictsRecorded(records=records, ruleset=plan.ruleset, state=plan.state)
+        return VerdictsRecorded(
+            records=records, ruleset=plan.ruleset, state=plan.state, token=token
+        )
 
     def verdict_standings(self) -> StandingsRead:
         """How each judgement guideline the change owes a verdict stands, as

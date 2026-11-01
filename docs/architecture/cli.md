@@ -1234,8 +1234,20 @@ invariant guidelines verdicts submit <file.json>
     Accepted verdicts are appended to the pipeline's evidence["verdicts"]
     (state_model.md), each with its citations' blobs (the cited file's
     digest in the tree), the pinned ruleset digest, the state and surface
-    "cli", and no clock time. Nothing is written into the tree. --json
-    carries recorded (the records), ruleset and state.
+    "cli", the submission's token, and no clock time. Nothing is written
+    into the tree. The text's first line is "recorded N verdicts (ruleset
+    <digest>, state <state>, token <hex>)". --json carries recorded (the
+    records), ruleset, state and token.
+
+    The token is 32 random hex digits, one per accepted submission, on
+    every record it wrote (A4 increment 8). It is the engine's: an object
+    naming token, like one naming agent, state or surface, is refused as
+    an unknown key. Its only reader is the host. A host that can name the
+    agent acting in the call (Claude Code's agent_type, on a subagent's
+    own shell calls) reads the token out of this output after the command
+    returns and stamps that agent on the records, once. A main-loop call
+    is not stamped. No gate reads the agent or the token (ADR-012 DN-12);
+    pipeline status --json prints both.
 
 invariant guidelines verdicts show
     Show what guidelines.verdicts_complete sees over the change in hand

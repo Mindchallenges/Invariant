@@ -6,7 +6,8 @@
   (ruling 5, D6). A1–A8 build it in the order the consumption table gives,
   and each increment's as-built note records what landed. The check-kind
   amendment was accepted the same day, with its own rulings table (DN-A1 to
-  DN-A14).
+  DN-A14). A4 closed with increment 8, whose design and three rulings
+  (a to c) are the user's.
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -1664,8 +1665,11 @@ yet: `guidelines.verdicts_complete` is increment 3.
   question.
 - *DN-12's extension point.* `VerdictRecord.agent` is optional and `None`
   in this increment. It is written only when set, so the record keeps its
-  ruled shape until increment 8 sets it, and no record is reshaped then. No
-  check reads it.
+  ruled shape until increment 8 sets it. No check reads it. *Amended by
+  increment 8:* the record is reshaped once after all. The user ruled that
+  the host may set `agent` once on an otherwise append-only record (ruling
+  a), and each record also carries the submission's `token` (ruling b). See
+  "As built: A4 increment 8".
 - *The manifest.* `guidelines.verdicts` is accepted, with one key,
   `note_max_chars`, default 280. `injection.on_edit` is still refused by
   name.
@@ -1683,7 +1687,7 @@ yet: `guidelines.verdicts_complete` is increment 3.
   - A submitted object may carry `ruleset` and a citation's `blob`, as D5's
     example does, and each must equal what the engine records. `state`,
     `surface` and `agent` are the engine's alone and are refused as unknown
-    keys.
+    keys, and so is `token` since increment 8 (ruling b).
   - One rule answered twice in one submission is refused at its second
     entry. A submission that is not a list, or is empty, is refused whole.
     A null `citations` or `tests` is refused rather than read as an empty
@@ -1933,7 +1937,8 @@ guidelines commands.
     predicate (DN-2), so the standing does not depend on where the pipeline
     is.
   - It does not show `agent` (DN-12). Nothing sets it before increment 8,
-    and showing it is not owed; no logic reads it.
+    and showing it is not owed; no logic reads it. Increment 8 sets it and
+    still does not show it here.
 - *Boy-Scout, the gate's fix for an edited citation.* At the gate a cited
   file whose blob changed was named with submission's fix, "leave the blob
   out; the engine records it", which is wrong advice for a recorded verdict.
@@ -2222,6 +2227,118 @@ these scenarios is left where that table and D1 item 2 put it, with A7.
   in order, the whole's predicates and `PREDICATES`, and
   `tests/test_guidelines_domain.py` the `--json` refusal document through
   `main` for each kind of refusal, and that the text form prints none.
+
+**As built: A4 increment 8, the host stamps the acting agent.** Built to
+DN-12, D1 items 1 and 2, D5 ("The gate") and the user's design ruling for the
+increment (Option A below). It closes A4: all eight increments on the
+session's plan have landed.
+
+- *The problem.* A verdict is recorded in the CLI child of a shell call, and
+  a shell call carries no hook payload, so the CLI cannot see who submitted
+  it. Only the hooks know `agent_type`, which Claude Code stamps on every
+  `PreToolUse` and `PostToolUse` payload, a subagent's own shell calls
+  included. The environment cannot carry it: a subagent shares its parent's
+  environment, and a command prefix could forge it.
+- *The design, chosen by the user (Option A).* Three others were rejected: a
+  pending actor left by `PreToolUse` (B), rewriting the command's
+  environment (C), and reading transcripts (D).
+  - Each accepted submission puts one random token on every record it
+    writes and prints it.
+  - The `PostToolUse` hook reads the token back out of the command's output
+    for a verdict command whose payload names the agent. It places the
+    session as an actor row is placed and asks the pipeline domain to stamp
+    the agent.
+  - The stamp is set once, only where the token matches and no agent is
+    recorded yet.
+  - It is host-neutral: core and the domain take an opaque agent string, and
+    a host without `agent_type` stamps nothing.
+- *The user's rulings for this increment.*
+
+  | # | Question | Ruling |
+  |---|---|---|
+  | a | May a host set a field on the append-only verdict record? | Yes: a set-once host stamp of `agent` is allowed on an otherwise append-only record. It never overwrites. This amends increment 1's "no record is reshaped" and state_model.md's matching sentence. |
+  | b | Who owns the token? | The engine. The per-submission token is an engine-owned key, and a submitter supplying the token or the agent is still refused under the unknown-key rule. |
+  | c | What links a shell call to the records it wrote? | The command's output, as the session binding already uses it (`_bind_claimed_session`). |
+
+- *The token (`domains/guidelines`, `core/verdicts`).*
+  `GuidelinesDomain.submit_verdicts` asks `new_submission_token`, which is
+  `secrets.token_hex(16)` (32 lowercase hex digits), once per accepted
+  submission. It sets the token on every `VerdictRecord` the plan accepted,
+  so one bulk submission has one token. `VerdictsRecorded.token` returns it.
+  `core/verdicts` stays pure. `VerdictRecord.token` is a field written only
+  when set, and `token` joins `state`, `surface` and `agent` as a key the
+  engine writes and `resubmitted` drops. The gate's re-check therefore never
+  sees it, and a submitted `token` is an unknown key (ruling b). A refused
+  submission has no token and prints none.
+- *The output (the CLI).* The text line is now `recorded N verdicts
+  (ruleset <digest>, state <state>, token <hex>)`, and `--json` adds a
+  top-level `token`, which each record in `recorded` also carries. This
+  spelling is a contract with the host's reader, and a test feeds the real
+  command's output, text and JSON, to the reader.
+- *The stamp (`domains/pipeline.stamp_verdict_agent(session, token,
+  agent)`).* Every record in the current pipeline's `evidence["verdicts"]`
+  carrying exactly that token, with no `agent` or a null one, gets the agent.
+  Nothing else on any record changes. A record that already has an agent
+  keeps it (ruling a). It returns the count and saves only when it stamped.
+  An empty or non-string token or agent, no pipeline, no verdicts, or no
+  matching record stamps nothing, writes nothing and raises nothing: the
+  verdict was accepted already.
+- *The hook (`hosts/claude_code`).* `_post_tool_use` calls
+  `_stamp_verdict_agent` for a `Bash` call, after `_record_acting_agent`. It
+  acts only when:
+  - the payload's `agent_type` is a non-empty string;
+  - the command matches `_VERDICT_SUBMISSION`, which is `invariant
+    guidelines verdict` or `invariant guidelines verdicts submit` reached
+    through any `cd ... &&`, and never `verdicts show`;
+  - the output holds a token (`_submission_tokens`, every distinct token in
+    order, so two submissions chained in one call are both stamped).
+
+  The session is `_actor_session` over `resolution_for_payload`, the place
+  check an actor row clears. A guessed route stamps nothing. On the host
+  route, an isolated session is stamped only when the call lands in its
+  worktree. An unplaced cross-project call returns before this, as for every
+  other record. An `InvariantError` is swallowed. `_response_text` is now
+  the one reading of a shell call's output, shared with
+  `_bind_claimed_session`. Nothing is added to `NORMALISED_PAYLOAD_KEYS`:
+  `agent_type` is already there, and `tool_response` is read only inside
+  `hosts/`, as the session claim reads it.
+- *DN-12 and D1 item 2.* No gate, check, standing, staleness test or landing
+  decision reads `agent` or `token`. A test pins three things equal across
+  records with neither, an agent, a token, and both: the gate's verdict,
+  `read_standings`, and `guidelines_landing` built from that verdict. It
+  does so for a current pass, a current fail and a missing verdict. The
+  landing record copies neither, and `guidelines verdicts show` shows
+  neither. `invariant pipeline status --json` prints them with the rest of
+  the evidence, which is where an audit reads them. No model identity or
+  capability tier is recorded (A7).
+- *Readings taken where the rulings are silent.*
+  - *A main-loop submission stays unstamped.* A main-loop turn names no
+    agent. A later call cannot stamp it either, because it would need the
+    token, which only that command printed.
+  - *The output link is trusted as far as ruling (c) trusts it.* A call
+    that prints another submission's token from a verdict command could
+    stamp that submission, if that submission is still unstamped. The token
+    is unguessable and printed only to the submitting call, so this needs
+    the token in hand. The stamp is audit only, so it can mislead a reader
+    but can change no gate.
+  - *Only the current pipeline is stamped.* The `PostToolUse` event brackets
+    the command that recorded into it.
+- *Tests.* `tests/test_guidelines_verdict_agent.py` covers:
+  - the record (the token written only when set, both keys dropped when read
+    back, both refused from a submitter);
+  - the token through `main` (one per submission, distinct across two, in
+    the text and `--json`, absent on a refusal, and parsed back by the host
+    from the real output);
+  - `stamp_verdict_agent` (matching records only, set once, a null agent,
+    nothing else changed, an unknown token, empty inputs, no pipeline, no
+    verdicts, a non-object record);
+  - the token reader;
+  - the hook through `_post_tool_use` and `_stamp_verdict_agent` with
+    fixture payloads only: text, JSON and both response spellings, two
+    tokens, no or a malformed agent, other commands, no token, a guessed
+    session, a domain refusal, the actor row beside it, an unplaced call,
+    and the worktree place check;
+  - the DN-12 pin.
 
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 

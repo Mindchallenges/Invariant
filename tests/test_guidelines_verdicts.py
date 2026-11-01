@@ -218,7 +218,7 @@ class TestTheRecord:
         assert len(citation.blob) == 12
 
     def test_the_agent_is_an_extension_point_written_only_when_set(self):
-        """DN-12: A4.8 stamps the acting agent; the record carries no key until then."""
+        """DN-12: the host stamps the acting agent later (A4.8); the check sets none."""
         record = checked(sub(citations=(cite(),))).record
         assert record.agent is None and "agent" not in record.record()
         stamped = verdicts.VerdictRecord(**{**record.__dict__, "agent": "reviewer"})

@@ -3414,6 +3414,11 @@ def _submit_verdicts(args, submission) -> int:
     The session is resolved by working directory, like every command an
     agent calls (BUG_082 is why it is not by hook payload); the domain
     refuses without one, and the plan without a running pipeline.
+
+    Both forms print the submission's token, ``token <hex>`` in the text
+    and ``token`` under ``--json``. That output is the link a host reads to
+    stamp the acting agent on these records (A4.8, ruling c), so its
+    spelling is a contract with ``hosts/claude_code._submission_tokens``.
     """
     from ..domains.guidelines import GuidelinesDomain
 
@@ -3426,7 +3431,7 @@ def _submit_verdicts(args, submission) -> int:
     lines = [
         (
             f"recorded {len(result.records)} {noun} (ruleset {result.ruleset}, "
-            f"state {result.state})"
+            f"state {result.state}, token {result.token})"
         ),
         *(f"  {r['rule']} {r['status']}" for r in result.records),
     ]
@@ -3434,6 +3439,7 @@ def _submit_verdicts(args, submission) -> int:
         "recorded": list(result.records),
         "ruleset": result.ruleset,
         "state": result.state,
+        "token": result.token,
     }, "\n".join(lines))
 
 
