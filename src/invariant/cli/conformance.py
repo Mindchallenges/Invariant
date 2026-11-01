@@ -5,9 +5,11 @@ replay seeds a fresh repository from the scenario's ``tree/``, writes the
 scenario's manifest into it, commits it, and runs the steps in order: a
 ``cli`` step through ``invariant.cli.main.main``, a ``hook`` step as
 ``invariant hook <event>`` with its payload on stdin, a ``write`` step as a
-file write, and a ``commit`` step as ``git add -A`` and a commit. What the CLI
-printed is reduced by ``core/conformance`` to an outcome; nothing here judges
-a gate.
+file write, a ``commit`` step as ``git add -A`` and a commit, and a
+``verdicts`` step as ``invariant guidelines verdicts submit`` over its
+entries, written as JSON beside the repository so the submission file is
+never part of the change it answers for. What the CLI printed is reduced by
+``core/conformance`` to an outcome; nothing here judges a gate.
 
 It lives in ``cli/`` and not in ``core/`` because it drives the CLI, and
 ``core/`` knows nothing about the CLI. The CLI itself is a parameter, so a
@@ -86,10 +88,11 @@ def replay(scenario: Scenario, *, workdir: Path, run: Cli | None = None) -> Repl
     results: list[StepResult] = []
     with _isolated(home, gitconfig):
         _seed(scenario, repo)
-        for step in scenario.steps:
+        for position, step in enumerate(scenario.steps, start=1):
             cwd = repo if step.where == "root" else _worktree(scenario, repo)
             os.chdir(cwd)
-            results.append(_run_step(step, run, repo, cwd))
+            submission = workdir / "submissions" / f"{position}.json"
+            results.append(_run_step(step, run, repo, cwd, submission))
     return Replay(outcome=reduce(results), steps=tuple(results))
 
 
@@ -162,7 +165,9 @@ def _fill(value: Any, places: Mapping[str, str]) -> Any:
     return value
 
 
-def _run_step(step: Step, run: Cli, repo: Path, cwd: Path) -> StepResult:
+def _run_step(step: Step, run: Cli, repo: Path, cwd: Path, submission: Path) -> StepResult:
+    """One step. ``submission`` is where a ``verdicts`` step writes its
+    entries: outside the repository, one file per step."""
     places = {"root": str(repo), "worktree": str(cwd)}
     if step.kind == "write":
         target = cwd / step.path
@@ -176,6 +181,12 @@ def _run_step(step: Step, run: Cli, repo: Path, cwd: Path) -> StepResult:
     if step.kind == "hook":
         argv = ["hook", step.event]
         stdin = json.dumps(_fill(dict(step.payload), places))
+    elif step.kind == "verdicts":
+        submission.parent.mkdir(parents=True, exist_ok=True)
+        entries = [_fill(entry, places) for entry in step.entries]
+        submission.write_text(json.dumps(entries), encoding="utf-8")
+        argv = ["--json", "guidelines", "verdicts", "submit", str(submission)]
+        stdin = ""
     else:
         argv = ["--json", *_fill(list(step.argv), places)]
         stdin = ""

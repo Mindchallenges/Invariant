@@ -214,15 +214,15 @@ class GuidelinesDomain:
         """
         session = self.ctx.session
         if not session or not session.get("id"):
-            raise VerdictRefused([(
+            raise VerdictRefused.precondition(
                 "pipeline: no session is active here, so a verdict has no pipeline "
                 "to enter; fix: invariant session start <task-name>"
-            )])
+            )
         if self.pipelines is None:
-            raise VerdictRefused([(
+            raise VerdictRefused.precondition(
                 "pipeline: this guidelines domain was built without the pipeline "
                 "domain a verdict is recorded in; fix: submit through the CLI"
-            )])
+            )
         plan = plan_verdicts(self.ctx, submission)
         if not plan.ok:
             raise plan.refusal()

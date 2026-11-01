@@ -1,0 +1,117 @@
+description: >
+  The engine's own N/A answers a judgement rule, and a fail recorded on it is
+  set aside (ADR-012 D5 item 5, the user's A4.3 ruling). The change edits
+  only the comment above the answer, so the blocker judgement rule
+  app.answer-is-stable is met through app.py but its mechanical condition
+  no-executable-change holds. In review a fail is submitted, cited on the
+  comment line the change added. It is accepted, as a pass or fail on such a
+  rule is, but the engine's answer stands over it: the rule is answered by
+  the engine, the fail is set aside and never counted, and under the strict
+  profile guidelines.verdicts_complete passes the landing. Coverage skips,
+  because the change alters no code a coverage run could measure.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+  enforcement: {profile: strict}
+  guidelines: {ruleset: docs/guidelines/ruleset.yaml}
+
+steps:
+  - kind: write
+    path: app.py
+    content: |
+      # The answer.
+      def answer():
+          return 42
+  - {kind: commit, message: the application answers 42}
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: feature-architect}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      # The answer, explained.
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [guidelines, render]}
+  - {kind: cli, in: worktree, argv: [pipeline, test]}
+  - {kind: cli, in: worktree, argv: [pipeline, coverage]}
+  - {kind: commit, in: worktree, message: "the answer, explained"}
+  - id: set-aside
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, fail,
+           --cite, app.py, "1", "1"]
+  - {id: standing, kind: cli, in: worktree, argv: [guidelines, verdicts, show]}
+  - {id: land, kind: cli, in: worktree, argv: [pipeline, advance, committed]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: pass}
+    reviewing: {test.all_pass: pass}
+    committed:
+      test.all_pass: pass
+      coverage.meets_floor: skip
+      privacy.clean: pass
+      docs.updated: pass
+      docs.diagrams_current: pass
+      agents.design_agent_ran: pass
+      agents.review_agent_ran: pass
+      guidelines.ruleset_valid: pass
+      guidelines.generated_current: pass
+      guidelines.mechanical_clean: pass
+      guidelines.verdicts_complete: pass
+  verdicts:
+    standing: {app.answer-is-stable: engine}
+  refusals: {}

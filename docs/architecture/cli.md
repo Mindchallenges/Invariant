@@ -1218,6 +1218,19 @@ invariant guidelines verdicts submit <file.json>
     integer); one rule answered twice. A bulk submission with any invalid
     entry records none of them (DN-11).
 
+    Under --json a refusal still prints a document (A4 increment 7):
+    {recorded: [], refused: [{entry, rule, predicate, problem}]}, one
+    object per line of the refusal, in its order. predicate is one of
+    core/verdicts.PREDICATES: P1 to P6, shape for a shape problem, pipeline
+    for a refusal of the whole with nothing to check against (no session,
+    no running pipeline, no ruleset, a ruleset that does not load, a
+    pipeline that moved), and submission for a file that cannot be read or
+    is not JSON. entry counts from 1 and is null, with rule, for a problem
+    of the whole; rule is null for an entry that names none. problem is the
+    line the text form prints. A host, a script or the conformance harness
+    reads which predicate failed from here, never from the prose. The exit
+    is still 1.
+
     Accepted verdicts are appended to the pipeline's evidence["verdicts"]
     (state_model.md), each with its citations' blobs (the cited file's
     digest in the tree), the pinned ruleset digest, the state and surface

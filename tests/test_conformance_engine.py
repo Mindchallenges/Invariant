@@ -47,13 +47,21 @@ SHIPPED = [
     "baselined",
     "clean",
     "docs-first-breach",
+    "engine-answers",
     "fixed-not-pruned",
+    "judgement-fail",
+    "judgement-fail-standard",
     "malformed-ruleset",
     "missing-test",
     "red-first-breach",
     "seeded-pattern",
+    "stale-verdict",
+    "vague-verdict",
     "valid-ruleset",
 ]
+
+#: The judgement rule the verdict scenarios owe a verdict (A1 increment 4).
+STABLE = "app.answer-is-stable"
 
 
 # -- the known answers ------------------------------------------------------
@@ -196,6 +204,106 @@ def test_a_missing_test_blocks_naming_the_rule_and_file(tmp_path):
     assert "tests/test_app.py" in record["fix"]
 
 
+# -- the verdict contract (A1 increment 4, A4 increment 7) -------------------------------
+
+
+def labelled(result) -> dict:
+    return {step.label: step for step in result.steps}
+
+
+def landings(result) -> list:
+    """The landing records ``pipeline status`` printed at the step labelled record."""
+    return labelled(result)["record"].document["evidence"]["guidelines_landings"]
+
+
+def standing_of(record: dict, rule: str) -> dict:
+    (gate,) = [g for g in record["gates"] if g["rule"] == "guidelines.verdicts_complete"]
+    (standing,) = [s for s in gate["standings"] if s["rule"] == rule]
+    return standing
+
+
+def test_a_vague_verdict_is_refused_naming_its_predicate_and_records_nothing(tmp_path):
+    """ADR-012 D5, "What vague means", and D11's vague verdict: each vague
+    answer is refused at submission naming the predicate it fails, the bulk
+    file is refused whole (DN-11), nothing is recorded, so the rule stands
+    missing, and the strict profile's verdicts_complete refuses the landing."""
+    result = replay(load_named("vague-verdict"), workdir=tmp_path)
+    steps = labelled(result)
+    refused = [label for label, step in steps.items() if step.argv[1:3] in (
+        ("guidelines", "verdict"), ("guidelines", "verdicts"))
+        and "show" not in step.argv]
+    assert len(refused) == 10
+    for label in refused:
+        assert steps[label].exit_code == 1, label
+        assert steps[label].document["recorded"] == [], label
+    (bulk,) = steps["bulk"].document["refused"]
+    assert (bulk["entry"], bulk["rule"], bulk["predicate"]) == (2, "app.answer-is-fast", "P1")
+    (diff,) = steps["outside-the-diff"].document["refused"]
+    assert (diff["entry"], diff["rule"]) == (1, STABLE)
+    assert result.outcome.verdicts == {"standing": {STABLE: "missing"}}
+    assert result.outcome.refusals["land"] == ("guidelines.verdicts_complete",)
+    (gate,) = [g for g in steps["land"].document["gates"]
+               if g["rule"] == "guidelines.verdicts_complete"]
+    assert f"{STABLE}: no verdict" in gate["message"]
+
+
+def test_a_judgement_fail_at_blocker_refuses_a_strict_landing_and_a_forced_one_keeps_it(
+        tmp_path):
+    """D11's judgement fail, under strict: the cited fail is accepted and
+    current, blocks the landing, and the forced landing's record (A4.6)
+    keeps the fail as the gate decided it."""
+    result = replay(load_named("judgement-fail"), workdir=tmp_path)
+    steps = labelled(result)
+    assert steps["fail"].exit_code == 0
+    assert result.outcome.verdicts == {"standing": {STABLE: "fail"}}
+    assert result.outcome.refusals == {"land": ("guidelines.verdicts_complete",)}
+    assert steps["forced"].exit_code == 0
+    (record,) = landings(result)
+    assert record["forced"] is True and record["to"] == "committed"
+    standing = standing_of(record, STABLE)
+    assert (standing["standing"], standing["status"], standing["blocks"]) == (
+        "current", "fail", True)
+
+
+def test_a_judgement_fail_at_blocker_warns_a_standard_landing_and_is_kept(tmp_path):
+    """The same fail under the standard profile: the gate warns, the landing
+    goes through unforced, and its record still keeps the fail."""
+    result = replay(load_named("judgement-fail-standard"), workdir=tmp_path)
+    assert result.outcome.gates["committed"]["guidelines.verdicts_complete"] == "warn"
+    assert result.outcome.refusals == {}
+    (record,) = landings(result)
+    assert record["forced"] is False
+    standing = standing_of(record, STABLE)
+    assert (standing["standing"], standing["status"]) == ("current", "fail")
+
+
+def test_a_verdict_goes_stale_when_its_cited_file_changes(tmp_path):
+    """D5, "Staleness": a current pass goes stale once the cited file's blob
+    changes, naming P3, and stale is missing at the strict landing."""
+    result = replay(load_named("stale-verdict"), workdir=tmp_path)
+    steps = labelled(result)
+    assert result.outcome.verdicts == {
+        "fresh": {STABLE: "pass"}, "edited": {STABLE: "stale"}}
+    (owed,) = steps["edited"].document["owed"]
+    assert [p["predicate"] for p in owed["problems"]] == ["P3"]
+    assert result.outcome.refusals == {"land": ("guidelines.verdicts_complete",)}
+
+
+def test_the_engines_na_answers_the_rule_and_sets_a_recorded_fail_aside(tmp_path):
+    """D5 item 5 and the user's A4.3 ruling: on a comment-only change the
+    mechanical N/A holds, so the engine answers the rule, the cited fail
+    recorded on it is set aside and never counted, and the strict landing
+    passes the gate."""
+    result = replay(load_named("engine-answers"), workdir=tmp_path)
+    steps = labelled(result)
+    assert steps["set-aside"].exit_code == 0
+    assert result.outcome.verdicts == {"standing": {STABLE: "engine"}}
+    (owed,) = steps["standing"].document["owed"]
+    assert owed["set_aside"] == "fail"
+    assert result.outcome.gates["committed"]["guidelines.verdicts_complete"] == "pass"
+    assert result.outcome.refusals == {}
+
+
 @pytest.mark.parametrize("name", SHIPPED)
 def test_a_replay_matches_the_known_answer(name, tmp_path):
     scenario = load_named(name)
@@ -321,6 +429,38 @@ def test_replay_seeds_the_tree_runs_steps_and_reduces(tmp_path, monkeypatch):
     assert log[:2] == ["step", "scenario tree"]
 
 
+def test_a_verdicts_step_submits_its_entries_from_a_file_outside_the_tree(tmp_path):
+    """The bulk form (D5, DN-11) driven host-neutrally: the entries are
+    written as JSON beside the replay, never into the seeded repository, and
+    handed to ``guidelines verdicts submit``."""
+    entries = [{"rule": "r.one", "status": "pass",
+                "citations": [{"path": "a.py", "lines": [1, 1]}], "note": "{root}"}]
+    root = write_scenario(
+        tmp_path / "s",
+        body([{"kind": "verdicts", "id": "bulk", "entries": entries},
+              {"kind": "verdicts", "entries": [7, "{worktree}"]}]),
+    )
+    seen: list[object] = []
+
+    def submit(argv):
+        seen.append(json.loads(Path(argv[-1]).read_text(encoding="utf-8")))
+        print(json.dumps({"recorded": []}))
+        return 0
+
+    result = replay(load(root), workdir=tmp_path / "w", run=submit)
+    first, second = result.steps
+    assert first.argv[:4] == ("--json", "guidelines", "verdicts", "submit")
+    written = Path(first.argv[4])
+    assert written.parent == tmp_path / "w" / "submissions"
+    assert Path(second.argv[4]) != written
+    sandbox = tmp_path / "w" / "repo"
+    assert seen[0] == [{**entries[0], "note": str(sandbox)}]
+    # An entry of the wrong shape is submitted as written: the engine refuses it.
+    assert seen[1] == [7, str(sandbox)]
+    assert not (sandbox / written.name).exists()
+    assert result.outcome.refusals == {}
+
+
 def test_a_worktree_step_with_no_worktree_is_refused(tmp_path):
     root = write_scenario(tmp_path / "s", body([{"kind": "commit", "in": "worktree"}]))
     with pytest.raises(ScenarioError, match="no session worktree"):
@@ -405,7 +545,7 @@ def test_an_unknown_scenario_name_is_refused():
          "unregistered rule"),
         (lambda b: b["expect"]["gates"].update(red={"privacy.clean": "fine"}), "status"),
         (lambda b: b["expect"]["refusals"].update(ghost=["privacy.clean"]), "no step"),
-        (lambda b: b["expect"].update(verdicts={}), "unknown key"),
+        (lambda b: b["expect"].update(answers={}), "unknown key"),
         (lambda b: b.update(steps={}), "list"),
         (lambda b: b.pop("manifest"), "missing"),
         (lambda b: b.update(manifest=[]), "manifest must be a mapping"),
@@ -414,6 +554,19 @@ def test_an_unknown_scenario_name_is_refused():
         (lambda b: b["expect"]["gates"].update(red=["privacy.clean"]), "must be a mapping"),
         (lambda b: (b["steps"].append({"kind": "commit", "id": "c"}),
                     b["expect"]["refusals"].update(c="privacy.clean")), "list of rule ids"),
+        (lambda b: b["steps"].append({"kind": "verdicts"}), "needs entries"),
+        (lambda b: b["steps"].append({"kind": "verdicts", "entries": {}}), "must be a list"),
+        (lambda b: b["expect"].update(verdicts=[]), "expect.verdicts must be a mapping"),
+        (lambda b: b["expect"].update(verdicts={"ghost": {}}), "no step"),
+        (lambda b: (b["steps"].append({"kind": "commit", "id": "c"}),
+                    b["expect"].update(verdicts={"c": {}})), "does not show the verdicts"),
+        (lambda b: (b["steps"].append(SHOW),
+                    b["expect"].update(verdicts={"show": []})), "must be a mapping"),
+        (lambda b: (b["steps"].append(SHOW),
+                    b["expect"].update(verdicts={"show": {"r.one": "fine"}})),
+         "is not one of"),
+        (lambda b: (b["steps"].append({"kind": "commit", "id": "c"}),
+                    b["expect"]["refusals"].update(c=["P9"])), "unregistered rule"),
     ],
 )
 def test_the_loader_refuses(tmp_path, mutate, message):
@@ -422,6 +575,26 @@ def test_the_loader_refuses(tmp_path, mutate, message):
     root = write_scenario(tmp_path / "s", data)
     with pytest.raises(ScenarioError, match=message):
         load(root)
+
+
+#: A step that shows the verdicts, which an ``expect.verdicts`` entry names.
+SHOW = {"kind": "cli", "id": "show", "argv": ["guidelines", "verdicts", "show"]}
+
+
+def test_a_known_answer_may_name_verdict_predicates_and_standings(tmp_path):
+    """A refusal names gate rules or a verdict submission's predicates, and a
+    known answer names the standing each judgement rule must reach (D11)."""
+    data = body(
+        [{"kind": "verdicts", "id": "bulk", "entries": []}, SHOW],
+        expect={"gates": {},
+                "refusals": {"bulk": ["P3", "shape", "pipeline", "submission"]},
+                "verdicts": {"show": {"r.one": "pass", "r.two": "stale", "r.three": "engine",
+                                      "r.four": "missing", "r.five": "fail", "r.six": "na"}}},
+    )
+    scenario = load(write_scenario(tmp_path / "s", data))
+    assert scenario.expected.refusals == {"bulk": ("P3", "pipeline", "shape", "submission")}
+    assert scenario.expected.verdicts["show"]["r.two"] == "stale"
+    assert scenario.steps[0].entries == ()
 
 
 def test_a_refusal_naming_an_unregistered_rule_is_refused(tmp_path):
@@ -517,6 +690,40 @@ def test_reduce_reads_every_gate_shape():
     assert outcome.refusals == {"go": ("docs.read_architecture",), "#6": ()}
 
 
+def standing(rule, standing="current", status=None):
+    return {"rule": rule, "standing": standing, "status": status, "problems": []}
+
+
+def test_reduce_reads_a_refused_submission_and_the_shown_standings():
+    results = [
+        StepResult("vague", "cli", ("--json", "guidelines", "verdict", "r"), 1, {
+            "recorded": [],
+            "refused": [{"entry": 1, "rule": "r", "predicate": "P3", "problem": "prose"},
+                        {"entry": 1, "rule": "r", "predicate": "P3", "problem": "more"},
+                        {"entry": 2, "rule": None, "predicate": "shape", "problem": "x"},
+                        "not a mapping"],
+        }),
+        StepResult("ok", "cli", ("--json", "guidelines", "verdict", "r"), 0,
+                   {"recorded": [{"rule": "r"}]}),
+        StepResult("show", "cli", ("--json", "guidelines", "verdicts", "show"), 0, {
+            "owed": [standing("r", status="pass"), standing("s", "stale"),
+                     standing("t", "engine", "na"), standing("u", "missing"),
+                     {"no": "rule"}],
+        }),
+        StepResult("show-none", "cli", ("--json", "guidelines", "verdicts", "show"), 0,
+                   {"status": "no-pipeline", "owed": []}),
+        StepResult("show-broken", "cli", ("--json", "guidelines", "verdicts", "show"), 1, None),
+        StepResult("#6", "cli", ("--json", "guidelines", "show"), 0, {"owed": "ignored"}),
+    ]
+    outcome = reduce(results)
+    assert outcome.refusals == {"vague": ("P3", "shape"), "show-broken": ()}
+    assert outcome.verdicts == {
+        "show": {"r": "pass", "s": "stale", "t": "engine", "u": "missing"},
+        "show-none": {},
+    }
+    assert outcome.gates == {}
+
+
 def test_reduce_ignores_an_advance_with_no_target():
     results = [StepResult("#1", "cli", ("--json", "pipeline", "advance"), 2, None)]
     assert reduce(results) == Outcome(gates={}, refusals={"#1": ()})
@@ -556,6 +763,23 @@ def test_compare_finds_every_kind_of_divergence():
     }
 
 
+def test_compare_holds_the_verdicts_each_named_step_showed():
+    want = Expected(gates={}, refusals={},
+                    verdicts={"show": {"r": "pass", "s": "missing"}, "later": {"r": "stale"}})
+    got = Outcome(gates={}, refusals={},
+                  verdicts={"show": {"r": "fail", "t": "engine"}, "extra": {}})
+    found = {(d.where, d.expected, d.actual) for d in compare(want, got)}
+    assert found == {
+        ("verdicts at show: r", "pass", "fail"),
+        ("verdicts at show: s", "missing", "absent"),
+        ("verdicts at show: t", "absent", "engine"),
+        ("verdicts at later", "observed", "never observed"),
+    }
+    exhaustive = compare(got.as_expected(), Outcome(gates={}, refusals={}, verdicts={
+        "show": {"r": "fail", "t": "engine"}, "extra": {}, "more": {}}), exhaustive=True)
+    assert exhaustive == [Divergence("verdicts at more", "never observed", "observed")]
+
+
 def test_exhaustive_compare_also_names_destinations_only_one_side_saw():
     got = Outcome(gates={"red": {}, "committed": {"privacy.clean": "pass"}}, refusals={})
     found = compare(expected({"red": {}}), got, exhaustive=True)
@@ -564,7 +788,8 @@ def test_exhaustive_compare_also_names_destinations_only_one_side_saw():
 
 
 def test_as_expected_round_trips():
-    got = Outcome(gates={"red": {"privacy.clean": "pass"}}, refusals={"go": ("x.y",)})
+    got = Outcome(gates={"red": {"privacy.clean": "pass"}}, refusals={"go": ("x.y",)},
+                  verdicts={"show": {"r": "pass"}})
     assert compare(got.as_expected(), got, exhaustive=True) == []
 
 

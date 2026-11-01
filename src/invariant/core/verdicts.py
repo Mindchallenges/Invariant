@@ -78,6 +78,16 @@ _CITATION_KEYS = frozenset({"path", "lines", "blob"})
 
 #: The predicate a problem of a submission's shape is named by.
 SHAPE = "shape"
+#: The predicate a refusal of the whole is named by when there is nothing to
+#: check a verdict against: no session, no running pipeline, no ruleset.
+PRECONDITION = "pipeline"
+#: The predicate a refusal of the whole is named by when the submitted file
+#: cannot be read, or is not JSON.
+SUBMISSION = "submission"
+#: Every name a refused submission gives a problem: the whole's two, a
+#: shape problem, and D5's six predicates. A host, a script or the
+#: conformance harness compares these, never the prose (A4 increment 7).
+PREDICATES = (PRECONDITION, SUBMISSION, SHAPE, "P1", "P2", "P3", "P4", "P5", "P6")
 
 
 @dataclass(frozen=True)
@@ -90,6 +100,27 @@ class Problem:
 
     def describe(self) -> str:
         return f"{self.predicate}: {self.message}; fix: {self.fix}"
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """One line of a refused submission, and the names a reader compares.
+
+    ``line`` is what the refusal prints. ``predicate`` is one of
+    :data:`PREDICATES`; ``entry`` (counted from 1) and ``rule`` say which
+    entry it was asked of, and are ``None`` for a problem of the whole, or
+    a rule an entry did not name.
+    """
+
+    predicate: str
+    line: str
+    entry: int | None = None
+    rule: str | None = None
+
+    def record(self) -> dict[str, Any]:
+        """As plain data: what a refusal prints under ``--json``."""
+        return {"entry": self.entry, "rule": self.rule, "predicate": self.predicate,
+                "problem": self.line}
 
 
 @dataclass(frozen=True)
@@ -239,8 +270,15 @@ class Checked:
     problems: tuple[Problem, ...] = field(default=())
 
     def describe(self) -> list[str]:
+        return [refusal.line for refusal in self.refusals()]
+
+    def refusals(self) -> list[Refusal]:
+        """Each problem as a refusal line, named by this entry and its rule."""
         named = f"entry {self.index} ({self.rule})" if self.rule else f"entry {self.index}"
-        return [f"{named}: {problem.describe()}" for problem in self.problems]
+        return [
+            Refusal(problem.predicate, f"{named}: {problem.describe()}", self.index, self.rule)
+            for problem in self.problems
+        ]
 
 
 # -- parsing ---------------------------------------------------------------------------

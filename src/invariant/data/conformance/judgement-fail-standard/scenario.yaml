@@ -1,0 +1,114 @@
+description: >
+  The same judgement fail under the standard profile warns rather than
+  blocks, and the landing keeps it (ADR-012 D5 "The gate", ruling 7, DN-7).
+  The blocker judgement rule app.answer-is-stable is answered in review with
+  a fail cited on the line the change added. The fail is current and fails
+  guidelines.verdicts_complete, which the standard profile holds at warn, so
+  the landing goes through unforced, and its record in the pipeline's
+  evidence still keeps the fail.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+  guidelines: {ruleset: docs/guidelines/ruleset.yaml}
+
+steps:
+  - kind: write
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 41
+  - {kind: commit, message: the application answers 41}
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: feature-architect}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [guidelines, render]}
+  - {kind: cli, in: worktree, argv: [pipeline, test]}
+  - {kind: cli, in: worktree, argv: [pipeline, coverage]}
+  - {kind: commit, in: worktree, message: answer is 42}
+  - id: fail
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, fail,
+           --cite, app.py, "3", "3"]
+  - {id: standing, kind: cli, in: worktree, argv: [guidelines, verdicts, show]}
+  - {id: land, kind: cli, in: worktree, argv: [pipeline, advance, committed]}
+  - {id: record, kind: cli, in: worktree, argv: [pipeline, status]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: pass}
+    reviewing: {test.all_pass: pass}
+    committed:
+      test.all_pass: pass
+      coverage.meets_floor: pass
+      privacy.clean: pass
+      docs.updated: pass
+      docs.diagrams_current: pass
+      agents.design_agent_ran: pass
+      agents.review_agent_ran: pass
+      guidelines.ruleset_valid: pass
+      guidelines.generated_current: pass
+      guidelines.mechanical_clean: pass
+      guidelines.verdicts_complete: warn
+  verdicts:
+    standing: {app.answer-is-stable: fail}
+  refusals: {}

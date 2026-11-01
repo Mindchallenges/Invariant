@@ -896,10 +896,10 @@ class PipelineDomain:
             str(r.get("state")) for r in records if r.get("state") != pipeline.state
         })
         if moved:
-            raise VerdictRefused([(
+            raise VerdictRefused.precondition(
                 f"pipeline: the pipeline moved to {pipeline.state!r} after the verdicts "
                 f"were checked in {', '.join(moved)}; fix: submit them again"
-            )])
+            )
         pipeline.evidence.setdefault("verdicts", []).extend(dict(r) for r in records)
         self._save(session_id, pipeline)
         return len(records)

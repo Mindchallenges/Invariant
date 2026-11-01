@@ -1,0 +1,186 @@
+description: >
+  A vague verdict is refused at the door and the landing sees the rule
+  unanswered (ADR-012 D5 "What vague means", D11 "vague verdict"). The change
+  edits the answer's executable line, so the blocker judgement rule
+  app.answer-is-stable is owed a verdict and its mechanical N/A does not
+  hold. In review, once the change is committed, every vague answer is
+  submitted and each is refused with exit 1, naming the predicate it fails:
+  a pass resting on nothing (P2); a citation of a file the change did not
+  touch, of lines outside the file, and of lines the change did not add
+  (P3); a test no recorded run named (P4); an N/A the engine finds false and
+  an N/A the ruleset never offered (P5); a note over the cap and a note the
+  privacy scan flags (P6); and a bulk file whose one valid entry is refused
+  with the invalid one beside it (DN-11, P1). Nothing is recorded, so the
+  rule stands missing, and under the strict profile
+  guidelines.verdicts_complete refuses the landing.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+  enforcement: {profile: strict}
+  guidelines:
+    ruleset: docs/guidelines/ruleset.yaml
+    verdicts: {note_max_chars: 40}
+  privacy:
+    extra: ["CONFORMANCE-SECRET-[0-9]+"]
+
+steps:
+  - kind: write
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 41
+  - {kind: commit, message: the application answers 41}
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: feature-architect}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [guidelines, render]}
+  - {kind: cli, in: worktree, argv: [pipeline, test]}
+  - {kind: cli, in: worktree, argv: [pipeline, coverage]}
+  - {kind: commit, in: worktree, message: answer is 42}
+  - id: no-evidence
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass]
+  - id: untouched-file
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --cite, check.sh, "1", "1"]
+  - id: past-the-end
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --cite, app.py, "3", "9"]
+  - id: outside-the-diff
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --cite, app.py, "1", "2"]
+  - id: unrecorded-test
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --test, check.sh::answer]
+  - id: engine-disagrees
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, na,
+           --na-condition, no-executable-change]
+  - id: unoffered-na
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, na,
+           --na-condition, looks-fine]
+  - id: long-note
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --cite, app.py, "3", "3",
+           --note, "the answer is one constant on every call, always"]
+  - id: flagged-note
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --cite, app.py, "3", "3", --note, "see CONFORMANCE-SECRET-7"]
+  - id: bulk
+    kind: verdicts
+    in: worktree
+    entries:
+      - rule: app.answer-is-stable
+        status: pass
+        citations: [{path: app.py, lines: [3, 3]}]
+      - rule: app.answer-is-fast
+        status: pass
+        citations: [{path: app.py, lines: [3, 3]}]
+  - {id: standing, kind: cli, in: worktree, argv: [guidelines, verdicts, show]}
+  - {id: land, kind: cli, in: worktree, argv: [pipeline, advance, committed]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: pass}
+    reviewing: {test.all_pass: pass}
+    committed:
+      test.all_pass: pass
+      coverage.meets_floor: pass
+      privacy.clean: pass
+      docs.updated: pass
+      docs.diagrams_current: pass
+      agents.design_agent_ran: pass
+      agents.review_agent_ran: pass
+      guidelines.ruleset_valid: pass
+      guidelines.generated_current: pass
+      guidelines.mechanical_clean: pass
+      guidelines.verdicts_complete: block
+  verdicts:
+    standing: {app.answer-is-stable: missing}
+  refusals:
+    no-evidence: [P2]
+    untouched-file: [P3]
+    past-the-end: [P3]
+    outside-the-diff: [P3]
+    unrecorded-test: [P4]
+    engine-disagrees: [P5]
+    unoffered-na: [P5]
+    long-note: [P6]
+    flagged-note: [P6]
+    bulk: [P1]
+    land: [guidelines.verdicts_complete]

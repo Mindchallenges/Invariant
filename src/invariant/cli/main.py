@@ -9,6 +9,7 @@ told" reproducible: it is this program's output.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -3386,6 +3387,27 @@ def _cited_line(text: str):
         return text
 
 
+@contextlib.contextmanager
+def _refusal_as_json(args):
+    """Under ``--json``, a refused submission still prints a document.
+
+    It names each problem's entry, rule and predicate apart from the prose
+    (A4 increment 7), so a host, a script or the conformance harness can
+    tell which predicate failed, as ``pipeline advance`` prints the gates it
+    was refused on. The refusal is raised on, so the exit is still 1.
+    """
+    from ..core.rules import VerdictRefused
+
+    try:
+        yield
+    except VerdictRefused as exc:
+        if getattr(args, "json", False):
+            print(json.dumps(
+                {"recorded": [], "refused": [r.record() for r in exc.refusals]}, indent=2
+            ))
+        raise
+
+
 def _submit_verdicts(args, submission) -> int:
     """Check and record a submission through the guidelines domain (ADR-012 D5).
 
@@ -3396,9 +3418,10 @@ def _submit_verdicts(args, submission) -> int:
     from ..domains.guidelines import GuidelinesDomain
 
     ctx = Context()
-    result = GuidelinesDomain(ctx.rule_context(), pipelines=ctx.pipelines).submit_verdicts(
-        submission
-    )
+    with _refusal_as_json(args):
+        result = GuidelinesDomain(ctx.rule_context(), pipelines=ctx.pipelines).submit_verdicts(
+            submission
+        )
     noun = "verdict" if len(result.records) == 1 else "verdicts"
     lines = [
         (
@@ -3436,20 +3459,21 @@ def cmd_guidelines_verdicts_submit(args) -> int:
     from ..core.rules import VerdictRefused
 
     path = Path(args.file)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise VerdictRefused([(
-            f"submission: {args.file} could not be read ({exc.__class__.__name__}); "
-            f"fix: name a UTF-8 JSON file"
-        )]) from exc
-    try:
-        submission = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise VerdictRefused([(
-            f"submission: {args.file} is not JSON (line {exc.lineno}: {exc.msg}); "
-            f"fix: write a JSON list of verdict objects"
-        )]) from exc
+    with _refusal_as_json(args):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise VerdictRefused.unreadable(
+                f"submission: {args.file} could not be read ({exc.__class__.__name__}); "
+                f"fix: name a UTF-8 JSON file"
+            ) from exc
+        try:
+            submission = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise VerdictRefused.unreadable(
+                f"submission: {args.file} is not JSON (line {exc.lineno}: {exc.msg}); "
+                f"fix: write a JSON list of verdict objects"
+            ) from exc
     return _submit_verdicts(args, submission)
 
 

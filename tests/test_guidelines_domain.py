@@ -1198,6 +1198,58 @@ class TestVerdictCommands:
         assert "P3" in err and "nothing was recorded" in err
         assert _stored(project) == []
 
+    def test_json_names_each_refused_predicate_and_records_nothing(self, project, capsys):
+        """A refusal under --json is a document (A4 increment 7): the entry,
+        the rule and the predicate of each problem, so a host, a script or
+        the conformance harness reads which predicate failed without the
+        prose. The exit is still 1, and nothing is recorded."""
+        import json
+
+        _review(project)
+        path = project / "verdicts.json"
+        path.write_text(json.dumps([
+            {"rule": "data.single-open", "status": "pass",
+             "citations": [{"path": "app/m.py", "lines": [2, 2]}]},
+            {"rule": "data.tested", "status": "pass"},
+            {"rule": "data.single-opn", "status": "pass", "colour": 1},
+        ]), encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path), "--json") == 1
+        body = payload(capsys)
+        assert body["recorded"] == []
+        named = [(r["entry"], r["rule"], r["predicate"]) for r in body["refused"]]
+        assert (2, "data.tested", "P2") in named
+        assert (3, None, "shape") in named
+        assert all(r["problem"].startswith(f"entry {r['entry']}") for r in body["refused"])
+        assert _stored(project) == []
+
+    def test_json_names_a_refusal_of_the_whole(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdicts", "submit", str(project / "missing.json"),
+                   "--json") == 1
+        (only,) = payload(capsys)["refused"]
+        assert (only["entry"], only["rule"], only["predicate"]) == (None, None, "submission")
+        path = project / "verdicts.json"
+        path.write_text("[{", encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path), "--json") == 1
+        assert [r["predicate"] for r in payload(capsys)["refused"]] == ["submission"]
+        path.write_text("{}", encoding="utf-8")
+        assert run("guidelines", "verdicts", "submit", str(path), "--json") == 1
+        assert [r["predicate"] for r in payload(capsys)["refused"]] == ["shape"]
+
+    def test_json_names_the_precondition_with_no_pipeline(self, project, capsys):
+        sid, pipelines = _review(project)
+        raw = pipelines.store.read(pipelines.relpath(sid), {})
+        raw["current"] = None
+        pipelines.store.write(pipelines.relpath(sid), raw)
+        assert run("guidelines", "verdict", "data.single-open", "--status", "pass",
+                   "--json") == 1
+        assert [r["predicate"] for r in payload(capsys)["refused"]] == ["pipeline"]
+
+    def test_without_json_a_refusal_prints_no_document(self, project, capsys):
+        _review(project)
+        assert run("guidelines", "verdict", "data.single-open", "--status", "pass") == 1
+        assert capsys.readouterr().out == ""
+
     def test_a_line_that_is_not_a_number_is_refused(self, project, capsys):
         _review(project)
         assert run("guidelines", "verdict", "data.single-open", "--status", "pass",

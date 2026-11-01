@@ -3718,16 +3718,31 @@ class VerdictRefused(InvariantError):
     """A verdict submission refused before anything was recorded (exit 1).
 
     Each line names the entry, the predicate that failed and its fix (DN-11).
+    ``refusals`` carries the same lines with those names apart, which the
+    CLI prints under ``--json`` (A4 increment 7); ``problems`` is the lines.
     """
 
     exit_code = 1
 
-    def __init__(self, problems: Iterable[str]) -> None:
-        self.problems = tuple(problems)
+    def __init__(self, refusals: Iterable[verdicts_reader.Refusal]) -> None:
+        self.refusals = tuple(refusals)
+        self.problems = tuple(r.line for r in self.refusals)
         super().__init__(
             "the verdict submission is refused; nothing was recorded:\n  "
             + "\n  ".join(self.problems)
         )
+
+    @classmethod
+    def precondition(cls, line: str) -> VerdictRefused:
+        """A refusal of the whole: nothing to check a verdict against (no
+        session, no pipeline, a pipeline that moved)."""
+        return cls([verdicts_reader.Refusal(verdicts_reader.PRECONDITION, line)])
+
+    @classmethod
+    def unreadable(cls, line: str) -> VerdictRefused:
+        """A refusal of the whole: the submitted file cannot be read, or is
+        not JSON."""
+        return cls([verdicts_reader.Refusal(verdicts_reader.SUBMISSION, line)])
 
 
 @dataclass(frozen=True)
@@ -3737,18 +3752,23 @@ class VerdictPlan:
     checked: tuple[verdicts_reader.Checked, ...] = ()
     #: Problems of the whole: no pipeline, no ruleset, a shape the
     #: submission as a whole does not have. Each entry's are on ``checked``.
-    whole: tuple[str, ...] = ()
+    whole: tuple[verdicts_reader.Refusal, ...] = ()
     #: The digest the accepted verdicts record, and the state they were
     #: submitted in; ``None`` when the plan could not get that far.
     ruleset: str | None = None
     state: str | None = None
 
     @property
-    def problems(self) -> tuple[str, ...]:
+    def refusals(self) -> tuple[verdicts_reader.Refusal, ...]:
         """Every problem named, the whole's first, then each entry's in order."""
         return self.whole + tuple(
-            line for checked in self.checked for line in checked.describe()
+            refusal for checked in self.checked for refusal in checked.refusals()
         )
+
+    @property
+    def problems(self) -> tuple[str, ...]:
+        """Each refusal's line, in the same order."""
+        return tuple(r.line for r in self.refusals)
 
     @property
     def ok(self) -> bool:
@@ -3762,11 +3782,15 @@ class VerdictPlan:
         return tuple(c.record for c in self.checked if c.record is not None)
 
     def refusal(self) -> VerdictRefused:
-        return VerdictRefused(self.problems)
+        return VerdictRefused(self.refusals)
 
 
 #: The predicate a refusal of the whole submission is named by.
-_PRECONDITION = "pipeline"
+_PRECONDITION = verdicts_reader.PRECONDITION
+
+
+def _whole(line: str) -> verdicts_reader.Refusal:
+    return verdicts_reader.Refusal(_PRECONDITION, f"{_PRECONDITION}: {line}")
 
 
 def plan_verdicts(ctx: RuleContext, submission: Any) -> VerdictPlan:
@@ -3779,26 +3803,28 @@ def plan_verdicts(ctx: RuleContext, submission: Any) -> VerdictPlan:
     """
     pipeline = ctx.pipeline
     if not pipeline:
-        return VerdictPlan(whole=((
-            f"{_PRECONDITION}: no pipeline is running for this session, so a verdict "
-            f"has no evidence to enter; fix: invariant pipeline start --task "
-            f"\"<what you are doing>\""
+        return VerdictPlan(whole=(_whole(
+            "no pipeline is running for this session, so a verdict "
+            "has no evidence to enter; fix: invariant pipeline start --task "
+            "\"<what you are doing>\""
         ),))
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
         detail = f" ({failure.detail})" if failure.detail else ""
         fixes = "; ".join(failure.fixes) or "fix the ruleset"
-        return VerdictPlan(whole=((
-            f"{_PRECONDITION}: no guideline can receive a verdict: "
-            f"{failure.message}{detail}; fix: {fixes}"
+        return VerdictPlan(whole=(_whole(
+            f"no guideline can receive a verdict: {failure.message}{detail}; fix: {fixes}"
         ),))
     if ruleset is None:
-        return VerdictPlan(whole=((
-            f"{_PRECONDITION}: no guidelines ruleset is configured, so no guideline "
-            f"can receive a verdict; fix: set guidelines.ruleset"
+        return VerdictPlan(whole=(_whole(
+            "no guidelines ruleset is configured, so no guideline "
+            "can receive a verdict; fix: set guidelines.ruleset"
         ),))
     parsed = verdicts_reader.parse_submission(submission)
-    whole = tuple(f"submission: {p.describe()}" for p in parsed.problems)
+    whole = tuple(
+        verdicts_reader.Refusal(p.predicate, f"{verdicts_reader.SUBMISSION}: {p.describe()}")
+        for p in parsed.problems
+    )
     facts = _verdict_facts(ctx, ruleset, pipeline)
     checked = verdicts_reader.check_all(parsed, ruleset, facts)
     return VerdictPlan(

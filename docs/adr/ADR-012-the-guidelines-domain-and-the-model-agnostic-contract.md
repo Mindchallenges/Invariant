@@ -2128,6 +2128,101 @@ clock time and no migration.
   `standard`, the cited pass answered, and the record equal to the
   advance's printed verdicts.
 
+**As built: A4 increment 7, the vague-verdict and judgement-fail scenarios
+(A1 increment 4).** Built to D5 ("What vague means", "What happens to one",
+"Staleness", "The gate", item 5), D11 ("vague verdict", "judgement fail"),
+ruling 7, DN-7, DN-11 and the user's A4.3 ruling on the engine's N/A. No
+ruling was open. The D1 permutation test D11's increment table puts beside
+these scenarios is left where that table and D1 item 2 put it, with A7.
+
+- *A refusal names its predicate in data (`core/verdicts`, `core/rules`, the
+  CLI).* A refused submission printed nothing on stdout under `--json`, so
+  which predicate failed could be read only from the prose on stderr, and
+  the harness never reads prose. `Refusal` is one line of a refusal with its
+  `predicate`, `entry` and `rule` apart, and `PREDICATES` is every name one
+  gives: P1 to P6, `shape`, and the whole's two, `pipeline` (nothing to
+  check against) and `submission` (a file that cannot be read or is not
+  JSON). `Checked.refusals` names each entry's problems, `VerdictPlan.whole`
+  holds `Refusal`s, and `VerdictRefused` carries `refusals` beside the
+  `problems` lines it always had, with `precondition` and `unreadable` for
+  the refusals of the whole the domains and the CLI raise. The text, the
+  lines and the exit are unchanged. Under `--json` both commands now print
+  `{recorded: [], refused: [{entry, rule, predicate, problem}]}` before the
+  exit 1, as `pipeline advance` prints the gates it was refused on.
+- *The harness (`core/conformance`, `cli/conformance`).* Three additions,
+  each host-neutral:
+  - A `verdicts` step: its `entries` (any list; a malformed entry is the
+    engine's to refuse) are written as JSON beside the replay's repository,
+    never into it, and handed to `guidelines verdicts submit`. The file is
+    therefore never part of the change it answers for, so BUG_105 does not
+    touch it.
+  - A refusal's names are the blocking rules of a refused advance and, for a
+    refused submission, the predicates its document names. A known answer's
+    refusal may name either; a name that is neither a registered rule nor a
+    predicate is refused at load.
+  - `expect.verdicts`, D11's "the verdict status each judgement rule must
+    receive": per step that runs `guidelines verdicts show`, each owed
+    guideline's answer, which is a current verdict's status or the standing
+    (`missing`, `stale`, `engine`). A step it names that does not show the
+    verdicts, or an answer outside that set, is refused at load. Like the
+    gates, a step it does not name is not compared, and two replays are held
+    to each other on every step. `CONF --> CVERD` is the new arrow, for the
+    vocabulary alone.
+- *Five scenarios.* Each seeds `app.py` on the base branch through a write and
+  a commit (the package data still carries no Python), and owes the blocker
+  judgement guideline `app.answer-is-stable` (`evidence: either`,
+  `scope: diff`, a mechanical `no-executable-change` and a claimed
+  `constant-only`). Every verdict is submitted in review after the change is
+  committed, where valid-ruleset submits its own.
+  - `vague-verdict` (strict): ten vague answers, each refused exit 1 naming
+    the predicate: a pass with nothing behind it (P2); a citation of an
+    untouched file, past the end of the file, and of lines the change did
+    not add (P3, the last D11's own seed); a test no run named (P4); an `na`
+    on the mechanical condition the engine finds false, and one naming a
+    condition the rule does not declare (P5); a note over a cap of 40, and a
+    note the privacy scan flags through a scenario-only `privacy.extra`
+    pattern (P6); and a bulk file of one valid entry and one naming no
+    guideline, refused whole (DN-11, P1). Nothing is recorded, so the rule
+    stands `missing`, and `verdicts_complete` refuses the landing.
+  - `judgement-fail` (strict): a cited `fail` is accepted and current, and
+    blocks the landing. The advance is then forced. The landing record
+    (A4.6) keeps the standing as the gate decided it, `forced: true`.
+  - `judgement-fail-standard`: the same fail warns, the landing goes through
+    unforced, and its record still keeps the fail (ruling 7: `warn` in
+    `standard`).
+  - `stale-verdict` (strict): a cited pass stands current, then the cited
+    line is edited and committed, so the verdict is stale on P3, and stale is
+    missing at the landing.
+  - `engine-answers` (strict): a comment-only change, so
+    `no-executable-change` holds. A cited `fail` is accepted (A4.2), the
+    engine answers the rule, the fail is set aside, and the gate passes.
+    `coverage.meets_floor` skips, since the change alters no code.
+- *Readings taken where the rulings are silent.*
+  - D11's table says a vague verdict makes `verdicts_complete` block. It
+    blocks under `strict` only (ruling 7), so the scenario names that
+    profile rather than raising the one gate.
+  - A grant spent under `strict` and held under `standard` gets no scenario
+    of its own. A4.5's and A4.6's tests already replay `valid-ruleset` with
+    its verdict replaced by a grant under both profiles, through the same
+    replay. A shipped scenario would add a second copy of that proof and no
+    new answer.
+  - A forced advance in a fixture is the engine's own forced landing, which
+    DN-7's reading records; nothing outside the replay's repository is
+    forced.
+- *Tests.* `tests/test_conformance_engine.py`: each scenario's known answer
+  and its two-replay agreement; per scenario, the refusal documents (every
+  refused step exits 1 and records nothing, the bulk refusal names its
+  second entry), the standings, the landing record kept under both profiles
+  and its `forced`, the stale verdict's P3, and the set-aside fail; the
+  `verdicts` step against a recording CLI (written outside the tree,
+  placeholders filled, a malformed entry passed through); the loader's new
+  refusals; the reduction of refused documents and shown standings; the
+  comparison and the exhaustive comparison of `verdicts`.
+  `tests/test_guidelines_verdicts.py` covers `Refusal`, the refusal's names
+  in order, the whole's predicates and `PREDICATES`, and
+  `tests/test_guidelines_domain.py` the `--json` refusal document through
+  `main` for each kind of refusal, and that the text form prints none.
+
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
 **Format.** A baseline file the manifest names, one entry per line, with `#`
@@ -2415,7 +2510,7 @@ None of this was built in increment 1.
 |---|---|---|
 | 2 | scenarios over the gates A2 adds; `malformed-ruleset` landed with A2 increment 1, and `valid-ruleset` (all five kinds) with A2 increment 2 | A2 |
 | 3 | `seeded pattern`, `baselined` and `missing test`, over A3's checkers and baseline | A3 |
-| 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test |
+| 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test. The scenarios are delivered with A4 increment 7: `vague-verdict`, `judgement-fail`, `judgement-fail-standard`, `stale-verdict` and `engine-answers`. The permutation test is still owed, with A7 |
 | 5 | the scripted driver, `conformance run --driver script` and `conformance show` | the engine layer |
 | 6 | Claude Code as the driver under at least two models | A4 and A6 |
 

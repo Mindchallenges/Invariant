@@ -920,6 +920,31 @@ class TestPlan:
         assert isinstance(refusal, VerdictRefused) and refusal.exit_code == 1
         assert "nothing was recorded" in str(refusal)
 
+    def test_the_refusal_names_each_problem_by_entry_rule_and_predicate(self, repo):
+        """A4 increment 7: each line of a refusal carries the names a reader
+        compares without the prose, in the order the lines are printed."""
+        write(repo, "app/m.py", "one\nTWO\nthree\n")
+        plan = plan_verdicts(context(repo), [ONE[0], {"rule": "data.tested", "status": "pass"}, 7])
+        refusal = plan.refusal()
+        assert [r.line for r in refusal.refusals] == list(refusal.problems)
+        assert [(r.entry, r.rule, r.predicate) for r in refusal.refusals] == [
+            (2, "data.tested", "P2"), (3, None, "shape")]
+        assert refusal.refusals[0].record() == {
+            "entry": 2, "rule": "data.tested", "predicate": "P2",
+            "problem": refusal.problems[0]}
+
+    def test_a_refusal_of_the_whole_is_named_by_its_precondition(self, repo):
+        refusal = plan_verdicts(context(repo, pipeline=None), ONE).refusal()
+        assert [(r.entry, r.rule, r.predicate) for r in refusal.refusals] == [
+            (None, None, verdicts.PRECONDITION)]
+        shape = plan_verdicts(context(repo), {}).refusal()
+        assert [r.predicate for r in shape.refusals] == [verdicts.SHAPE]
+        assert shape.problems[0].startswith("submission: shape: ")
+
+    def test_every_name_a_refusal_gives_is_a_known_predicate(self):
+        assert verdicts.PREDICATES == (
+            "pipeline", "submission", "shape", "P1", "P2", "P3", "P4", "P5", "P6")
+
 
 # -- the domain records what the plan accepted ------------------------------------------------------------
 
@@ -985,8 +1010,9 @@ class TestSubmit:
         manifest, session, pipelines = started(repo)
         ctx = domain_for(repo, session, pipelines, manifest).ctx
         ctx.session = None
-        with pytest.raises(VerdictRefused, match="no session"):
+        with pytest.raises(VerdictRefused, match="no session") as exc:
             GuidelinesDomain(ctx, pipelines=pipelines).submit_verdicts(ONE)
+        assert [r.predicate for r in exc.value.refusals] == [verdicts.PRECONDITION]
 
     def test_the_state_moving_under_the_plan_is_refused(self, repo):
         manifest, session, pipelines = started(repo)
@@ -995,8 +1021,9 @@ class TestSubmit:
         moved = pipelines.current(session.id)
         moved.state = "committed"
         pipelines._save(session.id, moved)
-        with pytest.raises(VerdictRefused, match="moved"):
+        with pytest.raises(VerdictRefused, match="moved") as exc:
             domain.submit_verdicts(ONE)
+        assert [r.predicate for r in exc.value.refusals] == [verdicts.PRECONDITION]
         assert "verdicts" not in pipelines.current(session.id).evidence
 
 

@@ -136,8 +136,9 @@ scenarios. A1 increments 2–6 are tracked here, not in a session.
   kinds A2 increment 2 validates are still owed.
 * Increment 3: done, landed with A3: the seeded-pattern, missing-test,
   baselined, baseline-grown and fixed-not-pruned scenarios.
-* Increment 4: after A4 (vague-verdict and judgement-fail scenarios), with the
-  model/host permutation test arriving with A7.
+* Increment 4: the scenarios are done, landed with A4 increment 7:
+  vague-verdict, judgement-fail, judgement-fail-standard, stale-verdict and
+  engine-answers. The model/host permutation test still arrives with A7.
 * Increment 5: the scripted CLI driver plus `invariant conformance run|show`,
   after A4.
 * Increment 6: Claude Code under two or more models, after A4 and A6.

@@ -1,0 +1,125 @@
+description: >
+  A verdict whose cited file changes after submission is stale, and stale is
+  missing at the landing (ADR-012 D5 "Staleness"). The blocker judgement rule
+  app.answer-is-stable is answered in review with a pass cited on the line
+  the change added, and it stands current. The answer's line is then edited
+  again and committed, so the cited file's blob is not the one the verdict
+  recorded: the verdict no longer holds (P3), and under the strict profile
+  guidelines.verdicts_complete refuses the landing.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+  enforcement: {profile: strict}
+  guidelines: {ruleset: docs/guidelines/ruleset.yaml}
+
+steps:
+  - kind: write
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 41
+  - {kind: commit, message: the application answers 41}
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: feature-architect}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [guidelines, render]}
+  - {kind: cli, in: worktree, argv: [pipeline, test]}
+  - {kind: cli, in: worktree, argv: [pipeline, coverage]}
+  - {kind: commit, in: worktree, message: answer is 42}
+  - id: answered
+    kind: cli
+    in: worktree
+    argv: [guidelines, verdict, app.answer-is-stable, --status, pass,
+           --cite, app.py, "3", "3"]
+  - {id: fresh, kind: cli, in: worktree, argv: [guidelines, verdicts, show]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      # The answer to the question.
+      def answer():
+          return 42 if True else 0
+  - {kind: commit, in: worktree, message: "the answer, rewritten"}
+  - {id: edited, kind: cli, in: worktree, argv: [guidelines, verdicts, show]}
+  - {id: land, kind: cli, in: worktree, argv: [pipeline, advance, committed]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: pass}
+    reviewing: {test.all_pass: pass}
+    committed:
+      test.all_pass: pass
+      coverage.meets_floor: pass
+      privacy.clean: pass
+      docs.updated: pass
+      docs.diagrams_current: pass
+      agents.design_agent_ran: pass
+      agents.review_agent_ran: pass
+      guidelines.ruleset_valid: pass
+      guidelines.generated_current: pass
+      guidelines.mechanical_clean: pass
+      guidelines.verdicts_complete: block
+  verdicts:
+    fresh: {app.answer-is-stable: pass}
+    edited: {app.answer-is-stable: stale}
+  refusals:
+    land: [guidelines.verdicts_complete]
