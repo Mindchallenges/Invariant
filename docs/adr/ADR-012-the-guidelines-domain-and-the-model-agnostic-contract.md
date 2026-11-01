@@ -7,7 +7,8 @@
   and each increment's as-built note records what landed. The check-kind
   amendment was accepted the same day, with its own rulings table (DN-A1 to
   DN-A14). A4 closed with increment 8, whose design and three rulings
-  (a to c) are the user's.
+  (a to c) are the user's. A5 is built to the user's twelve A5 rulings
+  (D1 to D12, under D7).
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -2431,6 +2432,93 @@ v1 no finding denies an edit, at any severity (ruling 9): the edit is advised
 and the landing gate holds. A `cochange` finding could not be judged at the
 edit anyway, since its second file may come later, so the advisory never
 covers one (A3 increment 8, below).
+
+**A5 rulings (the user's).** The user ruled on twelve questions before A5 was
+built. They bind every A5 increment.
+
+| # | Question | Ruling |
+|---|---|---|
+| D1 | What a state with no role sees | A state with no role (tdd's red, green and refactor, chore's doing, and other machines' working states) is a build state and sees design-phase plus always rules. This is decided from the machine alone, with no history. |
+| D2 | What the review phase sees | Review, landing and always rules. |
+| D3 | The turn index's file scope | Declared plus changed files. When both are empty, it is the whole role index, capped. |
+| D4 | What is injected at an edit | Only judgement rules' statements. |
+| D5 | Whether the edit layer remembers what it said | No: stateless. Every matching edit carries them. |
+| D6 | The cap at an edit | One shared cap, findings first, one overflow line. |
+| D7 | `guidelines.injection.on_edit` | Accepted, default true. |
+| D8 | Where the renderers live | Pure renderers live in `core/guidelines`; the host only wraps them. `render_advisory` moves down beside them in A5.3. |
+| D9 | Subagents | They wait for A6, getting only the edit layer until then. |
+| D10 | Verdict standings in the turn index | None. |
+| D11 | A `CLAUDE.md` block in this repository | None yet; revisit when an always rule is added. |
+| D12 | Always rules at the turn | The turn index always lists always rules by id and title, and `doctor` and `generated_current` say when always rules exist but no instruction file carries the block. |
+
+A5 is built in four increments, recorded on its session's plan: selection
+and `guidelines show --phase` (A5.1), the turn layer (A5.2), the edit layer
+and `on_edit` (A5.3), and the always-layer warning and closure (A5.4).
+
+**As built: A5 increment 1, selection and `guidelines show --phase`.** Built
+to D7, ruling 8 and the A5 rulings D1 to D3.
+
+- *`core/guidelines.select(ruleset, roles, paths)`.* D7 sketched
+  `select(role, paths)`; the ruleset is a parameter so the function stays
+  pure, and it takes a state's roles, plural, since a state may carry
+  several. `ROLE_PHASES` maps `design` to design and always rules, `review`
+  to review, landing and always (D2), and `landing` and `abandon` to none.
+  `phases_for(roles)` is the union, in `PHASES` order. A state carrying none
+  of those four roles is a build state and sees `BUILD_PHASES`, design and
+  always (D1). That reads the machine alone, never history. A rule is
+  selected when its phases meet those, and, when `paths` is not empty, when
+  at least one path meets it. Empty paths are no file filter. The result is
+  in declared order.
+- *One reading of "this file brings the rule into play".* `matches`,
+  `meets` and the path exception moved down from `core/findings` into
+  `core/guidelines`, because `core/findings` imports `core/guidelines` and
+  selection could not ask it from there. `core/findings` and `core/verdicts`
+  now import them, so the findings, the verdicts owed and the selection
+  read one predicate. A path exception with no fingerprint sets a file
+  aside; one naming a fingerprint excuses one finding and sets no file
+  aside. Nothing else changed in either module's behaviour.
+- *`render_selected`.* It is a pure renderer beside the others (D8). It
+  writes one header line naming the ruleset's path and digest, the phases,
+  how many rules were selected out of how many, and the file scope. Then
+  each rule follows through the checklist's own per-rule writer, so a rule
+  reads the same in both texts. An empty selection says so.
+- *`invariant guidelines show --phase R [--files ...] [--touched]`.* The
+  domain's `select` resolves the file scope and asks `core/guidelines` the
+  rest. A named file is read against the working directory and spelled
+  project-relative. `--touched` adds `core/rules`' `touched_paths`: the
+  session's declared plus changed files through `_changed_set` (D3), the
+  same union the gates read. The session is resolved from the working
+  directory. With both, the scope is the union. `--json` carries the phase,
+  its phases, the selected ids, the ruleset digest, the files and the text.
+  Plain `guidelines show` is unchanged.
+- *Refusals.* Each is `SelectionRefused`, exit 1, and writes nothing:
+  - an unknown phase, naming the four;
+  - `--touched` with no session;
+  - and, taken in the strict direction, `--files` or `--touched` without
+    `--phase`, and a named file that names nothing inside the project. A
+    misspelt path dropped silently would widen the selection to every rule
+    of the phase with nothing to say so.
+- *Readings taken where the rulings are silent.*
+  - A role the mapping does not know contributes no phases. So a state with
+    only such roles is a build state, the direction that shows more rules.
+  - `--phase` names a role, as D7 says. There is no `build` value: a build
+    state sees what `design` does, so `--phase design` is what it is shown.
+  - `touched_paths` keeps a path that is not, or no longer, a file in the
+    tree. A declared file the session is about to create is the one whose
+    rules it most needs before it exists. The verdicts' DN-3 reading, where
+    a deleted file owes nothing, is unchanged: it asks `meets` over present
+    files only.
+  - A changed set nothing could establish gives an empty scope. That is no
+    file filter, which hides no rule, so it is not refused.
+- *What is not here.* The turn layer (A5.2), the edit layer and
+  `guidelines.injection.on_edit` (A5.3, still refused by name at load), and
+  the always-layer warning in `doctor` and `generated_current` (A5.4).
+- *Tests.* `tests/test_guidelines_select.py`: `phases_for` for every role
+  combination and every shipped tdd and chore state, `select` (order, the
+  union, the file filter, a path exception, no filter), the moved predicate
+  read by `core/findings`, `render_selected`, the domain's selection and each
+  refusal, `--touched` over a real repository, and the command through
+  `main`.
 
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 

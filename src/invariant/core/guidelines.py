@@ -65,7 +65,7 @@ from typing import Any
 import yaml
 
 from .errors import InvariantError
-from .manifest import project_relative
+from .manifest import glob_matches, project_relative
 
 RULESET_VERSION = 1
 
@@ -1506,6 +1506,127 @@ def append_block(text: str, name: str, body: str) -> str:
     if not text:
         return block_text(name, body)
     return text.rstrip("\n") + "\n\n" + block_text(name, body)
+
+
+# -- selection by phase and file (ADR-012 D7, the A5 rulings D1 to D3) --------------
+
+#: The rule phases a state role selects. A design state sees the build-time
+#: subset (design and always); a review state sees review, landing and
+#: always (ruling D2); a landing or abandon state sees nothing, since no
+#: agent works in it.
+ROLE_PHASES: dict[str, tuple[str, ...]] = {
+    "design": ("design", "always"),
+    "review": ("review", "landing", "always"),
+    "landing": (),
+    "abandon": (),
+}
+
+#: What a build state sees (ruling D1): a state carrying none of the roles
+#: above, such as tdd's red, green and refactor or chore's doing.
+BUILD_PHASES: tuple[str, ...] = ("design", "always")
+
+
+def phases_for(roles: Iterable[str]) -> tuple[str, ...]:
+    """The rule phases a state with ``roles`` sees, in :data:`PHASES` order.
+
+    Decided from the machine's roles alone, with no history (ruling D1). A
+    state with several roles sees the union. A role this mapping does not
+    know carries no phases of its own, so a state with only such roles is a
+    build state: the direction that shows more rules, never fewer.
+    """
+    known = [role for role in roles if role in ROLE_PHASES]
+    if not known:
+        return BUILD_PHASES
+    seen = {phase for role in known for phase in ROLE_PHASES[role]}
+    return tuple(phase for phase in PHASES if phase in seen)
+
+
+def matches(rel: str, glob: str) -> bool:
+    """Does ``rel`` fall under a glob as the ruleset wrote it?
+
+    The glob is put in its canonical spelling first, and one that names
+    nothing inside the project matches nothing.
+    """
+    canonical = project_relative(glob)
+    if canonical in (None, "."):
+        return False
+    return glob_matches(rel, canonical)
+
+
+def path_exception(rule: Guideline, rel: str) -> GuidelineException | None:
+    """The path exception that sets the whole of ``rel`` aside, if any.
+
+    Only an exception with no fingerprint does: one naming a fingerprint
+    excuses one finding, never a file.
+    """
+    return next(
+        (exc for exc in rule.exceptions if exc.fingerprint is None and matches(rel, exc.path)),
+        None,
+    )
+
+
+def meets(rule: Guideline, rel: str) -> bool:
+    """Does ``rel`` bring the rule into play (A4's DN-3)?
+
+    ``rel`` is under the rule's ``applies_to`` and not set aside by a path
+    exception. The one reading: the findings, the verdicts owed and the
+    selection all ask it.
+    """
+    if not any(matches(rel, glob) for glob in rule.applies_to):
+        return False
+    return path_exception(rule, rel) is None
+
+
+def select(
+    ruleset: Ruleset, roles: Iterable[str], paths: Collection[str]
+) -> tuple[Guideline, ...]:
+    """The rules a state with ``roles`` sees over ``paths``, in declared order.
+
+    Pure. A rule is selected when one of its phases is among
+    :func:`phases_for`'s and, when ``paths`` is not empty, at least one of
+    the project-relative ``paths`` meets it. Empty ``paths`` is no file
+    filter: every rule of the phases.
+    """
+    phases = set(phases_for(roles))
+    return tuple(
+        rule
+        for rule in ruleset.rules
+        if phases.intersection(rule.phases)
+        and (not paths or any(meets(rule, rel) for rel in paths))
+    )
+
+
+def render_selected(
+    ruleset: Ruleset,
+    rules: Iterable[Guideline],
+    *,
+    source: str,
+    phases: Iterable[str],
+    files: Collection[str],
+) -> str:
+    """The full text of the selected ``rules``, in markdown.
+
+    A header line naming the ruleset, the phases and the file scope, then
+    each rule as the checklist writes it, so the two texts cannot drift.
+    """
+    writer = _MarkdownWriter()
+    rules = tuple(rules)
+    phases = tuple(phases)
+    scope = (
+        f"over {len(files)} {'file' if len(files) == 1 else 'files'}"
+        if files else "with no file filter"
+    )
+    header = (
+        f"Guidelines for {', '.join(phases) or 'no phases'} from "
+        f"{writer.code(source)} (ruleset {ruleset.digest}): {len(rules)} of "
+        f"{len(ruleset.rules)} rules, {scope}."
+    )
+    lines = [header, ""]
+    for rule in rules:
+        lines += writer.rule(rule)
+    if not rules:
+        lines.append("No rule is selected.")
+    return "\n".join(lines).rstrip("\n") + "\n"
 
 
 # -- the baseline (D6) ------------------------------------------------------------

@@ -3330,11 +3330,38 @@ def cmd_guidelines_render(args) -> int:
 
 
 def cmd_guidelines_show(args) -> int:
+    if args.phase is not None:
+        return _guidelines_show_phase(args)
+    if args.files or args.touched:
+        from ..domains.guidelines import SelectionRefused
+
+        raise SelectionRefused(
+            "--files and --touched select within a phase, and no phase was named",
+            "add --phase design or --phase review",
+        )
     shown = _guidelines_domain(Context()).show()
     text = shown.text.rstrip("\n") if shown.text is not None else (
         "no guidelines ruleset configured; nothing to show"
     )
     return emit(args, {"ruleset": shown.ruleset, "text": shown.text}, text)
+
+
+def _guidelines_show_phase(args) -> int:
+    """`guidelines show --phase`: the selected rules' full text (ADR-012 D7, A5.1)."""
+    shown = _guidelines_domain(Context()).select(
+        args.phase, files=tuple(args.files or ()), touched=args.touched
+    )
+    text = shown.text.rstrip("\n") if shown.text is not None else (
+        "no guidelines ruleset configured; nothing to show"
+    )
+    return emit(args, {
+        "phase": shown.phase,
+        "phases": list(shown.phases),
+        "ruleset": shown.ruleset,
+        "rules": list(shown.rules),
+        "files": list(shown.files),
+        "text": shown.text,
+    }, text)
 
 
 _BASELINE_STATUS = {
@@ -5480,6 +5507,24 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(func=cmd_guidelines_render)
     q = guide.add_parser(
         "show", help="print the full checklist text from the ruleset, writing nothing"
+    )
+    q.add_argument(
+        "--phase",
+        metavar="ROLE",
+        help="print only the rules a state with this role sees: design, review, "
+        "landing or abandon (ADR-012 D7)",
+    )
+    q.add_argument(
+        "--files",
+        action="extend",
+        nargs="+",
+        metavar="PATH",
+        help="with --phase, only the rules these files bring into play (repeatable)",
+    )
+    q.add_argument(
+        "--touched",
+        action="store_true",
+        help="with --phase, add the session's declared plus changed files to --files",
     )
     q.set_defaults(func=cmd_guidelines_show)
     q = guide.add_parser(

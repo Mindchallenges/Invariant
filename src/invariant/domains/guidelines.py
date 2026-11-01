@@ -68,6 +68,13 @@ It also shows how the verdicts stand without writing anything (A4 increment
 4): ``verdict_standings`` returns ``core.rules.read_standings``, the read
 ``guidelines.verdicts_complete`` judges, so the command and the gate cannot
 disagree.
+
+And it shows the rules one phase selects (A5 increment 1, ADR-012 D7):
+``select`` resolves the file scope (named files, the session's declared plus
+changed files, or both) and asks ``core/guidelines.select`` and
+``render_selected``, which decide everything else. It writes nothing. An
+unknown phase, ``touched`` with no session and a named file outside the
+project are each ``SelectionRefused``.
 """
 
 from __future__ import annotations
@@ -78,6 +85,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..core import guidelines
+from ..core.errors import InvariantError
 from ..core.rules import (
     BaselineChange,
     BlockRendered,
@@ -91,6 +99,7 @@ from ..core.rules import (
     plan_verdicts,
     read_standings,
     ruleset_or_refuse,
+    touched_paths,
 )
 
 if TYPE_CHECKING:
@@ -118,6 +127,32 @@ class Shown:
 
     text: str | None
     ruleset: str | None = None
+
+
+@dataclass(frozen=True)
+class Selected:
+    """What ``guidelines show --phase`` prints; ``text`` is ``None`` with no ruleset."""
+
+    phase: str
+    #: The rule phases the phase sees (``core/guidelines.phases_for``).
+    phases: tuple[str, ...]
+    #: The project-relative file scope; empty is no file filter.
+    files: tuple[str, ...]
+    text: str | None = None
+    ruleset: str | None = None
+    #: The selected rule ids, in declared order.
+    rules: tuple[str, ...] = ()
+
+
+class SelectionRefused(InvariantError):
+    """``guidelines show --phase`` cannot select (exit 1). Names the fix."""
+
+    exit_code = 1
+
+    def __init__(self, message: str, fix: str) -> None:
+        super().__init__(f"{message}\n  {fix}")
+        self.reason = message
+        self.fix = fix
 
 
 @dataclass(frozen=True)
@@ -196,6 +231,59 @@ class GuidelinesDomain:
         text = guidelines.render_checklist(ruleset, "markdown", source=source)
         _digest, body = guidelines.split_managed(text, "markdown")
         return Shown(text=body.lstrip("\n"), ruleset=ruleset.digest)
+
+    def select(
+        self, phase: str, *, files: tuple[str, ...] = (), touched: bool = False
+    ) -> Selected:
+        """The full text of the rules ``phase`` selects over a file scope.
+
+        ``phase`` is a state role (ADR-012 D7). The scope is ``files``, read
+        against the working directory and spelled project-relative, together
+        with, when ``touched``, the declared plus changed files of the session
+        resolved from the working directory. An empty scope is no file filter.
+        Markdown whatever ``docs.format`` says, as :meth:`show` is. Writes
+        nothing.
+        """
+        if phase not in guidelines.ROLE_PHASES:
+            raise SelectionRefused(
+                f"unknown phase {phase!r}",
+                f"name one of {', '.join(guidelines.ROLE_PHASES)}",
+            )
+        session = self.ctx.session
+        if touched and (not session or not session.get("id")):
+            raise SelectionRefused(
+                "--touched: no session is active here, so there are no declared "
+                "or changed files to read",
+                "invariant session start <task-name>, or name the files with --files",
+            )
+        scope = {self._project_file(path) for path in files}
+        if touched:
+            scope.update(touched_paths(self.ctx))
+        paths = tuple(sorted(scope))
+        phases = guidelines.phases_for((phase,))
+        ruleset = ruleset_or_refuse(self.ctx)
+        if ruleset is None:
+            return Selected(phase=phase, phases=phases, files=paths)
+        chosen = guidelines.select(ruleset, (phase,), paths)
+        source = guidelines_relpath(self.ctx, self.manifest.get("guidelines.ruleset"))
+        return Selected(
+            phase=phase, phases=phases, files=paths,
+            text=guidelines.render_selected(
+                ruleset, chosen, source=source, phases=phases, files=paths
+            ),
+            ruleset=ruleset.digest,
+            rules=tuple(rule.id for rule in chosen),
+        )
+
+    def _project_file(self, path: str) -> str:
+        """A named file, read against the working directory, project-relative."""
+        rel = guidelines_relpath(self.ctx, str(Path(self.ctx.cwd) / path))
+        if rel is None:
+            raise SelectionRefused(
+                f"--files {path}: names nothing inside the project",
+                "name a file in this project, relative to the working directory",
+            )
+        return rel
 
     def baseline(
         self,

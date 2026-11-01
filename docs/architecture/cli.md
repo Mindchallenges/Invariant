@@ -1092,13 +1092,35 @@ invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local
         file, block and line within the block. Like the checklist's, the scan
         always runs, whatever privacy.enabled and privacy.scope say.
 
-invariant guidelines show
+invariant guidelines show [--phase <role> [--files <path>...]... [--touched]]
     Print the full checklist text from the ruleset in the tree in hand, in
     markdown whatever docs.format says, without its marker line. Writes
     nothing. This is where a capped block points. A ruleset that does not
     load is refused (exit 1); with none configured it says so and exits 0.
-    --json carries the ruleset digest and the text. Selecting by phase and
-    files (ADR-012 D7) arrives with A5.
+    --json carries the ruleset digest and the text.
+
+    --phase prints only the rules a state with that role sees (ADR-012 D7,
+    A5 increment 1), selected by core.guidelines.select: design sees design
+    and always rules, review sees review, landing and always rules, landing
+    and abandon see none. A state carrying none of these roles (tdd's red,
+    green and refactor, chore's doing) is a build state and sees what design
+    sees, so --phase design is what such a state is shown. Each rule is
+    printed as the checklist prints it, under one header line naming the
+    ruleset, the phases and the file scope.
+
+    --files narrows the selection to the rules these files bring into play:
+    under a rule's applies_to and not set aside by a path exception. A path
+    is read against the working directory; one naming nothing inside the
+    project is refused (exit 1). --touched adds the declared plus changed
+    files of the session resolved from the working directory (its working
+    tree, its branch's commits and its declared set; a declared file not yet
+    created counts). With both, the scope is the union. An empty scope is
+    no file filter: every rule of the phases.
+
+    --json carries phase, phases, the selected rule ids in declared order
+    (rules), the ruleset digest, the files and the text. Refused, exit 1,
+    writing nothing: an unknown phase, naming the four; --touched with no
+    session; and --files or --touched without --phase.
 
 invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
     Write the ratchet baseline guidelines.baseline names (ADR-012 D6, A3

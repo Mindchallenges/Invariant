@@ -47,8 +47,8 @@ admitted (DN-6) is ``core/rules``' question.
 
 A judgement rule's mechanical N/A conditions (D5 item 5, DN-A12, A4
 increment 2) are answered here too, by :func:`na_answer`: ``no_added_match``
-and ``no_executable_change``, over the rule's files (:func:`meets`, A4's
-DN-3), through the same reading of the change the ``pair`` trigger uses. It
+and ``no_executable_change``, over the rule's files (``core/guidelines``'
+:func:`meets`, A4's DN-3, which ``select`` reads too), through the same reading of the change the ``pair`` trigger uses. It
 answers true, false or unanswerable, and ``core/verdicts``' P5 accepts an
 ``na`` naming one only when it is true.
 
@@ -63,7 +63,7 @@ from __future__ import annotations
 import hashlib
 import posixpath
 import re
-from collections.abc import Callable, Container, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -76,8 +76,11 @@ from .guidelines import (
     Registry,
     Requirement,
     Trigger,
+    matches,
+    meets,
+    path_exception,
 )
-from .manifest import glob_matches, project_relative
+from .manifest import project_relative
 
 #: The kinds this module evaluates: every mechanical kind (D4). ``engine`` is
 #: its registered rule's, and ``judgement`` is a verdict's (A4).
@@ -130,18 +133,6 @@ def fingerprint(rule_id: str, *key: str) -> str:
     """
     text = _SEPARATOR.join((rule_id, *key))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:DIGEST_LENGTH]
-
-
-def matches(rel: str, glob: str) -> bool:
-    """Does ``rel`` fall under a glob as the ruleset wrote it?
-
-    The glob is put in its canonical spelling first, and one that names
-    nothing inside the project matches nothing.
-    """
-    canonical = project_relative(glob)
-    if canonical in (None, "."):
-        return False
-    return glob_matches(rel, canonical)
 
 
 @dataclass(frozen=True)
@@ -316,7 +307,7 @@ def evaluate(
             if not any(matches(rel, glob) for glob in rule.applies_to):
                 continue
             covered.add(rel)
-            exempt = _path_exception(rule, rel)
+            exempt = path_exception(rule, rel)
             if exempt is not None:
                 found.append(_finding(rule, rel, "excepted", note=exempt.reason))
             elif rule.check.kind == "pattern":
@@ -649,43 +640,16 @@ def _finding(rule: Guideline, rel: str, status: str, **fields: Any) -> Finding:
     )
 
 
-def _path_exception(rule: Guideline, rel: str) -> GuidelineException | None:
-    """A path exception with no fingerprint sets the whole file aside."""
-    return _first(rule.exceptions, rel, lambda exc: exc.fingerprint is None)
-
-
 def _fingerprint_exception(
     rule: Guideline, rel: str, stamp: str
 ) -> GuidelineException | None:
-    return _first(rule.exceptions, rel, lambda exc: exc.fingerprint == stamp)
-
-
-def _first(
-    exceptions: Sequence[GuidelineException],
-    rel: str,
-    applies: Callable[[GuidelineException], bool],
-) -> GuidelineException | None:
     return next(
-        (exc for exc in exceptions if applies(exc) and matches(rel, exc.path)),
+        (exc for exc in rule.exceptions if exc.fingerprint == stamp and matches(rel, exc.path)),
         None,
     )
 
 
 # -- the mechanical N/A conditions (D5 item 5, DN-A12, A4 increment 2) --------------
-
-
-def meets(rule: Guideline, rel: str) -> bool:
-    """Does the change meet the rule through ``rel`` (A4's DN-3)?
-
-    ``rel`` is under the rule's ``applies_to`` and not set aside by a path
-    exception. An exception naming a fingerprint excuses one finding, and a
-    verdict and an N/A condition have none, so it sets no file aside here.
-    The caller hands in only changed files present in the tree: a deleted
-    file does not count.
-    """
-    if not any(matches(rel, glob) for glob in rule.applies_to):
-        return False
-    return _path_exception(rule, rel) is None
 
 
 @dataclass(frozen=True)

@@ -1842,6 +1842,20 @@ def guidelines_relpath(ctx: RuleContext, configured: str) -> str | None:
     return None if rel in (None, ".") else rel
 
 
+def touched_paths(ctx: RuleContext) -> tuple[str, ...]:
+    """The session's declared plus changed files, project-relative and sorted.
+
+    The file scope guideline selection reads (ADR-012 D7, the A5 ruling D3):
+    ``_changed_set``'s union, so the working tree, the branch's commits and
+    the declared set each count. A path not yet, or no longer, a file in the
+    tree is kept: a declared file the session is about to create is the one
+    whose rules it most needs. Empty when nothing could be established, which
+    the selection reads as no file filter, the direction that hides no rule.
+    """
+    files, gone = _changed_in_tree(ctx, _changed_set(ctx), guidelines_tree(ctx))
+    return tuple(sorted({*files, *gone}))
+
+
 # -- what `guidelines render` would write --------------------------------------
 #
 # The render plan: every generated output of the guidelines domain decided,

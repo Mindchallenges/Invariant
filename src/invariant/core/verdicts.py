@@ -55,8 +55,8 @@ from dataclasses import dataclass, field, replace
 from difflib import get_close_matches
 from typing import Any
 
-from .findings import NaAnswer, meets
-from .guidelines import Guideline, NaCondition, Ruleset, digest_of
+from .findings import NaAnswer
+from .guidelines import Guideline, NaCondition, Ruleset, digest_of, meets
 from .manifest import project_relative
 
 #: What a verdict can say (D5).
@@ -916,7 +916,7 @@ def not_owed(rule: Guideline, facts: Facts) -> str | None:
     ``guidelines verdicts show`` calls not owed is one the gate does not ask
     about. A rule is owed when it is a judgement guideline, its phases name
     review, landing or always (DN-2), and a changed file present in the tree
-    meets it (DN-3, ``findings.meets``): under ``applies_to``, not
+    meets it (DN-3, ``guidelines.meets``): under ``applies_to``, not
     path-excepted; a deleted file owes nothing. With no changed set nothing
     is owed, and the gate refuses first.
     """
