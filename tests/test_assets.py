@@ -452,3 +452,240 @@ class TestTheAgentsRecordScopedEvidenceUnderACadence:
         text = shipped(name)
         assert "held_paths" in text
         assert "sweep.no_full_run" in text
+
+
+# -- one classifier: the body is its own marker's witness (BUG_106) ---------
+
+
+SOURCE = "---\nname: thing\ndescription: Does a thing. Use when: X\n---\nBody.\n"
+OLDER = SOURCE + "Wording an earlier release shipped.\n"
+
+
+def managed(text):
+    """A copy exactly as some release's install wrote it."""
+    return assets.render_managed(text, assets.digest_of(text))
+
+
+class TestOneClassifier:
+    """`assets.classify` is the only place a divergence is judged. Each state
+    is handed in as a known case, the two edited ones included."""
+
+    def test_no_file_is_absent(self):
+        assert assets.classify(None, SOURCE) == assets.ABSENT
+
+    def test_no_frontmatter_is_unreadable(self):
+        assert assets.classify("prose only\n", SOURCE) == assets.UNREADABLE
+
+    def test_the_shipped_copy_is_current(self):
+        assert assets.classify(managed(SOURCE), SOURCE) == assets.CURRENT
+
+    def test_an_edit_to_this_releases_copy_is_local(self):
+        """BUG_051's case: the marker holds today's digest and the body moved."""
+        assert assets.classify(managed(SOURCE) + "mine\n", SOURCE) == assets.LOCAL
+
+    def test_an_edit_to_an_older_releases_copy_is_local(self):
+        """BUG_106's case: the marker holds another release's digest and the
+        body no longer hashes to it."""
+        assert assets.classify(managed(OLDER) + "mine\n", SOURCE) == assets.LOCAL
+
+    def test_an_unedited_older_releases_copy_is_stale(self):
+        assert assets.classify(managed(OLDER), SOURCE) == assets.OLDER
+
+    def test_a_file_with_no_marker_is_the_projects(self):
+        """A project file under a shipped name has no witness, so nothing says
+        it is ours to flatten."""
+        assert assets.classify(OLDER, SOURCE) == assets.LOCAL
+
+    def test_a_body_equal_to_the_shipped_one_is_current_whatever_its_marker(self):
+        bogus = managed(SOURCE).replace(
+            assets.digest_of(SOURCE), "0000000000000000"
+        )
+        assert assets.classify(bogus, SOURCE) == assets.CURRENT
+
+    def test_the_marker_digest_is_of_the_source_form(self):
+        """The witness only works if an install writes the digest of what
+        `reconstruct_source` gives back."""
+        text = managed(OLDER)
+        assert assets.marker_digest(text) == assets.digest_of(
+            assets.reconstruct_source(text)
+        )
+
+
+# -- one plan, every kind ---------------------------------------------------
+
+
+@pytest.fixture
+def every_kind(tmp_path, monkeypatch):
+    """A library shipping one asset of each kind, so the plan is exercised
+    for commands and skills too; the real library ships agents only."""
+    from invariant.hosts import claude_code
+
+    data = tmp_path / "data"
+    for kind in assets.KINDS:
+        base = data / kind.directory
+        path = base / "thing" / kind.nested_file if kind.nested_file else base / "thing.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(GOOD[kind.name].format(id="thing"), encoding="utf-8")
+    monkeypatch.setattr(claude_code, "DATA_DIR", data)
+    host = ClaudeCodeHost(tmp_path / "project")
+    host.install_assets()
+    return host
+
+
+def target_of(host, kind_name):
+    kind = assets.BY_NAME[kind_name]
+    return host._target_for(kind, "thing")
+
+
+class TestOnePlanEveryKind:
+    @pytest.mark.parametrize("kind", [k.name for k in assets.KINDS])
+    def test_an_edited_older_release_copy_is_skipped_and_named(self, every_kind, kind):
+        source = GOOD[kind].format(id="thing")
+        older = source + "Older wording.\n"
+        target = target_of(every_kind, kind)
+        target.write_text(managed(older) + "mine\n", encoding="utf-8")
+
+        result = every_kind.install_assets()
+        assert (f"{kind}:thing", assets.LOCAL) in result.skipped
+        assert target.read_text(encoding="utf-8").endswith("mine\n")
+
+    @pytest.mark.parametrize("kind", [k.name for k in assets.KINDS])
+    def test_an_unedited_older_release_copy_is_rewritten(self, every_kind, kind):
+        source = GOOD[kind].format(id="thing")
+        target = target_of(every_kind, kind)
+        target.write_text(managed(source + "Older wording.\n"), encoding="utf-8")
+
+        result = every_kind.install_assets()
+        assert f"{kind}:thing" in result.installed
+        assert assets.reconstruct_source(target.read_text(encoding="utf-8")) == source
+
+    @pytest.mark.parametrize("kind", [k.name for k in assets.KINDS])
+    def test_the_currency_row_reads_the_same_plan(self, every_kind, kind):
+        source = GOOD[kind].format(id="thing")
+        target_of(every_kind, kind).write_text(
+            managed(source + "Older wording.\n") + "mine\n", encoding="utf-8"
+        )
+        ok, detail = check(every_kind.asset_checks(), f"library {kind}s current")
+        assert not ok
+        assert "thing (edited locally)" in detail
+
+    def test_the_rows_narrow_to_one_kind_and_name_the_given_repair(self, every_kind):
+        target_of(every_kind, "agent").unlink()
+        rows = every_kind.asset_checks(only="agent", repair="invariant agents install")
+        assert {name for name, _, _ in rows} == {
+            "agents loadable by host",
+            "library agents current",
+        }
+        assert "repair with: invariant agents install" in check(rows, "agents loadable")[1]
+
+    def test_uninstall_keeps_an_edited_copy_of_every_kind(self, every_kind):
+        for kind in assets.KINDS:
+            source = GOOD[kind.name].format(id="thing")
+            target_of(every_kind, kind.name).write_text(
+                managed(source + "Older wording.\n") + "mine\n", encoding="utf-8"
+            )
+        plan = every_kind.plan_uninstall(remove_assets=True)
+        assert plan["assets"] == []
+        assert sorted(plan["protected"]) == sorted(
+            f"{k.name}:thing" for k in assets.KINDS
+        )
+
+
+# -- the agents and assets commands resolve the host by host.kind ----------
+
+
+@pytest.fixture
+def initialised(tmp_path, monkeypatch):
+    from invariant.cli.main import main
+
+    root = tmp_path / "proj"
+    (root / "docs" / "architecture").mkdir(parents=True)
+    monkeypatch.chdir(root)
+    assert main(["init", "--name", "demo"]) == 0
+    return root
+
+
+def set_host_kind(root, kind):
+    import yaml
+
+    path = root / ".claude" / "invariant.yaml"
+    body = yaml.safe_load(path.read_text(encoding="utf-8"))
+    body["host"] = {"kind": kind}
+    path.write_text(yaml.safe_dump(body), encoding="utf-8")
+
+
+class TestTheHostIsTheManifests:
+    @pytest.mark.parametrize(
+        "argv",
+        [["agents", "list"], ["agents", "install"], ["assets", "list"], ["assets", "install"]],
+        ids=" ".join,
+    )
+    def test_a_host_kind_with_no_adapter_is_refused_by_name(
+        self, initialised, capsys, argv
+    ):
+        from invariant.cli.main import main
+
+        set_host_kind(initialised, "some-other-host")
+        before = sorted(p.name for p in (initialised / ".claude" / "agents").iterdir())
+        capsys.readouterr()
+
+        assert main(argv) == 2
+        err = capsys.readouterr().err
+        assert "'some-other-host'" in err and "claude_code" in err
+        after = sorted(p.name for p in (initialised / ".claude" / "agents").iterdir())
+        assert before == after
+
+    def test_agents_list_reads_the_plan(self, initialised, capsys):
+        from invariant.cli.main import main
+
+        agents_dir = initialised / ".claude" / "agents"
+        (agents_dir / "bug-reproducer.md").unlink()
+        (agents_dir / "backlog-curator.md").write_text(
+            "---\nname: someone-else\ndescription: d\n---\nB.\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        assert main(["agents", "list", "--json"]) == 0
+        import json
+
+        rows = {r["agent"]: r for r in json.loads(capsys.readouterr().out)["agents"]}
+        assert rows["bug-reproducer"]["status"] == "NOT INSTALLED"
+        assert rows["backlog-curator"]["status"].startswith("UNLOADABLE")
+        assert rows["feature-architect"]["status"] == "loadable"
+        assert rows["feature-architect"]["role"] == "design"
+
+    def test_assets_list_names_owner_and_role(self, initialised, capsys):
+        from invariant.cli.main import main
+
+        commands = initialised / ".claude" / "commands"
+        commands.mkdir(parents=True, exist_ok=True)
+        (commands / "local.md").write_text("<!-- x -->\n", encoding="utf-8")
+        capsys.readouterr()
+
+        assert main(["assets", "list", "--json"]) == 0
+        import json
+
+        rows = {r["name"]: r for r in json.loads(capsys.readouterr().out)["assets"]}
+        assert rows["feature-architect"]["owner"] == "library"
+        assert rows["feature-architect"]["role"] == "design"
+        assert rows["local"]["owner"] == "project"
+        assert rows["local"]["status"].startswith("UNLOADABLE")
+
+        assert main(["assets", "list", "--kind", "agent", "--json"]) == 0
+        kinds = {r["kind"] for r in json.loads(capsys.readouterr().out)["assets"]}
+        assert kinds == {"agent"}
+
+
+class TestThePlanAtItsEdges:
+    def test_uninstall_passes_over_an_absent_shipped_asset(self, every_kind):
+        target_of(every_kind, "agent").unlink()
+        plan = every_kind.plan_uninstall(remove_assets=True)
+        assert target_of(every_kind, "agent") not in plan["assets"]
+        assert target_of(every_kind, "command") in plan["assets"]
+        assert plan["protected"] == []
+
+    def test_a_path_that_cannot_be_read_is_unloadable_by_name(self, every_kind):
+        (every_kind.claude_dir / "commands" / "odd.md").mkdir()
+        ok, detail = check(every_kind.asset_checks(), "commands loadable")
+        assert not ok
+        assert "odd (IsADirectoryError)" in detail

@@ -31,10 +31,12 @@ Nothing reaches the engine another way.
   shell-mediated write it was false about, and the three rules keyed on the
   same "is this an edit tool" predicate returned a bare N/A whose default text
   is "not applicable here" (BUG_027). Both are now route-specific.
-- No command ever writes to the repository outside the state root and **the
+- No command ever writes to the repository outside the state root, **the
   stores the manifest declares** (`items.path`, `paths.memory`,
-  `paths.reports`, `paths.sweeps`). One command commits what it wrote there:
-  `sweep run`, its own record and the items it filed, and nothing else.
+  `paths.reports`, `paths.sweeps`), the generated files the manifest declares
+  and the host assets the host adapter installs (both classes below). One
+  command commits what it wrote: `sweep run`, its own record and the items it
+  filed, and nothing else.
 
   This was once a flat list of three exceptions. ADR-002 D4 generalised it
   rather than adding a fourth, and the reason is worth stating: an enumeration
@@ -64,6 +66,21 @@ Nothing reaches the engine another way.
   Alternatives). Printing the text for an agent to write would make fixing
   drift a model's act. Declaring the files as stores would land them
   unreviewed.
+
+  **A fourth class: host assets.** The host adapter installs files where
+  its host reads them: for Claude Code, the hook shims under
+  `.claude/hooks/`, this library's entries in `.claude/settings.json`, and
+  the managed agents, commands and skills under `.claude/`. Only `init`,
+  `hooks install`, `agents install` and `assets install` write them, and
+  `uninstall` removes them. In the settings file the class is only the
+  entries the library wired; every other key is the project's. A managed
+  asset an operator has edited is the operator's and is never rewritten
+  unasked ("A managed file the operator has edited", below). Unlike a
+  generated file, a host asset is a host's own wiring rather than a
+  projection of the project's policy, so it stays exempt from session
+  isolation under the default `session.exempt_paths` (`.claude/*`), as
+  ADR-012's A6 ruling 3 keeps it.
+  Which host, and so which locations, is the manifest's `host.kind`.
 
   One store sits outside every repository and so outside this rule: the
   oracle's user-level directory (`$INVARIANT_HOME`, else `~/.invariant`;
@@ -277,15 +294,26 @@ invariant assets list [--kind agent|command|skill]
     Every host asset: kind, whether the host can load it, and whether this
     library or the project owns it.
 
+    The four asset commands (assets list, assets install, agents list, agents
+    install) ask the manifest's host.kind for the host adapter, since the
+    files are that host's format in that host's locations. A kind with no
+    adapter in this release is refused by name, exit 2, before anything is
+    read or written; claude_code is the only one (ADR-012, the A6 ruling 12).
+
 invariant assets install [--kind ...] [--overwrite-local] [--dry-run]
     Reinstall library-shipped assets and nothing else. Not a flag on `init`:
     `init --force` rewrites the manifest, so routing a repair through it would
     trade a broken asset for a discarded enforcement configuration.
 
-    An asset you have EDITED is skipped and named. See "A managed file the
-    operator has edited" below. --overwrite-local asks for the shipped version
-    back; --dry-run enumerates every target, its divergence, and whether the
-    run would write it.
+    An asset you have EDITED is skipped and named, whichever release
+    installed it. See "A managed file the operator has edited" below.
+    --overwrite-local asks for the shipped version back; --dry-run enumerates
+    every target, its divergence, and whether the run would write it.
+
+    It reads the install plan, ClaudeCodeHost.plan_assets, which is the
+    one plan: `doctor`'s currency rows, `agents install`, `init` and
+    `uninstall --remove-assets` read it too, so no two of them can classify
+    one target differently.
 
 invariant agents list
     Every library agent: installed or not, whether the host can load it, and
@@ -296,7 +324,10 @@ invariant agents install [--overwrite-local] [--dry-run]
     `init`: `init --force` rewrites the manifest, so routing an agent repair
     through it would trade a broken agent file for a discarded enforcement
     configuration. Same edit protection as `assets install`, and it matters
-    more here: this is the command `doctor` actually points people at.
+    more here: this is the command `doctor` actually points people at. It is
+    that command's plan and writer narrowed to agents, and its loadable row
+    is `doctor`'s row, naming `agents install` as the repair; it once kept a
+    classifier loop, a writer and a check of its own.
 
 invariant config show [--provenance]
     Print resolved configuration and where each value came from.
@@ -316,20 +347,35 @@ installed one.** An install that would diverge from what is on disk is a
 question rather than a write.
 
 The marker is what separates the two divergences, and one function —
-`classify_installed` — is the only place that judgement is made:
+`assets.classify`, read through `classify_installed` by the install plan —
+is the only place that judgement is made. The marker is its own witness: an
+install writes the digest of the very text it writes, so a body that still
+hashes to its own marker is exactly what some release put there, and a body
+that does not was changed after.
 
 ```mermaid
 graph TD
-    T["an installed asset"] --> E{"does its body still<br/>reconstruct to what we ship?"}
-    E -- yes --> C["current"]
-    E -- no --> M{"does its marker hold<br/>the digest we ship?"}
-    M -- "yes — it was ours,<br/>then it changed" --> L["edited locally — the operator's work"]
-    M -- "no — it records<br/>some other release" --> O["installed from an older version"]
+    T["an installed asset"] --> A{"is it there, with<br/>frontmatter on line 1?"}
+    A -- "no file" --> AB["absent: written"]
+    A -- "no frontmatter" --> U["unreadable: written"]
+    A -- yes --> E{"does its body still<br/>reconstruct to what we ship?"}
+    E -- yes --> C["current: rewritten, at no cost"]
+    E -- no --> M{"does its body still hash<br/>to its own marker's digest?"}
+    M -- "no, or it has no marker:<br/>it changed after it was written" --> L["edited locally: the operator's work,<br/>whichever release installed it"]
+    M -- "yes: some release wrote it<br/>and nobody touched it" --> O["installed from an older version"]
     L --> S["skipped, and NAMED"]
     O --> W["rewritten; this is what<br/>the command exists for"]
 ```
 
-That distinction was computed all along, rendered into a **failing** `doctor`
+The witness question is the second rule. The first asked whether the
+marker held the digest *this* release ships, and so could only see an edit
+made to a copy the current release had installed. A copy an earlier release
+installed, then edited, carries that release's digest, and went to "older
+version", which both install commands rewrote without naming it (BUG_106).
+A file with frontmatter and no marker is the project's own under a shipped
+name, and is kept as well.
+
+The edited-or-older distinction was computed all along, rendered into a **failing** `doctor`
 check, and then ignored by the only command `doctor`'s output pointed at:
 `install_assets` overwrote every target unconditionally, with no `--force`, no
 per-asset skip, no backup, and a `--dry-run` that named nothing it would
@@ -349,7 +395,8 @@ Three consequences are load-bearing:
   failure. The one case withheld is the one where writing destroys work.
 
 The managed block `guidelines render` keeps in an instruction file follows the
-same rule (ADR-012 D3). Its begin marker holds the digest of its body, so a
+same rule (ADR-012 D3), and asked the witness question first. Its begin
+marker holds the digest of its body, so a
 body that no longer matches is the operator's edit: skipped and named, and
 `--overwrite-local` takes the rendered text back. The generated checklist is
 the exception. The whole file is render's and the ruleset is its only source,

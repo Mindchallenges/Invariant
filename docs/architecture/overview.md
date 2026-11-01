@@ -15,6 +15,7 @@ graph TD
         CC[claude_code]
         CCTEL[claude_code_telemetry]
         CCLAUNCH[claude_code_launch]
+        CCASSETS["assets: the managed-asset format and its one classifier"]
     end
 
     subgraph cli["cli/ — entrypoint"]
@@ -91,6 +92,7 @@ graph TD
     CC --> PLAN
     CC --> RULES
     CC -. reads the claim token named by .-> CCLAUNCH
+    CC -- "plan_assets: every install, doctor, uninstall" --> CCASSETS
     CLI --> SESSION
     CLI --> PIPELINE
     CLI --> WORKITEM
@@ -1557,6 +1559,19 @@ and the list had not said so. The same change moved `AGENT_TOOLS` and the
 `dispatched_agent` reader into `core/rules`, beside `EDIT_TOOLS`, by the rule
 in the previous paragraph: the PostToolUse recording and the PreToolUse
 warning ask one question, so the host imports the rule's answer.
+
+Installed assets have one format and one judgement. `hosts/assets` owns the
+managed file: its frontmatter as the host reads it, the provenance marker,
+the digest, loadability per kind, and `classify`, the only answer to how an
+installed copy diverges from what is shipped (current, edited locally,
+installed from an older version, absent, unreadable; the marker is the
+body's own witness, BUG_106). `ClaudeCodeHost.plan_assets` is the one plan
+over it, per target: `doctor`'s currency rows, `assets install`, `agents
+install`, `init` and `uninstall --remove-assets` all read it, and only an
+edited copy is withheld from a write. The asset commands reach the host
+through the manifest's `host.kind`, and a kind with no adapter is refused by
+name (ADR-012, "As built: A6 increment 1"; cli.md, "A managed file the
+operator has edited").
 
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through

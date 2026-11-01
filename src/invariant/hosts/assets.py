@@ -18,6 +18,7 @@ fixed for all of them at once.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +185,50 @@ def reconstruct_source(text: str) -> str | None:
     front, body = split
     kept = [line for line in front if not line.strip().startswith(MARKER_PREFIX)]
     return "\n".join([FENCE, *kept, FENCE, body])
+
+
+def digest_of(source_text: str) -> str:
+    """The digest a managed marker records: of the source form, marker-free."""
+    return hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
+
+
+#: How an installed asset differs from what the library ships. These are the
+#: strings `doctor` has always printed; naming them keeps the classifier and
+#: its readers from drifting apart about what a divergence IS.
+CURRENT = "current"
+ABSENT = "absent"
+LOCAL = "edited locally"
+OLDER = "installed from an older version"
+UNREADABLE = "unreadable"
+
+
+def classify(installed: str | None, shipped: str) -> str:
+    """How an installed copy diverges from the source this library ships.
+
+    The one answer, read by `doctor`, every install and `uninstall`. The
+    marker is its own witness: an install writes the digest of the very text
+    it writes, so a copy whose body still hashes to its own marker is exactly
+    what SOME release put there, and one whose body does not was changed
+    after. That is the operator's work, whichever release wrote the marker.
+
+    The first rule asked a different question, whether the marker held
+    today's digest, and so could only see an edit made under the current
+    release. A copy an earlier release installed and the operator then edited
+    carries that release's digest, read as "installed from an older version",
+    and both install commands rewrote it unnamed (BUG_106). A copy with
+    frontmatter but no marker is the project's own file under a shipped name,
+    and is never flattened either.
+    """
+    if installed is None:
+        return ABSENT
+    rebuilt = reconstruct_source(installed)
+    if rebuilt is None:
+        return UNREADABLE
+    if rebuilt == shipped:
+        return CURRENT
+    if marker_digest(installed) != digest_of(rebuilt):
+        return LOCAL
+    return OLDER
 
 
 def render_managed(source_text: str, digest: str) -> str:

@@ -9,7 +9,8 @@
   DN-A14). A4 closed with increment 8, whose design and three rulings
   (a to c) are the user's. A5 closed with increment 4, built to the user's
   twelve A5 rulings (D1 to D12, under D7): all three layers of ruling 8 are
-  built.
+  built. A6 is built to the user's fourteen A6 rulings (under D8), in five
+  increments; increment 1 is built.
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -2701,9 +2702,11 @@ to D3, D7, ruling 8 and the A5 rulings D11 and D12.
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 
 **The source is host-neutral.** A library agent is a markdown body with
-neutral frontmatter: `name`, `description`, `roles` (design, review, intake,
-repro), `tier` (D9), and `capabilities` (read, edit, shell, dispatch) rather
-than a host's tool names. The body speaks only to the invariant CLI and to the
+neutral frontmatter: `name`, `description`, `tier` (D9), and `capabilities`
+(read, edit, shell, dispatch) rather than a host's tool names. The record
+first listed `roles` (design, review, intake, repro) among them; the A6
+ruling 7 drops it, because the manifest's `agents.roles` already owns which
+agent answers for which role. The body speaks only to the invariant CLI and to the
 ruleset (`guidelines show`, `guidelines verdict`), never to "read the
 checklist document", which is what lets the ruleset replace the prose the
 agents read today.
@@ -2718,9 +2721,11 @@ they live in a new `core/agents` module.
 (`agents.overlays.<name>`), an ordered list of operations against named
 sections of the shipped agent: append to a section, insert after it, replace
 it. Shipped agents carry stable section anchors so an overlay does not depend
-on a heading's wording. The installed file's managed marker records two
-digests, the shipped source's and the overlay's, which separates three cases
-the single digest cannot:
+on a heading's wording. The installed file's managed marker records three
+digests (amended by the A6 ruling 1; the record first said two): the shipped
+source's, the overlay's, and the rendered body's own, its witness. The
+witness is what tells an edit from an older release; the other two say what
+to re-render. Together they separate three cases the single digest cannot:
 
 - the library changed: re-render;
 - the overlay changed: re-render;
@@ -2730,6 +2735,91 @@ the single digest cannot:
 BUG_051's rule carries over: a hand-edited installed file is skipped and
 named, never flattened. Project-local agents (`agents.local`) are untouched,
 so a publisher bound to one app store stays the project's.
+
+**A6 rulings (the user's).** The user accepted all fourteen A6 design
+recommendations before A6 was built. They bind every A6 increment.
+
+| # | Question | Ruling |
+|---|---|---|
+| 1 | What the managed marker records | Three digests: the source's, the overlay's, and the body's own witness. This amends D8, which said two. |
+| 2 | BUG_106, an edit to an older release's copy rewritten | Filed, reproduced, and fixed combined in A6.1, since A6.1 rewrites the classifier. |
+| 3 | Where rendered agents sit among the write classes | They stay host assets, exempt from session isolation as `.claude/*` is today. They are not generated files. |
+| 4 | An overlay's format | Versioned YAML operations. |
+| 5 | What an overlay may change | Body sections, plus `description_append`. |
+| 6 | Where overlays live | By convention at `docs/agents/<name>.yaml`. |
+| 7 | `roles` in the neutral frontmatter | Dropped. The manifest's `agents.roles` owns it. This amends D8. |
+| 8 | `compliance-reviewer`'s `model: sonnet` | Dropped in A6.2. |
+| 9 | How the bodies reach the ruleset | Literal `guidelines show --phase` commands, plus a fallback for a project with no ruleset, and a test that every command a body carries parses. |
+| 10 | `agents.rendered_current` | Warns in every profile, plus a `doctor` row. |
+| 11 | `agents.library` and `agents.local` | Become real keys the renderer reads. |
+| 12 | Host adapters | Claude Code is the only one, plus a lint for host vocabulary in the neutral source. |
+| 13 | A migration helper for the downstream project | None. It is filed as an idea. |
+| 14 | A gate on the design agent reading the guidelines | None. |
+
+A6 is built in five increments, recorded on its session's plan: one asset
+classifier and one install plan (A6.1), the neutral format and the Claude
+Code renderer (A6.2), overlays and the `agents.*` keys (A6.3), the
+`agents.rendered_current` drift rule (A6.4), and the bodies onto the engine
+with A6's closure (A6.5).
+
+**As built: A6 increment 1, one asset classifier and one install plan.**
+Built to D8 ("BUG_051's rule carries over"), the A6 rulings 1, 2, 3 and 12,
+and BUG_106. No format changed: the marker still records one digest, the
+source's, which is the rendered text's own digest while there is no
+overlay, so the witness of ruling 1 is already on disk in every copy any
+release has written.
+
+- *The witness rule (BUG_106, fixed).* `hosts/assets.classify` is the one
+  classifier, for every asset kind. An absent file is `absent`; no
+  frontmatter on line 1 is `unreadable`; a body that reconstructs to the
+  shipped text is `current`. Otherwise a body that no longer hashes to its
+  own marker's digest, or has no marker, is `edited locally`, skipped and
+  named whatever release installed it. A body that matches its own digest
+  but not the shipped text is `installed from an older version`, and is
+  rewritten. The old rule asked whether the marker held today's digest, so a
+  copy an earlier release installed and the operator edited went to "older"
+  and was rewritten unnamed. BUG_051's same-release case still lands on
+  `edited locally`. A marker-less file under a shipped name was "older" and
+  rewritten; it is now the project's and kept. This is the managed block's
+  rule (A2.4's `block_state`), so the two now agree.
+- *One plan.* `ClaudeCodeHost.plan_assets` is read by `doctor`'s currency
+  rows (`_stale_for`), `assets install`, `agents install`, `init` (through
+  `install`) and `uninstall --remove-assets`. `install_agent`, the second
+  writer, is gone, and `agents install` is the plan and `install_assets`
+  narrowed to agents. `agent_checks` is joined into
+  `asset_checks(only, repair)`, whose agent rows `doctor` and `agents
+  install` both print, each naming its own repair command. A failing
+  loadable row whose every shipped asset is absent now names its repair,
+  as `agent_checks` did.
+- *One set of helpers.* The frontmatter split and parse, the marker
+  constants and reader, `reconstruct_source`, the digest and loadability
+  live only in `hosts/assets`. Their copies in `hosts/claude_code`
+  (`_split_frontmatter`, `agent_frontmatter`, `_marker_digest`,
+  `_reconstruct_source`, a two-argument `loadability_problem`, `MARKER_*`,
+  `FENCE`) are deleted with no re-export. `agents list` asks the agent kind's
+  `loadability_problem`, so a mismatched name reads "is installed as X", as
+  `assets list` already said.
+- *The host is the manifest's (ruling 12).* `assets list`, `assets
+  install`, `agents list` and `agents install` resolve the adapter through
+  `host.kind` (`_asset_host` in the CLI). A kind with no adapter is refused
+  by name with exit 2, before anything is read or written.
+- *The write class (ruling 3).* cli.md's Conventions name host assets as
+  their own write class, beside the state root, the declared stores and the
+  generated files, exempt from isolation as before.
+- *Tests.* `tests/test_authority.py`: the BUG_106 repro, its strict xfail
+  removed and its assertions unchanged, for both install commands; its
+  control; `doctor`, `--dry-run`, `--overwrite-local`, `uninstall
+  --remove-assets` and `init --force` on an edited older-release copy; and
+  BUG_051's stale-copy test, which replaced a marker spelling this library
+  never wrote and accepted either `doctor` exit, rebuilt to watch `doctor`
+  name the copy stale, the install rewrite it unnamed, and the row turn
+  current. `tests/test_assets.py`: each state of `classify` as a known case,
+  the witness's round trip, the plan across all three kinds with a library
+  that ships each (skip, rewrite, the currency row, uninstall), the narrowed
+  rows naming their repair, the `host.kind` refusal for all four commands,
+  and `agents list` read off the plan. `tests/test_host_claude_code.py`
+  reads the canonical helpers, and refuses a frontmatter-less shipped
+  source through `install_assets`.
 
 ### D9 — Capability tiers are hints, never gates (A7)
 

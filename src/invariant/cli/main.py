@@ -1202,13 +1202,32 @@ def cmd_uninstall(args) -> int:
     )
 
 
+def _asset_host(ctx: Context, verb: str):
+    """The host adapter the project's ``host.kind`` names, for an asset command.
+
+    Asset files are a host's own format and live where that host reads them,
+    so the commands that write and list them ask the manifest which host that
+    is rather than assuming one. Claude Code is the only adapter in this
+    release; any other kind is refused by name, before anything is read or
+    written.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    kind = ctx.manifest.get("host.kind")
+    if kind == "claude_code":
+        return ClaudeCodeHost(ctx.manifest.root)
+    raise UsageError(
+        f"{verb} works through a host adapter, and this project's host.kind is "
+        f"{kind!r}, which has none in this release; 'claude_code' is the only one"
+    )
+
+
 def cmd_assets_list(args) -> int:
     """Every host asset, what kind it is, whether it loads, and who owns it."""
     from ..hosts import assets as A
-    from ..hosts.claude_code import ClaudeCodeHost
 
     ctx = Context()
-    host = ClaudeCodeHost(ctx.manifest.root)
+    host = _asset_host(ctx, "assets list")
     roles = ctx.manifest.get("agents.roles") or {}
     role_of = {a: role for role, agents in roles.items() for a in (agents or [])}
 
@@ -1248,10 +1267,8 @@ def cmd_assets_install(args) -> int:
     so routing a repair through it would trade a broken asset file for a
     discarded enforcement configuration.
     """
-    from ..hosts.claude_code import ClaudeCodeHost
-
     ctx = Context()
-    host = ClaudeCodeHost(ctx.manifest.root)
+    host = _asset_host(ctx, "assets install")
 
     if args.dry_run:
         plan = host.plan_assets(only=args.kind, overwrite_local=args.overwrite_local)
@@ -1312,25 +1329,26 @@ def cmd_assets_install(args) -> int:
 
 def cmd_agents_list(args) -> int:
     """What is installed, whether the host can load it, and who owns which role."""
-    from ..hosts.claude_code import DATA_DIR, ClaudeCodeHost, loadability_problem
+    from ..hosts import assets as A
 
     ctx = Context()
-    host = ClaudeCodeHost(ctx.manifest.root)
+    host = _asset_host(ctx, "agents list")
     roles = ctx.manifest.get("agents.roles") or {}
     role_of = {a: role for role, agents in roles.items() for a in (agents or [])}
 
     rows = []
-    for source in sorted((DATA_DIR / "agents").glob("*.md")):
-        target = host.claude_dir / "agents" / source.name
-        if not target.is_file():
+    for step in host.plan_assets(only="agent"):
+        if step.state == A.ABSENT:
             status = "NOT INSTALLED"
         else:
-            problem = loadability_problem(
-                target.read_text(encoding="utf-8"), source.stem
+            problem = A.loadability_problem(
+                A.BY_NAME["agent"],
+                step.target.read_text(encoding="utf-8"),
+                step.identity,
             )
             status = f"UNLOADABLE — {problem}" if problem else "loadable"
         rows.append(
-            {"agent": source.stem, "status": status, "role": role_of.get(source.stem, "")}
+            {"agent": step.identity, "status": status, "role": role_of.get(step.identity, "")}
         )
 
     width = max((len(r["agent"]) for r in rows), default=1)
@@ -1349,69 +1367,56 @@ def cmd_agents_install(args) -> int:
     manifest, so pointing an agent repair at it would trade a broken agent file
     for a discarded enforcement configuration — a worse loss than the fault
     being repaired.
+
+    It reads the same install plan as ``assets install``, narrowed to agents.
+    It once classified each target itself and wrote through a second writer,
+    so the two commands could only agree by keeping two copies in step.
     """
-    from ..hosts.claude_code import (
-        CHECK_AGENTS_LOADABLE,
-        DATA_DIR,
-        LOCAL,
-        ClaudeCodeHost,
-        classify_installed,
-    )
+    from ..hosts.claude_code import CHECK_AGENTS_LOADABLE
 
     ctx = Context()
-    host = ClaudeCodeHost(ctx.manifest.root)
+    host = _asset_host(ctx, "agents install")
     agents_dir = host.claude_dir / "agents"
-    sources = sorted((DATA_DIR / "agents").glob("*.md"))
-    states = {
-        s.stem: classify_installed(s, agents_dir / s.name) for s in sources
-    }
-    protected = [
-        stem
-        for stem, state in states.items()
-        if state is LOCAL and not args.overwrite_local
-    ]
 
     if args.dry_run:
+        plan = host.plan_assets(only="agent", overwrite_local=args.overwrite_local)
         lines = [f"would install into {agents_dir}:"]
-        for source in sources:
-            state = states[source.stem]
-            verb = "SKIP     " if source.stem in protected else "install  "
-            lines.append(f"  {verb} {source.stem} ({state})")
-        if protected:
+        for step in plan:
+            verb = "install  " if step.write else "SKIP     "
+            lines.append(f"  {verb} {step.identity} ({step.state})")
+        if any(not step.write for step in plan):
             lines.append(_OVERWRITE_LOCAL_HINT)
         return emit(
             args,
             {
-                "would_install": [
-                    s.stem for s in sources if s.stem not in protected
-                ],
-                "would_skip": protected,
+                "would_install": [s.identity for s in plan if s.write],
+                "would_skip": [s.identity for s in plan if not s.write],
                 "into": str(agents_dir),
             },
             "\n".join(lines),
         )
 
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    installed = []
-    for source in sources:
-        host.install_agent(
-            source, agents_dir / source.name, overwrite_local=args.overwrite_local
-        )
-        if source.stem not in protected:
-            installed.append(source.stem)
+    result = host.install_assets(only="agent", overwrite_local=args.overwrite_local)
+    installed = [label.partition(":")[2] for label in result.installed]
+    skipped = [(label.partition(":")[2], why) for label, why in result.skipped]
 
-    checks = {label: (ok, detail) for label, ok, detail in host.agent_checks()}
+    checks = {
+        label: (ok, detail)
+        for label, ok, detail in host.asset_checks(
+            only="agent", repair="invariant agents install"
+        )
+    }
     ok, detail = checks[CHECK_AGENTS_LOADABLE]
     lines = [f"installed {len(installed)} agent(s) into {agents_dir}"]
-    lines += [f"  skipped {stem} ({LOCAL})" for stem in protected]
-    if protected:
+    lines += [f"  skipped {name} ({why})" for name, why in skipped]
+    if skipped:
         lines.append(_OVERWRITE_LOCAL_HINT)
     lines.append(f"  {detail}")
     if ok:
         lines.append("  reload the host's configuration for it to pick them up")
     emit(
         args,
-        {"installed": installed, "skipped": protected, "loadable": ok},
+        {"installed": installed, "skipped": [name for name, _ in skipped], "loadable": ok},
         "\n".join(lines),
     )
     return EXIT_OK if ok else 1

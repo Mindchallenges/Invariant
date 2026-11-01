@@ -26,16 +26,22 @@ import yaml
 
 from invariant.core import guidelines as guidelines_reader
 from invariant.core.errors import InvariantError
-from invariant.hosts import claude_code
+from invariant.hosts import assets, claude_code
+from invariant.hosts.assets import frontmatter as agent_frontmatter
 from invariant.hosts.claude_code import (
     CHECK_AGENTS_CURRENT,
     CHECK_AGENTS_LOADABLE,
     CHECK_HOOKS,
     CHECK_HOOKS_RUN,
     ClaudeCodeHost,
-    agent_frontmatter,
-    loadability_problem,
 )
+
+AGENT = assets.BY_NAME["agent"]
+
+
+def loadability_problem(text, expected_name):
+    """The agent kind's loadability question, the one `doctor` asks."""
+    return assets.loadability_problem(AGENT, text, expected_name)
 
 SHIPPED = sorted((claude_code.DATA_DIR / "agents").glob("*.md"))
 
@@ -140,7 +146,7 @@ class TestInstall:
         while being nothing at all to a YAML parser — which is the whole trick.
         """
         text = (agents_dir(installed) / source.name).read_text(encoding="utf-8")
-        assert claude_code.MARKER_PREFIX in text
+        assert assets.MARKER_PREFIX in text
         front = agent_frontmatter(text)
         assert not any("invariant" in str(key).lower() for key in front)
 
@@ -166,12 +172,19 @@ class TestInstall:
         installed.install()
         assert check(installed.verify(), CHECK_AGENTS_LOADABLE)[0]
 
-    def test_a_source_without_frontmatter_is_refused(self, host, tmp_path):
-        bad = tmp_path / "bad-agent.md"
-        bad.write_text("just prose, no frontmatter\n", encoding="utf-8")
+    def test_a_source_without_frontmatter_is_refused(self, host, tmp_path, monkeypatch):
+        """A shipped source the host could not load is refused before any
+        write, by the one installer every command shares."""
+        data = tmp_path / "data"
+        (data / "agents").mkdir(parents=True)
+        (data / "agents" / "bad-agent.md").write_text(
+            "just prose, no frontmatter\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(claude_code, "DATA_DIR", data)
         with pytest.raises(InvariantError) as exc:
-            host.install_agent(bad, agents_dir(host) / "bad-agent.md")
+            host.install_assets(only="agent")
         assert "frontmatter" in str(exc.value).lower()
+        assert not (agents_dir(host) / "bad-agent.md").exists()
 
 
 # -- verification ------------------------------------------------------
@@ -194,7 +207,7 @@ class TestVerifyLoadable:
         """The exact layout that shipped: marker above the frontmatter."""
         target = agents_dir(installed) / SHIPPED[0].name
         body = SHIPPED[0].read_text(encoding="utf-8")
-        digest = claude_code.digest_of(body)
+        digest = assets.digest_of(body)
         target.write_text(f"<!-- invariant-managed: {digest} -->\n{body}", encoding="utf-8")
 
         ok, detail = check(installed.verify(), CHECK_AGENTS_LOADABLE)
@@ -209,7 +222,7 @@ class TestVerifyLoadable:
         """
         target = agents_dir(installed) / SHIPPED[0].name
         body = SHIPPED[0].read_text(encoding="utf-8")
-        digest = claude_code.digest_of(body)
+        digest = assets.digest_of(body)
         target.write_text(f"<!-- invariant-managed: {digest} -->\n{body}", encoding="utf-8")
 
         assert digest in target.read_text(encoding="utf-8")  # the old check's basis
@@ -328,7 +341,7 @@ class TestLoadabilityReasons:
 
     def test_a_mismatched_name_names_both_sides(self):
         problem = loadability_problem("---\nname: a\ndescription: d\n---\nb\n", "x")
-        assert "'a'" in problem and "x.md" in problem
+        assert "'a'" in problem and "installed as x" in problem
 
     def test_a_good_file_has_no_problem(self):
         assert loadability_problem("---\nname: x\ndescription: d\n---\nb\n", "x") is None
@@ -336,14 +349,14 @@ class TestLoadabilityReasons:
 
 class TestMarkerDigest:
     def test_absent_frontmatter_has_no_marker(self):
-        assert claude_code._marker_digest("no frontmatter\n") is None
+        assert assets.marker_digest("no frontmatter\n") is None
 
     def test_frontmatter_without_a_marker_returns_none(self):
-        assert claude_code._marker_digest("---\nname: a\n---\nb\n") is None
+        assert assets.marker_digest("---\nname: a\n---\nb\n") is None
 
     def test_the_marker_is_read_back(self, installed):
         text = (agents_dir(installed) / SHIPPED[0].name).read_text(encoding="utf-8")
-        assert claude_code._marker_digest(text) == claude_code.digest_of(
+        assert assets.marker_digest(text) == assets.digest_of(
             SHIPPED[0].read_text(encoding="utf-8")
         )
 

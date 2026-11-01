@@ -28,7 +28,6 @@ is allowed to stand in for the other.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -53,6 +52,8 @@ from ..core.rules import (
 )
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
+from . import assets
+from .assets import ABSENT, CURRENT, LOCAL, digest_of
 from .claude_code_launch import HANDOFF_ENV
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -90,18 +91,6 @@ done
 # tool call in the project.
 echo '{{}}'
 """
-
-#: Provenance goes *inside* the frontmatter, as a YAML comment.
-#:
-#: It used to be an HTML comment on line 1. That pushed the frontmatter to line
-#: 2, and this host only recognises a frontmatter block that opens the file —
-#: so every agent installed that way was copied into place and then ignored,
-#: with nothing reporting it. A comment within the block is invisible to the
-#: YAML parser and still greppable, which is what provenance actually needs.
-MARKER_PREFIX = "# invariant-managed:"
-MARKER_TEMPLATE = MARKER_PREFIX + " {digest}"
-
-FENCE = "---"
 
 #: Check labels. Named constants because ``doctor`` prints them and the tests
 #: assert on them, and a silently renamed check is a silently dropped test.
@@ -259,17 +248,9 @@ def _question_text(tool_input: object) -> str | None:
     return None
 
 
+#: The agent kind's two rows from `asset_checks`, by label.
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
 CHECK_AGENTS_CURRENT = "library agents current"
-
-#: How an installed asset differs from what the library ships. These are the
-#: strings `doctor` has always printed; naming them keeps the classifier and
-#: its two readers from drifting apart about what a divergence IS.
-CURRENT = "current"
-ABSENT = "absent"
-LOCAL = "edited locally"
-OLDER = "installed from an older version"
-UNREADABLE = "unreadable"
 
 
 @dataclass
@@ -286,12 +267,12 @@ class AssetPlan:
 
 @dataclass
 class InstallResult:
-    """What an install DID, in three lists rather than one.
+    """What an install DID, in two lists rather than one.
 
     It used to return one list — every asset, all overwritten — and the command
     printed "installed N asset(s)" with no mention that one of them had been
-    changed by hand. The three cases are different facts and the operator needs
-    the middle one most.
+    changed by hand. A write and a skip are different facts, and the operator
+    needs the skip most.
     """
 
     installed: list[str] = field(default_factory=list)
@@ -333,122 +314,12 @@ def _currency_detail(stale: list[str], repair: str) -> str:
 def classify_installed(source: Path, target: Path) -> str:
     """How ``target`` diverges from the ``source`` this library ships.
 
-    The one answer, read by `doctor` and by every install. It was written
-    inside `_stale_for` and lived only there, so the command `doctor`'s failure
-    points at — `assets install` — could not consult it and destroyed the very
-    edits this function had just identified as edits (BUG_051).
-
-    The discriminator is the marker digest. A file whose marker still records
-    the digest of what we ship, but whose body no longer reconstructs to it,
-    was changed AFTER we wrote it: that is the operator's work. A file whose
-    marker records some other digest is a copy of an older release, which is
-    nobody's work and is the case reinstalling exists for.
+    The two file reads around `assets.classify`, which owns the rule. Every
+    reader goes through the install plan, so `doctor`, both install commands
+    and `uninstall` cannot disagree about what an edit is (BUG_051, BUG_106).
     """
-    from . import assets
-
-    if not target.is_file():
-        return ABSENT
-    text = target.read_text(encoding="utf-8")
-    shipped = source.read_text(encoding="utf-8")
-    rebuilt = assets.reconstruct_source(text)
-    if rebuilt is None:
-        return UNREADABLE
-    if rebuilt == shipped:
-        return CURRENT
-    return LOCAL if assets.marker_digest(text) == digest_of(shipped) else OLDER
-
-
-def digest_of(body: str) -> str:
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
-
-
-def _split_frontmatter(text: str) -> tuple[list[str], str] | None:
-    """``(frontmatter lines, body)`` — or ``None`` if the host would skip it.
-
-    Deliberately strict about the opening fence being the first line, because
-    that is the condition the host itself applies. A helper that is more
-    forgiving than the thing it models cannot be used to predict it.
-    """
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != FENCE:
-        return None
-    for index in range(1, len(lines)):
-        if lines[index].strip() == FENCE:
-            return lines[1:index], "\n".join(lines[index + 1 :])
-    return None
-
-
-#: A frontmatter key line. Deliberately narrow: a key is a bare identifier at
-#: the start of a line, everything after the first colon is the value.
-_KEY_LINE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
-
-
-def agent_frontmatter(text: str) -> dict | None:
-    """The agent's frontmatter as a mapping, or ``None`` if it will not load.
-
-    Parsed line by line rather than with a YAML parser, because the host reads
-    it that way and the host is what this predicts. Every agent file shipped
-    here — and the project-local one that has always loaded correctly — has a
-    ``description`` containing ``": "``, which strict YAML rejects outright.
-    Validating with ``yaml.safe_load`` would therefore condemn four agents that
-    work. A checker that is stricter than the system it models produces false
-    alarms exactly as reliably as a loose one produces misses.
-    """
-    split = _split_frontmatter(text)
-    if split is None:
-        return None
-    front: dict[str, str] = {}
-    for line in split[0]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        match = _KEY_LINE.match(stripped)
-        if match:  # anything else is a continuation line, not a new key
-            front.setdefault(match.group(1), match.group(2).strip())
-    return front or None
-
-
-def _marker_digest(text: str) -> str | None:
-    split = _split_frontmatter(text)
-    if split is None:
-        return None
-    for line in split[0]:
-        stripped = line.strip()
-        if stripped.startswith(MARKER_PREFIX):
-            return stripped[len(MARKER_PREFIX) :].strip()
-    return None
-
-
-def _reconstruct_source(text: str) -> str | None:
-    """The installed file with the marker removed — i.e. its source form.
-
-    Comparing this against the shipped file is what detects a *local edit*.
-    Comparing the marker against the shipped digest only detects an *old
-    install*; the two are different situations and the original check could
-    see neither.
-    """
-    split = _split_frontmatter(text)
-    if split is None:
-        return None
-    front, body = split
-    kept = [line for line in front if not line.strip().startswith(MARKER_PREFIX)]
-    return "\n".join([FENCE, *kept, FENCE, body])
-
-
-def loadability_problem(text: str, expected_name: str) -> str | None:
-    """Why the host would refuse this file, or ``None`` if it would load it."""
-    if _split_frontmatter(text) is None:
-        return "no frontmatter on line 1"
-    front = agent_frontmatter(text)
-    if front is None:
-        return "frontmatter declares no keys"
-    if not front.get("name"):
-        return "no name"
-    if not front.get("description"):
-        return "no description, so nothing can route work to it"
-    if str(front["name"]) != expected_name:
-        return f"declares name {front['name']!r} but the file is {expected_name}.md"
-    return None
+    installed = target.read_text(encoding="utf-8") if target.is_file() else None
+    return assets.classify(installed, source.read_text(encoding="utf-8"))
 
 
 #: The files this host reads as standing instructions, project-relative. The
@@ -472,7 +343,7 @@ class ClaudeCodeHost:
     def plan_install(self) -> list[str]:
         actions = [f"install {len(EVENTS)} hook shims into .claude/hooks/"]
         actions.append("wire the shims into .claude/settings.json")
-        agents = sorted((DATA_DIR / "agents").glob("*.md"))
+        agents = self._sources_for(assets.BY_NAME["agent"])
         actions.append(f"install {len(agents)} library agents into .claude/agents/")
         return actions
 
@@ -507,43 +378,11 @@ class ClaudeCodeHost:
         return written
 
     def install(self) -> None:
+        """What `init` installs: the hooks, and the library agents through the
+        same plan every other install reads, so an edited copy is kept here
+        too."""
         self.install_hooks()
-
-        agents_dir = self.claude_dir / "agents"
-        agents_dir.mkdir(parents=True, exist_ok=True)
-        for source in sorted((DATA_DIR / "agents").glob("*.md")):
-            self.install_agent(source, agents_dir / source.name)
-
-    def install_agent(
-        self, source: Path, target: Path, overwrite_local: bool = False
-    ) -> str:
-        """Write one agent, and answer what was there before.
-
-        The return value is the divergence it found, so a caller can report a
-        file it left alone. Skipping a local edit here is the same decision
-        `install_assets` makes and for the same reason — a file in the
-        operator's repository is the operator's (BUG_051).
-        """
-        state = classify_installed(source, target)
-        if state is LOCAL and not overwrite_local:
-            return state
-
-        body = source.read_text(encoding="utf-8")
-        split = _split_frontmatter(body)
-        if split is None:
-            raise InvariantError(
-                f"{source.name} has no YAML frontmatter starting on line 1. "
-                f"This host identifies an agent by that block; a file without "
-                f"one is copied into place and then silently ignored, so "
-                f"installing it would look like success and produce nothing."
-            )
-        front, rest = split
-        marker = MARKER_TEMPLATE.format(digest=digest_of(body))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            "\n".join([FENCE, marker, *front, FENCE, rest]), encoding="utf-8"
-        )
-        return state
+        self.install_assets(only="agent")
 
     def _wire_settings(self) -> None:
         settings = self._read_settings()
@@ -587,8 +426,6 @@ class ClaudeCodeHost:
         operation whose dry run is not a nicety: what it takes away cannot be
         got back by running it again.
         """
-        from . import assets
-
         hooks_dir = self.claude_dir / "hooks"
         shims = sorted(
             hooks_dir / f"invariant-{event}.sh"
@@ -605,16 +442,13 @@ class ClaudeCodeHost:
         asset_files: list[Path] = []
         protected: list[str] = []
         if remove_assets:
-            for kind in assets.KINDS:
-                for source in self._sources_for(kind):
-                    identity = kind.identity(source)
-                    target = self._target_for(kind, identity)
-                    if not target.is_file():
-                        continue
-                    if classify_installed(source, target) is LOCAL:
-                        protected.append(f"{kind.name}:{identity}")
-                    else:
-                        asset_files.append(target)
+            for step in self.plan_assets():
+                if step.state == ABSENT:
+                    continue
+                if step.write:
+                    asset_files.append(step.target)
+                else:
+                    protected.append(f"{step.kind}:{step.identity}")
 
         manifest = self.root / ".claude" / "invariant.yaml"
         return {
@@ -809,7 +643,9 @@ class ClaudeCodeHost:
             ),
         )
 
-    def asset_checks(self) -> list[tuple[str, bool, str]]:
+    def asset_checks(
+        self, only: str | None = None, repair: str = "invariant assets install"
+    ) -> list[tuple[str, bool, str]]:
         """Loadability and currency, for every kind the host reads.
 
         Both questions for every kind, because they answer different things and
@@ -819,11 +655,15 @@ class ClaudeCodeHost:
         Loadability covers PROJECT-OWNED files too. A local command that
         silently fails to load is the same outage as a shipped one, and until
         now nothing looked at commands or skills at all.
-        """
-        from . import assets
 
+        ``only`` narrows to one kind and ``repair`` names the command the rows
+        point at, so `agents install` reads these rows rather than a second
+        copy of them: it once kept its own, with its own classifier loop.
+        """
         checks: list[tuple[str, bool, str]] = []
         for kind in assets.KINDS:
+            if only and kind.name != only:
+                continue
             installed = kind.paths(self.claude_dir)
             unloadable: list[str] = []
             for path in installed:
@@ -841,20 +681,20 @@ class ClaudeCodeHost:
             # seeing "loadable: ok" beside a missing agent has been told the
             # wrong thing by the check whose whole job is that question.
             present = {kind.identity(path) for path in installed}
-            for identity in self._shipped_identities(kind):
-                if identity not in present:
-                    unloadable.append(f"{identity} (absent)")
+            for source in self._sources_for(kind):
+                if kind.identity(source) not in present:
+                    unloadable.append(f"{kind.identity(source)} (absent)")
 
             checks.append(
                 (
                     f"{kind.name}s loadable by host",
                     not unloadable,
                     (
-                        ", ".join(unloadable) + "  — repair with: invariant assets install"
+                        ", ".join(unloadable) + f"  — repair with: {repair}"
                         if unloadable
                         else f"{len(installed)} {kind.name}(s) parse and are addressable"
                     )
-                    if installed
+                    if installed or unloadable
                     else f"no {kind.name}s installed",
                 )
             )
@@ -865,21 +705,10 @@ class ClaudeCodeHost:
                     (
                         f"library {kind.name}s current",
                         not stale,
-                        _currency_detail(stale, "invariant assets install"),
+                        _currency_detail(stale, repair),
                     )
                 )
         return checks
-
-    def _shipped_identities(self, kind) -> list[str]:
-        """What this library ships of a kind, by name."""
-        root = DATA_DIR / kind.directory
-        if not root.is_dir():
-            return []
-        if kind.nested_file:
-            return sorted(
-                c.name for c in root.iterdir() if (c / kind.nested_file).is_file()
-            )
-        return sorted(p.stem for p in root.glob("*.md"))
 
     def _sources_for(self, kind) -> list[Path]:
         """The files this library ships of a kind, in a stable order."""
@@ -897,21 +726,16 @@ class ClaudeCodeHost:
     def _stale_for(self, kind) -> list[str] | None:
         """Which shipped assets of this kind differ from what we ship.
 
-        ``None`` when the library ships none of this kind — a project owning
-        every command is not drift, and reporting "0 stale" would imply this
-        library had an opinion about files it never wrote.
+        Read off the install plan, so the currency row and the install it
+        points at give one answer. ``None`` when the library ships none of
+        this kind — a project owning every command is not drift, and reporting
+        "0 stale" would imply this library had an opinion about files it never
+        wrote.
         """
-        sources = self._sources_for(kind)
-        if not sources:
+        plan = self.plan_assets(only=kind.name)
+        if not plan:
             return None
-
-        stale: list[str] = []
-        for source in sources:
-            identity = kind.identity(source)
-            state = classify_installed(source, self._target_for(kind, identity))
-            if state is not CURRENT:
-                stale.append(f"{identity} ({state})")
-        return stale
+        return [f"{s.identity} ({s.state})" for s in plan if s.state != CURRENT]
 
     def _target_for(self, kind, identity: str) -> Path:
         base = self.claude_dir / kind.directory
@@ -919,16 +743,20 @@ class ClaudeCodeHost:
             return base / identity / kind.nested_file
         return base / f"{identity}.md"
 
-    def plan_assets(self, only: str | None = None, overwrite_local: bool = False):
+    def plan_assets(
+        self, only: str | None = None, overwrite_local: bool = False
+    ) -> list[AssetPlan]:
         """What an install would do to each target, before it does any of it.
+
+        The one plan: `doctor`'s currency rows, both install commands, `init`
+        and `uninstall --remove-assets` all read it, so none of them can
+        classify a target differently from the others.
 
         Separated from the doing so that ``--dry-run`` can enumerate. It used
         to return before any per-file work and print "would reinstall library
         assets", which names nothing it would flatten — the one thing a dry run
         of a destructive command is for (BUG_051).
         """
-        from . import assets
-
         plan: list[AssetPlan] = []
         for kind in assets.KINDS:
             if only and kind.name != only:
@@ -949,7 +777,7 @@ class ClaudeCodeHost:
                         source=source,
                         target=target,
                         state=state,
-                        write=not (state is LOCAL and not overwrite_local),
+                        write=not (state == LOCAL and not overwrite_local),
                     )
                 )
         return plan
@@ -976,20 +804,15 @@ class ClaudeCodeHost:
         and an install that would diverge from what is on disk is a question
         rather than a write.
         """
-        from . import assets
-
         result = InstallResult()
         for step in self.plan_assets(only=only, overwrite_local=overwrite_local):
             label = f"{step.kind}:{step.identity}"
             if not step.write:
                 result.skipped.append((label, step.state))
                 continue
-            step.target.parent.mkdir(parents=True, exist_ok=True)
             body = step.source.read_text(encoding="utf-8")
             try:
-                step.target.write_text(
-                    assets.render_managed(body, digest_of(body)), encoding="utf-8"
-                )
+                rendered = assets.render_managed(body, digest_of(body))
             except ValueError as exc:
                 raise InvariantError(
                     f"{step.kind} {step.identity!r} has no YAML frontmatter starting "
@@ -998,61 +821,10 @@ class ClaudeCodeHost:
                     f"ignored, so installing it would look like success and "
                     f"produce nothing."
                 ) from exc
+            step.target.parent.mkdir(parents=True, exist_ok=True)
+            step.target.write_text(rendered, encoding="utf-8")
             result.installed.append(label)
         return result
-
-    def agent_checks(self) -> list[tuple[str, bool, str]]:
-        """Two questions, kept apart on purpose.
-
-        *Loadable* asks whether the host can turn this file into an agent at
-        all. *Current* asks whether it is the version the library ships. The
-        original implementation asked only the second, and answered it by
-        looking for a marker whose placement was what broke the first — so a
-        project with zero working agents was reported as fully in order. One
-        check standing in for the other is the whole bug.
-        """
-        unloadable: list[str] = []
-        stale: list[str] = []
-        total = 0
-
-        for source in sorted((DATA_DIR / "agents").glob("*.md")):
-            total += 1
-            target = self.claude_dir / "agents" / source.name
-            if not target.is_file():
-                unloadable.append(f"{source.stem} (absent)")
-                stale.append(f"{source.stem} (absent)")
-                continue
-
-            text = target.read_text(encoding="utf-8")
-            problem = loadability_problem(text, source.stem)
-            if problem:
-                unloadable.append(f"{source.stem} ({problem})")
-
-            # One classifier, shared with `_stale_for` and with every install.
-            # It used to be written out here as well, which is how the two
-            # readers could have come to disagree about what an edit IS — and
-            # the install path, which had no classifier at all, destroyed the
-            # files this one identifies (BUG_051).
-            state = classify_installed(source, target)
-            if state is not CURRENT:
-                stale.append(f"{source.stem} ({state})")
-
-        return [
-            (
-                CHECK_AGENTS_LOADABLE,
-                not unloadable,
-                (
-                    ", ".join(unloadable) + " — repair with: invariant agents install"
-                    if unloadable
-                    else f"{total} agent(s) parse and are addressable by name"
-                ),
-            ),
-            (
-                CHECK_AGENTS_CURRENT,
-                not stale,
-                _currency_detail(stale, "invariant agents install"),
-            ),
-        ]
 
     # -- request handling ----------------------------------------------
 

@@ -655,22 +655,42 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         assert "# project note" not in target.read_text(encoding="utf-8")
 
     def test_a_stale_asset_is_still_repaired_without_asking(self, project, capsys):
-        """The case the command exists for. An OLD installed copy carries a
-        digest that does not match what it holds, so it is not the operator's
-        work and reinstalling it is the repair, not a loss.
+        """The case the command exists for. A copy an earlier release wrote,
+        untouched since, still hashes to its own marker, so it is nobody's work
+        and reinstalling it is the repair, not a loss.
+
+        It once replaced a marker spelling this library never wrote and
+        accepted either exit code from `doctor`, so it passed with the stale
+        branch gone. The copy is now built the way a release builds one, and
+        the test watches `doctor` go from naming it stale to current.
         """
+        from invariant.hosts import assets
+
         run("init", "--name", "demo")
         target = project / ".claude" / "agents" / "feature-architect.md"
-        text = target.read_text(encoding="utf-8")
+        shipped = assets.reconstruct_source(target.read_text(encoding="utf-8"))
+        older = shipped + "\nWording an earlier release shipped.\n"
         target.write_text(
-            text.replace("invariant:managed", "invariant:managed digest=deadbeef")
-            if "invariant:managed" in text
-            else text,
-            encoding="utf-8",
+            assets.render_managed(older, assets.digest_of(older)), encoding="utf-8"
         )
         capsys.readouterr()
-        run("assets", "install")
-        assert run("doctor", "--json") in (0, 1)
+
+        run("doctor", "--json")
+        before = {c["check"]: c for c in payload(capsys)["checks"]}
+        detail = before["library agents current"]["detail"]
+        assert before["library agents current"]["ok"] is False
+        assert "feature-architect (installed from an older version)" in detail
+        assert "your edits are kept" not in detail
+
+        assert run("assets", "install") == 0
+        text = out(capsys)
+        assert "agent:feature-architect" in text
+        assert "skipped" not in text
+        assert assets.reconstruct_source(target.read_text(encoding="utf-8")) == shipped
+
+        run("doctor", "--json")
+        after = {c["check"]: c for c in payload(capsys)["checks"]}
+        assert after["library agents current"]["ok"] is True
 
     def test_dry_run_enumerates_what_it_would_do_to_each_file(self, project, capsys):
         """It returned before any per-file work, so it could not name what it
@@ -747,10 +767,12 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     today's digest to "installed from an older version", which both install
     commands rewrite. The operator's edit is lost and never named.
 
-    The two xfail tests fail while the defect is live. When the fix lands,
-    delete their expected-failure markers; the assertions must then pass
-    unchanged. The control is not wrapped: an unedited older-release copy is
-    rewritten today and must still be rewritten after the fix.
+    The classifier now asks whether the body still hashes to its own
+    marker, so an edit is kept and named whichever release installed the
+    copy. The two edited cases were committed under a strict xfail while the
+    defect was live, and their assertions pass unchanged with the marker
+    gone. The control holds the designed rewrite of an unedited
+    older-release copy.
     """
 
     MARK = "# project note"
@@ -774,10 +796,6 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
         target.write_text(text, encoding="utf-8")
         return target, shipped
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG_106 is live — delete this marker with the fix",
-    )
     @pytest.mark.parametrize("command", COMMANDS, ids=lambda c: c[0])
     def test_BUG_106_an_edited_older_release_copy_survives_and_is_named(
         self, project, capsys, command
@@ -814,6 +832,70 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
         assert not any(
             "skipped" in ln and "feature-architect" in ln for ln in text.splitlines()
         )
+
+    def test_doctor_names_an_edited_older_release_copy_as_the_operators(
+        self, project, capsys
+    ):
+        """The row `doctor` prints is read off the same plan, so it says the
+        edit is kept rather than offering a repair that would discard it."""
+        run("init", "--name", "demo")
+        self.older_release_copy(project, edited=True)
+        capsys.readouterr()
+
+        run("doctor", "--json")
+        rows = {c["check"]: c for c in payload(capsys)["checks"]}
+        detail = rows["library agents current"]["detail"]
+        assert "feature-architect (edited locally)" in detail
+        assert "your edits are kept" in detail
+
+    @pytest.mark.parametrize("command", COMMANDS, ids=lambda c: c[0])
+    def test_a_dry_run_names_the_edited_older_release_copy_as_a_skip(
+        self, project, capsys, command
+    ):
+        run("init", "--name", "demo")
+        target, _ = self.older_release_copy(project, edited=True)
+        before = target.read_text(encoding="utf-8")
+        capsys.readouterr()
+
+        assert run(*command, "--dry-run") == 0
+        lines = out(capsys).splitlines()
+        assert any(
+            "SKIP" in ln and "feature-architect" in ln and "edited locally" in ln
+            for ln in lines
+        )
+        assert target.read_text(encoding="utf-8") == before
+
+    @pytest.mark.parametrize("command", COMMANDS, ids=lambda c: c[0])
+    def test_overwrite_local_still_takes_the_shipped_version_back(
+        self, project, capsys, command
+    ):
+        run("init", "--name", "demo")
+        target, shipped = self.older_release_copy(project, edited=True)
+        capsys.readouterr()
+
+        assert run(*command, "--overwrite-local") == 0
+        from invariant.hosts import assets
+
+        assert assets.reconstruct_source(target.read_text(encoding="utf-8")) == shipped
+
+    def test_uninstall_keeps_an_edited_older_release_copy(self, project, capsys):
+        run("init", "--name", "demo")
+        target, _ = self.older_release_copy(project, edited=True)
+        capsys.readouterr()
+
+        assert run("uninstall", "--remove-assets") == 0
+        assert self.MARK in target.read_text(encoding="utf-8")
+        assert "kept    agent:feature-architect (edited locally" in out(capsys)
+
+    def test_init_force_keeps_an_edited_older_release_copy(self, project, capsys):
+        """`init` installs agents through the same plan, so a re-init does not
+        flatten the edit either."""
+        run("init", "--name", "demo")
+        target, _ = self.older_release_copy(project, edited=True)
+        capsys.readouterr()
+
+        assert run("init", "--name", "demo", "--force") == 0
+        assert self.MARK in target.read_text(encoding="utf-8")
 
 
 # -- AUTH-04: the temporary half of the position ------------------------
