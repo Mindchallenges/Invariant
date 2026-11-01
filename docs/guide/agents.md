@@ -108,12 +108,16 @@ agent, so who submitted a verdict never changes whether it counts.
 
 ## Keeping them current, and making them yours
 
-Library agents are **managed** files: the frontmatter carries a digest of
-what was shipped, so `invariant doctor` can tell three states apart —
+The library ships each agent in a host-neutral form, naming capabilities
+(read, edit, shell, dispatch) rather than a host's tools, and the install
+renders it into the host's own file. Library agents are **managed** files:
+the frontmatter carries a digest of what was installed, so `invariant doctor` can tell three states apart —
 current, installed from an older release, or edited by you.
 
 ```bash
 invariant agents list                      # installed? loadable? which role?
+invariant agents show feature-architect    # the text an install would write; writes nothing
+invariant agents show feature-architect --sections  # the section ids it is cut into
 invariant agents install                   # rewrite stale copies; skip and NAME edited ones
 invariant agents install --overwrite-local # take the shipped version back
 ```

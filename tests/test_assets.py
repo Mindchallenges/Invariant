@@ -57,11 +57,20 @@ def check(rows, label_fragment):
     raise AssertionError(f"no check matching {label_fragment!r} in {[r[0] for r in rows]}")
 
 
+#: Each kind as the host reads it. An agent's is what the renderer makes of
+#: :data:`NEUTRAL_AGENT`, so a plan over a library shipping that source
+#: installs exactly this text.
 GOOD = {
-    "agent": "---\nname: {id}\ndescription: Does a thing. Use when: X\n---\nBody.\n",
+    "agent": "---\nname: {id}\ndescription: Does a thing. Use when: X\ntools: Read, Grep, Glob\n---\nBody.\n",
     "command": "---\ndescription: Does a thing. Use when: X\n---\nBody.\n",
     "skill": "---\nname: {id}\ndescription: Does a thing. Use when: X\n---\nBody.\n",
 }
+
+
+#: The library's form of the GOOD agent: a neutral source (ADR-012 D8).
+NEUTRAL_AGENT = (
+    "---\nname: {id}\ndescription: Does a thing. Use when: X\ncapabilities: [read]\n---\nBody.\n"
+)
 
 
 class TestEveryKindIsChecked:
@@ -525,7 +534,8 @@ def every_kind(tmp_path, monkeypatch):
         base = data / kind.directory
         path = base / "thing" / kind.nested_file if kind.nested_file else base / "thing.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(GOOD[kind.name].format(id="thing"), encoding="utf-8")
+        shipped = NEUTRAL_AGENT if kind.name == "agent" else GOOD[kind.name]
+        path.write_text(shipped.format(id="thing"), encoding="utf-8")
     monkeypatch.setattr(claude_code, "DATA_DIR", data)
     host = ClaudeCodeHost(tmp_path / "project")
     host.install_assets()

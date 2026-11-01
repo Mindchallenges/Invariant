@@ -12,10 +12,11 @@ cannot drift apart about what a host owes the engine — they already had, which
 is what BUG_022 was filed about. A second host adapter's obligation is to fill
 those keys; nothing above reads anything else.
 
-**Hooks are shims; agents are copies.** A hook can be three lines that exec the
-CLI, so it has nothing to drift. An agent definition has to be a real file the
-host reads, so it is copied with a content hash recorded *inside* its
-frontmatter, and ``doctor`` reports drift rather than silently overwriting
+**Hooks are shims; agents are renders.** A hook can be three lines that exec
+the CLI, so it has nothing to drift. An agent definition has to be a real file
+the host reads, so it is rendered from the library's host-neutral source
+(``core/agents``, ADR-012 D8) and written with a content hash recorded *inside*
+its frontmatter, and ``doctor`` reports drift rather than silently overwriting
 local edits.
 
 The marker's placement is not a detail. It was once written above the
@@ -34,7 +35,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core import agents as agent_sources
 from ..core import plan as plan_reader
+from ..core.agents import AgentSource
 from ..core.errors import InvariantError, UsageError
 from ..core.guidelines import render_edit, render_turn_index
 from ..core.rules import (
@@ -263,6 +266,9 @@ class AssetPlan:
     target: Path
     state: str
     write: bool
+    #: What the host reads, before its marker: an agent rendered from its
+    #: neutral source, any other kind the source as shipped.
+    text: str
 
 
 @dataclass
@@ -311,21 +317,68 @@ def _currency_detail(stale: list[str], repair: str) -> str:
     return detail
 
 
-def classify_installed(source: Path, target: Path) -> str:
-    """How ``target`` diverges from the ``source`` this library ships.
+def classify_installed(shipped: str, target: Path) -> str:
+    """How ``target`` diverges from the ``shipped`` text this host reads.
 
-    The two file reads around `assets.classify`, which owns the rule. Every
-    reader goes through the install plan, so `doctor`, both install commands
-    and `uninstall` cannot disagree about what an edit is (BUG_051, BUG_106).
+    The file read around `assets.classify`, which owns the rule. Every reader
+    goes through the install plan, so `doctor`, both install commands and
+    `uninstall` cannot disagree about what an edit is (BUG_051, BUG_106).
+    ``shipped`` is the rendered text, not the neutral source: the host reads
+    the render, so an installed copy is judged against it.
     """
     installed = target.read_text(encoding="utf-8") if target.is_file() else None
-    return assets.classify(installed, source.read_text(encoding="utf-8"))
+    return assets.classify(installed, shipped)
 
 
 #: The files this host reads as standing instructions, project-relative. The
 #: default of ``guidelines.instruction_files`` (ADR-012 D3): which file a host
 #: reads is a host question, not a library constant.
 INSTRUCTION_FILES = ("CLAUDE.md",)
+
+#: Each neutral capability as this host's tools (ADR-012 D8). ``dispatch`` is
+#: the host's own agent tool, the one :data:`AGENT_TOOLS` names today.
+CAPABILITY_TOOLS = {
+    "read": ("Read", "Grep", "Glob"),
+    "edit": ("Edit", "Write"),
+    "shell": ("Bash",),
+    "dispatch": ("Agent",),
+}
+
+#: The order a rendered ``tools:`` line lists them in: the order every shipped
+#: agent file carried before the sources were neutral, so the render is the
+#: same bytes.
+TOOL_ORDER = ("Bash", "Read", "Edit", "Write", "Grep", "Glob", "Agent")
+
+#: This host's own words, which a neutral source must not speak (the A6
+#: ruling 12): its tool names, and the tool it asks the user a question with.
+HOST_VOCABULARY: tuple[str, ...] = (
+    *TOOL_ORDER,
+    *sorted(AGENT_TOOLS - set(TOOL_ORDER)),
+    "AskUserQuestion",
+)
+
+
+def render_agent(source: AgentSource) -> str:
+    """A neutral agent source as this host's agent file, before its marker.
+
+    The capabilities become a ``tools:`` line and the section anchors are
+    dropped. No model line is ever written: a model reaches this file only
+    through the operator's ``host.tier_map`` (ADR-012 D9), which A7 builds.
+    """
+    granted = {
+        tool for capability in source.capabilities for tool in CAPABILITY_TOOLS[capability]
+    }
+    tools = ", ".join(tool for tool in TOOL_ORDER if tool in granted)
+    return "\n".join(
+        [
+            assets.FENCE,
+            f"name: {source.name}",
+            f"description: {source.description}",
+            f"tools: {tools}",
+            assets.FENCE,
+            source.body(),
+        ]
+    )
 
 
 class ClaudeCodeHost:
@@ -737,6 +790,31 @@ class ClaudeCodeHost:
             return None
         return [f"{s.identity} ({s.state})" for s in plan if s.state != CURRENT]
 
+    def agent_source(self, name: str) -> AgentSource:
+        """The library's neutral source for one agent, parsed.
+
+        A name the library does not ship is refused naming the ones it does.
+        """
+        kind = assets.BY_NAME["agent"]
+        sources = {kind.identity(path): path for path in self._sources_for(kind)}
+        if name not in sources:
+            raise UsageError(
+                f"the library ships no agent named {name!r}; it ships "
+                + ", ".join(sorted(sources))
+            )
+        return agent_sources.parse(sources[name].read_text(encoding="utf-8"), name)
+
+    def _shipped_text(self, kind, source: Path) -> str:
+        """What the host reads for one shipped asset, before its marker.
+
+        An agent is rendered from its neutral source; a source that does not
+        validate is refused naming every problem, before anything is written.
+        """
+        text = source.read_text(encoding="utf-8")
+        if kind.name != "agent":
+            return text
+        return render_agent(agent_sources.parse(text, kind.identity(source)))
+
     def _target_for(self, kind, identity: str) -> Path:
         base = self.claude_dir / kind.directory
         if kind.nested_file:
@@ -764,7 +842,8 @@ class ClaudeCodeHost:
             for source in self._sources_for(kind):
                 identity = kind.identity(source)
                 target = self._target_for(kind, identity)
-                state = classify_installed(source, target)
+                text = self._shipped_text(kind, source)
+                state = classify_installed(text, target)
                 # Everything but a local edit is written, including a target
                 # that already matches: rewriting an identical file costs
                 # nothing, and a repair command that reports "installed 0"
@@ -778,6 +857,7 @@ class ClaudeCodeHost:
                         target=target,
                         state=state,
                         write=not (state == LOCAL and not overwrite_local),
+                        text=text,
                     )
                 )
         return plan
@@ -810,9 +890,8 @@ class ClaudeCodeHost:
             if not step.write:
                 result.skipped.append((label, step.state))
                 continue
-            body = step.source.read_text(encoding="utf-8")
             try:
-                rendered = assets.render_managed(body, digest_of(body))
+                rendered = assets.render_managed(step.text, digest_of(step.text))
             except ValueError as exc:
                 raise InvariantError(
                     f"{step.kind} {step.identity!r} has no YAML frontmatter starting "

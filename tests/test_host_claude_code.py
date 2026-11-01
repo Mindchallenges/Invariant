@@ -25,6 +25,7 @@ import pytest
 import yaml
 
 from invariant.core import guidelines as guidelines_reader
+from invariant.core.agents import parse
 from invariant.core.errors import InvariantError
 from invariant.hosts import assets, claude_code
 from invariant.hosts.assets import frontmatter as agent_frontmatter
@@ -34,6 +35,7 @@ from invariant.hosts.claude_code import (
     CHECK_HOOKS,
     CHECK_HOOKS_RUN,
     ClaudeCodeHost,
+    render_agent,
 )
 
 AGENT = assets.BY_NAME["agent"]
@@ -152,12 +154,13 @@ class TestInstall:
 
     @pytest.mark.parametrize("source", SHIPPED, ids=lambda p: p.stem)
     def test_body_is_untouched(self, installed, source):
-        original = source.read_text(encoding="utf-8")
+        """The installed body is the source's, less its section anchors: the
+        renderer only drops them (ADR-012 D8)."""
+        body = parse(source.read_text(encoding="utf-8"), source.stem).body()
         installed_text = (agents_dir(installed) / source.name).read_text(
             encoding="utf-8"
         )
-        body = original.split("---\n", 2)[2]
-        assert installed_text.endswith(body)
+        assert installed_text.endswith("\n---\n" + body)
 
     def test_install_is_idempotent(self, host):
         host.install()
@@ -357,7 +360,7 @@ class TestMarkerDigest:
     def test_the_marker_is_read_back(self, installed):
         text = (agents_dir(installed) / SHIPPED[0].name).read_text(encoding="utf-8")
         assert assets.marker_digest(text) == assets.digest_of(
-            SHIPPED[0].read_text(encoding="utf-8")
+            render_agent(parse(SHIPPED[0].read_text(encoding="utf-8"), SHIPPED[0].stem))
         )
 
 

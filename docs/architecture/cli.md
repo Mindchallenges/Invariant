@@ -294,8 +294,8 @@ invariant assets list [--kind agent|command|skill]
     Every host asset: kind, whether the host can load it, and whether this
     library or the project owns it.
 
-    The four asset commands (assets list, assets install, agents list, agents
-    install) ask the manifest's host.kind for the host adapter, since the
+    The asset commands (assets list, assets install, agents list, agents
+    show, agents install) ask the manifest's host.kind for the host adapter, since the
     files are that host's format in that host's locations. A kind with no
     adapter in this release is refused by name, exit 2, before anything is
     read or written; claude_code is the only one (ADR-012, the A6 ruling 12).
@@ -318,6 +318,17 @@ invariant assets install [--kind ...] [--overwrite-local] [--dry-run]
 invariant agents list
     Every library agent: installed or not, whether the host can load it, and
     which pipeline role it answers for.
+
+invariant agents show <name> [--sections]
+    One library agent as the host would install it, without the marker an
+    install adds. Writes nothing. The text is the host adapter's render of
+    the agent's host-neutral source (ADR-012 D8, A6 increment 2): for Claude
+    Code, the capabilities as a `tools:` line, the section anchors dropped,
+    and no model line. Printed byte for byte, so it can be redirected and
+    diffed against an installed copy. --sections lists the source's section
+    anchors instead, in order: the ids an overlay can target. A name the
+    library does not ship is refused naming the ones it does, exit 2, and
+    the host is the manifest's host.kind, as for the other agent commands.
 
 invariant agents install [--overwrite-local] [--dry-run]
     Reinstall the library agents and nothing else. Deliberately not a flag on
@@ -351,7 +362,10 @@ The marker is what separates the two divergences, and one function —
 is the only place that judgement is made. The marker is its own witness: an
 install writes the digest of the very text it writes, so a body that still
 hashes to its own marker is exactly what some release put there, and a body
-that does not was changed after.
+that does not was changed after. For an agent, what is shipped is the
+render of its host-neutral source, so an installed copy is judged against
+the render, and a copy an earlier release wrote reads as older, not edited,
+when only the format moved (ADR-012, A6 increment 2).
 
 ```mermaid
 graph TD

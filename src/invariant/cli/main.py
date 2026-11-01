@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..core import plan as plan_reader
+from ..core.agents import AgentSource
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
 from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Manifest
 from ..core.rules import (
@@ -1358,6 +1359,27 @@ def cmd_agents_list(args) -> int:
         for r in rows
     )
     return emit(args, {"agents": rows}, text or "  (none shipped)")
+
+
+def cmd_agents_show(args) -> int:
+    """One library agent as the host would install it, and nothing written.
+
+    The text is the renderer's, from the neutral source, without the marker an
+    install adds. ``--sections`` lists the source's section anchors instead,
+    the ids an overlay can target (ADR-012 D8).
+    """
+    from ..hosts.claude_code import render_agent
+
+    ctx = Context()
+    host = _asset_host(ctx, "agents show")
+    source: AgentSource = host.agent_source(args.name)
+    if args.sections:
+        ids = list(source.section_ids())
+        return emit(args, {"agent": args.name, "sections": ids}, "\n".join(ids))
+    text = render_agent(source)
+    # `emit` ends what it prints with a newline, so the text's own last one is
+    # left to it: the output is the rendered bytes, fit to redirect and diff.
+    return emit(args, {"agent": args.name, "text": text}, text.removesuffix("\n"))
 
 
 def cmd_agents_install(args) -> int:
@@ -5144,6 +5166,14 @@ def build_parser() -> argparse.ArgumentParser:
     agents = sub.add_parser("agents").add_subparsers(dest="sub", required=True)
     agents.add_parser("list", help="installed agents and whether the host can load them"
                       ).set_defaults(func=cmd_agents_list)
+    q = agents.add_parser(
+        "show", help="print a library agent as the host would install it; writes nothing"
+    )
+    q.add_argument("name")
+    q.add_argument(
+        "--sections", action="store_true", help="list the section anchors an overlay can target"
+    )
+    q.set_defaults(func=cmd_agents_show)
     q = agents.add_parser("install", help="reinstall the library agents")
     q.add_argument(
         "--overwrite-local",

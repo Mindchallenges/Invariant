@@ -10,7 +10,7 @@
   (a to c) are the user's. A5 closed with increment 4, built to the user's
   twelve A5 rulings (D1 to D12, under D7): all three layers of ruling 8 are
   built. A6 is built to the user's fourteen A6 rulings (under D8), in five
-  increments; increment 1 is built.
+  increments; increments 1 and 2 are built.
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -2820,6 +2820,74 @@ release has written.
   and `agents list` read off the plan. `tests/test_host_claude_code.py`
   reads the canonical helpers, and refuses a frontmatter-less shipped
   source through `install_assets`.
+
+**As built: A6 increment 2, the neutral agent format and the Claude Code
+renderer.** Built to D8 ("The source is host-neutral", "The host adapter
+renders it") and the A6 rulings 7, 8 and 12. The marker still records one
+digest, now of the rendered text; the three-digest marker is A6.3's, with
+overlays.
+
+- *D8, amended by ruling 7.* The neutral frontmatter is `name`,
+  `description` and `capabilities`. D8 first listed `roles` among them, and
+  ruling 7 drops it: the manifest's `agents.roles` owns which agent answers
+  for which role, and a second statement of it in the source would be a
+  second answer that could disagree. D8 also lists `tier` (D9). It is
+  refused by name until A7 builds it, so a source cannot carry a hint
+  nothing reads.
+- *`core/agents` (new, pure).* `parse` reads a neutral source into an
+  `AgentSource`: the frontmatter, a `preamble`, and `sections`, each running
+  from a whole-line anchor `<!-- invariant:section <id> -->` to the next.
+  `capabilities` is a bracketed list drawn from read, edit, shell and
+  dispatch. A source is refused whole (`AgentSourceError`), naming every
+  problem as the ruleset loader does: no frontmatter on line 1, a missing
+  key, an unknown or repeated key, a line that is not `key: value`, a
+  capability list that is not bracketed, empty, unknown or repeated, a name
+  that is not the file's, and a malformed or repeated anchor. `tier`,
+  `model`, `tools` and `roles` are refused by name with the reason. It
+  imports nothing from `hosts/` and does no I/O: the caller hands it the
+  text. It keeps its own frontmatter reader rather than `hosts/assets`',
+  which is the host's reading rule and may not be imported from `core/`.
+- *The four sources.* Each declares `capabilities: [read, edit, shell]`,
+  which is what its `tools:` line gave, and carries anchors at the body's
+  start (`intro`) and above each top-level section, plus `phase-1b` in
+  `feature-architect`. `compliance-reviewer` loses `model: sonnet` (ruling
+  8). The two `AskUserQuestion` mentions in `backlog-curator` are reworded
+  host-neutrally with their meaning kept: the parent relays the interview
+  questions verbatim, as a multiple-choice question where its host offers
+  one. The `MODEL:` hint prose in the architect's and the reproducer's
+  descriptions is carried unchanged for A7. No other body text changed.
+- *The renderer (`hosts/claude_code.render_agent`).* Capabilities become a
+  `tools:` line (read gives Read, Grep, Glob; edit gives Edit, Write; shell
+  gives Bash; dispatch gives the host's agent tool, Agent), listed in one
+  fixed order, which is the order every shipped file carried, so the render
+  is the same bytes. The anchors are dropped and no model line is written.
+  `plan_assets` renders every agent through it, so each `AssetPlan` now
+  carries the host's `text`, and the classifier judges an installed copy
+  against the render rather than the source. A source that does not parse
+  is refused naming its problems before anything is written.
+- *`invariant agents show <name> [--sections]`.* Prints the rendered text,
+  without the marker an install adds, and writes nothing. `--sections` lists
+  the anchor ids an overlay can target. An unknown name is refused naming the
+  shipped agents, and the host is the manifest's `host.kind`, as for the
+  other agent commands.
+- *An install from before A6.2.* A copy A6.1 wrote still hashes to its own
+  marker, so it reads as stale, never as edited: `compliance-reviewer` and
+  `backlog-curator` as `installed from an older version`, and rewritten;
+  `feature-architect` and `bug-reproducer` as current, since their render is
+  A6.1's text. A copy edited since reads as `edited locally` and is kept.
+  This repository's own installed copies are reinstalled after the merge.
+- *Tests.* `tests/test_agents.py` covers the model and every refusal, and
+  scans the module to show it imports no host and nothing that does I/O.
+  `tests/test_agent_rendering.py` holds the golden: each shipped source,
+  rendered with no overlay, is A6.1's installed text byte for byte (checked
+  in under `tests/fixtures/agents_a6_1/`), minus the model line, with the
+  two `backlog-curator` rewrites declared in the test. Beside it are the
+  anchor-set pin per agent, the host-vocabulary lint over the sources (the
+  adapter supplies `HOST_VOCABULARY`: its tool names and `AskUserQuestion`;
+  a word such as "Read" counts only where it is used as a tool), the
+  capability mapping, the plan writing the render, the A6.1-copy cases, and
+  `agents show`. `tests/test_assets.py` ships a neutral agent in its
+  every-kind library.
 
 ### D9 — Capability tiers are hints, never gates (A7)
 

@@ -61,6 +61,7 @@ graph TD
         CGUIDE["guidelines (ADR-012 D3)"]
         CFIND["findings (ADR-012 D4, A3.3)"]
         CVERD["verdicts (ADR-012 D5, A4.1 to A4.7)"]
+        CAGENTS["agents (ADR-012 D8, A6.2)"]
     end
 
     subgraph domains["domains/ — the seven state domains"]
@@ -83,7 +84,7 @@ graph TD
     subgraph data["shipped data"]
         METH[methodologies/*.yaml]
         PROF[profiles/*.yaml]
-        AGENTS[agents/*.md]
+        AGENTS["agents/*.md (host-neutral sources)"]
         SCAFFOLD[scaffold/*.md]
         CONFDATA["conformance/*/"]
     end
@@ -229,7 +230,10 @@ graph TD
     PRIVACY -. project_relative, glob_matches, imported at call time .-> MANIFEST
     MANIFEST --> adapters
     PIPELINE --> adapters
-    CC --> AGENTS
+    CC -- reads the sources --> AGENTS
+    CC -- "parse, AgentSource: render_agent and plan_assets render every agent" --> CAGENTS
+    CLI -- "AgentSource, for agents show and its section list" --> CAGENTS
+    CAGENTS -- the neutral format it parses --> AGENTS
     CLI --> SCAFFOLD
     CREPLAY -- drives in-process --> CLI
     CREPLAY --> CONF
@@ -271,6 +275,17 @@ purpose — `render_lines` answers a question somebody asked and lists every
 entry, `summary_lines` is injected into every turn and is capped at two lines —
 but they count from the same `progress()`, which is what makes them unable to
 disagree.
+
+`CC --> CAGENTS` is the fourth arrow of that kind (ADR-012 D8, A6
+increment 2). A library agent is shipped as a host-neutral source.
+`CAGENTS --> AGENTS` is the format `core/agents` parses; the host reads the
+file and hands it the text. `hosts/claude_code.render_agent` turns the parsed
+`AgentSource` into this host's agent file: capabilities become a `tools:`
+line, the section anchors are dropped, and no model line is written.
+`plan_assets` renders every agent through it, so the classifier judges an
+installed copy against the render. `CLI --> CAGENTS` is `agents show`, which
+prints the render or, with `--sections`, the source's anchor ids.
+`core/agents` imports no host, which `tests/test_agents.py` scans for.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1249,6 +1264,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`); the ratchet baseline's format (`BaselineEntry`, `parse_baseline`, `render_baseline`, and `baseline_rule_problems` against a ruleset), refused whole by line (`BaselineError`); what a rule's findings depend on, compared structurally between two copies of it (`definition_of`, DN-6); `parse` takes a `read` callable for a ruleset read as a revision held it; the one reading of whether a file brings a rule into play (`matches`, `path_exception`, `meets`, A4's DN-3, moved here in A5 increment 1); phase-scoped selection (ADR-012 D7, A5 increment 1): the state roles each rule phase reaches (`ROLE_PHASES`, `BUILD_PHASES`, `phases_for`: design and always for a design state and for a state carrying none of the selection's roles, review, landing and always for a review state, nothing for a landing or abandon state, the union over several roles), `select(ruleset, roles, paths)`, pure, filtering by `meets` with empty paths meaning no file filter, and `render_selected`, the selected rules' full text through the checklist's own per-rule writer; the injected texts' plain data and pure renderers (the A5 ruling D8): the turn index (`TurnIndex`, `render_turn_index`, A5.2) and what an edit carries (`AdvisedFinding`, `EditAdvisory`, `EditGuidelines`, `render_advisory`, moved down from the host, and `render_edit`, the findings then the statements under one cap, A5.3) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
 | `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames; a judgement rule's mechanical N/A conditions (`na_answer`, `NaAnswer`, A4 increment 2), `no_added_match` and `no_executable_change` over the rule's files, read through `core/guidelines`' `meets` (A4's DN-3) | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, the acting agent the host stamps, and `token`, the submission's, each written only when set and both dropped by `resubmitted`, A4 increment 8); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused; each refused line as a `Refusal` naming its predicate, entry and rule apart from the prose, and `PREDICATES`, every name a refusal gives (A4 increment 7); for `guidelines.verdicts_complete` (A4 increment 3), the owed rules (`owed`, over `not_owed`, the one reading of why a rule is or is not owed), a record read back as a submission (`resubmitted`) and each owed rule's `Standing` (`standings`: current, missing, stale, or answered by the engine's N/A, a pass or fail on it set aside); for `guidelines verdicts show` (A4 increment 4), the recorded verdicts on rules no longer owed (`unowed`) | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
+| `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `tier`, `model`, `tools` and `roles` refused by name | Know a host or its tool names; read a file (the caller hands it the text); render a host's file (that is `hosts/`) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
@@ -1572,6 +1588,13 @@ edited copy is withheld from a write. The asset commands reach the host
 through the manifest's `host.kind`, and a kind with no adapter is refused by
 name (ADR-012, "As built: A6 increment 1"; cli.md, "A managed file the
 operator has edited").
+
+A library agent is not shipped in this host's format. Its source is
+host-neutral (`core/agents`), and `render_agent` is this host's rendering of
+it: `CAPABILITY_TOOLS` maps each capability to tools, `TOOL_ORDER` fixes the
+`tools:` line, and the anchors are dropped. `HOST_VOCABULARY`, the tool names
+plus the question tool, is what a test lints the neutral sources for, so this
+host's words stay out of them (ADR-012, "As built: A6 increment 2").
 
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through
