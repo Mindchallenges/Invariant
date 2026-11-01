@@ -353,21 +353,23 @@ DEFAULTS: dict[str, Any] = {
     # the managed `guidelines/index` block; null means the host adapter's
     # default (CLAUDE.md for claude_code), which the CLI supplies because no
     # domain imports a host. They are generated files too, but only between
-    # their markers. `injection.max_lines` caps that block (ruling DN-C).
+    # their markers. `injection.max_lines` caps that block (ruling DN-C), and
+    # every injected guideline text. `injection.on_edit` says whether an
+    # edit carries the statements of the judgement rules that apply to it
+    # (the A5 ruling D7); the findings an edit adds are advised either way.
     # `baseline` is the ratchet's record of pre-existing pattern and boundary
     # findings (D6); null means no baseline, and every such finding is new
     # (DN-1). A configured path whose file does not exist is an error. It is
     # a generated file too, written only by `guidelines baseline`.
     # `verdicts.note_max_chars` caps the inert note a judgement verdict
-    # carries (D5 item 6, A4 increment 1). D13's other keys join as the
-    # increments that read them land; until then they are refused rather
-    # than ignored.
+    # carries (D5 item 6, A4 increment 1). A key D13 does not name is
+    # refused rather than ignored.
     "guidelines": {
         "ruleset": None,
         "baseline": None,
         "checklist": None,
         "instruction_files": None,
-        "injection": {"max_lines": 40},
+        "injection": {"max_lines": 40, "on_edit": True},
         "verdicts": {"note_max_chars": 280},
     },
 }
@@ -378,8 +380,8 @@ _GUIDELINES_KEYS = (
 )
 #: Those of them that are null or one path.
 _GUIDELINES_PATH_KEYS = ("ruleset", "baseline", "checklist")
-#: The `guidelines.injection` keys this build reads (D13's `on_edit` is A5's).
-_INJECTION_KEYS = ("max_lines",)
+#: The `guidelines.injection` keys this build reads.
+_INJECTION_KEYS = ("max_lines", "on_edit")
 #: The `guidelines.verdicts` keys this build reads (A4 increment 1).
 _VERDICTS_KEYS = ("note_max_chars",)
 
@@ -747,13 +749,11 @@ class Manifest:
         """Refuse a `guidelines` key this build does not read (ADR-012 D13).
 
         A key the schema does not know loads, does nothing, and reads in
-        `config show` as though it had taken: the BUG_050 shape. D13 names
-        more keys than this build reads (`injection.on_edit`); each is
-        accepted by the increment that reads it, and refused, by name, before
-        then. `ruleset`, `baseline` and `checklist` are null or a non-empty
-        path, `instruction_files` null or a non-empty list of them,
-        `injection.max_lines` an integer of at least 2, and
-        `verdicts.note_max_chars` a positive integer. Where a path
+        `config show` as though it had taken: the BUG_050 shape, so it is
+        refused by name. `ruleset`, `baseline` and `checklist` are null or a
+        non-empty path, `instruction_files` null or a non-empty list of them,
+        `injection.max_lines` an integer of at least 2, `injection.on_edit` a
+        boolean, and `verdicts.note_max_chars` a positive integer. Where a path
         points is checked by whatever reads it, against the tree in hand.
         """
         section = self.data.get("guidelines")
@@ -797,6 +797,13 @@ class Manifest:
             raise ManifestError(
                 f"guidelines.injection.max_lines must be an integer of at least 2, "
                 f"got {cap!r}"
+            )
+        on_edit = injection.get("on_edit")
+        if not isinstance(on_edit, bool):
+            # A string such as "no" would read as true, and null as false: each
+            # turns the edit layer the opposite way from what was written.
+            raise ManifestError(
+                f"guidelines.injection.on_edit must be a boolean, got {on_edit!r}"
             )
         verdicts = section.get("verdicts")
         if not isinstance(verdicts, Mapping):

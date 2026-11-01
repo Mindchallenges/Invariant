@@ -2584,6 +2584,74 @@ A5 rulings D3, D10 and D12.
   manifest's cap, silence on a failure in the host's step, and the hook's
   text equal to `invariant context`'s.
 
+**As built: A5 increment 3, the edit layer and `guidelines.injection.on_edit`.**
+Built to D7, rulings 8 and 9, D13 and the A5 rulings D4 to D9.
+
+- *`core/rules.edit_guidelines(manifest, target, context)`.* It returns
+  plain data, a `core/guidelines.EditGuidelines`, or `None` for silence. It
+  reads `guidelines.ruleset` and then `guidelines.injection.on_edit` first;
+  with no ruleset, or with `on_edit` false, it never calls `context`, the
+  shape of `edit_advisory`. Otherwise the edited file is placed in the tree
+  the gates read, as A3.8 places it, the current state's roles are read from
+  the machine the pipeline was started under and `phases_for` them (D1, D2),
+  and `core/guidelines.select` chooses over the one file, so `applies_to`
+  and the path exception are read through `meets` as everywhere else. Of
+  what it selects, only `judgement` rules are kept (D4). Nothing is
+  remembered between edits (D5). The overflow command is
+  `invariant guidelines show --phase R --files <path>`, R read as the turn
+  index reads it (`_show_phase`, now shared with `turn_guidelines`, as is
+  `_state_roles`), the path shell-quoted.
+- *Silence.* No ruleset, `on_edit` false, an edit outside the session's
+  tree, a path that is no file, a landing or abandon state, and a file no
+  judgement rule of the phase covers.
+- *One line.* A ruleset that does not load gives the line the findings half
+  gives, word for word (`_unloaded_at_edit`, shared by both), so the
+  renderer says it once. An exception inside is one line naming its type
+  and `invariant guidelines show`.
+- *The renderers (D6, D8).* `AdvisedFinding`, `EditAdvisory` and
+  `render_advisory` moved down from `core/rules` and `hosts/claude_code`
+  into `core/guidelines`, beside `TurnIndex`. `render_edit(advisory,
+  guidance, max_lines)` writes the findings exactly as A3.8 did, then a
+  header naming the file and the phases and one line per carried rule, its
+  id, severity and statement with its whitespace collapsed onto one line.
+  One cap is shared. Past it the last line counts the items left out and
+  names `invariant check guidelines.mechanical_clean`, the show command, or
+  both joined by `; `, by which halves were cut. `render_advisory` is
+  `render_edit` with no statements, so the findings-only output is
+  unchanged, and its tests pass with only their imports moved.
+- *The host only wraps.* `_edit_advisory` asks both projections through one
+  rule-context builder built at most once, has `render_edit` write the
+  lines, and returns them as `additionalContext`. Never a
+  `permissionDecision` (ruling 9). An exception in the host's step is
+  silence. The A3.8 findings are unchanged: the ratchet applies and no
+  cochange is evaluated.
+- *`guidelines.injection.on_edit`.* Accepted at load, default true (D7). A
+  value that is not a boolean is refused by name: a string `"no"` would read
+  as true and null as false. It turns off the statements alone; the findings
+  are advised either way. This repository's manifest does not name it
+  (BUG_050; the default is what it would say).
+- *Readings taken where the rulings are silent.*
+  - No pipeline carries the always judgement rules alone, as the turn index
+    lists the always rules alone; its show command names `--phase design`,
+    the nearest phase that prints them, since `--files` needs a phase.
+  - A header the cap leaves with nothing under it is dropped, unless it is
+    the first line, so a cap of 2 still names the file. The response may
+    then be one line short of the cap.
+  - A statement is collapsed, not cut: the rule's statement is what this
+    layer exists to carry.
+- *Subagents (D9).* A subagent's edits reach the same `PostToolUse`, so the
+  edit layer is what they get until A6. No agent text changed.
+- *What is not here.* The always-layer warning in `doctor` and
+  `generated_current` (A5.4).
+- *Tests.* `tests/test_guidelines_edit_layer.py`: every tdd state, the
+  path exception, D4's engine rule left out, no pipeline, statelessness,
+  each silence including the no-ruleset and `on_edit` cost, each line, the
+  renderer's shared cap, its overflow commands and dropped header, the
+  findings-only output equal to `render_advisory`'s, the host wrapping one
+  response with the context built once, and against a real repository
+  through `handle`. `tests/test_guidelines.py`: the key's default, a kept
+  value beside the default cap, and each refusal.
+
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 
 **The source is host-neutral.** A library agent is a markdown body with

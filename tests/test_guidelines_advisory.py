@@ -23,13 +23,8 @@ from test_guidelines_domain import RULESET_REL, write
 from test_guidelines_findings import RULESET
 
 from invariant.core import findings, rules
-from invariant.core.rules import (
-    ADVISED_KINDS,
-    AdvisedFinding,
-    EditAdvisory,
-    RuleContext,
-    edit_advisory,
-)
+from invariant.core.guidelines import AdvisedFinding, EditAdvisory
+from invariant.core.rules import ADVISED_KINDS, RuleContext, edit_advisory
 
 PRINT = "style.no-print"
 TODO = "style.no-todo"

@@ -1899,15 +1899,11 @@ def _turn_guidelines(ctx: RuleContext) -> guidelines_reader.TurnIndex | None:
     pipeline = ctx.pipeline
     roles: tuple[str, ...] = ()
     if pipeline:
-        machine = load_pipeline_machine(ctx.manifest, pipeline.get("methodology") or None)
-        roles = tuple(machine.state(str(pipeline.get("state") or "")).roles)
+        roles = _state_roles(pipeline, ctx.manifest)
         phases = guidelines_reader.phases_for(roles)
         if not phases:
             return None
-        phase = next(
-            (role for role in roles if guidelines_reader.ROLE_PHASES.get(role)), "design"
-        )
-        show = f"invariant guidelines show --phase {phase} --touched"
+        show = f"invariant guidelines show --phase {_show_phase(roles)} --touched"
     else:
         phases = ("always",)
         show = "invariant guidelines show"
@@ -1940,6 +1936,23 @@ def _turn_guidelines(ctx: RuleContext) -> guidelines_reader.TurnIndex | None:
         scope_unknown=unknown,
         show=show,
         pin=pin if pin and pin != ruleset.digest else None,
+    )
+
+
+def _state_roles(pipeline: Mapping[str, Any], manifest: Manifest) -> tuple[str, ...]:
+    """The roles of the pipeline's current state, read from the machine it was
+    started under, so a later change to the configured methodology does not
+    move a running pipeline (the A5 ruling D1: the machine alone, no history)."""
+    machine = load_pipeline_machine(manifest, pipeline.get("methodology") or None)
+    return tuple(machine.state(str(pipeline.get("state") or "")).roles)
+
+
+def _show_phase(roles: Iterable[str]) -> str:
+    """The ``--phase`` that reproduces what a state with ``roles`` is shown:
+    its first role that selects anything, or ``design`` for a build state,
+    which sees what a design state sees."""
+    return next(
+        (role for role in roles if guidelines_reader.ROLE_PHASES.get(role)), "design"
     )
 
 
@@ -2770,33 +2783,9 @@ ADVISED_KINDS = ("pattern", "boundary")
 ADVISED_LINE_CHARS = 160
 
 
-@dataclass(frozen=True)
-class AdvisedFinding:
-    """One finding the landing gate would count as new, stated as plain facts."""
-
-    rule: str
-    severity: str
-    path: str
-    line: int | None
-    #: The matched line, its whitespace collapsed and its length capped.
-    text: str
-    target: str | None
-    fix: str
-
-
-@dataclass(frozen=True)
-class EditAdvisory:
-    """What one landed edit adds that ``guidelines.mechanical_clean`` would hold."""
-
-    path: str
-    findings: tuple[AdvisedFinding, ...] = ()
-    #: One short line: the file, the ruleset or the baseline could not be read.
-    problem: str | None = None
-
-
 def edit_advisory(
     manifest: Manifest, target: Path, context: Callable[[], RuleContext]
-) -> EditAdvisory | None:
+) -> guidelines_reader.EditAdvisory | None:
     """What the edit that just landed on ``target`` adds at the landing gate.
 
     ADR-012 ruling 9, D7 and DN-8. A projection of ``guidelines.mechanical_clean``
@@ -2818,7 +2807,7 @@ def edit_advisory(
     try:
         return _edit_advisory(context(), target)
     except Exception as exc:  # noqa: BLE001 - an advisory may never fail its hook
-        return EditAdvisory(
+        return guidelines_reader.EditAdvisory(
             path=target.name,
             problem=(
                 f"the guidelines advisory could not be computed for this edit "
@@ -2828,18 +2817,14 @@ def edit_advisory(
         )
 
 
-def _edit_advisory(ctx: RuleContext, target: Path) -> EditAdvisory | None:
+def _edit_advisory(ctx: RuleContext, target: Path) -> guidelines_reader.EditAdvisory | None:
     tree = guidelines_tree(ctx)
     rel = _inside_tree(tree, target if target.is_absolute() else ctx.cwd / target)
     if rel is None:
         return None
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
-        return EditAdvisory(
-            path=rel,
-            problem=f"the guidelines ruleset does not load, so {rel} was not checked: "
-            f"{failure.message}; see invariant check guidelines.ruleset_valid",
-        )
+        return guidelines_reader.EditAdvisory(path=rel, problem=_unloaded_at_edit(rel, failure))
     advised = [
         rule for rule in ruleset.rules
         if rule.check.kind in ADVISED_KINDS
@@ -2849,7 +2834,7 @@ def _edit_advisory(ctx: RuleContext, target: Path) -> EditAdvisory | None:
         return None
     baseline, broken = load_baseline(ctx, ruleset)
     if broken is not None:
-        return EditAdvisory(
+        return guidelines_reader.EditAdvisory(
             path=rel,
             problem=f"the guidelines baseline does not load, so {rel} was not checked: "
             f"{broken.message}",
@@ -2871,7 +2856,7 @@ def _edit_advisory(ctx: RuleContext, target: Path) -> EditAdvisory | None:
         problem = f"{rel} could not be checked against {ids}: {notes}"
     if not new and problem is None:
         return None
-    return EditAdvisory(path=rel, findings=new, problem=problem)
+    return guidelines_reader.EditAdvisory(path=rel, findings=new, problem=problem)
 
 
 def _inside_tree(tree: Path, target: Path) -> str | None:
@@ -2890,7 +2875,9 @@ def _inside_tree(tree: Path, target: Path) -> str | None:
     return None if rel in ("", ".") else rel
 
 
-def _advised(finding: findings_reader.Finding, lines: list[str]) -> AdvisedFinding:
+def _advised(
+    finding: findings_reader.Finding, lines: list[str]
+) -> guidelines_reader.AdvisedFinding:
     line = finding.line or 0
     text = findings_reader.collapse(lines[line - 1]) if 0 < line <= len(lines) else ""
     if len(text) > ADVISED_LINE_CHARS:
@@ -2906,9 +2893,90 @@ def _advised(finding: findings_reader.Finding, lines: list[str]) -> AdvisedFindi
             f"change line {line} so {finding.rule} holds, or give it a reasoned "
             f"exception in the ruleset ({where})"
         )
-    return AdvisedFinding(
+    return guidelines_reader.AdvisedFinding(
         rule=finding.rule, severity=finding.severity, path=finding.path,
         line=finding.line, text=text, target=finding.target, fix=fix,
+    )
+
+
+def _unloaded_at_edit(rel: str, failure: Verdict) -> str:
+    """The one line an edit carries when the ruleset does not load.
+
+    Both halves of what an edit carries say it in these words, so the
+    renderer says it once.
+    """
+    return (
+        f"the guidelines ruleset does not load, so {rel} was not checked: "
+        f"{failure.message}; see invariant check guidelines.ruleset_valid"
+    )
+
+
+# -- the edit layer (ADR-012 ruling 8, D7, the A5 rulings D4 to D9) -------------------
+
+
+def edit_guidelines(
+    manifest: Manifest, target: Path, context: Callable[[], RuleContext]
+) -> guidelines_reader.EditGuidelines | None:
+    """The judgement rules whose statements the edit on ``target`` carries.
+
+    The A5 rulings D4 and D5: only judgement rules, and every matching edit
+    carries them, since nothing here remembers an earlier one. A rule is
+    carried when ``core/guidelines.select`` picks it for the current state's
+    roles over the one edited file: its phases meet the state's (D1, D2), its
+    ``applies_to`` covers the file and no path exception sets the file aside.
+    With no pipeline only the always rules are carried, as the turn index
+    lists them alone.
+
+    ``None`` is silence: no ruleset or ``guidelines.injection.on_edit`` false
+    (both decided from the manifest alone, so no file is read, no git is
+    asked and ``context`` is never called), an edit outside the tree the
+    gates read, a path that is no file, a landing or abandon state, and no
+    judgement rule for the file. A ruleset that does not load is one
+    ``problem`` line, worded as :func:`edit_advisory` words it. Any exception
+    inside is one line too, so a hook that asks this can never fail on it.
+    """
+    if not manifest.get("guidelines.ruleset"):
+        return None
+    if manifest.get("guidelines.injection.on_edit") is False:
+        return None
+    try:
+        return _edit_guidelines(context(), target)
+    except Exception as exc:  # noqa: BLE001 - a projection may never fail its hook
+        return guidelines_reader.EditGuidelines(
+            path=target.name,
+            problem=(
+                f"the guideline statements could not be computed for this edit "
+                f"({type(exc).__name__}); invariant guidelines show prints the ruleset"
+            ),
+        )
+
+
+def _edit_guidelines(
+    ctx: RuleContext, target: Path
+) -> guidelines_reader.EditGuidelines | None:
+    tree = guidelines_tree(ctx)
+    rel = _inside_tree(tree, target if target.is_absolute() else ctx.cwd / target)
+    if rel is None or not (tree / rel).is_file():
+        return None
+    pipeline = ctx.pipeline
+    roles = _state_roles(pipeline, ctx.manifest) if pipeline else ()
+    phases = guidelines_reader.phases_for(roles) if pipeline else ("always",)
+    if not phases:
+        return None
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return guidelines_reader.EditGuidelines(path=rel, problem=_unloaded_at_edit(rel, failure))
+    carried = tuple(
+        rule for rule in guidelines_reader.select(ruleset, roles, (rel,))
+        if rule.check.kind == "judgement" and set(phases).intersection(rule.phases)
+    )
+    if not carried:
+        return None
+    return guidelines_reader.EditGuidelines(
+        path=rel,
+        phases=phases,
+        rules=carried,
+        show=f"invariant guidelines show --phase {_show_phase(roles)} --files {shlex.quote(rel)}",
     )
 
 

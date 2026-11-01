@@ -1703,6 +1703,149 @@ def render_turn_index(index: TurnIndex, max_lines: int) -> list[str]:
     return [header, *kept, f"- {left} more: {index.show}"]
 
 
+# -- what an edit carries (ADR-012 ruling 9, D7, A3 increment 8, the A5 rulings D4 to D8) --
+
+
+@dataclass(frozen=True)
+class AdvisedFinding:
+    """One finding the landing gate would count as new, stated as plain facts."""
+
+    rule: str
+    severity: str
+    path: str
+    line: int | None
+    #: The matched line, its whitespace collapsed and its length capped.
+    text: str
+    target: str | None
+    fix: str
+
+
+@dataclass(frozen=True)
+class EditAdvisory:
+    """What one landed edit adds that ``guidelines.mechanical_clean`` would hold.
+
+    ``core/rules.edit_advisory`` decides it and :func:`render_advisory`
+    writes it.
+    """
+
+    path: str
+    findings: tuple[AdvisedFinding, ...] = ()
+    #: One short line: the file, the ruleset or the baseline could not be read.
+    problem: str | None = None
+
+
+@dataclass(frozen=True)
+class EditGuidelines:
+    """The judgement rules an edit carries the statements of, as plain data.
+
+    ``core/rules.edit_guidelines`` decides it (the A5 ruling D4) and
+    :func:`render_edit` writes it after the findings. ``show`` is the command
+    that prints the rules in full for this file. ``problem`` stands in for
+    the rules: one line saying why there are none to show.
+    """
+
+    path: str
+    phases: tuple[str, ...] = ()
+    rules: tuple[Guideline, ...] = ()
+    show: str = _SHOW
+    problem: str | None = None
+
+
+#: The label every line an edit carries starts from.
+ADVISORY_LABEL = "guidelines advisory: "
+
+#: Where the findings past the cap are read in full.
+ADVISORY_MORE = "invariant check guidelines.mechanical_clean"
+
+
+def render_advisory(advisory: EditAdvisory, max_lines: int) -> list[str]:
+    """The findings an edit adds, alone, at most ``max_lines`` lines.
+
+    A header naming the file and the gate, then the problem line if there is
+    one, then one line per finding: rule id, severity, path:line, the matched
+    line and the fix. A problem alone is that one line. Past the cap the last
+    line counts what was left out and names where to read it, as the managed
+    block does (DN-C), so N counts lines and items alike. It is
+    :func:`render_edit` with no statements.
+    """
+    return render_edit(advisory, None, max_lines)
+
+
+def render_edit(
+    advisory: EditAdvisory | None, guidance: EditGuidelines | None, max_lines: int
+) -> list[str]:
+    """Everything one edit carries, at most ``max_lines`` lines (the A5 ruling D6).
+
+    The findings first, as :func:`render_advisory` writes them, then the
+    statements: a header naming the file and the phases, and one line per
+    judgement rule, its id, severity and statement on one line. One shared
+    cap. Past it the last line counts the items left out and names the
+    command that reads each half in full; a header left with nothing under
+    it is dropped, unless it is the first line. A statements problem that
+    says what the findings' problem already says is not said twice.
+    Nothing to say is silence.
+    """
+    parts = _advisory_parts(advisory) if advisory is not None else []
+    if guidance is not None:
+        repeated = (
+            guidance.problem is not None
+            and advisory is not None
+            and guidance.problem == advisory.problem
+        )
+        parts += [] if repeated else _guidance_parts(guidance)
+    if not any(source for _, source in parts):
+        return []
+    if len(parts) <= max_lines:
+        return [line for line, _ in parts]
+    kept = parts[: max(max_lines - 1, 1)]
+    while len(kept) > 1 and kept[-1][1] is None:
+        kept.pop()
+    cut = [source for _, source in parts[len(kept):] if source]
+    commands = [
+        ADVISORY_MORE if source == "findings" else guidance.show
+        for source in dict.fromkeys(cut)
+    ]
+    return [*(line for line, _ in kept), f"- {len(cut)} more: {'; '.join(commands)}"]
+
+
+def _advisory_parts(advisory: EditAdvisory) -> list[tuple[str, str | None]]:
+    """The findings half as (line, source) pairs; a header's source is ``None``."""
+    if not advisory.findings:
+        return [(ADVISORY_LABEL + advisory.problem, "findings")] if advisory.problem else []
+    header = (
+        f"{ADVISORY_LABEL}{len(advisory.findings)} new finding(s) in {advisory.path}, "
+        f"which guidelines.mechanical_clean evaluates at landing"
+    )
+    parts: list[tuple[str, str | None]] = [(header, None)]
+    if advisory.problem:
+        parts.append((f"- {advisory.problem}", "findings"))
+    for found in advisory.findings:
+        where = found.path if found.line is None else f"{found.path}:{found.line}"
+        target = f" (references {found.target})" if found.target else ""
+        line = (
+            f"- {found.rule} ({found.severity}) {where}: {found.text}{target}; "
+            f"fix: {found.fix}"
+        )
+        parts.append((line, "findings"))
+    return parts
+
+
+def _guidance_parts(guidance: EditGuidelines) -> list[tuple[str, str | None]]:
+    """The statements half as (line, source) pairs; a header's source is ``None``."""
+    if guidance.problem is not None:
+        return [(ADVISORY_LABEL + guidance.problem, "statements")]
+    if not guidance.rules:
+        return []
+    header = (
+        f"{ADVISORY_LABEL}{len(guidance.rules)} judgement rule(s) for {guidance.path} "
+        f"(phases {', '.join(guidance.phases)})"
+    )
+    return [(header, None)] + [
+        (f"- {rule.id} ({rule.severity}): {' '.join(rule.statement.split())}", "statements")
+        for rule in guidance.rules
+    ]
+
+
 # -- the baseline (D6) ------------------------------------------------------------
 #
 # The ratchet's record of pre-existing findings, one entry per line:

@@ -190,15 +190,24 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
                                # adapter's default (CLAUDE.md for claude_code).
                                # Generated between the block's markers only
   injection:
-    max_lines: 40              # cap on the guidelines/index block, at least 2
+    max_lines: 40              # cap on the guidelines/index block, the turn
+                               # index and what an edit carries, at least 2
+    on_edit: true              # an edit carries the statements of the
+                               # judgement rules that apply to it (ADR-012
+                               # D7, the A5 ruling D7); a boolean
   verdicts:
     note_max_chars: 280        # cap on a judgement verdict's inert note, a
                                # positive integer (ADR-012 D5, A4 increment 1)
 ```
 
-D13's last other `guidelines` key, `injection.on_edit`, is accepted by the
-increment that reads it (A5). Until then it is refused at load, by name,
-rather than loaded and ignored, as every key the build does not know is.
+`guidelines.injection.on_edit` (A5 increment 3) says whether an edit
+carries, after it lands, the statements of the judgement rules that apply to
+the edited file in the current phase. It defaults to true, so a project with
+a ruleset gets them without naming the key. False turns off the statements
+alone: the new pattern and boundary findings an edit adds are advised either
+way, since they are what the landing gate will hold. With it false the edit
+layer reads nothing for the statements. It is a boolean; a string, a number
+or null is refused at load, since `"no"` would read as true and null as false.
 
 `guidelines.verdicts.note_max_chars` caps the note a judgement verdict
 carries (A4 increment 1). The note is inert: recorded for audit and read by
@@ -1048,12 +1057,13 @@ since they would do nothing. Levels are read resolved — profile, overrides and
 `INVARIANT_DISABLE` — because that is what the gate would do. `sweep.fresh` is
 refused at `block` or `ask`, with or without a cadence: the user ruled that it
 only ever warns, and the engine holds that ruling at load rather than in prose.
-`guidelines` must be a mapping whose keys this build reads (today `ruleset`,
-`baseline`, `checklist`, `instruction_files` and `injection`). `ruleset`,
+`guidelines` must be a mapping whose keys this build reads (`ruleset`,
+`baseline`, `checklist`, `instruction_files`, `injection` and `verdicts`). `ruleset`,
 `baseline` and `checklist` are each null or a non-empty path, and `instruction_files` is null or a
 non-empty list of them; a bare string is refused, as for every declared list.
-`injection` is a mapping whose only key is `max_lines`, an integer of at least
-2: the block's header and the line that counts what the cap left out. Where
+`injection` is a mapping whose keys are `max_lines`, an integer of at least
+2 (the block's header and the line that counts what the cap left out), and
+`on_edit`, a boolean; any other key is refused by name. Where
 the checklist and the instruction files point is checked by `guidelines
 render`, against the tree in hand, not at load. The ruleset's
 own contents are not read at load: a manifest is read on every command, and a

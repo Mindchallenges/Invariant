@@ -415,7 +415,10 @@ class TestManifestKey:
             ({"instruction_files": []}, "guidelines.instruction_files must be null or a list of paths"),
             ({"instruction_files": ["CLAUDE.md", ""]}, "guidelines.instruction_files must be null or a list of paths"),
             ({"injection": 40}, "guidelines.injection must be a mapping"),
-            ({"injection": {"on_edit": True}}, "guidelines.injection.on_edit is not a key this build reads"),
+            ({"injection": {"per_turn": 3}}, "guidelines.injection.per_turn is not a key this build reads"),
+            ({"injection": {"on_edit": "yes"}}, "guidelines.injection.on_edit must be a boolean"),
+            ({"injection": {"on_edit": 1}}, "guidelines.injection.on_edit must be a boolean"),
+            ({"injection": {"on_edit": None}}, "guidelines.injection.on_edit must be a boolean"),
             ({"injection": {"max_lines": "40"}}, "guidelines.injection.max_lines must be an integer of at least 2"),
             ({"injection": {"max_lines": True}}, "guidelines.injection.max_lines must be an integer of at least 2"),
             ({"injection": {"max_lines": 1}}, "guidelines.injection.max_lines must be an integer of at least 2"),
@@ -460,6 +463,17 @@ class TestManifestKey:
     def test_a_configured_injection_cap_is_kept(self, make_manifest):
         manifest = make_manifest({"version": 1, "guidelines": {"injection": {"max_lines": 12}}})
         assert manifest.get("guidelines.injection.max_lines") == 12
+
+    def test_on_edit_defaults_to_true(self, make_manifest):
+        """D13's `guidelines.injection.on_edit` (the A5 ruling D7, A5 increment 3)."""
+        manifest = make_manifest({"version": 1})
+        assert manifest.get("guidelines.injection.on_edit") is True
+        assert manifest.source_of("guidelines.injection.on_edit") == "default"
+
+    def test_a_configured_on_edit_is_kept_beside_the_default_cap(self, make_manifest):
+        manifest = make_manifest({"version": 1, "guidelines": {"injection": {"on_edit": False}}})
+        assert manifest.get("guidelines.injection.on_edit") is False
+        assert manifest.get("guidelines.injection.max_lines") == 40
 
     def test_the_note_cap_defaults_to_280_characters(self, make_manifest):
         """D13's `guidelines.verdicts.note_max_chars` (A4 increment 1)."""

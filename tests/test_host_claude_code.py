@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from invariant.core import guidelines as guidelines_reader
 from invariant.core.errors import InvariantError
 from invariant.hosts import claude_code
 from invariant.hosts.claude_code import (
@@ -2243,7 +2244,7 @@ class TestTheEditTimeGuidelinesAdvisory:
 
     @staticmethod
     def found(n, *, rule="style.no-print", target=None):
-        from invariant.core.rules import AdvisedFinding
+        from invariant.core.guidelines import AdvisedFinding
 
         return AdvisedFinding(
             rule=rule, severity="blocker", path="app/m.py", line=n,
@@ -2284,7 +2285,7 @@ class TestTheEditTimeGuidelinesAdvisory:
     # -- the host formats ------------------------------------------------------
 
     def test_a_finding_is_rendered_as_plain_facts(self, host, monkeypatch):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         ctx, seen = self.fake(
             monkeypatch, EditAdvisory("app/m.py", findings=(self.found(2),))
@@ -2300,17 +2301,18 @@ class TestTheEditTimeGuidelinesAdvisory:
         ]
 
     def test_a_boundary_finding_names_its_target(self):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         advisory = EditAdvisory(
             "app/m.py", findings=(self.found(1, rule="layers.x", target="tools/x.py"),)
         )
-        assert claude_code.render_advisory(advisory, 40)[1] == (
+        assert guidelines_reader.render_advisory(advisory, 40)[1] == (
             "- layers.x (blocker) app/m.py:1: print(1) (references tools/x.py); fix: fix 1"
         )
 
     def test_every_edit_tool_is_advised(self, host, monkeypatch):
-        from invariant.core.rules import EDIT_TOOLS, EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
+        from invariant.core.rules import EDIT_TOOLS
 
         ctx, seen = self.fake(monkeypatch, EditAdvisory("a", problem="p"))
         for tool in sorted(EDIT_TOOLS):
@@ -2318,7 +2320,7 @@ class TestTheEditTimeGuidelinesAdvisory:
         assert len(seen) == len(EDIT_TOOLS)
 
     def test_a_problem_alone_is_one_line(self, host, monkeypatch):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         ctx, _ = self.fake(
             monkeypatch, EditAdvisory("app/m.py", problem="app/m.py could not be checked")
@@ -2327,15 +2329,15 @@ class TestTheEditTimeGuidelinesAdvisory:
         assert lines == ["guidelines advisory: app/m.py could not be checked"]
 
     def test_a_problem_beside_findings_follows_the_header(self):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         advisory = EditAdvisory("app/m.py", findings=(self.found(1),), problem="half")
-        lines = claude_code.render_advisory(advisory, 40)
+        lines = guidelines_reader.render_advisory(advisory, 40)
         assert lines[1] == "- half"
         assert lines[2].startswith("- style.no-print")
 
     def test_the_cap_names_how_many_more_and_where(self, host, monkeypatch):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         advisory = EditAdvisory("app/m.py", findings=tuple(self.found(n) for n in range(1, 11)))
         ctx, _ = self.fake(monkeypatch, advisory, {"guidelines.injection.max_lines": 4})
@@ -2346,18 +2348,18 @@ class TestTheEditTimeGuidelinesAdvisory:
         assert lines[3] == "- 8 more: invariant check guidelines.mechanical_clean"
 
     def test_the_cap_defaults_to_forty_lines(self):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         advisory = EditAdvisory("app/m.py", findings=tuple(self.found(n) for n in range(1, 61)))
-        lines = claude_code.render_advisory(advisory, 40)
+        lines = guidelines_reader.render_advisory(advisory, 40)
         assert len(lines) == 40
         assert lines[-1] == "- 22 more: invariant check guidelines.mechanical_clean"
 
     def test_exactly_at_the_cap_nothing_is_cut(self):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         advisory = EditAdvisory("app/m.py", findings=tuple(self.found(n) for n in range(1, 4)))
-        lines = claude_code.render_advisory(advisory, 4)
+        lines = guidelines_reader.render_advisory(advisory, 4)
         assert len(lines) == 4 and "more:" not in lines[-1]
 
     # -- silence, and never failing the hook --------------------------------------
@@ -2370,14 +2372,14 @@ class TestTheEditTimeGuidelinesAdvisory:
         assert host._post_tool_use(self.edit("/proj/app/m.py"), FakeCtx(None)) == {}
 
     def test_an_edit_naming_no_file_is_silent(self, host, monkeypatch):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         ctx, seen = self.fake(monkeypatch, EditAdvisory("a", problem="p"))
         assert host._post_tool_use({"tool_name": "Write", "tool_input": {}}, ctx) == {}
         assert seen == []
 
     def test_a_read_is_never_advised(self, host, monkeypatch):
-        from invariant.core.rules import EditAdvisory
+        from invariant.core.guidelines import EditAdvisory
 
         ctx, seen = self.fake(monkeypatch, EditAdvisory("a", problem="p"))
         host._post_tool_use({"tool_name": "Read", "tool_input": {"file_path": "/x/a"}}, ctx)
