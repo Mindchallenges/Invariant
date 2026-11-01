@@ -210,6 +210,13 @@ privacy scan flags. That scan runs whatever `privacy.enabled` and
 cap that is not a positive integer (zero, negative, a string, a boolean), is
 refused at load.
 
+The landing gate over those verdicts, `guidelines.verdicts_complete` (A4
+increment 3), has no key of its own: like `guidelines.mechanical_clean` its
+level comes from the profile, warn in `loose` and `standard` and block in
+`strict` (ruling 7), and `enforcement.rules` raises it. A manifest naming it
+loads only on a build that registers it, so a project raises it after the
+build that ships the gate is installed.
+
 ### Generated files are declared, and never exempt
 
 `guidelines.checklist` is the first key of a third kind (ADR-012 ruling 13).

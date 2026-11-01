@@ -2312,8 +2312,8 @@ def guideline_override_refusal(ctx: RuleContext, guideline_id: str) -> str | Non
     if kind not in findings_reader.EVALUATED_KINDS:
         return (
             f"guideline {guideline_id!r} is a {kind} guideline, answered by a "
-            f"verdict, and no gate evaluates verdicts yet (A4); a grant for it "
-            f"could never be spent"
+            f"verdict at guidelines.verdicts_complete, which no grant passes "
+            f"yet (A4 increment 5); a grant for it could never be spent"
         )
     if guideline.severity != "blocker":
         # A registry class's outcome never exceeds its rule's severity, so a
@@ -3647,9 +3647,17 @@ def plan_verdicts(ctx: RuleContext, submission: Any) -> VerdictPlan:
 
 
 def _verdict_facts(
-    ctx: RuleContext, ruleset: guidelines_reader.Ruleset, pipeline: Mapping[str, Any]
+    ctx: RuleContext,
+    ruleset: guidelines_reader.Ruleset,
+    pipeline: Mapping[str, Any],
+    changed: _ChangedSet | None = None,
 ) -> verdicts_reader.Facts:
-    """Every read the checks need, from the tree in hand (DN-1)."""
+    """Every read the checks need, from the tree in hand (DN-1).
+
+    The submission and ``guidelines.verdicts_complete`` both ask this, so a
+    verdict is checked at the gate against exactly what submission read.
+    ``changed`` is the changed set when the caller has read it already.
+    """
     pinned = pipeline.get("ruleset")
     pin = pinned.get("digest") if isinstance(pinned, Mapping) else None
     state = str(pipeline.get("state") or "")
@@ -3662,7 +3670,8 @@ def _verdict_facts(
         roles_problem = str(exc)
 
     tree = guidelines_tree(ctx)
-    changed = _changed_set(ctx)
+    if changed is None:
+        changed = _changed_set(ctx)
     touched: tuple[str, ...] | None = None
     if changed.answerable:
         # A changed path gone from the tree is no file to meet applies_to
@@ -3738,6 +3747,90 @@ def _note_findings(scanner: PrivacyScanner, note: str) -> list[str]:
     if EXEMPTION_MARKER in note:
         found.append(f"the privacy exemption marker {EXEMPTION_MARKER!r}")
     return found
+
+
+@rule(
+    "guidelines.verdicts_complete",
+    summary="Every judgement guideline the change owes a verdict has one that still holds.",
+    events=(),
+)
+def _guidelines_verdicts_complete(ctx: RuleContext) -> Verdict:
+    """ADR-012 D5 ("The gate", "Staleness") and the A4 rulings (A4.3).
+
+    Which judgement guidelines the change owes a verdict is
+    ``core/verdicts.owed``: phases naming review, landing or always (DN-2),
+    met by a changed file present in the tree outside the path exceptions
+    (DN-3). A mechanical N/A condition the engine finds true answers a rule
+    itself and no verdict is owed (D5 item 5); a pass or fail recorded on it
+    is set aside, since the gate is over applicable rules, and named. Every
+    other owed rule is answered by its latest recorded verdict, checked again
+    through the reads ``plan_verdicts`` makes and the checks submission ran,
+    the review-role predicate aside: a cited file whose blob changed, a
+    ruleset that is not the pin (DN-6), a test whose latest run is not green
+    (DN-8) or a mechanical N/A no longer true makes it stale, and stale is
+    missing. It fails on a missing or stale verdict, and on a current
+    ``fail`` at blocker severity; a ``fail`` at warn is reported inside a
+    pass. It never reads which agent submitted a verdict (D1 item 2, DN-12).
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return Verdict.fail(
+            f"no verdict can be judged: {failure.message}",
+            detail=failure.detail,
+            fixes=failure.fixes,
+        )
+    if ruleset is None:
+        return Verdict.na("no guidelines ruleset configured")
+    pipeline = ctx.pipeline
+    if not pipeline:
+        return Verdict.na("no pipeline is running, so no verdict is owed")
+    changed = _changed_set(ctx)
+    if not changed.answerable:
+        return _unestablished_changed_set(changed)
+    facts = _verdict_facts(ctx, ruleset, pipeline, changed)
+    recorded = ctx.evidence("verdicts") or ()
+    records = tuple(recorded) if isinstance(recorded, list) else ()
+    found = verdicts_reader.standings(ruleset, records, facts)
+    digest = facts.pin or facts.tree_digest
+    if not found:
+        return Verdict.clean(
+            f"no judgement guideline is owed a verdict by this change, ruleset {digest}"
+        )
+    blocking = [s for s in found if s.blocks]
+    detail = "; ".join(
+        s.describe() for s in found if not s.blocks
+        and (s.warns or s.standing == verdicts_reader.ENGINE)
+    ) or None
+    if blocking:
+        return Verdict.fail(
+            f"{len(blocking)} of {len(found)} owed judgement guideline(s) lack a verdict "
+            f"that holds, or fail at blocker: " + "; ".join(s.describe() for s in blocking),
+            detail=detail,
+            fixes=_verdict_fixes(blocking),
+        )
+    return Verdict.clean(
+        f"every one of {len(found)} judgement guideline(s) owed a verdict has one "
+        f"that holds, ruleset {digest}",
+        detail=detail,
+    )
+
+
+def _verdict_fixes(blocking: Iterable[verdicts_reader.Standing]) -> tuple[str, ...]:
+    """One fix per blocking rule: a fresh verdict, or the code a fail cites."""
+    fixes: list[str] = []
+    for s in blocking:
+        if s.standing == verdicts_reader.CURRENT:
+            fixes.append(
+                f"fix what the fail on {s.rule} cites, then answer it again: "
+                f"invariant guidelines verdict {s.rule} --status pass"
+            )
+        else:
+            fixes.append(
+                f"invariant guidelines verdict {s.rule} --status pass  # or fail, "
+                f"or na; with the evidence the rule declares: --cite <path> <first> "
+                f"<last>, --test <selector>, or --na-condition <id>"
+            )
+    return tuple(fixes)
 
 
 # -- test rules --------------------------------------------------------

@@ -1040,17 +1040,21 @@ one invalid entry enters nothing (DN-11). One entry:
 ```
 
 - **`blob`** is `digest_of` the cited file's bytes in the tree at
-  submission. A later edit of the file makes the verdict stale, which is the
-  gate's to read (A4 increment 3).
+  submission. A later edit of the file makes the verdict stale, and
+  `guidelines.verdicts_complete` reads a stale verdict as a missing one (A4
+  increment 3).
 - **`ruleset`** is the pin, and a verdict is accepted only while the tree's
   ruleset has the pinned digest (DN-6). With no pin, or a pin whose digest is
-  null, the tree's digest stands in for it.
+  null, the tree's digest stands in for it. At the gate, a recorded
+  `ruleset` that is not the tree's digest, or a tree that is not the pin,
+  makes the verdict stale; nothing repins.
 - **`state`** is the state the verdict was checked in, always a review-role
   state (DN-2). `record_verdicts` refuses, with nothing written, a record
   whose state the pipeline has since left.
 - **No clock time.** The record is evidence about the change, ordered by
-  position. A later verdict on a rule is appended beside the earlier one, and
-  which one answers the rule is the gate's question.
+  position. A later verdict on a rule is appended beside the earlier one.
+  The latest answers the rule at the gate; an earlier one is never brought
+  back over a latest one gone stale (A4 increment 3).
 - **`agent`** is reserved for A4 increment 8, where the host stamps the
   acting agent (DN-12). It is absent until then, never read by a gate, and
   needs no migration: a record without it loads unchanged.
@@ -1199,7 +1203,11 @@ Details that are load-bearing rather than incidental:
   render` would write now and warns on drift in every profile, so it reports
   and never refuses the landing. It reads the host's default instruction
   files from the rule context, which `PipelineDomain` is handed by the CLI.
-  `guidelines.mechanical_clean` rides there too (A3 increments 3 and 4).
+  `guidelines.mechanical_clean` rides there too (A3 increments 3 and 4),
+  and so does `guidelines.verdicts_complete` (A4 increment 3): every
+  judgement guideline the change owes a verdict has one that still holds,
+  read from `evidence["verdicts"]` and checked again against the tree at
+  the landing. Both warn in `loose` and `standard` and block in `strict`.
   `guidelines.baseline_only_shrinks` (`BASELINE_GATES`, A3 increment 6)
   joins the same entry set only when `guidelines.baseline` is configured as
   well. With no baseline it is N/A, and it blocks in every profile. The

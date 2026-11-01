@@ -95,5 +95,6 @@ expect:
       guidelines.ruleset_valid: pass
       guidelines.generated_current: pass
       guidelines.mechanical_clean: block
+      guidelines.verdicts_complete: pass
   refusals:
     land: [guidelines.mechanical_clean]

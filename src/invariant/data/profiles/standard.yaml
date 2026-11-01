@@ -67,6 +67,12 @@ rules:
   # warns in loose and standard and blocks in strict. A project moves it to
   # block once its baseline is recorded.
   guidelines.mechanical_clean: warn
+  # Every judgement guideline the change owes a verdict has one that still
+  # holds: cited files unchanged, tests green, the pinned ruleset (ADR-012
+  # D5, A4 increment 3, ruling 7). Split by profile like mechanical_clean:
+  # it warns in loose and standard and blocks in strict. A fail at warn
+  # severity is reported and never blocks.
+  guidelines.verdicts_complete: warn
   # The baseline only shrinks against the base branch's committed copy, and
   # no stale entry is left in a touched file (ADR-012 D6, DN-5 to DN-7,
   # ruling 7). Injected at the landing only when a baseline is configured.

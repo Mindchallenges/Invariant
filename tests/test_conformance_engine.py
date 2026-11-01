@@ -39,6 +39,7 @@ GUIDELINES = (
     "guidelines.generated_current",
     "guidelines.mechanical_clean",
     "guidelines.baseline_only_shrinks",
+    "guidelines.verdicts_complete",
 )
 
 SHIPPED = [
@@ -77,6 +78,8 @@ def test_a_malformed_ruleset_is_the_one_refusal_at_the_landing(tmp_path):
     # It cannot look for findings either, and the standard profile holds it
     # at warn (ruling 7), so it is no refusal.
     assert landing["guidelines.mechanical_clean"] == "warn"
+    # Nor can it judge a verdict, and standard holds it at warn (ruling 7).
+    assert landing["guidelines.verdicts_complete"] == "warn"
     assert outcome.refusals == {"land": ("guidelines.ruleset_valid",)}
 
 
@@ -92,6 +95,9 @@ def test_a_ruleset_using_every_kind_lands_like_the_clean_change(tmp_path):
     assert landing["guidelines.ruleset_valid"] == "pass"
     assert landing["guidelines.generated_current"] == "pass"
     assert landing["guidelines.mechanical_clean"] == "pass"
+    # The judgement rule the change owes is answered by the cited pass the
+    # scenario submits in review (A4 increment 3).
+    assert landing["guidelines.verdicts_complete"] == "pass"
     assert outcome.refusals == {}
 
 

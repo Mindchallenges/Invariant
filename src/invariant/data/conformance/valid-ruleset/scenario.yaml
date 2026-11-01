@@ -7,7 +7,9 @@ description: >
   pass beside every other landing gate: ruleset_valid, generated_current
   with the checklist current and no instruction-file block inserted, and
   mechanical_clean, because the change adds no print call and imports
-  nothing from the docs.
+  nothing from the docs, and verdicts_complete, because the one judgement
+  rule the change owes a verdict is answered by a cited pass on the lines
+  it added, submitted in review once the change is committed.
 
 manifest:
   version: 1
@@ -77,6 +79,10 @@ steps:
   - {kind: cli, in: worktree, argv: [pipeline, test]}
   - {kind: cli, in: worktree, argv: [pipeline, coverage]}
   - {kind: commit, in: worktree, message: answer is 42}
+  - kind: cli
+    in: worktree
+    argv: [guidelines, verdict, style.answer-is-documented, --status, pass,
+           --cite, app.py, "1", "2"]
   - {kind: cli, in: worktree, argv: [pipeline, advance, committed]}
 
 expect:
@@ -95,4 +101,5 @@ expect:
       guidelines.ruleset_valid: pass
       guidelines.generated_current: pass
       guidelines.mechanical_clean: pass
+      guidelines.verdicts_complete: pass
   refusals: {}

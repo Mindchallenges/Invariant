@@ -1167,8 +1167,9 @@ invariant guidelines verdicts submit <file.json>
     records. The session is resolved by working directory, and both need a
     running pipeline.
 
-    Checked by core.rules.plan_verdicts, the one validation the
-    guidelines.verdicts_complete gate (A4 increment 3) will ask too. A
+    Checked by core.rules.plan_verdicts. The guidelines.verdicts_complete
+    gate (A4 increment 3) reads the same facts and checks every recorded
+    verdict again with the same predicates, the review role aside. A
     verdict is accepted only when every predicate holds:
       P1  the rule is a judgement guideline; the ruleset in the tree has
           the digest the pipeline pinned (no pin, or a null one, takes the
@@ -1269,6 +1270,27 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     load, a changed set that cannot be established, no base recorded, a
     merge base or rename listing git cannot give, and a base copy that git
     cannot read or that does not parse.
+
+      invariant check guidelines.verdicts_complete [--json]
+
+    asks whether every judgement guideline the change owes a verdict has
+    one that still holds (ADR-012 D5, A4 increment 3). A rule is owed when
+    its phases name review, landing or always and a changed file present in
+    the tree falls under it outside its path exceptions; a deleted file owes
+    nothing. A mechanical N/A condition the engine finds true answers the
+    rule, and the detail names it ("na, answered by the engine (no-code
+    holds: ...)"); a pass or fail recorded on that rule is named as set
+    aside. Otherwise the latest recorded verdict answers the rule, checked
+    again by P1 to P6 without the review-role predicate. Each failing rule
+    is named: "<rule>: no verdict", "<rule>: the latest verdict no longer
+    holds (P3: ...)" for a cited file edited since, a ruleset not the pin,
+    a test whose latest run is not green or a mechanical N/A no longer
+    true, and "<rule>: fail at blocker". A fail at warn is named in the
+    detail of a passing verdict. The fixes name `invariant guidelines
+    verdict <rule>` per rule. N/A with no ruleset or no running pipeline;
+    it fails on a ruleset that does not load and on a changed set that
+    cannot be established. It warns in loose and standard and blocks in
+    strict. No grant passes it yet (A4 increment 5).
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
 

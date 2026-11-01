@@ -120,15 +120,19 @@ FRESHNESS_GATE = "sweep.fresh"
 #: from it is reported (``guidelines.generated_current``, warn in every
 #: profile, ruling 7). ``guidelines.mechanical_clean`` holds new findings of
 #: the pattern, boundary and cochange guidelines there (A3 increments 3 and 4); it warns in
-#: ``loose`` and ``standard`` and blocks in ``strict``. A running pipeline
-#: that pinned a ruleset at ``start`` keeps them whatever the manifest says
-#: later (``guidelines=True``).
+#: ``loose`` and ``standard`` and blocks in ``strict``. So does
+#: ``guidelines.verdicts_complete`` (A4 increment 3), which asks whether every
+#: judgement guideline the change owes a verdict has one that still holds; it
+#: rides the landing entry by role, as ``agents.review_agent_ran`` does (D5).
+#: A running pipeline that pinned a ruleset at ``start`` keeps them whatever
+#: the manifest says later (``guidelines=True``).
 GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
     "landing": {
         "entry": [
             "guidelines.ruleset_valid",
             "guidelines.generated_current",
             "guidelines.mechanical_clean",
+            "guidelines.verdicts_complete",
         ]
     },
 }

@@ -1802,6 +1802,90 @@ increment 3.
   `tests/test_guidelines_verdicts.py` and `tests/test_guidelines_kinds.py`
   carry the amended P5 and mask assertions.
 
+**As built: A4 increment 3, `guidelines.verdicts_complete`.** Built to D5
+("The gate", "Staleness", item 5), ruling 7 and DN-2, DN-3, DN-6, DN-8 and
+DN-12. It reuses the plan's reads and the submission's checks rather than
+deriving either again.
+
+- *The gate (`core/rules`).* `guidelines.verdicts_complete` reads the
+  ruleset through `load_ruleset`, the changed set through `_changed_set`,
+  and every other fact through `_verdict_facts`, the reads `plan_verdicts`
+  makes, so a verdict is checked at the landing against exactly what
+  submission read. It asks `core/verdicts.standings` over the pipeline's
+  `evidence["verdicts"]`. It is N/A with no ruleset or no running pipeline,
+  and fails on a ruleset that does not load and on a changed set that
+  cannot be established, as `mechanical_clean` does.
+- *Owed (`core/verdicts.owed`, DN-2, DN-3).* A judgement rule whose phases
+  name review, landing or always, met through `findings.meets` by a changed
+  file present in the tree, under `applies_to` and not path-excepted. A
+  design-only rule and a deleted file owe nothing.
+- *The engine's N/A (D5 item 5).* For each owed rule, `na_answer` is asked
+  of its mechanical conditions in declared order, through `Facts.na`. The
+  first that holds answers the rule: no verdict is owed, and the detail
+  names the condition and the engine's reason. False, unanswerable, or no
+  answer read leaves the rule owed. A claim is never put to the engine.
+- *A pass or fail on such a rule (increment 2's open point), ruled by the
+  user.* D5 puts the gate over "any applicable judgement rule", and a
+  `not_applicable_when` condition that holds is the ruleset saying the rule
+  does not apply to this change. So the engine's answer stands: a pass or
+  fail recorded on the rule is set aside, never counted, and named in the
+  detail ("the fail recorded on it is set aside"). A recorded `na` on it is
+  not named, since it agrees. This reading is the strict one for the
+  record, not for the change: a fail is never silently dropped.
+  This is the user's ruling for the increment, on top of the D5 reading:
+  the engine's N/A answers the rule and the recorded fail does not block.
+- *Which record answers (D5, increment 1's "the gate's question").* The
+  latest record on the rule. It is read back as the submission it was
+  (`resubmitted`, dropping the engine's own `state`, `surface` and `agent`)
+  and put through `check` again, with the recorded `ruleset` and blobs,
+  under `submitting=False`. An earlier record is never brought back over a
+  latest one gone stale: the latest is the submitter's current word.
+- *Staleness, re-checked at gate time.* Every predicate submission ran,
+  P1 to P6, except P1's review-role predicate, which is submission's alone
+  (DN-2; the landing is not a review state, and `record_verdicts` already
+  refused a record from a state the pipeline had left). So a verdict is
+  stale when a cited file's blob changed (P3), a cited file is no longer in
+  the touched set or a cited range no longer meets an added line under
+  `scope: diff` (P3), the tree's ruleset is not the pin or not the digest
+  the record holds (P1, DN-6; with a null pin the tree's digest stands, as
+  increment 1 built it, so an edited ruleset still makes it stale), a test's
+  latest run naming it is not green (P4, DN-8), or a mechanical `na` is no
+  longer true (P5). A record that no longer parses is stale too. Stale is
+  missing (D5).
+- *The verdict.* It fails on a missing or stale verdict, at any severity,
+  and on a current `fail` at blocker severity, naming each rule ("no
+  verdict", "the latest verdict no longer holds (P3: ...)", "fail at
+  blocker") and a fix per rule (`invariant guidelines verdict <rule>`, or
+  the cited code for a fail). A current `fail` at warn severity is reported
+  in the detail of a pass (D5). Nothing is recorded, and no gate reads
+  `agent` (D1 item 2, DN-12).
+- *Severity (ruling 7).* `warn` in `loose` and `standard`, `block` in
+  `strict`, as `mechanical_clean`. It rides `GUIDELINES_GATES` at the
+  landing entry, injected by role. This repository's manifest is left at
+  the profile's level: naming the gate in `enforcement.rules` before the
+  installed build registers it would fail to load (BUG_050), so raising it
+  is a chore after this lands.
+- *Left for later increments.* `guidelines verdicts show` (A4.4), a grant
+  naming a judgement guideline (A4.5; the override refusal now says no
+  grant passes the gate yet), and the landing's records in pipeline
+  evidence (A4.6).
+- *Conformance.* The seven scenarios with a ruleset carry the gate in their
+  known answer: `pass` where no judgement rule is owed, `warn` in
+  `malformed-ruleset`. `valid-ruleset` owes its judgement rule a verdict
+  (`app.py` is new, so `no-executable-change` is false), and now submits a
+  cited pass once the change is committed, so it still lands like the clean
+  change with the gate passing. It is placed after the commit because the
+  changed set does not list an untracked file the scenario wrote without
+  staging, which is `_changed_set`'s existing reading, not this gate's.
+- *Tests.* `tests/test_guidelines_verdicts_complete.py`: owed (phases,
+  applies_to, path exceptions, no changed set), missing, current, the
+  latest answering, a stale latest not rescued, every staleness predicate,
+  the engine's N/A with a pass or fail set aside, warn and blocker fails,
+  and the gate over real repositories (levels per profile, the injection,
+  N/A and failing preconditions, a deleted file, a comment-only change, an
+  edit after the verdict, a ruleset edited mid-pipeline).
+  `tests/test_conformance_engine.py` carries the new gate.
+
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
 **Format.** A baseline file the manifest names, one entry per line, with `#`

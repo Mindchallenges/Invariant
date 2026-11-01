@@ -25,8 +25,16 @@ submits through the CLI. This module holds the record, reads a submission into
 Pure (DN-1). The file bytes, the added lines, the test runs, the pin and the
 privacy scan arrive as values or callables in :class:`Facts`; this module
 does no file read, no ``git`` call and no clock read. ``core/rules`` makes
-every read, from the tree in hand, in ``plan_verdicts``, and A4.3's gate asks
-the same plan. Recording is ``domains/pipeline``'s.
+every read, from the tree in hand, in ``plan_verdicts``, and the
+``guidelines.verdicts_complete`` gate (A4.3) reads the same :class:`Facts`.
+Recording is ``domains/pipeline``'s.
+
+At the gate, :func:`standings` asks which judgement rules the change owes a
+verdict (:func:`owed`, DN-2 and DN-3), lets a mechanical N/A condition the
+engine finds true answer a rule itself (D5 item 5), and checks the latest
+recorded verdict on every other owed rule again with :func:`check`, so a
+verdict whose citations, tests, N/A or ruleset no longer hold is stale, and a
+stale verdict is a missing one (D5, "Staleness").
 
 A refused verdict never enters evidence (ruling 6): a check answers the record
 only when no predicate failed, and names every problem when one did. The
@@ -338,9 +346,19 @@ def parse_submission(data: Any) -> Parsed:
 
 
 def applies_problems(
-    sub: Submitted, rule: Guideline | None, facts: Facts, ids: Sequence[str] = ()
+    sub: Submitted,
+    rule: Guideline | None,
+    facts: Facts,
+    ids: Sequence[str] = (),
+    *,
+    submitting: bool = True,
 ) -> list[Problem]:
-    """P1. With no rule, or one that is not judgement, nothing else is asked."""
+    """P1. With no rule, or one that is not judgement, nothing else is asked.
+
+    The review-role predicate is asked only at submission (DN-2): the gate
+    checks a recorded verdict again at the landing, which is no review state,
+    and the record was refused in any state the pipeline had since left.
+    """
     if rule is None:
         near = get_close_matches(sub.rule, list(ids), n=1, cutoff=0.6)
         hint = f"did you mean {near[0]!r}? " if near else ""
@@ -372,18 +390,8 @@ def applies_problems(
             f"the entry names ruleset {sub.ruleset}, and the tree's is {facts.tree_digest}",
             "leave the ruleset out; the engine records the pinned one",
         ))
-    if facts.roles_problem is not None:
-        problems.append(Problem(
-            "P1", f"the state's roles cannot be read: {facts.roles_problem}",
-            "invariant pipeline status",
-        ))
-    elif ACCEPTING_ROLE not in facts.roles:
-        problems.append(Problem(
-            "P1",
-            f"state {facts.state!r} carries no {ACCEPTING_ROLE} role; verdicts are "
-            f"accepted only in a review-role state (DN-2)",
-            f"advance the pipeline to its {ACCEPTING_ROLE} state, then submit",
-        ))
+    if submitting:
+        problems.extend(_role_problems(facts))
     if not set(rule.phases) & OWED_PHASES:
         problems.append(Problem(
             "P1",
@@ -406,6 +414,23 @@ def applies_problems(
             "submit a verdict only for a guideline the change meets",
         ))
     return problems
+
+
+def _role_problems(facts: Facts) -> list[Problem]:
+    """P1's review-role predicate (DN-2), asked at submission only."""
+    if facts.roles_problem is not None:
+        return [Problem(
+            "P1", f"the state's roles cannot be read: {facts.roles_problem}",
+            "invariant pipeline status",
+        )]
+    if ACCEPTING_ROLE not in facts.roles:
+        return [Problem(
+            "P1",
+            f"state {facts.state!r} carries no {ACCEPTING_ROLE} role; verdicts are "
+            f"accepted only in a review-role state (DN-2)",
+            f"advance the pipeline to its {ACCEPTING_ROLE} state, then submit",
+        )]
+    return []
 
 
 # -- P2, evidence of an allowed kind --------------------------------------------------------
@@ -663,9 +688,15 @@ def check(
     facts: Facts,
     ids: Sequence[str] = (),
     index: int = 0,
+    *,
+    submitting: bool = True,
 ) -> Checked:
-    """Every predicate over one submitted verdict, every problem named."""
-    problems = applies_problems(sub, rule, facts, ids)
+    """Every predicate over one submitted verdict, every problem named.
+
+    ``submitting=False`` is the gate's re-check of a recorded verdict: every
+    predicate but the review-role one (DN-2).
+    """
+    problems = applies_problems(sub, rule, facts, ids, submitting=submitting)
     if rule is None or rule.check.kind != "judgement":
         return Checked(index=index, rule=sub.rule, record=None, problems=tuple(problems))
     problems += evidence_problems(sub, rule)
@@ -706,3 +737,147 @@ def check_all(parsed: Parsed, ruleset: Ruleset, facts: Facts) -> tuple[Checked, 
                              problems=(twice, *result.problems))
         results.append(result)
     return tuple(results)
+
+
+# -- the gate: which rules are owed, and how each stands (A4.3) ------------------------------------
+
+#: How an owed rule stands at the gate.
+#: ``current``: its latest verdict still holds. ``missing``: it has none.
+#: ``stale``: its latest no longer holds, and is treated as missing (D5).
+#: ``engine``: a mechanical N/A condition the engine finds true answers it.
+CURRENT = "current"
+MISSING = "missing"
+STALE = "stale"
+ENGINE = "engine"
+
+#: The keys of a record the engine writes and a submission may not carry.
+_RECORD_ONLY_KEYS = frozenset({"state", "surface", "agent"})
+
+
+@dataclass(frozen=True)
+class Standing:
+    """One owed judgement rule at the gate, and the answer it has."""
+
+    rule: str
+    severity: str
+    standing: str
+    #: The answering verdict's status: the current one's, or, for ``engine``,
+    #: ``na``. ``None`` for a rule with no verdict that holds.
+    status: str | None = None
+    #: For ``engine``: the condition that holds and the engine's reason.
+    reason: str = ""
+    #: For ``stale``: every predicate the latest verdict now fails.
+    problems: tuple[Problem, ...] = ()
+    #: For ``engine``: the status of a pass or fail recorded on the rule,
+    #: which the gate sets aside because the rule is not applicable.
+    set_aside: str | None = None
+
+    @property
+    def blocks(self) -> bool:
+        """No verdict that holds, or a current fail at blocker severity."""
+        if self.standing in (MISSING, STALE):
+            return True
+        return self.standing == CURRENT and self.status == "fail" and self.severity == "blocker"
+
+    @property
+    def warns(self) -> bool:
+        """A current fail at warn severity: reported, never blocking (D5)."""
+        return self.standing == CURRENT and self.status == "fail" and self.severity != "blocker"
+
+    def describe(self) -> str:
+        if self.standing == MISSING:
+            return f"{self.rule}: no verdict"
+        if self.standing == STALE:
+            why = "; ".join(p.describe() for p in self.problems)
+            return f"{self.rule}: the latest verdict no longer holds ({why})"
+        if self.standing == ENGINE:
+            told = f"{self.rule}: na, answered by the engine ({self.reason})"
+            if self.set_aside is not None:
+                told += f"; the {self.set_aside} recorded on it is set aside"
+            return told
+        if self.status == "fail":
+            return f"{self.rule}: fail at {self.severity}"
+        return f"{self.rule}: {self.status}"
+
+
+def owed(ruleset: Ruleset, facts: Facts) -> tuple[Guideline, ...]:
+    """The judgement rules this change owes a verdict, in ruleset order.
+
+    A rule is owed when its phases name review, landing or always (DN-2) and
+    a changed file present in the tree meets it (DN-3, ``findings.meets``):
+    under ``applies_to``, not path-excepted; a deleted file owes nothing.
+    With no changed set there is nothing to ask, and the gate refuses first.
+    """
+    if facts.touched is None:
+        return ()
+    return tuple(
+        rule for rule in ruleset.rules
+        if rule.check.kind == "judgement"
+        and set(rule.phases) & OWED_PHASES
+        and any(meets(rule, rel) for rel in facts.touched)
+    )
+
+
+def resubmitted(record: Mapping[str, Any]) -> tuple[Submitted | None, tuple[Problem, ...]]:
+    """A recorded verdict read back as the submission it was, to check again.
+
+    The keys only the engine writes (``state``, ``surface``, ``agent``) are
+    dropped. The recorded ``ruleset`` and blobs stay, so the checks compare
+    them with the tree in hand: that is what makes a drifted ruleset or an
+    edited cited file stale.
+    """
+    return parse_entry({k: v for k, v in record.items() if k not in _RECORD_ONLY_KEYS})
+
+
+def _engine_answer(rule: Guideline, facts: Facts) -> NaAnswer | None:
+    """The first mechanical N/A condition the engine finds true, or ``None``.
+
+    False or unanswerable never sets a rule aside; nor does no answer read.
+    A claim is never put to the engine.
+    """
+    if facts.na is None or facts.touched is None:
+        return None
+    for condition in rule.check.not_applicable_when:
+        if condition.mechanical is None:
+            continue
+        answer = facts.na(rule, condition, facts.touched)
+        if answer.holds is True:
+            return answer
+    return None
+
+
+def standing_of(rule: Guideline, records: Sequence[Any], facts: Facts) -> Standing:
+    """How one owed rule stands: answered by the engine, or by its latest
+    recorded verdict checked again, or not at all.
+
+    The latest record answers the rule: it is the submitter's current word,
+    and an earlier one it superseded is never brought back, even when the
+    latest has gone stale.
+    """
+    mine = [r for r in records if isinstance(r, Mapping) and r.get("rule") == rule.id]
+    latest = mine[-1] if mine else None
+    answer = _engine_answer(rule, facts)
+    if answer is not None:
+        status = latest.get("status") if latest is not None else None
+        return Standing(
+            rule=rule.id, severity=rule.severity, standing=ENGINE, status="na",
+            reason=f"{answer.condition} holds: {answer.reason}" if answer.reason
+            else f"{answer.condition} holds",
+            set_aside=status if status in ("pass", "fail") else None,
+        )
+    if latest is None:
+        return Standing(rule=rule.id, severity=rule.severity, standing=MISSING)
+    sub, shape = resubmitted(latest)
+    if sub is None:
+        return Standing(rule=rule.id, severity=rule.severity, standing=STALE, problems=shape)
+    result = check(sub, rule, facts, submitting=False)
+    if result.problems:
+        return Standing(
+            rule=rule.id, severity=rule.severity, standing=STALE, problems=result.problems,
+        )
+    return Standing(rule=rule.id, severity=rule.severity, standing=CURRENT, status=sub.status)
+
+
+def standings(ruleset: Ruleset, records: Sequence[Any], facts: Facts) -> tuple[Standing, ...]:
+    """Every owed judgement rule's standing, in ruleset order (D5, "The gate")."""
+    return tuple(standing_of(rule, records, facts) for rule in owed(ruleset, facts))
