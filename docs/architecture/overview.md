@@ -714,6 +714,21 @@ cannot be established, and never reads the acting agent (D1 item 2, DN-12).
 `core/machines` injects it in `GUIDELINES_GATES` beside `mechanical_clean`;
 it warns in `loose` and `standard` and blocks in `strict` (ruling 7).
 
+A grant naming a judgement guideline (A4 increment 5) is A3.7's grant, read
+by this gate instead of `mechanical_clean`: `core.rules.guideline_grants`
+splits the live grants by the guideline's kind, so each family gate reads and
+names only its own, and `guideline_family_gate` is the one reading of which
+gate a guideline's grant passes. `core/verdicts.standings` takes the grants
+and marks each failing standing of a granted rule with the grant's reason
+(`Standing.override`): no verdict, a stale one, a current fail, at either
+severity (DN-9). The engine's N/A still answers the rule first. A marked
+standing does not block, and `unused_grants` names each grant that passed
+nothing. `read_standings` carries the grants and the unused ones, so the
+gate and `guidelines verdicts show` print the same override. Both family
+gates report what a grant passed in `Verdict.overridden`, and `cli/main`
+spends from it on one path after an advance the grant decided. No new
+arrow: `RULES --> CVERD` carries the grants as values.
+
 `invariant guidelines verdicts show` prints what that gate sees (A4
 increment 4). The gate's reads are one function, `core.rules.read_standings`,
 and its verdict is `standings_verdict` over that read. The command asks the

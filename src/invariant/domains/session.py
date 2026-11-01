@@ -29,6 +29,7 @@ from ..core.rules import (
     RuleContext,
     evaluate,
     get_rule,
+    guideline_gate_of,
     guideline_override_refusal,
     is_exempt_path,
 )
@@ -1331,12 +1332,15 @@ class SessionDomain:
         """Let the next ``calls`` evaluations of ``rule_id`` at a hook through.
 
         ``rule_id`` may name a guideline instead (ADR-012 ruling 4, D12): the
-        grant then passes that guideline's new blocker findings in one
-        evaluation of ``guidelines.mechanical_clean``, and the pipeline advance
-        it lets through spends it. The id is checked against the ruleset of
-        the tree in hand, read from ``cwd`` as the gate reads it, and no
-        guideline id is a rule id (DN-15), so the grant is held in the same
-        shape either way.
+        grant then passes that guideline in one evaluation of its family
+        gate, and the pipeline advance it lets through spends it. For a
+        pattern, boundary or cochange guideline that is its new blocker
+        findings at ``guidelines.mechanical_clean``; for a judgement
+        guideline, its missing, stale or failing verdict at
+        ``guidelines.verdicts_complete`` (A4.5, DN-9). The id is checked
+        against the ruleset of the tree in hand, read from ``cwd`` as the
+        gates read it, and no guideline id is a rule id (DN-15), so the grant
+        is held in the same shape either way.
         """
         if not reason or not reason.strip():
             raise UsageError(
@@ -1352,21 +1356,19 @@ class SessionDomain:
             # not (BUG_050 is this fault at the configuration layer). An id
             # naming no rule is held only when it names a guideline a gate can
             # be stopped by.
-            refusal = guideline_override_refusal(
-                RuleContext(
-                    manifest=self.manifest,
-                    cwd=Path(cwd or self.manifest.root),
-                    session=session.to_dict(),
-                ),
-                rule_id,
+            here = RuleContext(
+                manifest=self.manifest,
+                cwd=Path(cwd or self.manifest.root),
+                session=session.to_dict(),
             )
+            refusal = guideline_override_refusal(here, rule_id)
             if refusal is not None:
                 raise UsageError(refusal)
             if calls != 1:
                 raise UsageError(
                     f"a grant naming the guideline {rule_id!r} is good for one "
-                    f"evaluation of guidelines.mechanical_clean (ADR-012 ruling 4); "
-                    f"drop --calls"
+                    f"evaluation of {guideline_gate_of(here, rule_id)} (ADR-012 "
+                    f"ruling 4); drop --calls"
                 )
         if calls < 1:
             raise UsageError("--calls must be at least 1")

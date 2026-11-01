@@ -31,6 +31,7 @@ from ..core.rules import (
     coverage_advisory_exception,
     evaluate,
     get_rule,
+    guideline_gate_of,
     sweep_cadence_summary,
 )
 from ..core.store import InertStore, JsonStore
@@ -1519,7 +1520,8 @@ def cmd_session_status(args) -> int:
         reach = (
             f"({grant.get('calls', 1)} call(s) left)"
             if get_rule(grant["rule"]) is not None
-            else f"(guideline; one evaluation of {MECHANICAL_RULE}, spent by the "
+            else f"(guideline; one evaluation of "
+            f"{_family_gate(ctx.rule_context(), grant['rule'])}, spent by the "
             f"pipeline advance it lets through)"
         )
         text.append(f"  override   {grant['rule']} — {grant['reason']} {reach}")
@@ -1555,15 +1557,22 @@ def cmd_override(args) -> int:
         session.id, args.rule, args.reason, calls=args.calls, cwd=ctx.cwd
     )
     if get_rule(args.rule) is None:
-        level = ctx.manifest.rule_level(MECHANICAL_RULE).value
+        gate = guideline_gate_of(ctx.rule_context(), args.rule) or MECHANICAL_RULE
+        level = ctx.manifest.rule_level(gate).value
+        passes = (
+            f"{args.rule}'s missing, stale or failing verdict is passed there, "
+            f"and every other guideline stands"
+            if gate == VERDICTS_RULE
+            else f"{args.rule}'s new blocker findings are passed there, and "
+            f"every other finding stands"
+        )
         return emit(
             args,
             updated.to_dict(),
             f"override granted for guideline {args.rule}\n"
             f"  reason: {args.reason}\n"
-            f"  good for one evaluation of {MECHANICAL_RULE} ({level} in this "
-            f"project): {args.rule}'s new blocker findings are passed there, and "
-            f"every other finding stands\n"
+            f"  good for one evaluation of {gate} ({level} in this "
+            f"project): {passes}\n"
             f"  spent by the pipeline advance it lets through, and recorded on "
             f"this session; withdraw it with --clear",
         )
@@ -2835,46 +2844,45 @@ def cmd_pipeline_advance(args) -> int:
     )
 
 
-#: The family gate a grant naming a guideline passes for one evaluation
-#: (ADR-012 ruling 4, D12).
+#: The family gate a grant naming a pattern, boundary or cochange guideline
+#: passes for one evaluation (ADR-012 ruling 4, D12); a judgement guideline's
+#: is ``VERDICTS_RULE`` (A4.5).
 MECHANICAL_RULE = "guidelines.mechanical_clean"
+VERDICTS_RULE = "guidelines.verdicts_complete"
 
 
 def _spend_guideline_overrides(ctx, session, verdicts) -> None:
     """Spend each guideline grant the advance that just succeeded relied on.
 
-    ADR-012 ruling 4, and manifest.md's four properties of the token. The
-    family gate reads a live grant and reports the guideline's new blocker
-    findings as passed by override; it never spends one, because asking a
+    ADR-012 ruling 4, and manifest.md's four properties of the token. Both
+    family gates, ``guidelines.mechanical_clean`` and
+    ``guidelines.verdicts_complete``, read a live grant and name what it
+    passed in ``Verdict.overridden``; neither spends one, because asking a
     rule must not change the world. This is the delivery surface, so the
     grant is spent HERE, after the advance succeeded, and recorded in
-    ``session.overrides`` with surface ``cli``.
+    ``session.overrides`` with surface ``cli``. One path for both gates.
 
     Only where it decided something. At ``warn`` the gate would not have
-    stopped the advance, and a gate still failing on another finding was not
-    passed by the grant (a forced advance went past it); in both the grant
-    is held, and said to be. ``pipeline gates``, ``check``, ``doctor`` and
-    the oracle evaluate the same gate and never reach this.
+    stopped the advance, and a gate still failing on another guideline was
+    not passed by the grant (a forced advance went past it); in both the
+    grant is held, and said to be. ``pipeline gates``, ``check``, ``doctor``
+    and the oracle evaluate the same gates and never reach this.
     """
     for evaluated in verdicts:
-        if evaluated.rule_id != MECHANICAL_RULE or not evaluated.verdict.findings:
-            continue
-        passed: dict[str, list[str]] = {}
-        for record in evaluated.verdict.findings:
-            if record.get("finding") == "overridden":
-                passed.setdefault(str(record["rule"]), []).append(_cited(record))
+        passed = evaluated.verdict.overridden
         if not passed:
             continue
+        gate = evaluated.rule_id
         stopping = evaluated.level in (Level.BLOCK, Level.ASK)
         decided = stopping and evaluated.verdict.ok and not evaluated.verdict.skipped
-        for guideline, places in passed.items():
+        for guideline, stopped_on in passed:
             if not decided:
                 why = (
-                    f"{MECHANICAL_RULE} still failed on other findings, so the "
-                    f"grant passed nothing"
+                    f"{gate} still failed on another guideline, so the grant "
+                    f"passed nothing"
                     if stopping
-                    else f"{MECHANICAL_RULE} is {evaluated.level.value} here, so "
-                    f"nothing was stopped"
+                    else f"{gate} is {evaluated.level.value} here, so nothing "
+                    f"was stopped"
                 )
                 print(f"[override] {guideline}: held, not spent — {why}", file=sys.stderr)
                 continue
@@ -2884,17 +2892,15 @@ def _spend_guideline_overrides(ctx, session, verdicts) -> None:
             print(
                 f"[override] {guideline}: passed deliberately — "
                 f"{spent.get('reason', 'overridden')} (spent)\n"
-                f"        it would have blocked {MECHANICAL_RULE}: "
-                + ", ".join(places),
+                f"        it would have blocked {gate}: {stopped_on}",
                 file=sys.stderr,
             )
 
 
-def _cited(record: Mapping) -> str:
-    """Where a finding record points: its path, and its line when it has one."""
-    (citation,) = record.get("citations") or [{"path": "?", "lines": None}]
-    lines = citation.get("lines")
-    return citation["path"] if not lines else f"{citation['path']}:{lines[0]}"
+def _family_gate(rc, guideline_id: str) -> str:
+    """The gate a grant naming ``guideline_id`` passes, as the ruleset in the
+    tree in hand says; "its family gate" when no ruleset loads there."""
+    return guideline_gate_of(rc, guideline_id) or "its family gate"
 
 
 def cmd_pipeline_test(args) -> int:
@@ -3450,8 +3456,6 @@ def cmd_guidelines_verdicts_submit(args) -> int:
     return _submit_verdicts(args, submission)
 
 
-VERDICTS_RULE = "guidelines.verdicts_complete"
-
 
 def _standing_payload(s) -> dict:
     return {
@@ -3462,6 +3466,7 @@ def _standing_payload(s) -> dict:
             for p in s.problems
         ],
         "set_aside": s.set_aside, "blocks": s.blocks, "warns": s.warns,
+        "override": s.override, "overridden": s.overridden,
     }
 
 
@@ -3494,6 +3499,9 @@ def cmd_guidelines_verdicts_show(args) -> int:
         if read.unowed:
             lines.append("recorded on guidelines the change no longer owes:")
             lines.extend(f"  {u.describe()}" for u in read.unowed)
+        if read.unused:
+            lines.append("grants on judgement guidelines that pass nothing here:")
+            lines.extend(f"  {u.describe()}" for u in read.unused)
         lines.append(gate.render())
         text = "\n".join(lines)
     return emit(args, {
@@ -3504,6 +3512,9 @@ def cmd_guidelines_verdicts_show(args) -> int:
         "not_owed": [
             {"rule": u.rule, "status": u.status, "recorded": u.recorded, "reason": u.reason}
             for u in read.unowed
+        ],
+        "unused_grants": [
+            {"rule": u.rule, "reason": u.reason, "why": u.why} for u in read.unused
         ],
         "gate": _verdict_payload(gate),
     }, text)

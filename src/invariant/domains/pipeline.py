@@ -23,6 +23,8 @@ from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_pipeline_machine
 from ..core.manifest import Level
 from ..core.rules import (
+    MECHANICAL_GATE,
+    VERDICTS_GATE,
     Evaluated,
     RuleContext,
     apply_acknowledgements,
@@ -1234,8 +1236,12 @@ class PipelineDomain:
         )
 
 
-#: The family gate an override naming a guideline reaches (ADR-012 ruling 4).
-GUIDELINE_FAMILY_GATE = "guidelines.mechanical_clean"
+#: What a grant naming a guideline passes at each family gate it reaches
+#: (ADR-012 ruling 4; the verdict gate since A4 increment 5).
+_GUIDELINE_GRANT_PASSES = {
+    MECHANICAL_GATE: "that guideline's new findings",
+    VERDICTS_GATE: "that guideline's missing, stale or failing verdict",
+}
 
 
 def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) -> str:
@@ -1263,12 +1269,12 @@ def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) ->
             f"      (it fires on {', '.join(events)}; one call, then it is spent)"
         )
     if rule_id in machine.gate_ids():
-        if rule_id == GUIDELINE_FAMILY_GATE:
+        if rule_id in _GUIDELINE_GRANT_PASSES:
             # ADR-012 ruling 4: one guideline at a time, the others in force.
             routes.append(
                 "    invariant override <guideline-id> --reason '<why>'\n"
-                "      (passes that guideline's new findings in one evaluation; "
-                "the advance it lets through spends it)"
+                f"      (passes {_GUIDELINE_GRANT_PASSES[rule_id]} in one "
+                "evaluation; the advance it lets through spends it)"
             )
         routes.append(
             "    invariant pipeline advance <state> --force --reason '<why>'\n"

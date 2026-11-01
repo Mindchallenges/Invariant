@@ -416,6 +416,21 @@ than a gate that quietly did not fire. An unspent grant prints in
 `session status`, because a held override is enforcement the operator turned off
 and may well have forgotten.
 
+A grant may name a guideline instead of a rule (ADR-012 ruling 4). It is held
+and spent in the same shape, with the guideline id as its `rule`, and the gate
+it passes is the guideline's family gate: `guidelines.mechanical_clean` for a
+pattern, boundary or cochange guideline (A3 increment 7), and
+`guidelines.verdicts_complete` for a judgement guideline, whose missing, stale
+or failing verdict it passes, a warn guideline's included (A4 increment 5,
+DN-9). Each gate reads only the grants of its own kind, names them with their
+reasons, and carries what each passed in `Verdict.overridden`; the CLI's
+`pipeline advance` is the one surface that spends a guideline grant, and only
+where the gate stops work and passed because of the grant. The self-loop holds
+across pipelines: a guideline grant nothing spent stays in `pending_overrides`
+for the rest of the session. Where the family gate warns, as both do in `loose`
+and `standard`, nothing spends it, so it holds until `--clear`; `session status`
+names it and its gate, and every evaluation of the gate names it.
+
 ### Standing enforcement down
 
 `Session.standdown` is the third of these fields and the only one that is a
@@ -1211,7 +1226,9 @@ Details that are load-bearing rather than incidental:
   and so does `guidelines.verdicts_complete` (A4 increment 3): every
   judgement guideline the change owes a verdict has one that still holds,
   read from `evidence["verdicts"]` and checked again against the tree at
-  the landing. Both warn in `loose` and `standard` and block in `strict`.
+  the landing. Both warn in `loose` and `standard` and block in `strict`,
+  and a grant naming a guideline passes that guideline at its family gate
+  (see "The two override lists").
   `guidelines.baseline_only_shrinks` (`BASELINE_GATES`, A3 increment 6)
   joins the same entry set only when `guidelines.baseline` is configured as
   well. With no baseline it is N/A, and it blocks in every profile. The

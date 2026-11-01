@@ -1330,7 +1330,7 @@ shape a rule's grant already has, with the guideline id as its `rule`.
     naming no rule is (ADR-001 D25, BUG_050). That covers:
     - an `engine` guideline, whose refusal names the rule to override instead;
     - a `judgement` guideline, until A4 builds the gate that evaluates
-      verdicts;
+      verdicts (A4 increment 5 lifted this; see "As built: A4 increment 5");
     - a `warn` guideline, since a registry class's outcome never exceeds its
       rule's severity, so its findings never block.
   - `--calls` above one is refused for a guideline. Ruling 4 makes the grant
@@ -1951,6 +1951,106 @@ guidelines commands.
   `--json`, any state, no session, no pipeline, no ruleset, a ruleset that
   does not load, and that it writes nothing).
 
+**As built: A4 increment 5, override by guideline id for judgement
+guidelines.** Built to ruling 4, D12 ("A single guideline's level"), DN-9
+and DN-12, the user's A4.3 ruling on the engine's N/A, and A3 increment 7's
+mechanism. There is no second override path and no new record shape: a
+judgement grant is the A3.7 grant, held in `session.pending_overrides` and
+spent into `session.overrides` with the guideline id as its `rule`.
+
+- *A note on numbering.* The session brief called the coverage ruling DN-10.
+  In the table above it is DN-9 ("What a grant naming a judgement guideline
+  covers"), and DN-10 is the review agent's text. The ruling is the same.
+- *The grant (`core/rules.guideline_override_refusal`).* A judgement
+  guideline is granted at either severity, because a missing or stale
+  verdict fails the gate whatever the rule's severity, so a warn guideline
+  can be stopped too. A judgement guideline whose phases name neither
+  review, landing nor always is refused: it is never owed a verdict, so
+  nothing could ever spend the grant (A3.7's rule, ADR-001 D25). The other
+  refusals are unchanged: an engine guideline names its rule, and a warn
+  mechanical guideline can never block. `--calls` above one is refused,
+  naming the family gate. `guideline_family_gate` is the one reading of
+  which gate a guideline's grant passes, and `guideline_gate_of` reads it
+  from the ruleset of the tree in hand for the CLI's text and the session's
+  refusal.
+- *Each family gate reads its own grants.* `guideline_grants(ctx, ruleset,
+  judgement=...)` splits the live grants by the guideline's kind.
+  `mechanical_clean` reads every grant that does not name a judgement
+  guideline, so it still names a grant whose guideline left the ruleset as
+  unused (A3.7). `verdicts_complete` reads the judgement ones. Neither names
+  the other's grant.
+- *What a grant covers (DN-9, `core/verdicts`).* `standings` takes the
+  grants. A granted rule whose standing is missing, stale or a current fail,
+  at blocker or at warn, keeps that standing and is marked with the grant's
+  reason (`Standing.override`). It neither blocks nor warns. `failing` is
+  what the rule's answer alone would do, and `describe` adds "passed by
+  override, granted with `invariant override <rule>` (reason: ...)". The
+  engine's mechanical N/A is asked first and answers the rule, so a grant
+  on it passes nothing. That is the user's A4.3 ruling: the engine's answer
+  stands over any record, and over any grant. A current pass or `na` leaves
+  the grant passing nothing. `unused_grants` names each such grant and why:
+  its latest verdict holds, the engine answers it, or the change does not
+  owe it a verdict.
+- *The gate and the command agree.* `read_standings` reads the grants with
+  every other fact, and `StandingsRead` carries `grants` and `unused`.
+  `standings_verdict` counts "N passed by override" in its message. Its
+  detail names each passed rule with the grant, and names each unused
+  grant. `guidelines verdicts show` prints the same standings, so the
+  overridden rule shows on its own line with the grant's clause, and an
+  unused grant shows under its own heading. `--json` adds `override` and
+  `overridden` to each owed rule, and `unused_grants`. A blocking rule's
+  fixes name `invariant override <rule> --reason '<why>'` beside the
+  verdict, and `pipeline ack`'s refusal for the gate names the guideline
+  route beside the forced advance, as it does for `mechanical_clean`.
+- *One spend path.* `Verdict.overridden` is new: each guideline a grant
+  passed where it would otherwise have failed the gate, with what it would
+  have failed on. Both family gates set it. `mechanical_clean` names the
+  finding's places, and `verdicts_complete` names the standing without the
+  grant's clause. `cli/main._spend_guideline_overrides` now reads it for any
+  gate, instead of parsing `mechanical_clean`'s findings, so both gates are
+  spent by one path, under A3.7's conditions: after an advance that
+  succeeded, where the gate blocks or asks and passed. Otherwise the command
+  says the grant is held.
+- *Readings taken where the rulings are silent.*
+  - A fail at warn passed by a grant is covered (DN-9). It is named in the
+    detail and not reported as a warn. It is not in `Verdict.overridden`,
+    since a fail at warn never blocked and the grant decided nothing, so no
+    advance spends the grant for it. That is manifest.md's property that a
+    grant is consumed only where the verdict actually stops the work. The
+    detail says so.
+  - One grant names one guideline, as in A3.7 and ruling 4. A grant on a
+    rule the change does not owe now is accepted and named as unused, as a
+    mechanical grant on a guideline with no new finding is.
+  - A later fresh pass does not retire a grant. The grant is then named as
+    unused, with `--clear` as the way to withdraw it, as in A3.7.
+  - The profiles do not differ in what a grant may name. Under `strict` the
+    gate blocks, so a grant that decided the landing is spent there. Under
+    `loose` and `standard` the gate warns, so it is never spent.
+- *Carry-over (A3.7, unchanged and now documented).* A held guideline grant
+  stays in `pending_overrides` for the rest of the session. It passes its
+  guideline at every later evaluation, in this pipeline and the next, until
+  an advance spends it or `--clear` withdraws it. A judgement grant makes
+  this visible: under `loose` and `standard` nothing spends it, so it holds
+  for the session. It is loud throughout. `session status` names it with
+  its family gate, the gate names it on every evaluation, and `override`'s
+  output names the gate and its level. cli.md and state_model.md say so.
+- *DN-12.* No check reads the acting agent. A test pins the gate's verdict
+  equal with and without an `agent` on the records.
+- *Tests.* `tests/test_guidelines_verdicts_override.py` covers each standing
+  under a grant (missing, stale, a fail at blocker, a fail at warn, a pass,
+  the engine's N/A, another rule untouched) and the unused grants. It also
+  covers the gate over real repositories (passes, still failing on another
+  rule, the fixes, each gate ignoring the other's grants, the agreement with
+  `read_standings`, DN-12), the family gate, granting and its refusals,
+  spending through the one path for both gates, the commands (`override`,
+  `session status`, `verdicts show` text and `--json`, and that `check` and
+  `show` never spend), and `pipeline ack`'s route. The `valid-ruleset`
+  scenario is replayed with its verdict replaced by a grant: spent at the
+  landing under `strict`, refused without it, and held under `standard`.
+  `tests/test_guidelines_override.py` carries the lifted judgement refusal
+  and the spend helper's `overridden`. `tests/test_guidelines_verdicts_show.py`
+  carries the two new JSON keys.
+
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
 **Format.** A baseline file the manifest names, one entry per line, with `#`
@@ -2356,8 +2456,9 @@ guideline id as well as a rule id, and a grant naming a guideline passes that
 guideline's findings or verdict in one evaluation of the family gate, leaving
 every other guideline under that gate in force. The rule registry stays fixed:
 no guideline is minted as a registry rule. A3 increment 7 builds it for
-`guidelines.mechanical_clean` (D4, "As built: A3 increment 7"); the verdict
-half waits for A4's `guidelines.verdicts_complete`.
+`guidelines.mechanical_clean` (D4, "As built: A3 increment 7"), and A4
+increment 5 builds the verdict half, for `guidelines.verdicts_complete` (D5,
+"As built: A4 increment 5").
 
 ### D13 — Manifest keys
 

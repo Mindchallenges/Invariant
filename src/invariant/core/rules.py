@@ -158,6 +158,11 @@ class Verdict:
     #: rule, so a payload carries the key only where it means something.
     #: Printed, never persisted (DN-16).
     findings: tuple[Mapping[str, Any], ...] | None = None
+    #: Each guideline a live grant passed in this evaluation where it would
+    #: otherwise have failed the gate, with what it would have failed on
+    #: (ADR-012 ruling 4). Set by the two guideline family gates only, and
+    #: read by the delivery surface that spends the grant.
+    overridden: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def clean(cls, message: str = "", detail: str = "") -> Verdict:
@@ -2217,7 +2222,7 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     ratcheted = findings_reader.ratchet(
         evaluation.findings, baseline or (), touched=set(files) | set(gone)
     )
-    grants = guideline_grants(ctx)
+    grants = guideline_grants(ctx, ruleset)
     found = findings_reader.overridden(ratcheted.findings, grants)
     records = tuple(f.record(ruleset.digest) for f in found)
     blocking = [f for f in found if f.blocks]
@@ -2232,6 +2237,7 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
     counted = [f"{len(baselined)} baselined"] if baselined else []
     if passed:
         counted.append(f"{len(passed)} passed by override")
+    overridden = _passed_findings(passed)
     if blocking:
         held = f" ({', '.join(counted)})" if counted else ""
         return Verdict(
@@ -2241,6 +2247,7 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
             detail=detail,
             fixes=_mechanical_fixes(blocking),
             findings=records,
+            overridden=overridden,
         )
     return Verdict(
         ok=True,
@@ -2249,10 +2256,56 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
         f"ruleset {ruleset.digest}" + "".join(f"; {part}" for part in counted),
         detail=detail,
         findings=records,
+        overridden=overridden,
     )
 
 
-def guideline_grants(ctx: RuleContext) -> dict[str, str]:
+def _passed_findings(
+    passed: Iterable[findings_reader.Finding],
+) -> tuple[tuple[str, str], ...]:
+    """Each guideline whose new blocker findings a grant passed, with where
+    they are: what the gate would have blocked on without the grant."""
+    places: dict[str, list[str]] = {}
+    for f in passed:
+        where = f.path if f.line is None else f"{f.path}:{f.line}"
+        places.setdefault(f.rule, []).append(where)
+    return tuple((rule_id, ", ".join(found)) for rule_id, found in places.items())
+
+
+#: The gates a grant naming a guideline passes, one per kind of answer
+#: (ADR-012 ruling 4, D12): the findings of a pattern, boundary or cochange
+#: guideline, and the verdict of a judgement guideline (A4 increment 5).
+MECHANICAL_GATE = "guidelines.mechanical_clean"
+VERDICTS_GATE = "guidelines.verdicts_complete"
+
+
+def guideline_family_gate(guideline: guidelines_reader.Guideline) -> str | None:
+    """The gate a grant naming ``guideline`` passes, or ``None`` for one no
+    grant passes (an ``engine`` guideline, answered by its own rule)."""
+    if guideline.check.kind == "judgement":
+        return VERDICTS_GATE
+    if guideline.check.kind in findings_reader.EVALUATED_KINDS:
+        return MECHANICAL_GATE
+    return None
+
+
+def guideline_gate_of(ctx: RuleContext, guideline_id: str) -> str | None:
+    """The family gate a grant naming ``guideline_id`` passes, read from the
+    ruleset of the tree in hand; ``None`` when no ruleset loads there or it
+    names no such guideline, so a caller says "its family gate"."""
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None or ruleset is None:
+        return None
+    guideline = ruleset.by_id(guideline_id)
+    return None if guideline is None else guideline_family_gate(guideline)
+
+
+def guideline_grants(
+    ctx: RuleContext,
+    ruleset: guidelines_reader.Ruleset | None = None,
+    *,
+    judgement: bool = False,
+) -> dict[str, str]:
     """The live grants naming a guideline, each with the reason it gives.
 
     ADR-012 D12, ruling 4. A grant is held in ``session.pending_overrides``
@@ -2261,14 +2314,26 @@ def guideline_grants(ctx: RuleContext) -> dict[str, str]:
     id (DN-15). This only READS the grant: spending it is the delivery
     surface's, the CLI's at a pipeline advance, and asking a rule must not
     change the world.
+
+    With ``ruleset``, the grants are split by family gate, so each gate
+    names only its own (A4.5): ``judgement=True`` keeps the grants naming a
+    judgement guideline, for ``guidelines.verdicts_complete``, and
+    ``judgement=False`` every other, for ``guidelines.mechanical_clean``,
+    which keeps naming a grant whose guideline left the ruleset (A3.7).
     """
     grants: dict[str, str] = {}
     for held in (ctx.session or {}).get("pending_overrides") or ():
         if not isinstance(held, Mapping):
             continue
         rule_id = held.get("rule")
-        if isinstance(rule_id, str) and rule_id not in _REGISTRY:
-            grants[rule_id] = str(held.get("reason") or "no reason given")
+        if not isinstance(rule_id, str) or rule_id in _REGISTRY:
+            continue
+        if ruleset is not None:
+            guideline = ruleset.by_id(rule_id)
+            judged = guideline is not None and guideline.check.kind == "judgement"
+            if judged != judgement:
+                continue
+        grants[rule_id] = str(held.get("reason") or "no reason given")
     return grants
 
 
@@ -2276,10 +2341,13 @@ def guideline_override_refusal(ctx: RuleContext, guideline_id: str) -> str | Non
     """Why ``invariant override <guideline_id>`` may not be granted, or ``None``.
 
     ADR-012 ruling 4 and D12. The id must name a guideline in the ruleset of
-    the tree in hand, read as ``guidelines.mechanical_clean`` reads it, and
-    the guideline must be one that gate can be stopped by. A grant nothing
-    could ever spend is refused rather than held: a control handed back that
-    silently does nothing is worse than one never offered (ADR-001 D25).
+    the tree in hand, read as the guideline gates read it, and the guideline
+    must be one its family gate can be stopped by: a pattern, boundary or
+    cochange guideline at blocker (``guidelines.mechanical_clean``), or a
+    judgement guideline whose phases owe a verdict, at either severity
+    (``guidelines.verdicts_complete``, A4.5). A grant nothing could ever
+    spend is refused rather than held: a control handed back that silently
+    does nothing is worse than one never offered (ADR-001 D25).
     """
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
@@ -2302,19 +2370,25 @@ def guideline_override_refusal(ctx: RuleContext, guideline_id: str) -> str | Non
             f"no rule or guideline {guideline_id!r}{hint} 'invariant rules list' "
             f"shows the rules, and 'invariant guidelines show' the guidelines"
         )
-    kind = guideline.check.kind
-    if kind == "engine":
+    gate = guideline_family_gate(guideline)
+    if gate is None:
         return (
             f"guideline {guideline_id!r} is enforced by the rule "
             f"{guideline.check.rule}, so override that: "
             f"invariant override {guideline.check.rule} --reason '<why>'"
         )
-    if kind not in findings_reader.EVALUATED_KINDS:
-        return (
-            f"guideline {guideline_id!r} is a {kind} guideline, answered by a "
-            f"verdict at guidelines.verdicts_complete, which no grant passes "
-            f"yet (A4 increment 5); a grant for it could never be spent"
-        )
+    if gate == VERDICTS_GATE:
+        # A4.5, DN-9: a judgement guideline's missing or stale verdict fails
+        # the gate at any severity, so a warn one can be stopped too. One
+        # whose phases owe no verdict is never asked about at all.
+        if not set(guideline.phases) & verdicts_reader.OWED_PHASES:
+            return (
+                f"guideline {guideline_id!r} is never owed a verdict: its phases "
+                f"({', '.join(guideline.phases)}) name neither review, landing "
+                f"nor always, so {VERDICTS_GATE} never asks about it and a grant "
+                f"for it could never be spent"
+            )
+        return None
     if guideline.severity != "blocker":
         # A registry class's outcome never exceeds its rule's severity, so a
         # warn guideline's findings never block, whatever its kind.
@@ -3772,6 +3846,16 @@ def _guidelines_verdicts_complete(ctx: RuleContext) -> Verdict:
     ``fail`` at blocker severity; a ``fail`` at warn is reported inside a
     pass. It never reads which agent submitted a verdict (D1 item 2, DN-12).
 
+    A live grant naming a judgement guideline (A4.5, ruling 4, DN-9) passes
+    every failure of that guideline in this evaluation, a warn one's
+    included: no verdict, a stale one, a current fail. The verdict names it
+    with the grant's reason, counts it as passed by override, and carries it
+    in ``Verdict.overridden`` when it passed a failing rule, which is what
+    the CLI spends at the advance it lets through. A grant passing nothing
+    (a current pass, the engine's N/A, a rule not owed) is named as unused.
+    Every other guideline stays in force. The grant is read here, never
+    spent.
+
     The reads are :func:`read_standings`', and the verdict is
     :func:`standings_verdict` over them: ``guidelines verdicts show`` prints
     that same read (A4 increment 4), so the command and the gate cannot
@@ -3821,6 +3905,10 @@ class StandingsRead:
     ruleset: str | None = None
     state: str | None = None
     failure: Verdict | None = None
+    #: The live grants naming a judgement guideline, each with its reason
+    #: (A4.5), and those of them that pass nothing in this read.
+    grants: Mapping[str, str] = field(default_factory=dict)
+    unused: tuple[verdicts_reader.Unused, ...] = ()
 
 
 def read_standings(ctx: RuleContext) -> StandingsRead:
@@ -3828,7 +3916,8 @@ def read_standings(ctx: RuleContext) -> StandingsRead:
 
     The ruleset through ``load_ruleset``, the changed set through
     ``_changed_set``, every other fact through ``_verdict_facts`` (the reads
-    ``plan_verdicts`` makes), and ``evidence["verdicts"]``. Nothing recorded.
+    ``plan_verdicts`` makes), ``evidence["verdicts"]``, and the live grants
+    naming a judgement guideline (A4.5). Nothing recorded, nothing spent.
     """
     ruleset, failure = load_ruleset(ctx)
     if failure is not None:
@@ -3851,12 +3940,16 @@ def read_standings(ctx: RuleContext) -> StandingsRead:
     facts = _verdict_facts(ctx, ruleset, pipeline, changed)
     recorded = ctx.evidence("verdicts") or ()
     records = tuple(recorded) if isinstance(recorded, list) else ()
+    grants = guideline_grants(ctx, ruleset, judgement=True)
+    found = verdicts_reader.standings(ruleset, records, facts, grants)
     return StandingsRead(
         status="standings",
-        standings=verdicts_reader.standings(ruleset, records, facts),
+        standings=found,
         unowed=verdicts_reader.unowed(ruleset, records, facts),
         ruleset=facts.pin or facts.tree_digest,
         state=facts.state,
+        grants=grants,
+        unused=verdicts_reader.unused_grants(found, grants),
     )
 
 
@@ -3870,33 +3963,61 @@ def standings_verdict(read: StandingsRead) -> Verdict:
         return Verdict.na("no pipeline is running, so no verdict is owed")
     found = read.standings
     digest = read.ruleset
+    unused = "; ".join(u.describe() for u in read.unused)
     if not found:
         return Verdict.clean(
-            f"no judgement guideline is owed a verdict by this change, ruleset {digest}"
+            f"no judgement guideline is owed a verdict by this change, ruleset {digest}",
+            detail=unused,
         )
     blocking = [s for s in found if s.blocks]
-    detail = "; ".join(
-        s.describe() for s in found if not s.blocks
+    passed = [s for s in found if s.overridden]
+    parts = [_passed_detail(s) for s in passed]
+    parts += [
+        s.describe() for s in found if not s.blocks and not s.overridden
         and (s.warns or s.standing == verdicts_reader.ENGINE)
-    ) or ""
+    ]
+    if unused:
+        parts.append(unused)
+    detail = "; ".join(parts)
+    tally = f"{len(passed)} passed by override" if passed else ""
+    # Only a grant that passed a failing rule decided anything, so only it is
+    # one the advance spends: a warn fail never blocked (A3.7's property).
+    overridden = tuple((s.rule, s.unpassed()) for s in passed if s.failing)
     if blocking:
-        return Verdict.fail(
-            f"{len(blocking)} of {len(found)} owed judgement guideline(s) lack a verdict "
-            f"that holds, or fail at blocker: " + "; ".join(s.describe() for s in blocking),
+        return Verdict(
+            ok=False,
+            message=f"{len(blocking)} of {len(found)} owed judgement guideline(s) lack "
+            f"a verdict that holds, or fail at blocker" + (f" ({tally})" if tally else "")
+            + ": "
+            + "; ".join(s.describe() for s in blocking),
             detail=detail,
             fixes=_verdict_fixes(blocking),
+            overridden=overridden,
         )
-    return Verdict.clean(
-        f"every one of {len(found)} judgement guideline(s) owed a verdict has one "
-        f"that holds, ruleset {digest}",
+    return Verdict(
+        ok=True,
+        message=f"every one of {len(found)} judgement guideline(s) owed a verdict has one "
+        f"that holds, ruleset {digest}" + (f"; {tally}" if tally else ""),
         detail=detail,
+        overridden=overridden,
     )
 
 
+def _passed_detail(s: verdicts_reader.Standing) -> str:
+    """A rule a grant passes, named with the grant, and whether it decided."""
+    told = s.describe()
+    if s.failing:
+        return told + "; the pipeline advance this lets through spends the grant"
+    return told + "; a fail at warn never blocks, so nothing spends the grant"
+
+
 def _verdict_fixes(blocking: Iterable[verdicts_reader.Standing]) -> tuple[str, ...]:
-    """One fix per blocking rule: a fresh verdict, or the code a fail cites."""
+    """One fix per blocking rule: a fresh verdict, or the code a fail cites;
+    then, per rule, the recorded grant that passes it for one advance."""
     fixes: list[str] = []
+    rules: list[str] = []
     for s in blocking:
+        rules.append(s.rule)
         if s.standing == verdicts_reader.CURRENT:
             fixes.append(
                 f"fix what the fail on {s.rule} cites, then answer it again: "
@@ -3908,6 +4029,11 @@ def _verdict_fixes(blocking: Iterable[verdicts_reader.Standing]) -> tuple[str, .
                 f"or na; with the evidence the rule declares: --cite <path> <first> "
                 f"<last>, --test <selector>, or --na-condition <id>"
             )
+    for rule_id in rules:
+        fixes.append(
+            f"or pass {rule_id}'s verdict for one advance, recorded: "
+            f"invariant override {rule_id} --reason '<why>'"
+        )
     return tuple(fixes)
 
 

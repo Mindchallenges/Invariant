@@ -338,10 +338,14 @@ class TestGrantingOne:
         with pytest.raises(UsageError, match="invariant override test.all_pass"):
             sessions.grant_override(session.id, "tests.green", REASON, cwd=tmp_path / "p")
 
-    def test_a_judgement_guideline_is_refused(self, tmp_path):
+    def test_a_judgement_guideline_is_granted_for_the_verdict_gate(self, tmp_path):
+        """A4.5: its family gate is guidelines.verdicts_complete
+        (tests/test_guidelines_verdicts_override.py)."""
         sessions, session = sessions_in(tmp_path / "p", RULESET + JUDGEMENT)
-        with pytest.raises(UsageError, match="judgement"):
-            sessions.grant_override(session.id, "style.judged", REASON, cwd=tmp_path / "p")
+        updated = sessions.grant_override(
+            session.id, "style.judged", REASON, cwd=tmp_path / "p"
+        )
+        assert [o["rule"] for o in updated.pending_overrides] == ["style.judged"]
 
     def test_a_guideline_that_can_never_block_is_refused(self, tmp_path):
         sessions, session = sessions_in(tmp_path / "p")
@@ -399,7 +403,10 @@ def mechanical(level: Level, *, ok: bool, finding: str = "overridden", rule=PRIN
         "fingerprint": "abcdefabcdef", "target": None, "note": "", "fix": "",
         "ruleset": "abcdefabcdef",
     }
-    return Evaluated(RULE, level, Verdict(ok=ok, message="m", findings=(record,)))
+    passed = ((rule, "app/m.py:2"),) if finding == "overridden" else ()
+    return Evaluated(
+        RULE, level, Verdict(ok=ok, message="m", findings=(record,), overridden=passed)
+    )
 
 
 @pytest.fixture

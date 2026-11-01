@@ -327,7 +327,7 @@ class TestTheCommand:
         assert owed["data.single-open"] == {
             "rule": "data.single-open", "severity": "blocker", "standing": "current",
             "status": "pass", "reason": "", "problems": [], "set_aside": None,
-            "blocks": False, "warns": False,
+            "blocks": False, "warns": False, "override": None, "overridden": False,
         }
         assert owed["data.tested"]["standing"] == "missing" and owed["data.tested"]["blocks"]
         assert body["not_owed"] == []

@@ -1235,13 +1235,20 @@ invariant guidelines verdicts show
       engine   answered by a mechanical N/A condition the engine finds true,
                with its reason, and "the pass (or fail) recorded on it is
                set aside" when one was.
+    A missing, stale or failing rule a live grant passes (A4 increment 5)
+    keeps its standing and adds "passed by override, granted with
+    `invariant override <rule>` (reason: ...)"; it does not block.
     Then, under "recorded on guidelines the change no longer owes:", each
     rule with a recorded verdict that is not owed now: the latest status,
     how many were recorded, and why it is not owed (core/verdicts.not_owed,
     the reading owed asks: no changed file meets its applies_to, its phases
     name neither review, landing nor always, it is not a judgement
-    guideline, or it is gone from the ruleset). Last, the gate's own line,
-    rendered as a gate prints, with its "try:" fixes.
+    guideline, or it is gone from the ruleset). Then, under "grants on
+    judgement guidelines that pass nothing here:", each live grant naming a
+    judgement guideline that passed nothing, and why: its latest verdict
+    holds, the engine answers it, or the change does not owe it a verdict.
+    Last, the gate's own line, rendered as a gate prints, with its "try:"
+    fixes.
 
     Exits 0 whenever it can show the standings, whatever the gate would
     say, as `pipeline gates` does; `invariant check
@@ -1254,9 +1261,11 @@ invariant guidelines verdicts show
     --json carries status (standings, no-ruleset or no-pipeline), ruleset
     (the digest verdicts are judged against), state, owed (each {rule,
     severity, standing, status, reason, problems: [{predicate, message,
-    fix}], set_aside, blocks, warns}), not_owed (each {rule, status,
-    recorded, reason}) and gate (the verdict payload). It never reads or
-    shows the acting agent (DN-12).
+    fix}], set_aside, blocks, warns, override, overridden}), not_owed (each
+    {rule, status, recorded, reason}), unused_grants (each {rule, reason,
+    why}) and gate (the verdict payload). override is the reason of the
+    grant that passes the rule, or null. It never reads or shows the acting
+    agent (DN-12), and it never spends a grant.
 ```
 
 ## Rules and gates
@@ -1333,7 +1342,15 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     verdict <rule>` per rule. N/A with no ruleset or no running pipeline;
     it fails on a ruleset that does not load and on a changed set that
     cannot be established. It warns in loose and standard and blocks in
-    strict. No grant passes it yet (A4 increment 5).
+    strict. A live grant naming a judgement guideline (`invariant override
+    <guideline-id>`, A4 increment 5) passes every failure of that guideline
+    in one evaluation, a warn guideline's included (DN-9): no verdict, a
+    stale one, a current fail. The message counts "N passed by override",
+    the detail names each with the grant's reason, and a fail at warn passed
+    this way is named as deciding nothing. A grant passing nothing (a
+    current pass, the engine's N/A, a rule not owed) is named as unused. A
+    blocking rule's fixes name `invariant override <rule> --reason '<why>'`
+    beside the verdict. Every other guideline stays in force.
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
 
@@ -1381,17 +1398,37 @@ invariant override <rule-id | guideline-id> --clear [--id <sid>]
     same list a forced transition writes to — naming the rule, the reason and
     the surface. An unspent grant shows in `session status`.
 
-    Naming a GUIDELINE instead (ADR-012 ruling 4) passes that guideline's
-    new blocker findings in one evaluation of `guidelines.mechanical_clean`,
-    reported as passed by override and naming the grant; every other finding
-    of the gate stands, the guideline's unanswerable ones included. The id
-    must name a pattern, boundary or cochange guideline at `blocker` in the
-    ruleset of the tree in hand, and the grant covers one evaluation, so
-    `--calls` above one is refused. `pipeline advance` spends it, with
-    surface `cli`, only when the advance succeeds while the gate blocks or
-    asks here and passed because of the grant; otherwise the command says it
-    is held. `pipeline gates`, `check`, `doctor` and the oracle never spend
-    one, and the gate names an unspent grant on every evaluation.
+    Naming a GUIDELINE instead (ADR-012 ruling 4) passes that guideline in
+    one evaluation of its family gate, reported as passed by override and
+    naming the grant:
+      - a pattern, boundary or cochange guideline at `blocker`: its new
+        blocker findings at `guidelines.mechanical_clean`; every other
+        finding of the gate stands, the guideline's unanswerable ones
+        included;
+      - a judgement guideline whose phases name review, landing or always,
+        at either severity (A4 increment 5, DN-9): its missing, stale or
+        failing verdict at `guidelines.verdicts_complete`, a fail at warn
+        included; the engine's mechanical N/A still answers the rule, and a
+        grant on a rule whose verdict holds passes nothing.
+    The id must name such a guideline in the ruleset of the tree in hand
+    (an engine guideline is refused naming its rule, a warn mechanical one
+    and a design-only judgement one as never spendable), and the grant
+    covers one evaluation, so `--calls` above one is refused. `pipeline
+    advance` spends it, with surface `cli`, only when the advance succeeds
+    while the family gate blocks or asks here and passed because of the
+    grant; otherwise the command says it is held. A grant that passed only a
+    fail at warn decided nothing and is not spent. `pipeline gates`,
+    `check`, `doctor`, `guidelines verdicts show` and the oracle never spend
+    one, and the family gate names an unspent grant on every evaluation.
+
+    A held guideline grant carries over: it stays in `pending_overrides`
+    for the rest of the session, passing its guideline at every later
+    evaluation, in this pipeline and the next, until an advance spends it
+    or `--clear` withdraws it. Where the family gate warns, as both do in
+    `loose` and `standard`, nothing ever spends it, so a judgement grant
+    there holds for the whole session. It is loud throughout: `session
+    status` names it and its gate, and every evaluation of the gate names
+    it, used or unused.
     `guidelines.baseline_only_shrinks` is not passed by any guideline grant;
     its route is a forced advance.
 

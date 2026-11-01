@@ -37,7 +37,9 @@ verdict whose citations, tests, N/A or ruleset no longer hold is stale, and a
 stale verdict is a missing one (D5, "Staleness"). :func:`not_owed` is the one
 reading of why a rule is or is not owed, and :func:`unowed` names the recorded
 verdicts on rules the change no longer owes, for ``guidelines verdicts show``
-(A4.4), which prints the gate's own read.
+(A4.4), which prints the gate's own read. A live grant naming a judgement
+guideline passes every failure of it, a warn one's included (A4.5, DN-9),
+and :func:`unused_grants` names each grant that passes nothing.
 
 A refused verdict never enters evidence (ruling 6): a check answers the record
 only when no predicate failed, and names every problem when one did. The
@@ -48,7 +50,7 @@ engine never reads the note (D5, item 6), and no check reads the acting agent
 from __future__ import annotations
 
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import get_close_matches
 from typing import Any
 
@@ -785,20 +787,49 @@ class Standing:
     #: For ``engine``: the status of a pass or fail recorded on the rule,
     #: which the gate sets aside because the rule is not applicable.
     set_aside: str | None = None
+    #: The reason of the live grant naming this rule that passes its failure
+    #: in this evaluation (ADR-012 ruling 4, DN-9, A4.5); ``None`` when no
+    #: grant passed anything here.
+    override: str | None = None
 
     @property
-    def blocks(self) -> bool:
-        """No verdict that holds, or a current fail at blocker severity."""
+    def failing(self) -> bool:
+        """What the rule's answer alone would do to the gate: no verdict that
+        holds, or a current fail at blocker severity. A grant does not change
+        it; it is what a grant that passes the rule decided."""
         if self.standing in (MISSING, STALE):
             return True
         return self.standing == CURRENT and self.status == "fail" and self.severity == "blocker"
 
     @property
+    def overridden(self) -> bool:
+        """A grant passes this rule's failure here, named, never counted."""
+        return self.override is not None
+
+    @property
+    def blocks(self) -> bool:
+        """It fails the gate: failing, and passed by no grant."""
+        return self.failing and not self.overridden
+
+    @property
     def warns(self) -> bool:
-        """A current fail at warn severity: reported, never blocking (D5)."""
-        return self.standing == CURRENT and self.status == "fail" and self.severity != "blocker"
+        """A current fail at warn severity, passed by no grant: reported,
+        never blocking (D5)."""
+        return (
+            self.standing == CURRENT and self.status == "fail"
+            and self.severity != "blocker" and not self.overridden
+        )
 
     def describe(self) -> str:
+        told = self._answer()
+        if self.override is not None:
+            told += (
+                f"; passed by override, granted with `invariant override {self.rule}` "
+                f"(reason: {self.override})"
+            )
+        return told
+
+    def _answer(self) -> str:
         if self.standing == MISSING:
             return f"{self.rule}: no verdict"
         if self.standing == STALE:
@@ -812,6 +843,11 @@ class Standing:
         if self.status == "fail":
             return f"{self.rule}: fail at {self.severity}"
         return f"{self.rule}: {self.status}"
+
+    def unpassed(self) -> str:
+        """What the rule's answer alone says, without the grant's clause: the
+        failure a grant passed, as the spend names it."""
+        return self._answer()
 
 
 def not_owed(rule: Guideline, facts: Facts) -> str | None:
@@ -876,14 +912,35 @@ def _engine_answer(rule: Guideline, facts: Facts) -> NaAnswer | None:
     return None
 
 
-def standing_of(rule: Guideline, records: Sequence[Any], facts: Facts) -> Standing:
+def standing_of(
+    rule: Guideline,
+    records: Sequence[Any],
+    facts: Facts,
+    grants: Mapping[str, str] | None = None,
+) -> Standing:
     """How one owed rule stands: answered by the engine, or by its latest
-    recorded verdict checked again, or not at all.
+    recorded verdict checked again, or not at all; and whether a grant
+    passes it.
 
     The latest record answers the rule: it is the submitter's current word,
     and an earlier one it superseded is never brought back, even when the
     latest has gone stale.
+
+    A live grant naming the rule (``grants`` maps a guideline id to its
+    reason) passes every failure of it in this evaluation, a warn rule's
+    included (DN-9): no verdict, a stale one, and a current fail at either
+    severity. It passes nothing where nothing failed: a current pass or
+    ``na``, and a rule the engine's N/A answers, since the engine's answer
+    stands over any record and any grant (the A4.3 ruling).
     """
+    found = _standing_of(rule, records, facts)
+    reason = (grants or {}).get(rule.id)
+    if reason is not None and (found.failing or found.warns):
+        return replace(found, override=reason)
+    return found
+
+
+def _standing_of(rule: Guideline, records: Sequence[Any], facts: Facts) -> Standing:
     mine = [r for r in records if isinstance(r, Mapping) and r.get("rule") == rule.id]
     latest = mine[-1] if mine else None
     answer = _engine_answer(rule, facts)
@@ -908,9 +965,59 @@ def standing_of(rule: Guideline, records: Sequence[Any], facts: Facts) -> Standi
     return Standing(rule=rule.id, severity=rule.severity, standing=CURRENT, status=sub.status)
 
 
-def standings(ruleset: Ruleset, records: Sequence[Any], facts: Facts) -> tuple[Standing, ...]:
-    """Every owed judgement rule's standing, in ruleset order (D5, "The gate")."""
-    return tuple(standing_of(rule, records, facts) for rule in owed(ruleset, facts))
+def standings(
+    ruleset: Ruleset,
+    records: Sequence[Any],
+    facts: Facts,
+    grants: Mapping[str, str] | None = None,
+) -> tuple[Standing, ...]:
+    """Every owed judgement rule's standing, in ruleset order (D5, "The gate"),
+    each failure a live grant passes marked with its reason."""
+    return tuple(
+        standing_of(rule, records, facts, grants) for rule in owed(ruleset, facts)
+    )
+
+
+@dataclass(frozen=True)
+class Unused:
+    """A live grant naming a judgement guideline that passes nothing here."""
+
+    rule: str
+    reason: str
+    #: Why it passes nothing: the answer holds, or nothing is owed.
+    why: str
+
+    def describe(self) -> str:
+        return (
+            f"override held for {self.rule} (reason: {self.reason}), unused here: "
+            f"{self.why}, so nothing spends it; withdraw it with "
+            f"invariant override {self.rule} --clear"
+        )
+
+
+def unused_grants(
+    found: Sequence[Standing], grants: Mapping[str, str]
+) -> tuple[Unused, ...]:
+    """Each grant in ``grants`` that passes none of ``found``, in grant order.
+
+    A grant is named whether used or not, so a held one is never silent: one
+    on a rule whose latest verdict holds, one on a rule the engine answers,
+    and one on a rule this change does not owe a verdict.
+    """
+    by_rule = {s.rule: s for s in found}
+    unused: list[Unused] = []
+    for rule_id, reason in grants.items():
+        s = by_rule.get(rule_id)
+        if s is not None and s.overridden:
+            continue
+        if s is None:
+            why = "the change does not owe it a verdict"
+        elif s.standing == ENGINE:
+            why = "the engine answers it"
+        else:
+            why = "its latest verdict holds"
+        unused.append(Unused(rule=rule_id, reason=reason, why=why))
+    return tuple(unused)
 
 
 # -- recorded verdicts the change no longer owes (A4.4) ----------------------------------------
