@@ -350,7 +350,8 @@ def parse(
     offer (``Adapter.guideline_engines``). A pattern rule reading ``code``,
     ``comments`` or ``strings`` needs ``mask``, and is refused without it
     (ADR-012 D4): evaluated over raw text instead, it would read more than it
-    says. A ``boundary`` rule needs ``imports`` (DN-A14), and is refused
+    says. So do a cochange ``when.in`` and a judgement's ``no_added_match.in``
+    (A3.4, A4.2). A ``boundary`` rule needs ``imports`` (DN-A14), and is refused
     without it: no adapter could answer for any file it names. ``None`` asks
     the schema question alone; ``guidelines.ruleset_valid`` always passes
     what the configured adapters offer.
@@ -1009,10 +1010,19 @@ class _Reader:
         if absent:
             self.problem(f"{at}: no_added_match: missing {', '.join(absent)}")
             return None
+        scope = self.lexical_scope(at, "no_added_match.in", test["in"])
+        if scope in MASKED_SCOPES and self.engines is not None and "mask" not in self.engines:
+            # A3.1 deferred this to A4.2, which evaluates the condition: an
+            # added line is matched through the mask its in names.
+            self.problem(
+                f"{at}: no_added_match.in {scope!r} needs a lexical mask, and no "
+                f"configured ecosystem's adapter offers one; read in: any, or declare "
+                f"an ecosystem whose adapter masks these files"
+            )
         return NaCondition(
             id=condition_id,
             mechanical="no_added_match",
-            scope=self.lexical_scope(at, "no_added_match.in", test["in"]),
+            scope=scope,
             match=self.regex(at, "no_added_match.match", test["match"]),
         )
 

@@ -45,6 +45,13 @@ shrinks" (A3 increment 6): :func:`growth` compares the base branch's entries
 with the change's, through the change's renames (DN-7), and which growth is
 admitted (DN-6) is ``core/rules``' question.
 
+A judgement rule's mechanical N/A conditions (D5 item 5, DN-A12, A4
+increment 2) are answered here too, by :func:`na_answer`: ``no_added_match``
+and ``no_executable_change``, over the rule's files (:func:`meets`, A4's
+DN-3), through the same reading of the change the ``pair`` trigger uses. It
+answers true, false or unanswerable, and ``core/verdicts``' P5 accepts an
+``na`` naming one only when it is true.
+
 Override by guideline id (A3.7, ruling 4) is :func:`overridden`: a live grant
 naming a guideline passes that guideline's new blocker findings for one
 evaluation, as ``overridden``, named and never counted. ``core/rules`` reads
@@ -65,6 +72,7 @@ from .guidelines import (
     BaselineEntry,
     Guideline,
     GuidelineException,
+    NaCondition,
     Registry,
     Requirement,
     Trigger,
@@ -406,7 +414,103 @@ class _Unanswerable(Exception):
     """A fact a cochange finding rests on that git or an adapter cannot give."""
 
 
-class _Pairs:
+class _ChangeFacts:
+    """What the change did to one file, from ``History`` and the reads.
+
+    The one reading of "its executable code changed" and "a line the change
+    added matches", shared by the cochange ``pair`` trigger and the
+    mechanical N/A conditions, so the two cannot disagree. A fact git or an
+    adapter cannot give raises :class:`_Unanswerable`, never a pass.
+    """
+
+    _UNASKED = object()
+
+    def __init__(self, history: History | None, texts: _Texts, mask: Mask) -> None:
+        self._history = history
+        self._texts = texts
+        self._mask = mask
+        self._lines: Any = self._UNASKED
+
+    def _facts(self) -> History:
+        if self._history is None:
+            raise _Unanswerable("what git knows about this change was not read")
+        return self._history
+
+    def _existed(self, rel: str) -> bool:
+        existed = self._facts().existed(rel)
+        if existed is None:
+            raise _Unanswerable(
+                "whether the file existed where the branch left its base could not be read"
+            )
+        return existed
+
+    def executable_changed(self, rel: str, present: bool) -> bool:
+        existed = self._existed(rel)
+        if not present and not existed:
+            return False
+        before = self._decoded(self._facts().before(rel), "its base") if existed else ""
+        after = self._current(rel) if present else ""
+        reduce = self._facts().executable
+        reduced = reduce(rel, before), reduce(rel, after)
+        if None in reduced:
+            raise _Unanswerable(
+                "no configured adapter can reduce this file to its executable text"
+            )
+        return reduced[0] != reduced[1]
+
+    def added_matches(self, rel: str, scope: str | None, match: str | None) -> list[int]:
+        """The lines the change added to a present file that match, through
+        the mask ``scope`` names. A file that is not text has none, and is
+        named in the evaluation; one git shows unchanged has none."""
+        text = self._texts.get(rel)
+        if text is _Texts._UNREAD:
+            raise _Unanswerable("the file could not be read")
+        if text is None:
+            return []
+        added = self._changed().get(rel)
+        if added is None:
+            return []
+        scope = scope or "any"
+        masked = text if scope == "any" else self._mask(rel, text, scope)
+        if masked is None:
+            raise _Unanswerable(f"no configured adapter can mask {scope} in this file")
+        lines = masked.split("\n")
+        if len(lines) != len(text.split("\n")):
+            raise _Unanswerable("the lexical mask did not keep the file's lines")
+        regex = re.compile(match or "")
+        return [
+            number for number, line in enumerate(lines, 1)
+            if number in added and regex.search(line)
+        ]
+
+    def _current(self, rel: str) -> str:
+        text = self._texts.get(rel, name=False)
+        if text is _Texts._UNREAD:
+            raise _Unanswerable("the file could not be read")
+        if text is None:
+            raise _Unanswerable("the file is not UTF-8 text, so it has no executable text")
+        return text  # type: ignore[return-value]
+
+    @staticmethod
+    def _decoded(data: bytes | None, where: str) -> str:
+        if data is None:
+            raise _Unanswerable(f"the file could not be read at {where}")
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise _Unanswerable(
+                f"the file is not UTF-8 text at {where}, so it has no executable text"
+            ) from None
+
+    def _changed(self) -> Mapping[str, Container[int]]:
+        if self._lines is self._UNASKED:
+            self._lines = self._facts().lines()
+        if self._lines is None:
+            raise _Unanswerable("the files and lines this change touched could not be read from git")
+        return self._lines
+
+
+class _Pairs(_ChangeFacts):
     """The ``pair`` form of ``cochange`` (DN-A4 to DN-A6).
 
     "If a file under ``applies_to`` changed in this way, did the files
@@ -415,16 +519,11 @@ class _Pairs:
     declared files, and declaring a file is not changing it.
     """
 
-    _UNASKED = object()
-
     def __init__(
         self, history: History | None, texts: _Texts, mask: Mask, candidates: list[str]
     ) -> None:
-        self._history = history
-        self._texts = texts
-        self._mask = mask
+        super().__init__(history, texts, mask)
         self._candidates = candidates
-        self._lines: Any = self._UNASKED
 
     def evaluate(self, rule: Guideline, rel: str, *, present: bool) -> list[Finding]:
         when, then = rule.check.when, rule.check.then
@@ -458,91 +557,17 @@ class _Pairs:
     def _triggered(self, when: Trigger, rel: str, present: bool) -> bool:
         if when.change == "added" and not self._added(rel, present):
             return False
-        if when.change == "executable" and not self._executable(rel, present):
+        if when.change == "executable" and not self.executable_changed(rel, present):
             return False
         return self._matched(when, rel, present) if when.match else True
-
-    def _facts(self) -> History:
-        if self._history is None:
-            raise _Unanswerable("what git knows about this change was not read")
-        return self._history
-
-    def _existed(self, rel: str) -> bool:
-        existed = self._facts().existed(rel)
-        if existed is None:
-            raise _Unanswerable(
-                "whether the file existed where the branch left its base could not be read"
-            )
-        return existed
 
     def _added(self, rel: str, present: bool) -> bool:
         return present and not self._existed(rel)
 
-    def _executable(self, rel: str, present: bool) -> bool:
-        existed = self._existed(rel)
-        if not present and not existed:
-            return False
-        before = self._decoded(self._facts().before(rel), "its base") if existed else ""
-        after = self._current(rel) if present else ""
-        reduce = self._facts().executable
-        reduced = reduce(rel, before), reduce(rel, after)
-        if None in reduced:
-            raise _Unanswerable(
-                "no configured adapter can reduce this file to its executable text"
-            )
-        return reduced[0] != reduced[1]
-
     def _matched(self, when: Trigger, rel: str, present: bool) -> bool:
-        if not present:
-            return False
-        text = self._texts.get(rel)
-        if text is _Texts._UNREAD:
-            raise _Unanswerable("the file could not be read")
-        if text is None:
-            return False
-        added = self._changed().get(rel)
-        if added is None:
-            return False
-        scope = when.scope or "any"
-        masked = text if scope == "any" else self._mask(rel, text, scope)
-        if masked is None:
-            raise _Unanswerable(f"no configured adapter can mask {scope} in this file")
-        lines = masked.split("\n")
-        if len(lines) != len(text.split("\n")):
-            raise _Unanswerable("the lexical mask did not keep the file's lines")
-        regex = re.compile(when.match or "")
-        return any(
-            number in added and regex.search(line)
-            for number, line in enumerate(lines, 1)
-        )
-
-    def _current(self, rel: str) -> str:
-        text = self._texts.get(rel, name=False)
-        if text is _Texts._UNREAD:
-            raise _Unanswerable("the file could not be read")
-        if text is None:
-            raise _Unanswerable("the file is not UTF-8 text, so it has no executable text")
-        return text  # type: ignore[return-value]
-
-    @staticmethod
-    def _decoded(data: bytes | None, where: str) -> str:
-        if data is None:
-            raise _Unanswerable(f"the file could not be read at {where}")
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError:
-            raise _Unanswerable(
-                f"the file is not UTF-8 text at {where}, so it has no executable text"
-            ) from None
+        return present and bool(self.added_matches(rel, when.scope, when.match))
 
     # -- what must change with it (DN-A5) ----------------------------------------------
-
-    def _changed(self) -> Mapping[str, Container[int]]:
-        if self._lines is self._UNASKED:
-            self._lines = self._facts().lines()
-        if self._lines is None:
-            raise _Unanswerable("the files and lines this change touched could not be read from git")
-        return self._lines
 
     def _missing(self, then: Requirement, rel: str) -> list[str]:
         changed = self._changed()
@@ -645,6 +670,112 @@ def _first(
         None,
     )
 
+
+# -- the mechanical N/A conditions (D5 item 5, DN-A12, A4 increment 2) --------------
+
+
+def meets(rule: Guideline, rel: str) -> bool:
+    """Does the change meet the rule through ``rel`` (A4's DN-3)?
+
+    ``rel`` is under the rule's ``applies_to`` and not set aside by a path
+    exception. An exception naming a fingerprint excuses one finding, and a
+    verdict and an N/A condition have none, so it sets no file aside here.
+    The caller hands in only changed files present in the tree: a deleted
+    file does not count.
+    """
+    if not any(matches(rel, glob) for glob in rule.applies_to):
+        return False
+    return _path_exception(rule, rel) is None
+
+
+@dataclass(frozen=True)
+class NaAnswer:
+    """The engine's answer to one mechanical N/A condition over a change.
+
+    ``holds`` is ``True`` (the condition is true, so ``na`` stands), ``False``
+    (it is false, and ``reason`` names each file and line that makes it so)
+    or ``None`` (unanswerable, and ``reason`` names why). False is definite:
+    a file nothing could answer for cannot make it true again.
+    """
+
+    rule: str
+    condition: str
+    holds: bool | None
+    reason: str = ""
+    #: The rule's files it was asked over (DN-3), sorted.
+    files: tuple[str, ...] = ()
+    #: Those that are not UTF-8 text, which no added line can match.
+    not_text: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        if self.holds is True:
+            return f"{self.condition} holds"
+        verdict = "false" if self.holds is False else "unanswerable"
+        return f"{self.condition} is {verdict}: {self.reason}"
+
+
+def na_answer(
+    rule: Guideline,
+    condition: NaCondition,
+    files: Iterable[str],
+    *,
+    read: Read,
+    mask: Mask,
+    history: History | None,
+) -> NaAnswer:
+    """Is a mechanical N/A condition true over the change (D5 item 5)?
+
+    ``files`` is the changed files present in the tree, project-relative; the
+    rule's files are those of them the change meets the rule through
+    (:func:`meets`, DN-3). Two conditions exist (DN-A12):
+
+    - ``no_added_match``: no line the change added to a rule file matches the
+      regex, through the mask its ``in`` names, line by line as a pattern is
+      (DN-2). A file git shows unchanged added nothing, and a file that is not
+      text has no line to match and is named.
+    - ``no_executable_change``: no rule file's executable text differs
+      between the merge base and the tree, through the adapters'
+      ``executable_text``; a new file is compared with an empty one.
+
+    Every fact comes from the same reading the cochange ``pair`` trigger
+    uses, so "its executable code changed" means one thing in both. Each
+    file is read once. A claim is not the engine's to answer.
+    """
+    rel_files = tuple(sorted({rel for rel in files if meets(rule, rel)}))
+
+    def answer(holds: bool | None, reason: str = "", not_text: Iterable[str] = ()) -> NaAnswer:
+        return NaAnswer(rule.id, condition.id, holds, reason, rel_files, tuple(not_text))
+
+    if condition.mechanical is None:
+        return answer(None, f"{condition.id} is a claim, which the engine does not answer")
+    texts = _Texts(read)
+    change = _ChangeFacts(history, texts, mask)
+    against: list[str] = []
+    unanswerable: list[str] = []
+    for rel in rel_files:
+        try:
+            if condition.mechanical == "no_executable_change":
+                if change.executable_changed(rel, present=True):
+                    against.append(f"{rel} changes executable code")
+            else:
+                against.extend(
+                    f"{rel}:{number}"
+                    for number in change.added_matches(rel, condition.scope, condition.match)
+                )
+        except _Unanswerable as why:
+            unanswerable.append(f"{rel}: {why}")
+    not_text = sorted(texts.not_text)
+    if against:
+        found = (
+            "this change adds a line matching "
+            f"{condition.match!r} in {condition.scope or 'any'} at " + ", ".join(against)
+            if condition.mechanical == "no_added_match" else "; ".join(against)
+        )
+        rest = f"; and unanswerable: {'; '.join(unanswerable)}" if unanswerable else ""
+        return answer(False, found + rest, not_text)
+    if unanswerable:
+        return answer(None, "; ".join(unanswerable), not_text)
+    return answer(True, not_text=not_text)
 
 
 # -- the ratchet (D6, ruling 5) ------------------------------------------------------

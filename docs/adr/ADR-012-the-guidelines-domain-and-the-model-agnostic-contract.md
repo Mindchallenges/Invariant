@@ -1725,6 +1725,83 @@ yet: `guidelines.verdicts_complete` is increment 3.
   submission. `tests/test_guidelines_domain.py` covers both commands through
   `main`, and `tests/test_guidelines.py` the manifest key.
 
+**As built: A4 increment 2, the mechanical N/A conditions.** Built to D5
+item 5, the check-kind amendment's DN-A12 and the `judgement` table, and
+DN-1, DN-3 and DN-11. The vocabulary was already fixed by DN-A12, so no new
+ruling was needed: `no_added_match: {in, match}` and
+`no_executable_change: true`. Still no gate reads verdicts; that is
+increment 3.
+
+- *`core/findings.na_answer` (DN-1, pure).* It answers one mechanical
+  condition of one rule over the change as an `NaAnswer`: `holds` is true,
+  false (the reason names each file and line that makes it false) or `None`,
+  unanswerable (the reason names why). The reads arrive as they do for
+  `guidelines.mechanical_clean`: `read`, `mask` and the cochange kind's
+  `History`.
+  - `no_added_match`: a line the change added to a rule file (git's
+    account, untracked files whole) matches the regex, through the mask its
+    `in` names, line by line as a pattern is (DN-2). Any such line makes it
+    false.
+  - `no_executable_change`: a rule file's `executable_text` differs between
+    the merge base and the tree, a new file compared with an empty one. Any
+    such file makes it false.
+- *The rule's files are DN-3's.* `findings.meets` is the one reading: a
+  changed file present in the tree, under `applies_to`, not set aside by a
+  path exception. It moved from `core/verdicts` to `core/findings`, so P1
+  and P5 read one set, and `CVERD --> CFIND` carries `meets` and `NaAnswer`
+  where it carried `matches`. A deleted file is asked nothing, as it owes
+  nothing.
+- *One reading of the change.* The cochange `pair` trigger's reads of a file
+  (did it exist at the merge base, its bytes there, its executable text, the
+  added lines matching through a mask) were lifted out of `_Pairs` into
+  `_ChangeFacts`, which both the trigger and `na_answer` use. "Its
+  executable code changed" therefore means one thing in a cochange rule and
+  in an N/A condition.
+- *P5, wired.* `Facts.na` is the engine's answer, as a callable `core/rules`
+  builds in `plan_verdicts` from the reads above. An `na` naming a mechanical
+  condition is accepted only when the answer holds. False is refused, P5,
+  naming the lines or files. Unanswerable is refused, P5, naming why. The
+  fix in both cases is to answer pass or fail, or to name a true claim. With
+  no changed set, P1 already refuses the verdict, and P5 asks the engine
+  nothing. With no answer read, P5 refuses rather than passing. Increment 1
+  refused every mechanical `na`; that refusal is gone.
+- *The reading of D5 item 5 taken.* "The engine answers, and no verdict is
+  asked for" is read as follows. Whether a rule is owed at all when one of
+  its mechanical conditions holds is increment 3's question, and
+  `na_answer` is what its gate will ask. A submitted `na` naming that
+  condition is accepted when the engine agrees, since it then records only
+  what the engine found. It is never accepted on the agent's word.
+- *Validation (A3.1 deferred it here).* `guidelines.ruleset_valid` refuses a
+  `no_added_match.in` of `code`, `comments` or `strings` unless a configured
+  adapter offers `mask`, as it refuses a cochange `when.in`. `in: any` needs
+  no mask.
+- *Small points the rulings left open, taken in the strict direction.*
+  - A false answer is definite. A file nothing could answer for, beside a
+    file that makes the condition false, does not make it unanswerable. The
+    reason names both.
+  - Unanswerable is never true: no history, a merge base or an existence
+    git cannot give, a base blob it cannot read, added lines it cannot give,
+    no mask, a mask that moves lines, no executable text, and a file that
+    cannot be read.
+  - A file that is not UTF-8 has no added line to match, as for a pattern
+    and a `when.match`, so `no_added_match` does not fail on it, and the
+    answer names it. Under `no_executable_change` it is unanswerable, as an
+    `executable` trigger on it is.
+  - A file git shows unchanged added no line, so it cannot make
+    `no_added_match` false.
+  - A claim is never put to the engine. Asked of one, `na_answer` answers
+    unanswerable.
+  - A pass or fail on a rule whose mechanical condition holds is not
+    refused here. Whether such a rule is owed is increment 3's question.
+- *Tests.* `tests/test_guidelines_na.py`: both conditions and every
+  unanswerable fact, the rule's files (applies_to, path exceptions, order),
+  `meets` as the one reading, the answer's text, P5 over `Facts` (true,
+  false, unanswerable, not read, no changed set, a claim never put to the
+  engine) and `plan_verdicts` over real repositories (a comment-only change,
+  a code change, an added handle, no base, a base git cannot find).
+  `tests/test_guidelines_verdicts.py` and `tests/test_guidelines_kinds.py`
+  carry the amended P5 and mask assertions.
+
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
 **Format.** A baseline file the manifest names, one entry per line, with `#`

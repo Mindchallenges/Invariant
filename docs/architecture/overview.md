@@ -59,7 +59,7 @@ graph TD
         CONF["conformance (ADR-012 D11)"]
         CGUIDE["guidelines (ADR-012 D3)"]
         CFIND["findings (ADR-012 D4, A3.3)"]
-        CVERD["verdicts (ADR-012 D5, A4.1)"]
+        CVERD["verdicts (ADR-012 D5, A4.1, A4.2)"]
     end
 
     subgraph domains["domains/ — the seven state domains"]
@@ -234,8 +234,8 @@ graph TD
     CONF --> CONFDATA
     RULES -- load, the render plan, the ruleset and drift gates, parse_baseline, definition_of --> CGUIDE
     CGUIDE -- project_relative --> MANIFEST
-    RULES -- evaluate, with the bytes, masks, references and the change's history as callables; ratchet, growth --> CFIND
-    CFIND -- Guideline, the ruleset model it evaluates; BaselineEntry --> CGUIDE
+    RULES -- evaluate, with the bytes, masks, references and the change's history as callables; ratchet, growth; na_answer, for the verdict plan --> CFIND
+    CFIND -- Guideline and NaCondition, the ruleset model it evaluates; BaselineEntry --> CGUIDE
     CFIND -- project_relative, glob_matches --> MANIFEST
     CLI --> GDOM
     CLI -. injects INSTRUCTION_FILES into the rule context, PIPELINE and OGATES from .-> CC
@@ -244,7 +244,7 @@ graph TD
     GDOM -- plan_verdicts --> RULES
     GDOM -- record_verdicts --> PIPELINE
     RULES -- plan_verdicts asks parse_submission and check_all, every read handed in as Facts --> CVERD
-    CVERD -- matches --> CFIND
+    CVERD -- meets, NaAnswer --> CFIND
     CVERD -- Guideline, Ruleset, digest_of --> CGUIDE
     CVERD -- project_relative --> MANIFEST
 ```
@@ -503,6 +503,22 @@ warn finding inside a pass. It warns in `loose` and `standard` and blocks in
 the landing. The findings are printed in D5's record shape on the verdict
 (`invariant check guidelines.mechanical_clean --json`) and kept nowhere.
 
+`CFIND` also answers a judgement rule's mechanical N/A conditions (A4
+increment 2, ADR-012 D5 item 5, DN-A12), through `na_answer`, as a
+`NaAnswer`: true, false naming each file and line that makes it so, or
+unanswerable naming why. `no_added_match` asks whether a line the change
+added to a rule file matches its regex, through the mask its `in` names;
+`no_executable_change` asks whether any rule file's `executable_text`
+differs from the merge base's. The rule's files are A4's DN-3 set (`meets`):
+changed files present in the tree, under `applies_to`, not path-excepted.
+Both read the change through the same `_ChangeFacts` the cochange `pair`
+trigger reads it through, so "its executable code changed" and "an added
+line matches" mean one thing in both. A fact git or an adapter cannot give is
+unanswerable, never true; a file that is not UTF-8 has no added line to
+match and is named. `ruleset_valid` refuses a `no_added_match.in` of `code`,
+`comments` or `strings` unless a configured adapter offers `mask`, as it
+refuses a cochange `when.in`.
+
 The ratchet (A3 increment 5, ADR-012 D6) is `CFIND`'s too, as arithmetic
 only: `ratchet` takes the findings and the baseline entries `core/rules`
 read, and for each (rule, path, fingerprint) of a touched file, F findings
@@ -648,10 +664,15 @@ review-role state owing the rule (DN-2). P2: the evidence kinds the rule
 allows. P3: each citation is a real range of a touched UTF-8 file, meeting an
 added line for `scope: diff` (DN-4, DN-5). P4: each test is a selector a
 recorded run named exactly, green for a pass (DN-8). P5: an `na` names a
-claim condition. P6: the note is capped by `guidelines.verdicts.note_max_chars`
-and privacy-scanned. It is pure (DN-1): the bytes, the added lines, the test
-runs, the pin and the scan arrive as `Facts`. `CVERD --> CFIND` is one name,
-`matches`, so a judgement rule's globs match as a mechanical rule's do;
+declared condition; a claim is the agent's pick, and a mechanical one holds
+only when the engine finds it true over the change (A4 increment 2). P6: the
+note is capped by `guidelines.verdicts.note_max_chars` and privacy-scanned.
+It is pure (DN-1): the bytes, the added lines, the test runs, the pin, the
+scan and the engine's answer to a mechanical condition arrive as `Facts`.
+`CVERD --> CFIND` is two names: `meets`, the one reading of DN-3 (a changed
+file present in the tree, under `applies_to`, not path-excepted), so a
+judgement rule's globs match as a mechanical rule's do, and `NaAnswer`, the
+engine's answer P5 reads;
 `CVERD --> CGUIDE` is the ruleset model and `digest_of`, the blob a citation
 records; `CVERD --> MANIFEST` is `project_relative`, the spelling a citation
 must already have.
@@ -659,7 +680,9 @@ must already have.
 `core.rules.plan_verdicts` is the one validation (`RULES --> CVERD`): it makes
 every read from the tree in hand (the ruleset, the pin, the machine's roles,
 `_changed_set`, `git.changed_lines`, the pipeline's `test_runs`, the privacy
-scanner) and records nothing, so the `guidelines.verdicts_complete` gate
+scanner, and for the mechanical N/A conditions the reads and the change's
+history `guidelines.mechanical_clean` hands `core/findings`) and records
+nothing, so the `guidelines.verdicts_complete` gate
 A4 increment 3 adds asks the same plan the command does. `domains/guidelines`
 performs the submit (`GDOM -- plan_verdicts --> RULES`) and records what the
 plan accepted through `PipelineDomain.record_verdicts` (`GDOM --> PIPELINE`,
@@ -1107,8 +1130,8 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, or a known answer that names an unregistered rule. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination, plus the rules each refusal named). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
 | `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`); the ratchet baseline's format (`BaselineEntry`, `parse_baseline`, `render_baseline`, and `baseline_rule_problems` against a ruleset), refused whole by line (`BaselineError`); what a rule's findings depend on, compared structurally between two copies of it (`definition_of`, DN-6); `parse` takes a `read` callable for a ruleset read as a revision held it | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
-| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
-| `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, DN-12's extension point, written only when set); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix; `check` over one entry and `check_all` over a submission, one rule answered twice refused | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin and the scan arrive as `Facts`. Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
+| `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames; a judgement rule's mechanical N/A conditions (`na_answer`, `NaAnswer`, A4 increment 2), `no_added_match` and `no_executable_change` over the rule's files, and the one reading of A4's DN-3 (`meets`) | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
+| `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, DN-12's extension point, written only when set); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`

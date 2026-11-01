@@ -3549,7 +3549,8 @@ def _shrink_detail(copy: _BaseCopy, admitted: list[str], renames: Mapping[str, s
 # `core/` may not import a domain. `core/verdicts` checks; this does every
 # read: the ruleset and its pin, the machine's roles for the state, the
 # changed set, the cited files' bytes, the lines git says the change added,
-# the pipeline's test runs and the privacy scan.
+# the pipeline's test runs, the privacy scan, and what the mechanical N/A
+# conditions read (the masks and the change's history, A4.2).
 
 
 class VerdictRefused(InvariantError):
@@ -3676,6 +3677,17 @@ def _verdict_facts(
             asked["lines"] = _added_lines(ctx, tree, base)
         return asked["lines"]
 
+    # The mechanical N/A conditions read the tree, the masks and the change's
+    # history exactly as guidelines.mechanical_clean does (A4.2).
+    adapters = _ecosystem_adapters(ctx)
+    reads = _finding_reads(tree, adapters)
+    history = _change_history(ctx, tree, base, adapters)
+
+    def na(rule, condition, files):
+        return findings_reader.na_answer(
+            rule, condition, files, read=reads["read"], mask=reads["mask"], history=history
+        )
+
     runs = (ctx.evidence("test_runs") or ()) if ctx.pipeline else ()
     scanner = PrivacyScanner.from_manifest(ctx.manifest)
     return verdicts_reader.Facts(
@@ -3690,6 +3702,7 @@ def _verdict_facts(
         note_max_chars=int(ctx.manifest.get("guidelines.verdicts.note_max_chars")),
         scan=lambda note: _note_findings(scanner, note),
         roles_problem=roles_problem,
+        na=na,
     )
 
 

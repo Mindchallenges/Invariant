@@ -814,7 +814,7 @@ class TestACochangeScopeNeedsAMask:
     """A3 increment 1 deferred this to A3.4: a cochange ``when.in`` of code,
     comments or strings is read through the adapter's lexical mask, so the
     ruleset is refused when no configured adapter offers ``mask``. ``any``
-    needs none. ``no_added_match.in`` stays with A4."""
+    needs none. A4.2 refuses a ``no_added_match.in`` the same way."""
 
     @pytest.mark.parametrize("scope", ["code", "comments", "strings"])
     @pytest.mark.parametrize("ecosystems", [None, ["generic"], ["node"]])
@@ -852,8 +852,9 @@ class TestACochangeScopeNeedsAMask:
         with pytest.raises(RulesetError, match="when.in 'code' needs a lexical mask"):
             parse(COCHANGE_RULESET, registered=REGISTERED, engines=frozenset())
 
-    def test_a_judgement_no_added_match_is_not_refused_here(self):
-        """``no_added_match.in`` is A4's to check, where it is evaluated."""
+    def test_a_judgement_no_added_match_needs_a_mask_too(self):
+        """A4.2 evaluates ``no_added_match`` through the mask its ``in`` names,
+        so it is refused here as a ``when.in`` is."""
         text = """\
 version: 1
 sections:
@@ -875,7 +876,12 @@ rules:
         - id: no-handle-code
           mechanical: {no_added_match: {in: code, match: 'open'}}
 """
-        assert parse(text, registered=REGISTERED, engines=frozenset()).rules
+        assert parse(text, registered=REGISTERED).rules
+        assert parse(text, registered=REGISTERED, engines=frozenset({"mask"})).rules
+        with pytest.raises(RulesetError, match="no_added_match.in 'code' needs a lexical mask"):
+            parse(text, registered=REGISTERED, engines=frozenset())
+        anything = text.replace("in: code", "in: any")
+        assert parse(anything, registered=REGISTERED, engines=frozenset()).rules
 
 
 class TestACochangeExceptionHasNoFingerprint:

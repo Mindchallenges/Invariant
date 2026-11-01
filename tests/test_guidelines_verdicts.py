@@ -15,7 +15,8 @@ naming the predicate that failed and its fix, and nothing is recorded:
 - P3, each citation is a real range of a touched UTF-8 text file (DN-4,
   DN-5), and for `scope: diff` one of them meets a line the change added;
 - P4, each test is a selector a recorded run named, green for a pass (DN-8);
-- P5, an `na` names a claim condition and carries no evidence;
+- P5, an `na` names a declared condition and carries no evidence; a
+  mechanical one holds only when the engine finds it true (A4.2);
 - P6, the note is capped and privacy-scanned.
 
 A bulk submission with any invalid entry is refused whole, every problem
@@ -650,9 +651,11 @@ class TestP5:
         assert "read-only" in result.problems[0].fix
 
     def test_a_mechanical_condition_is_the_engines_to_answer(self):
+        """A4.2: the engine answers it; with no answer read, the na is refused."""
         result = checked(sub(status="na", na_condition="no-code"))
         assert predicates(result) == ["P5"]
         assert "mechanical" in result.problems[0].message
+        assert "not read" in result.problems[0].message
 
     def test_a_rule_with_no_conditions_offers_no_na(self):
         result = checked(sub("data.tested", status="na", na_condition="read-only"))

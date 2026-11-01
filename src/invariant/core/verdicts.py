@@ -17,8 +17,9 @@ submits through the CLI. This module holds the record, reads a submission into
   inside it; for ``scope: diff`` one cited range meets a line the change added;
 - **P4**, each test is a selector a recorded run in this pipeline named,
   exactly, and for a ``pass`` the latest such run is green (DN-8);
-- **P5**, an ``na`` names a claim condition of the rule, and carries no
-  citations and no tests;
+- **P5**, an ``na`` names a declared condition of the rule, and carries no
+  citations and no tests; a mechanical one holds only when the engine finds
+  it true over the change (``core/findings.na_answer``, A4.2);
 - **P6**, the note is capped and privacy-scanned.
 
 Pure (DN-1). The file bytes, the added lines, the test runs, the pin and the
@@ -40,8 +41,8 @@ from dataclasses import dataclass, field
 from difflib import get_close_matches
 from typing import Any
 
-from .findings import matches
-from .guidelines import Guideline, Ruleset, digest_of
+from .findings import NaAnswer, meets
+from .guidelines import Guideline, NaCondition, Ruleset, digest_of
 from .manifest import project_relative
 
 #: What a verdict can say (D5).
@@ -208,6 +209,11 @@ class Facts:
     #: Why the state's roles could not be read (a methodology that no longer
     #: loads); ``None`` when they could.
     roles_problem: str | None = None
+    #: ``na(rule, condition, touched)``: the engine's answer to a mechanical
+    #: N/A condition over the touched files (``core/findings.na_answer``,
+    #: A4.2). ``None`` when it was not read, and an ``na`` naming a
+    #: mechanical condition is then refused.
+    na: Callable[[Guideline, NaCondition, tuple[str, ...]], NaAnswer] | None = None
 
 
 @dataclass(frozen=True)
@@ -402,19 +408,6 @@ def applies_problems(
     return problems
 
 
-def meets(rule: Guideline, rel: str) -> bool:
-    """Is ``rel`` under the rule's ``applies_to`` and not path-excepted (DN-3)?
-
-    A path exception names no fingerprint. One with a fingerprint excuses a
-    finding, and a verdict has none, so it sets no file aside here.
-    """
-    if not any(matches(rel, glob) for glob in rule.applies_to):
-        return False
-    return not any(
-        exc.fingerprint is None and matches(rel, exc.path) for exc in rule.exceptions
-    )
-
-
 # -- P2, evidence of an allowed kind --------------------------------------------------------
 
 
@@ -570,9 +563,12 @@ def selector_problems(sub: Submitted, runs: Sequence[Any]) -> list[Problem]:
 # -- P5, na is chosen, not written -----------------------------------------------------------------
 
 
-def na_problems(sub: Submitted, rule: Guideline) -> list[Problem]:
-    """P5. An ``na`` names one of the rule's claim conditions, and nothing else
-    of a verdict; a ``pass`` or ``fail`` names none."""
+def na_problems(sub: Submitted, rule: Guideline, facts: Facts) -> list[Problem]:
+    """P5. An ``na`` names one of the rule's declared conditions, and nothing
+    else of a verdict; a ``pass`` or ``fail`` names none. A claim is the
+    agent's pick, recorded for audit. A mechanical condition holds only when
+    the engine finds it true over the change (A4.2): false or unanswerable,
+    and the ``na`` is refused, naming why."""
     claims = [c.id for c in rule.check.not_applicable_when if c.claim is not None]
     if sub.status != "na":
         if sub.na_condition is not None:
@@ -583,31 +579,56 @@ def na_problems(sub: Submitted, rule: Guideline) -> list[Problem]:
     if sub.citations or sub.tests:
         problems.append(Problem("P5", "an na carries no citations and no tests",
                                 "drop the citations and tests, or answer pass or fail"))
-    offered = (f"name one of {', '.join(claims)}" if claims
-               else f"{rule.id} offers no claim, so answer pass or fail")
-    if not rule.check.not_applicable_when:
+    declared = [c.id for c in rule.check.not_applicable_when]
+    if not declared:
         problems.append(Problem(
             "P5", f"{rule.id} declares no not_applicable_when condition, so na is not available",
             "answer pass or fail",
         ))
         return problems
     if sub.na_condition is None:
-        problems.append(Problem("P5", "an na names the condition it rests on", offered))
+        problems.append(Problem("P5", "an na names the condition it rests on",
+                                f"name one of {', '.join(declared)}"))
         return problems
     condition = next(
         (c for c in rule.check.not_applicable_when if c.id == sub.na_condition), None
     )
     if condition is None:
         problems.append(Problem("P5", f"{rule.id} declares no condition {sub.na_condition!r}",
-                                offered))
+                                f"name one of {', '.join(declared)}"))
     elif condition.mechanical is not None:
-        problems.append(Problem(
-            "P5",
-            f"{sub.na_condition} is a mechanical condition; the engine answers it, and no "
-            f"verdict is asked for",
-            offered,
-        ))
+        problems.extend(_mechanical_problems(rule, condition, facts, claims))
     return problems
+
+
+def _mechanical_problems(
+    rule: Guideline, condition: NaCondition, facts: Facts, claims: Sequence[str]
+) -> list[Problem]:
+    """A mechanical condition, put to the engine. It is asked only over a
+    changed set that could be established; P1 names the one that could not."""
+    otherwise = "answer pass or fail with the evidence the rule declares" + (
+        f", or name a claim that is true ({', '.join(claims)})" if claims else ""
+    )
+    mechanical = f"{condition.id} is a mechanical condition"
+    if facts.touched is None:
+        return [Problem("P5", f"{mechanical}, and the changed set could not be established",
+                        otherwise)]
+    if facts.na is None:
+        return [Problem("P5", f"{mechanical}, and the engine's answer to it was not read",
+                        otherwise)]
+    answer = facts.na(rule, condition, facts.touched)
+    if answer.holds is True:
+        return []
+    if answer.holds is False:
+        return [Problem(
+            "P5", f"{mechanical}, and the engine finds it false over this change: "
+            f"{answer.reason}", otherwise,
+        )]
+    return [Problem(
+        "P5", f"{mechanical}, and the engine finds it unanswerable over this change: "
+        f"{answer.reason}",
+        otherwise,
+    )]
 
 
 # -- P6, the note is bounded and inert ---------------------------------------------------------------
@@ -651,7 +672,7 @@ def check(
     citations, cited = citation_problems(sub, rule, facts)
     problems += cited
     problems += selector_problems(sub, facts.test_runs)
-    problems += na_problems(sub, rule)
+    problems += na_problems(sub, rule, facts)
     problems += note_problems(sub, facts)
     if problems:
         return Checked(index=index, rule=sub.rule, record=None, problems=tuple(problems))

@@ -1189,9 +1189,13 @@ invariant guidelines verdicts submit <file.json>
           run `pipeline test` recorded in this pipeline. A full run never
           vouches for a named test. For a pass, the latest run naming it
           passed and was not read as red.
-      P5  an na names one of the rule's claim conditions with
-          --na-condition, and carries no citations and no tests. A
-          mechanical condition is the engine's to answer, and is refused.
+      P5  an na names one of the rule's declared conditions with
+          --na-condition, and carries no citations and no tests. A claim
+          is the agent's pick, recorded for audit. A mechanical condition
+          is the engine's to answer: the na is accepted only when the
+          engine finds it true over the change, and refused, naming the
+          file and line or why it cannot answer, when it is false or
+          unanswerable.
       P6  the note is at most guidelines.verdicts.note_max_chars characters
           (default 280), and the privacy scan finds nothing in it, whatever
           privacy.scope says. A note may not carry the exemption marker.
