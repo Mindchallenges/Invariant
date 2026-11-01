@@ -738,6 +738,84 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         assert target.is_file()
 
 
+class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
+    """Repro for BUG_106 — see the work-item entry.
+
+    BUG_051 protected an edit made to a copy the CURRENT release installed. A
+    copy installed by an EARLIER release and then edited by hand still carries
+    that release's own marker, and the classifier sends any marker other than
+    today's digest to "installed from an older version", which both install
+    commands rewrite. The operator's edit is lost and never named.
+
+    The two xfail tests fail while the defect is live. When the fix lands,
+    delete their expected-failure markers; the assertions must then pass
+    unchanged. The control is not wrapped: an unedited older-release copy is
+    rewritten today and must still be rewritten after the fix.
+    """
+
+    MARK = "# project note"
+    COMMANDS = (("assets", "install"), ("agents", "install"))
+
+    def older_release_copy(self, project, edited):
+        """Turn the installed feature-architect into a copy an earlier release
+        wrote: an older body, rendered with that body's own digest — exactly
+        what that release's install would have put on disk. Optionally, the
+        operator then edits it, leaving the marker in place."""
+        from invariant.hosts import assets
+        from invariant.hosts.claude_code import digest_of
+
+        target = project / ".claude" / "agents" / "feature-architect.md"
+        shipped = assets.reconstruct_source(target.read_text(encoding="utf-8"))
+        older = shipped + "\nWording an earlier release shipped.\n"
+        text = assets.render_managed(older, digest_of(older))
+        assert assets.marker_digest(text) != digest_of(shipped)
+        if edited:
+            text += f"\n{self.MARK}\n"
+        target.write_text(text, encoding="utf-8")
+        return target, shipped
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="BUG_106 is live — delete this marker with the fix",
+    )
+    @pytest.mark.parametrize("command", COMMANDS, ids=lambda c: c[0])
+    def test_BUG_106_an_edited_older_release_copy_survives_and_is_named(
+        self, project, capsys, command
+    ):
+        run("init", "--name", "demo")
+        target, _ = self.older_release_copy(project, edited=True)
+        capsys.readouterr()
+
+        assert run(*command) == 0
+        text = out(capsys)
+        assert self.MARK in target.read_text(encoding="utf-8"), (
+            f"`{' '.join(command)}` overwrote an operator's edit to an "
+            f"older-release copy"
+        )
+        skipped = [ln for ln in text.splitlines() if "skipped" in ln]
+        assert any(
+            "feature-architect" in ln and "edited locally" in ln for ln in skipped
+        ), f"the edited copy was not named as skipped:\n{text}"
+
+    @pytest.mark.parametrize("command", COMMANDS, ids=lambda c: c[0])
+    def test_BUG_106_control_an_unedited_older_release_copy_is_rewritten(
+        self, project, capsys, command
+    ):
+        from invariant.hosts import assets
+
+        run("init", "--name", "demo")
+        target, shipped = self.older_release_copy(project, edited=False)
+        capsys.readouterr()
+
+        assert run(*command) == 0
+        text = out(capsys)
+        rebuilt = assets.reconstruct_source(target.read_text(encoding="utf-8"))
+        assert rebuilt == shipped
+        assert not any(
+            "skipped" in ln and "feature-architect" in ln for ln in text.splitlines()
+        )
+
+
 # -- AUTH-04: the temporary half of the position ------------------------
 
 
