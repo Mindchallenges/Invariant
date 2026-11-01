@@ -22,7 +22,7 @@ import re
 import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -156,13 +156,27 @@ class Verdict:
     #: The records a rule computed, in ADR-012 D5's shape, for a rule that
     #: has them (``guidelines.mechanical_clean``). ``None`` for every other
     #: rule, so a payload carries the key only where it means something.
-    #: Printed, never persisted (DN-16).
+    #: Printed (DN-16), and kept only in a landing's guidelines record
+    #: (A4.6, DN-7).
     findings: tuple[Mapping[str, Any], ...] | None = None
     #: Each guideline a live grant passed in this evaluation where it would
     #: otherwise have failed the gate, with what it would have failed on
     #: (ADR-012 ruling 4). Set by the two guideline family gates only, and
     #: read by the delivery surface that spends the grant.
     overridden: tuple[tuple[str, str], ...] = ()
+    #: Each owed judgement rule's standing as plain data
+    #: (``core/verdicts.Standing.record``), for ``guidelines.verdicts_complete``
+    #: when it judged standings; ``None`` for every other rule and outcome.
+    #: Kept in a landing's guidelines record (A4.6, DN-7).
+    standings: tuple[Mapping[str, Any], ...] | None = None
+    #: The ruleset digest a guideline family gate judged against, when it
+    #: judged at all: the tree's for ``mechanical_clean``, the pin (or the
+    #: tree's, with no pin) for ``verdicts_complete``.
+    ruleset: str | None = None
+    #: Every live grant a guideline family gate read, as (guideline, reason),
+    #: in grant order, used or not; what :func:`grant_outcomes` reads for a
+    #: grant that passed nothing.
+    grants: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def clean(cls, message: str = "", detail: str = "") -> Verdict:
@@ -538,11 +552,18 @@ def apply_acknowledgements(
             and not evaluated.verdict.ok
             and evaluated.level not in (Level.BLOCK, Level.ASK)
         ):
+            # A skip with the acknowledgement as its text, keeping what the
+            # rule computed (findings, standings, digest, grants): a landing
+            # records what the gate found as well as that it was acknowledged
+            # (A4.6).
             out.append(
                 Evaluated(
                     evaluated.rule_id,
                     evaluated.level,
-                    Verdict.na(f"acknowledged — {reason}"),
+                    replace(
+                        evaluated.verdict, ok=True, skipped=True,
+                        message=f"acknowledged — {reason}", detail="", fixes=(),
+                    ),
                 )
             )
         else:
@@ -2248,6 +2269,8 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
             fixes=_mechanical_fixes(blocking),
             findings=records,
             overridden=overridden,
+            ruleset=ruleset.digest,
+            grants=tuple(grants.items()),
         )
     return Verdict(
         ok=True,
@@ -2257,6 +2280,8 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
         detail=detail,
         findings=records,
         overridden=overridden,
+        ruleset=ruleset.digest,
+        grants=tuple(grants.items()),
     )
 
 
@@ -2335,6 +2360,68 @@ def guideline_grants(
                 continue
         grants[rule_id] = str(held.get("reason") or "no reason given")
     return grants
+
+
+@dataclass(frozen=True)
+class GrantOutcome:
+    """What one advance did with one grant a guideline family gate read."""
+
+    guideline: str
+    gate: str
+    #: The grant's reason, as the gate read it; ``None`` for a passed
+    #: guideline the verdict names without the grant behind it.
+    reason: str | None
+    #: The advance relied on it, so it is spent; otherwise it is held.
+    spent: bool
+    #: What the gate would have failed on without it; ``None`` when it
+    #: passed nothing that would have failed the gate.
+    passed: str | None
+    #: Why it is held; empty when it is spent.
+    why: str
+
+    def record(self) -> dict[str, Any]:
+        return {
+            "guideline": self.guideline, "gate": self.gate, "reason": self.reason,
+            "outcome": "spent" if self.spent else "held",
+            "passed": self.passed, "why": self.why,
+        }
+
+
+def grant_outcomes(evaluated: Evaluated) -> tuple[GrantOutcome, ...]:
+    """Each grant ``evaluated`` read or relied on, and whether an advance
+    that succeeded with this verdict spends it (ADR-012 ruling 4, A3.7).
+
+    The one decision: ``cli/main`` spends what it answers spent, and a
+    landing records it (A4.6). A grant is spent only where it decided the
+    advance: the gate blocks or asks here, passed, and the grant passed a
+    guideline that would otherwise have failed it. At ``warn`` nothing was
+    stopped, a gate still failing on another guideline was forced past, and
+    a grant that passed nothing decided nothing; each is held, with why.
+    Grants come in the order the gate read them, then any passed guideline
+    the verdict names without one.
+    """
+    verdict = evaluated.verdict
+    gate = evaluated.rule_id
+    stopping = evaluated.level in (Level.BLOCK, Level.ASK)
+    decided = stopping and verdict.ok and not verdict.skipped
+    reasons = dict(verdict.grants)
+    passed = dict(verdict.overridden)
+    out: list[GrantOutcome] = []
+    for guideline in [*reasons, *(g for g in passed if g not in reasons)]:
+        stopped_on = passed.get(guideline)
+        if stopped_on is None:
+            why = f"it passed nothing that would have failed {gate}"
+        elif decided:
+            why = ""
+        elif stopping:
+            why = f"{gate} still failed on another guideline, so the grant passed nothing"
+        else:
+            why = f"{gate} is {evaluated.level.value} here, so nothing was stopped"
+        out.append(GrantOutcome(
+            guideline=guideline, gate=gate, reason=reasons.get(guideline),
+            spent=stopped_on is not None and decided, passed=stopped_on, why=why,
+        ))
+    return tuple(out)
 
 
 def guideline_override_refusal(ctx: RuleContext, guideline_id: str) -> str | None:
@@ -3964,10 +4051,20 @@ def standings_verdict(read: StandingsRead) -> Verdict:
     found = read.standings
     digest = read.ruleset
     unused = "; ".join(u.describe() for u in read.unused)
+    # What a landing keeps of this verdict (A4.6, DN-7): the standings it was
+    # decided on, the digest, and every grant read, whatever the outcome.
+    kept = {
+        "standings": tuple(s.record() for s in found),
+        "ruleset": digest,
+        "grants": tuple(read.grants.items()),
+    }
     if not found:
-        return Verdict.clean(
-            f"no judgement guideline is owed a verdict by this change, ruleset {digest}",
+        return Verdict(
+            ok=True,
+            message=f"no judgement guideline is owed a verdict by this change, "
+            f"ruleset {digest}",
             detail=unused,
+            **kept,
         )
     blocking = [s for s in found if s.blocks]
     passed = [s for s in found if s.overridden]
@@ -3993,6 +4090,7 @@ def standings_verdict(read: StandingsRead) -> Verdict:
             detail=detail,
             fixes=_verdict_fixes(blocking),
             overridden=overridden,
+            **kept,
         )
     return Verdict(
         ok=True,
@@ -4000,6 +4098,7 @@ def standings_verdict(read: StandingsRead) -> Verdict:
         f"that holds, ruleset {digest}" + (f"; {tally}" if tally else ""),
         detail=detail,
         overridden=overridden,
+        **kept,
     )
 
 

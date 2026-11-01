@@ -59,7 +59,7 @@ graph TD
         CONF["conformance (ADR-012 D11)"]
         CGUIDE["guidelines (ADR-012 D3)"]
         CFIND["findings (ADR-012 D4, A3.3)"]
-        CVERD["verdicts (ADR-012 D5, A4.1 to A4.4)"]
+        CVERD["verdicts (ADR-012 D5, A4.1 to A4.6)"]
     end
 
     subgraph domains["domains/ — the seven state domains"]
@@ -189,7 +189,7 @@ graph TD
     SESSION --> STORE
     PIPELINE --> STORE
     SESSION --> RULES
-    PIPELINE --> RULES
+    PIPELINE -- evaluate, grant_outcomes, the family gate records kept at the landing --> RULES
     WORKITEM --> ITEMS
     MEMDOMAIN --> MEMORY
     STATSDOMAIN --> STATS
@@ -501,7 +501,8 @@ blocker guideline, or of a registry class mapped to blocker, and reports a
 warn finding inside a pass. It warns in `loose` and `standard` and blocks in
 `strict`, and `core/machines` injects it beside the other guidelines gates at
 the landing. The findings are printed in D5's record shape on the verdict
-(`invariant check guidelines.mechanical_clean --json`) and kept nowhere.
+(`invariant check guidelines.mechanical_clean --json`), and kept only in the
+landing's guidelines record (A4 increment 6, below).
 
 `CFIND` also answers a judgement rule's mechanical N/A conditions (A4
 increment 2, ADR-012 D5 item 5, DN-A12), through `na_answer`, as a
@@ -728,6 +729,22 @@ gate and `guidelines verdicts show` print the same override. Both family
 gates report what a grant passed in `Verdict.overridden`, and `cli/main`
 spends from it on one path after an advance the grant decided. No new
 arrow: `RULES --> CVERD` carries the grants as values.
+
+A landing keeps what the family decided (A4 increment 6, ADR-012 DN-7).
+`PipelineDomain.advance`, entering a state with the `landing` role
+(`core/machines.LANDING_ROLE`), appends one entry to
+`evidence["guidelines_landings"]` in the same save that moves the state,
+built by `guidelines_landing` from the verdicts that advance evaluated: each
+`guidelines.*` gate's outcome and level, the digest it judged against
+(`Verdict.ruleset`), `mechanical_clean`'s findings, `verdicts_complete`'s
+standings (`Verdict.standings`, each `Standing.record`, the form `guidelines
+verdicts show --json` prints too), and each grant either gate read
+(`Verdict.grants`), spent or held. Spent or held is
+`core.rules.grant_outcomes`, which `cli/main`'s spend asks as well, so the
+record and the spend cannot disagree. That is the label on `PIPELINE -->
+RULES`; no arrow is new. A refused advance records nothing, a forced one
+records the same shape with `forced: true`, and the record holds no clock
+time and is read by no rule. See the state model, "Domain: pipeline".
 
 `invariant guidelines verdicts show` prints what that gate sees (A4
 increment 4). The gate's reads are one function, `core.rules.read_standings`,

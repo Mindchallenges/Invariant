@@ -30,6 +30,11 @@ MACHINE_DIR = Path(__file__).resolve().parent.parent / "data" / "machines"
 #: injections are: a machine this library has never seen labels its own states.
 ABANDON_ROLE = "abandon"
 
+#: The role of the state a pipeline LANDS in: the role the landing gates are
+#: injected by, and the one whose entry records the landing's guidelines
+#: decisions in pipeline evidence (ADR-012 DN-7, A4.6).
+LANDING_ROLE = "landing"
+
 #: Attached to every pipeline machine. Keyed by state role.
 #:
 #: The read gate is an EXIT gate on the design state, not an entry gate. A

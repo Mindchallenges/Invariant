@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ..core import plan as plan_reader
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
-from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Level, Manifest
+from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Manifest
 from ..core.rules import (
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
@@ -31,6 +31,7 @@ from ..core.rules import (
     coverage_advisory_exception,
     evaluate,
     get_rule,
+    grant_outcomes,
     guideline_gate_of,
     sweep_cadence_summary,
 )
@@ -2865,26 +2866,22 @@ def _spend_guideline_overrides(ctx, session, verdicts) -> None:
     Only where it decided something. At ``warn`` the gate would not have
     stopped the advance, and a gate still failing on another guideline was
     not passed by the grant (a forced advance went past it); in both the
-    grant is held, and said to be. ``pipeline gates``, ``check``, ``doctor``
-    and the oracle evaluate the same gates and never reach this.
+    grant is held, and said to be. Which is which is
+    ``core.rules.grant_outcomes``, the decision a landing records too
+    (A4.6), so the record and the spend cannot disagree. ``pipeline
+    gates``, ``check``, ``doctor`` and the oracle evaluate the same gates
+    and never reach this.
     """
     for evaluated in verdicts:
-        passed = evaluated.verdict.overridden
-        if not passed:
-            continue
-        gate = evaluated.rule_id
-        stopping = evaluated.level in (Level.BLOCK, Level.ASK)
-        decided = stopping and evaluated.verdict.ok and not evaluated.verdict.skipped
-        for guideline, stopped_on in passed:
-            if not decided:
-                why = (
-                    f"{gate} still failed on another guideline, so the grant "
-                    f"passed nothing"
-                    if stopping
-                    else f"{gate} is {evaluated.level.value} here, so nothing "
-                    f"was stopped"
+        for outcome in grant_outcomes(evaluated):
+            if outcome.passed is None:
+                continue  # passed nothing; the gate's detail names it as unused
+            guideline = outcome.guideline
+            if not outcome.spent:
+                print(
+                    f"[override] {guideline}: held, not spent — {outcome.why}",
+                    file=sys.stderr,
                 )
-                print(f"[override] {guideline}: held, not spent — {why}", file=sys.stderr)
                 continue
             spent = ctx.sessions.consume_override(session.id, guideline, surface="cli")
             if spent is None:
@@ -2892,7 +2889,7 @@ def _spend_guideline_overrides(ctx, session, verdicts) -> None:
             print(
                 f"[override] {guideline}: passed deliberately — "
                 f"{spent.get('reason', 'overridden')} (spent)\n"
-                f"        it would have blocked {gate}: {stopped_on}",
+                f"        it would have blocked {outcome.gate}: {outcome.passed}",
                 file=sys.stderr,
             )
 
@@ -3456,20 +3453,6 @@ def cmd_guidelines_verdicts_submit(args) -> int:
     return _submit_verdicts(args, submission)
 
 
-
-def _standing_payload(s) -> dict:
-    return {
-        "rule": s.rule, "severity": s.severity, "standing": s.standing,
-        "status": s.status, "reason": s.reason,
-        "problems": [
-            {"predicate": p.predicate, "message": p.message, "fix": p.fix}
-            for p in s.problems
-        ],
-        "set_aside": s.set_aside, "blocks": s.blocks, "warns": s.warns,
-        "override": s.override, "overridden": s.overridden,
-    }
-
-
 def cmd_guidelines_verdicts_show(args) -> int:
     """How each owed judgement guideline stands, as the gate sees it. Writes nothing.
 
@@ -3508,7 +3491,7 @@ def cmd_guidelines_verdicts_show(args) -> int:
         "status": read.status,
         "ruleset": read.ruleset,
         "state": read.state,
-        "owed": [_standing_payload(s) for s in read.standings],
+        "owed": [s.record() for s in read.standings],
         "not_owed": [
             {"rule": u.rule, "status": u.status, "recorded": u.recorded, "reason": u.reason}
             for u in read.unowed

@@ -2051,6 +2051,83 @@ spent into `session.overrides` with the guideline id as its `rule`.
   and the spend helper's `overridden`. `tests/test_guidelines_verdicts_show.py`
   carries the two new JSON keys.
 
+**As built: A4 increment 6, the landing's guidelines records.** Built to
+DN-7 ("Saved into pipeline evidence"), D1 items 1 and 2, D5 ("Mechanical
+kinds use the same record"), ruling 4 and DN-12. DN-7 names the place and
+nothing else, so the shape follows the session brief: what the family
+decided at the landing, copied from that advance's own verdicts, with no
+clock time and no migration.
+
+- *Where (`domains/pipeline`).* `PipelineDomain.advance`, after the gates
+  passed (or a forced advance went past them) and before the one save that
+  moves the state, appends one entry to `evidence["guidelines_landings"]`
+  when the target carries the `landing` role (`core/machines.LANDING_ROLE`,
+  beside `ABANDON_ROLE`) and at least one `guidelines.*` gate was evaluated.
+  `guidelines_landing` builds it from the `Evaluated` list the advance holds,
+  so the record is what the gates decided at that advance, never a later
+  re-derivation. A list, append-only, because a forced advance can land a
+  pipeline twice.
+- *What (one entry).* `from`, `to`, `forced` (as the history row has it),
+  `gates` and `grants`.
+  - Each `guidelines.*` gate: `rule`, `level`, `ok`, `skipped`, `blocks` and
+    `message`, then, only where the gate computed them, `ruleset` (the digest
+    it judged against), `findings` (`mechanical_clean`'s, in D5's record
+    shape, warn and baselined ones included) and `standings`
+    (`verdicts_complete`'s, one per owed rule, `Standing.record`). Every
+    family gate on the landing is kept, `ruleset_valid`,
+    `generated_current` and `baseline_only_shrinks` included, since each
+    was part of why the landing was allowed. `detail` and `fixes` are not:
+    they are advice derived from the same facts.
+  - Each grant either family gate read or relied on: `guideline`, `gate`,
+    `reason`, `outcome` (`spent` or `held`), `passed` (what the gate would
+    have failed on, or null) and `why` it is held.
+- *The gates hand their decision over (`core/rules`).* `Verdict` gains
+  `standings`, `ruleset` and `grants`, set by the two family gates only.
+  `mechanical_clean` sets its digest and the grants it read beside its
+  `findings`; `standings_verdict` sets the standings, the digest and the
+  grants whenever it judged standings (an empty list when nothing is owed),
+  and none of them where it is N/A or cannot judge. No other rule sets any.
+  `Standing.record` (`core/verdicts`) is the one plain-data form of a
+  standing, which `guidelines verdicts show --json` now prints too, so the
+  command's `owed` and the record cannot drift apart.
+- *Spent or held is one decision (`core/rules.grant_outcomes`).* The CLI's
+  spend asks it and the record copies it: spent where the gate blocks or
+  asks, passed, and the grant passed a guideline that would have failed it;
+  held otherwise, naming why (the gate is at warn, still failed on another
+  guideline, or the grant passed nothing). The CLI consumes the grant after
+  the save, so the record says what the advance decided, and
+  `session.overrides` says what was consumed.
+- *An acknowledged gate keeps what it computed.* `apply_acknowledgements`
+  turned a warn verdict into a fresh N/A, dropping its findings. It now
+  keeps the verdict's records (findings, standings, digest, grants,
+  overridden) under the acknowledgement's text, so a landing past an
+  acknowledged `mechanical_clean` still records the findings acknowledged.
+  The text, detail and fixes a gate prints are unchanged.
+- *Readings taken where DN-7 is silent.*
+  - A forced landing records the same shape, `forced: true`, and the gate
+    it went past shows `blocks: true`. Recording it differently, or not at
+    all, would leave the least ordinary landings with the thinnest record.
+    The forced advance's own row stays in `overrides`.
+  - A refused advance records nothing. It is not a landing, and a refused
+    transition writes nothing anywhere today.
+  - No new command. `invariant pipeline status --json` prints the record
+    with the rest of the evidence. A dedicated read can come with an audit
+    surface if one is wanted.
+  - With no ruleset configured or pinned no guidelines gate is injected, so
+    nothing is recorded. A family gate set to `off` is recorded as the skip
+    it ran as.
+- *DN-12 and D1 item 2.* No rule reads the record, and the record copies no
+  `agent`: standings carry none, and it is never read in logic.
+- *Tests.* `tests/test_guidelines_landing_record.py`: `Standing.record` and
+  the command's JSON over it, what each family gate carries (and that no
+  other rule does), the acknowledgement keeping it, `grant_outcomes` for
+  each outcome and ordering, the domain's write (the shape, a reload, a
+  forced landing, a refused one, a non-landing target, no family gate, a
+  disabled one, a second landing, no clock time), and the `valid-ruleset`
+  scenario end to end: a spent grant under `strict`, a held one under
+  `standard`, the cited pass answered, and the record equal to the
+  advance's printed verdicts.
+
 ### D6 — The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
 
 **Format.** A baseline file the manifest names, one entry per line, with `#`
@@ -2400,7 +2477,7 @@ graph TD
     CFIND -- project_relative, glob_matches --> MANIFEST
     CGUIDE -- project_relative --> MANIFEST
     FSM -. injects guidelines.* by role .-> RULES
-    PIPELINE --> RULES
+    PIPELINE -- evaluate, grant_outcomes, the family gate records kept at the landing (A4.6) --> RULES
     CC --> CGUIDE
     CC -- edit_advisory, A3.8 --> RULES
     CC --> CAGENTS

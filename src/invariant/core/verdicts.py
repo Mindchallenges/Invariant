@@ -849,6 +849,20 @@ class Standing:
         failure a grant passed, as the spend names it."""
         return self._answer()
 
+    def record(self) -> dict[str, Any]:
+        """The standing as plain data: what ``guidelines verdicts show --json``
+        prints for an owed rule, and what the landing keeps (A4.6, DN-7)."""
+        return {
+            "rule": self.rule, "severity": self.severity, "standing": self.standing,
+            "status": self.status, "reason": self.reason,
+            "problems": [
+                {"predicate": p.predicate, "message": p.message, "fix": p.fix}
+                for p in self.problems
+            ],
+            "set_aside": self.set_aside, "blocks": self.blocks, "warns": self.warns,
+            "override": self.override, "overridden": self.overridden,
+        }
+
 
 def not_owed(rule: Guideline, facts: Facts) -> str | None:
     """Why the change owes ``rule`` no verdict, or ``None`` when it owes one.

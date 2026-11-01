@@ -20,7 +20,7 @@ from typing import Any
 from ..adapters import get_adapter
 from ..core.errors import GateFailure, InvariantError, TransitionError, UsageError
 from ..core.fsm import Machine
-from ..core.machines import ABANDON_ROLE, load_pipeline_machine
+from ..core.machines import ABANDON_ROLE, LANDING_ROLE, load_pipeline_machine
 from ..core.manifest import Level
 from ..core.rules import (
     MECHANICAL_GATE,
@@ -30,6 +30,7 @@ from ..core.rules import (
     apply_acknowledgements,
     evaluate,
     get_rule,
+    grant_outcomes,
     ruleset_pin,
 )
 from ..core.stats import Usage, WatermarkSource
@@ -811,6 +812,12 @@ class PipelineDomain:
                 "usage_host": usage_host,
             }
         )
+        if LANDING_ROLE in machine.state(target).roles:
+            landing = guidelines_landing(
+                pipeline.state, target, forced=bool(force), verdicts=verdicts
+            )
+            if landing is not None:
+                pipeline.evidence.setdefault(LANDINGS_KEY, []).append(landing)
         pipeline.state = target
         if target in machine.terminal:
             pipeline.finished = now
@@ -1234,6 +1241,58 @@ class PipelineDomain:
             self.relpath(session_id),
             {"current": pipeline.to_dict(), "completed": completed},
         )
+
+
+#: The evidence key each landing's guidelines record is appended to
+#: (ADR-012 DN-7, A4.6).
+LANDINGS_KEY = "guidelines_landings"
+#: Every gate of the guidelines family is named under this prefix.
+GUIDELINES_FAMILY = "guidelines."
+
+
+def guidelines_landing(
+    source: str, target: str, *, forced: bool, verdicts: Sequence[Evaluated]
+) -> dict[str, Any] | None:
+    """What the guidelines family decided at one landing, as the record keeps it.
+
+    ADR-012 DN-7 (A4.6). Copied from the verdicts the advance evaluated, never
+    derived again: each ``guidelines.*`` gate's outcome at the level it ran
+    at, the digest it judged against, ``mechanical_clean``'s findings and
+    ``verdicts_complete``'s standings, and every grant either gate read,
+    spent or held as ``grant_outcomes`` decides, which is the CLI's spend
+    decision too. ``None`` when no guidelines gate was evaluated (no ruleset
+    configured or pinned), so such a landing records nothing. No clock time.
+    """
+    family = [v for v in verdicts if v.rule_id.startswith(GUIDELINES_FAMILY)]
+    if not family:
+        return None
+    return {
+        "from": source,
+        "to": target,
+        "forced": forced,
+        "gates": [_landing_gate(v) for v in family],
+        "grants": [o.record() for v in family for o in grant_outcomes(v)],
+    }
+
+
+def _landing_gate(evaluated: Evaluated) -> dict[str, Any]:
+    verdict = evaluated.verdict
+    gate: dict[str, Any] = {
+        "rule": evaluated.rule_id,
+        "level": evaluated.level.value,
+        "ok": verdict.ok,
+        "skipped": verdict.skipped,
+        "blocks": evaluated.blocks,
+        "message": verdict.message,
+    }
+    # Each key only where the gate computed it, as the verdict payload does.
+    if verdict.ruleset is not None:
+        gate["ruleset"] = verdict.ruleset
+    if verdict.findings is not None:
+        gate["findings"] = [dict(f) for f in verdict.findings]
+    if verdict.standings is not None:
+        gate["standings"] = [dict(s) for s in verdict.standings]
+    return gate
 
 
 #: What a grant naming a guideline passes at each family gate it reaches

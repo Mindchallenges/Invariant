@@ -1023,10 +1023,11 @@ sequenceDiagram
   that pinned a ruleset whatever the manifest says now, so clearing
   `guidelines.ruleset` (an isolation-exempt manifest line, like
   `methodology.pipeline`) cannot drop them mid-pipeline. Their verdicts then
-  say what they can see. No gate compares the pinned digest with the current
-  one yet. That comparison is A4's, for verdicts (DN-D). A verdict submission
-  already makes it: one is refused while the tree's digest differs from the
-  pin (A4 DN-6, below). No landing gate reads it until A4 increment 3.
+  say what they can see. The comparison of the pinned digest with the
+  current one is A4's, for verdicts (DN-D): a submission is refused while
+  the tree's digest differs from the pin (A4 DN-6, below), and
+  `guidelines.verdicts_complete` reads every recorded verdict as stale while
+  it differs (A4 increment 3).
 - **Nothing pinned, nothing changes.** With no ruleset at start the field is
   null and the manifest decides, as before. A record written before the field
   existed loads with it null and is read the same way, so no record is
@@ -1080,6 +1081,66 @@ the records on rules the change no longer owes.
 
 The key is additive. A record older than it has no `verdicts`, which reads as
 "no verdict submitted", and no record is migrated.
+
+**A landing keeps what the guidelines family decided** (ADR-012 DN-7, A4
+increment 6). An advance that succeeds into a state with the `landing` role,
+with at least one `guidelines.*` gate on the edge, appends one entry to
+`evidence["guidelines_landings"]`, in the same save that moves the state.
+`domains/pipeline.guidelines_landing` copies it from the verdicts that
+advance evaluated, so it is what the gates decided there, not a later
+re-derivation. One entry:
+
+```json
+{
+  "from": "reviewing",
+  "to": "committed",
+  "forced": false,
+  "gates": [
+    {"rule": "guidelines.ruleset_valid", "level": "block", "ok": true,
+     "skipped": false, "blocks": false, "message": "..."},
+    {"rule": "guidelines.mechanical_clean", "level": "warn", "ok": true,
+     "skipped": false, "blocks": false, "message": "...",
+     "ruleset": "5be0c2d91f7a", "findings": []},
+    {"rule": "guidelines.verdicts_complete", "level": "block", "ok": true,
+     "skipped": false, "blocks": false, "message": "...",
+     "ruleset": "5be0c2d91f7a",
+     "standings": [{"rule": "data.single-open", "severity": "blocker",
+                    "standing": "missing", "status": null, "reason": "",
+                    "problems": [], "set_aside": null, "blocks": false,
+                    "warns": false, "override": "reviewed by hand",
+                    "overridden": true}]}
+  ],
+  "grants": [{"guideline": "data.single-open",
+              "gate": "guidelines.verdicts_complete",
+              "reason": "reviewed by hand", "outcome": "spent",
+              "passed": "data.single-open: no verdict", "why": ""}]
+}
+```
+
+- **`gates`** is every `guidelines.*` gate the edge evaluated, as it was
+  delivered: its level, `ok`, `skipped`, `blocks` and `message`. `ruleset`
+  (the digest the gate judged against), `findings` (`mechanical_clean`'s, in
+  D5's record shape) and `standings` (`verdicts_complete`'s, one per owed
+  rule) appear only where the gate computed them. An acknowledged warn gate
+  keeps its findings under the acknowledgement's text. `detail` and `fixes`
+  are not kept.
+- **`grants`** is each grant either family gate read or relied on, spent or
+  held, with what it passed and why it is held: `core.rules.grant_outcomes`,
+  the decision the CLI spends from. The CLI consumes a spent grant after the
+  save, into `session.overrides`.
+- **`forced`** is the advance's, as on the history row. A forced landing
+  records the same shape, and the gate it went past shows `blocks: true`;
+  its override row stays in `overrides`.
+- **A refused advance records nothing**, and nor does a landing with no
+  guidelines gate on it (no ruleset configured or pinned).
+- **No clock time, no agent, no reader.** The entry is ordered by position,
+  carries no acting agent (DN-12), and no rule reads it: it is the audit
+  record of why a landing was allowed. `invariant pipeline status --json`
+  prints it with the rest of the evidence.
+
+The key is additive under the round-trip contract (BUG_061): a record older
+than it has none, a build that does not know it writes it back intact, and
+no record is migrated.
 
 Shipped methodologies:
 

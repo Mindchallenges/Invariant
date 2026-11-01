@@ -785,11 +785,19 @@ invariant pipeline status [--json]
     The methodology, task, state and legal successors, and the pinned
     ruleset: "ruleset <path> @ <digest>", or the reason it could not be
     loaded at start. No line when nothing was pinned. --json is the record,
-    `ruleset` included.
+    `ruleset` included, and the evidence, each landing's guidelines record
+    included.
 invariant pipeline advance <state> [--force]
     Validates the transition against the FSM and runs the gates. --force
     records an override with a required --reason rather than bypassing
     silently; the override is visible in status and in the session record.
+    An advance that succeeds into the landing state, with guidelines gates
+    on the edge, appends what they decided to
+    evidence["guidelines_landings"] (ADR-012 DN-7, A4 increment 6): each
+    guidelines.* gate's outcome and level, its ruleset digest, the findings
+    and standings, and each grant spent or held, copied from this advance's
+    verdicts. A forced landing records the same, with `forced: true`; a
+    refused advance records nothing. It prints nothing new.
 invariant pipeline gates [--state <id>]
     List the gates for a state and their current verdicts, without advancing.
 ```
@@ -1416,7 +1424,8 @@ invariant override <rule-id | guideline-id> --clear [--id <sid>]
     covers one evaluation, so `--calls` above one is refused. `pipeline
     advance` spends it, with surface `cli`, only when the advance succeeds
     while the family gate blocks or asks here and passed because of the
-    grant; otherwise the command says it is held. A grant that passed only a
+    grant; otherwise the command says it is held. The decision is
+    core.rules.grant_outcomes, and a landing records it, spent or held. A grant that passed only a
     fail at warn decided nothing and is not spent. `pipeline gates`,
     `check`, `doctor`, `guidelines verdicts show` and the oracle never spend
     one, and the family gate names an unspent grant on every evaluation.
