@@ -1933,6 +1933,26 @@ invariant context
     transitions, pending gates, outstanding residue. Useful standalone for
     debugging what an agent is actually being told.
 
+    With guidelines.ruleset configured and a session bound, the last lines
+    are the guidelines turn index (ADR-012 D7, A5 increment 2), the same
+    lines UserPromptSubmit and the SessionStart greeting carry. A header
+    names the phases the pipeline's state sees, the ruleset and its digest,
+    how many rules are listed out of how many, and the file scope: the
+    session's declared plus changed files, or no file filter, saying so when
+    the changed files could not be established. Then one line per rule, id
+    and title: the always rules first, whatever the phase and the files, then
+    the state's own rules over the scope. Capped at
+    guidelines.injection.max_lines, the last line counting what was left out
+    and naming the command that prints it,
+    `invariant guidelines show --phase <role> --touched` (with no pipeline,
+    `invariant guidelines show`). No pipeline lists the always rules alone;
+    a landing or abandon state lists nothing; nothing selected is silent. A
+    ruleset that does not load is one line naming
+    `invariant check guidelines.ruleset_valid`, a tree ruleset whose digest
+    is not the pipeline's pin adds one line saying a verdict is refused until
+    they agree, and a failure inside the projection is one line. No
+    statement and no verdict standing is carried.
+
     With no session bound it prints nothing — unless a fresh, unconsumed
     handoff is recorded here, in which case it prints that note, who left it
     and `invariant session handoff --dismiss`, as the SessionStart greeting

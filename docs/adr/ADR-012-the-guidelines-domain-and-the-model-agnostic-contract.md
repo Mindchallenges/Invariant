@@ -2520,6 +2520,70 @@ to D7, ruling 8 and the A5 rulings D1 to D3.
   refusal, `--touched` over a real repository, and the command through
   `main`.
 
+**As built: A5 increment 2, the turn layer.** Built to D7, ruling 8 and the
+A5 rulings D3, D10 and D12.
+
+- *`core/rules.turn_guidelines(manifest, context)`.* It returns plain data,
+  a `core/guidelines.TurnIndex`, or `None` for silence. It reads
+  `guidelines.ruleset` first; with none it never calls `context` and reads
+  no file and no git, the shape of `edit_advisory`. Otherwise it reads the
+  pipeline's current state roles from the machine the pipeline was started
+  under, `phases_for` them, and returns `None` when that is empty (a landing
+  or abandon state). The file scope is `touched_paths`'s union (D3), which
+  now shares `_touched` with it so the changed set is read once and its
+  `answerable` flag is kept. The ruleset is read from the tree in hand and
+  `core/guidelines.select` chooses over the scope. The pinned digest is
+  carried as `pin` only when it is set and differs from the tree's (DN-6's
+  reading: a null pin, or none, compares against the tree's).
+- *`core/guidelines.render_turn_index(index, max_lines)`.* The pure renderer
+  (D8). A header naming the phases, the ruleset's path and digest, how many
+  rules are listed out of how many, and the file scope; then the pin line,
+  when there is one; then one line per rule, `- id: title`, an always rule
+  marked `(always)` as the managed block marks it. The existing index format
+  carries neither severity nor kind, so neither is added. Past the cap the
+  last line counts the rules left out and names the reproducing command,
+  `invariant guidelines show --phase R --touched`, R being the state's first
+  role that selects anything, or `design` for a build state. With no
+  pipeline it names `invariant guidelines show`. No statement and no
+  verdict standing (D10).
+- *`build_context` appends it,* indented as the projection's other lines,
+  so `UserPromptSubmit`, the `SessionStart` greeting and `invariant context`
+  carry the same text; a test pins the hook's text equal to the command's.
+  The rule context is built from the session and pipeline the projection
+  already holds, rather than resolved again through `Context.rule_context`,
+  so the index reads exactly the session the projection shows. The cap is
+  `guidelines.injection.max_lines`.
+- *Readings taken.*
+  - D12 is read as "listed unconditionally": the always rules are on every
+    turn index, whatever the phase and whatever the file scope, ahead of the
+    state's own rules. They are the standing instructions the managed block
+    also carries, so a file filter does not drop them. The state's other
+    rules are filtered as `select` filters them. So the overflow command
+    reproduces what the cap cut, which is never an always rule unless the
+    always rules alone pass the cap.
+  - No pipeline gives the always rules alone; a session with none bound gets
+    no turn index, since its projection is about starting one.
+  - A ruleset that does not load is one line, its failure plus
+    `see invariant check guidelines.ruleset_valid`. A moved pin is one line
+    above the rules, which are still listed from the tree. An exception
+    inside the projection, a pinned machine that does not load included, is
+    one line; an exception in the host's own step is silence, and the rest
+    of the projection still stands.
+  - Nothing selected and no pin is silence: a header counting zero rules on
+    every turn says nothing the managed block does not.
+  - The A5.1 reviewer's note fits the header: when the scope is empty
+    because the changed set could not be established, it ends "with no file
+    filter, since the changed files could not be established".
+- *What is not here.* The edit layer and `guidelines.injection.on_edit`
+  (A5.3), and the always-layer warning in `doctor` and `generated_current`
+  (A5.4). No subagent change (D9).
+- *Tests.* `tests/test_guidelines_turn.py`: every state of the shipped tdd
+  machine, no pipeline, the file scope, the unestablished scope, each
+  problem line, the pin, the renderer's cap and silence, and, through the
+  host against a real repository, the prompt hook, the greeting, the
+  manifest's cap, silence on a failure in the host's step, and the hook's
+  text equal to `invariant context`'s.
+
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 
 **The source is host-neutral.** A library agent is a markdown body with
@@ -2779,7 +2843,7 @@ graph TD
     FSM -. injects guidelines.* by role .-> RULES
     PIPELINE -- evaluate, grant_outcomes, the family gate records kept at the landing (A4.6) --> RULES
     CC --> CGUIDE
-    CC -- edit_advisory, A3.8 --> RULES
+    CC -- edit_advisory, A3.8; turn_guidelines, A5.2 --> RULES
     CC --> CAGENTS
     CCREN --> CAGENTS
     CC --> AGENTS
@@ -2803,9 +2867,13 @@ graph TD
   everything rendered before it is written.
 - **`hosts/`** gains rendering of host-neutral agents and the transport of
   injected text. `CC --> CGUIDE` is downward, the same shape as `CC --> PLAN`
-  and `CC --> RULES`: the turn projection asks `select` directly. The
-  edit-time advisory (A3 increment 8) is `CC --> RULES`: `PostToolUse` asks
-  `edit_advisory` and only formats what it answers.
+  and `CC --> RULES`. The turn projection was first drawn asking `select`
+  directly; A5 increment 2 routes the decision through `CC --> RULES`
+  (`turn_guidelines`), because the roles, the file scope and the pin are
+  reads `core/rules` already owns, and keeps `CC --> CGUIDE` for the pure
+  renderer, `render_turn_index`. The edit-time advisory (A3 increment 8) is
+  `CC --> RULES` too: `PostToolUse` asks `edit_advisory` and only formats
+  what it answers.
 - **`core/machines`** injects the landing gates by role, as it injects
   docs-first and the agent-role gates.
 

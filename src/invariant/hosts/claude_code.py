@@ -37,16 +37,19 @@ from pathlib import Path
 
 from ..core import plan as plan_reader
 from ..core.errors import InvariantError, UsageError
+from ..core.guidelines import render_turn_index
 from ..core.rules import (
     AGENT_TOOLS,
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
     EditAdvisory,
+    RuleContext,
     dispatched_agent,
     edit_advisory,
     evaluate_event,
     is_architecture_doc,
     standdown_in_force,
+    turn_guidelines,
 )
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
@@ -2336,4 +2339,37 @@ def build_context(ctx, greeting: bool = False) -> str:
     if session.push_count:
         lines.append(f"  pushes used: {session.push_count} (the barrier allows one)")
 
+    lines += _turn_index_lines(ctx, session, pipeline)
+
     return "\n".join(lines)
+
+
+def _turn_index_lines(ctx, session, pipeline) -> list[str]:
+    """The guidelines turn index, indented as the projection's other lines.
+
+    ADR-012 ruling 8, D7 and the A5 rulings. The engine decides what to say
+    (``core.rules.turn_guidelines``) and ``core.guidelines`` writes it; this
+    only indents it, capped by ``guidelines.injection.max_lines``. The rule
+    context is built from the session and pipeline already in hand, and only
+    once a ruleset is known to be configured, so a project without one pays
+    nothing. Any exception in this step is silence: the turn goes on.
+    """
+    manifest = getattr(ctx, "manifest", None)
+    if manifest is None:
+        return []
+    try:
+        index = turn_guidelines(
+            manifest,
+            lambda: RuleContext(
+                manifest=manifest,
+                cwd=ctx.cwd,
+                session=session.to_dict(),
+                pipeline=pipeline.to_dict() if pipeline else None,
+            ),
+        )
+        if index is None:
+            return []
+        cap = int(manifest.get("guidelines.injection.max_lines", ADVISORY_MAX_LINES))
+        return [f"  {line}" for line in render_turn_index(index, cap)]
+    except Exception:  # noqa: BLE001 - the projection may never fail its turn
+        return []

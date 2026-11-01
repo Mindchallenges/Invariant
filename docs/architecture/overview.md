@@ -1476,6 +1476,13 @@ that does not load, and an exception inside the projection are one short line;
 an exception in the adapter's own step is silence. None of it can fail the
 call, which has already happened.
 
+The turn index travels the same direction (ADR-012 D7, A5 increment 2).
+`build_context` asks `core.rules.turn_guidelines` and has
+`core.guidelines.render_turn_index` write the answer, so the adapter only
+indents it; the rule context is built from the session and pipeline the
+projection already holds, and only once a ruleset is configured. See
+"Injecting state instead of rules" below.
+
 The contract has been widened once since, deliberately and for the same class
 of reason. `agent_type` — the acting agent, which Claude Code stamps on every
 hook payload including a subagent's own — was added because a subagent that
@@ -1728,18 +1735,44 @@ sequenceDiagram
     participant C as CLI
     participant P as pipeline
     participant F as fsm
+    participant R as rules
+    participant G as guidelines
 
     H->>C: UserPromptSubmit
     C->>P: current pipeline state
     P->>F: legal transitions + pending gates from here
     F-->>C: {state, next[], blocked_by[]}
-    C-->>H: additionalContext — where you are, what is legal, what is owed
+    opt guidelines.ruleset configured (ADR-012 D7, A5 increment 2)
+        C->>R: turn_guidelines(manifest, context)
+        R->>F: the state's roles, from the pinned machine
+        R->>G: select(ruleset, roles, touched paths)
+        R-->>C: TurnIndex (plain data)
+        C->>G: render_turn_index(index, max_lines)
+    end
+    C-->>H: additionalContext — where you are, what is legal, what is owed, which guidelines apply
 ```
 
 The injected text is a projection of state. It is short because it describes
 one node of a graph rather than the whole rulebook, and it cannot go stale
 relative to what actually happened, because it is read from the record of what
 actually happened.
+
+The guidelines turn index is the same kind of projection (ADR-012 ruling 8,
+D7, A5 increment 2). `build_context` appends it, so `UserPromptSubmit`, the
+`SessionStart` greeting and `invariant context` carry the same lines.
+`core/rules.turn_guidelines` decides it: with no `guidelines.ruleset` it asks
+for nothing and reads nothing; otherwise it reads the state's roles from the
+machine the pipeline was started under, the session's declared plus changed
+files (`touched_paths`), the ruleset from the tree in hand and the pin, and
+asks `core/guidelines.select`. The pure renderer `render_turn_index` beside it
+writes ids and titles under one header, always rules first and listed
+whatever the phase and the files (the A5 ruling D12), capped at
+`guidelines.injection.max_lines` with one line naming the
+`invariant guidelines show` command that prints the rest. It carries no
+statement and no verdict standing (D10). No pipeline lists the always rules
+alone; a landing or abandon state lists nothing. A ruleset that does not load,
+a tree digest that differs from the pin (DN-6), and an exception inside the
+projection are one line each; an exception in the host's own step is silence.
 
 ## Where things live at rest
 

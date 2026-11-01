@@ -1852,8 +1852,95 @@ def touched_paths(ctx: RuleContext) -> tuple[str, ...]:
     whose rules it most needs. Empty when nothing could be established, which
     the selection reads as no file filter, the direction that hides no rule.
     """
-    files, gone = _changed_in_tree(ctx, _changed_set(ctx), guidelines_tree(ctx))
+    return _touched(ctx, _changed_set(ctx))
+
+
+def _touched(ctx: RuleContext, changed: _ChangedSet) -> tuple[str, ...]:
+    files, gone = _changed_in_tree(ctx, changed, guidelines_tree(ctx))
     return tuple(sorted({*files, *gone}))
+
+
+# -- the turn index (ADR-012 ruling 8, D7, the A5 rulings D1 to D3, D10, D12) ---------
+
+
+def turn_guidelines(
+    manifest: Manifest, context: Callable[[], RuleContext]
+) -> guidelines_reader.TurnIndex | None:
+    """What the turn projection says about the guidelines, as plain data.
+
+    ``None`` is silence: no ruleset (decided from the manifest alone, so no
+    file is read, no git is asked and ``context`` is never called), and a
+    pipeline in a landing or abandon state, where no agent works. With no
+    pipeline the index is the always rules alone. Otherwise the state's
+    roles are read from the machine the pipeline was started under, the
+    file scope is :func:`touched_paths`'s union (the A5 ruling D3), and
+    ``core/guidelines.select`` chooses over it. The always rules are listed
+    whatever the phase and the scope (D12). The ruleset is read from the
+    tree in hand. A pinned digest that differs from the tree's is carried
+    as ``pin`` (DN-6); a null pin, or none, compares against the tree's.
+
+    A ruleset that does not load, and any exception inside, is one
+    ``problem`` line, so a hook that asks this can never fail on it.
+    """
+    if not manifest.get("guidelines.ruleset"):
+        return None
+    try:
+        return _turn_guidelines(context())
+    except Exception as exc:  # noqa: BLE001 - a projection may never fail its hook
+        return guidelines_reader.TurnIndex(
+            problem=(
+                f"the turn index could not be computed ({type(exc).__name__}); "
+                f"invariant guidelines show prints the ruleset"
+            )
+        )
+
+
+def _turn_guidelines(ctx: RuleContext) -> guidelines_reader.TurnIndex | None:
+    pipeline = ctx.pipeline
+    roles: tuple[str, ...] = ()
+    if pipeline:
+        machine = load_pipeline_machine(ctx.manifest, pipeline.get("methodology") or None)
+        roles = tuple(machine.state(str(pipeline.get("state") or "")).roles)
+        phases = guidelines_reader.phases_for(roles)
+        if not phases:
+            return None
+        phase = next(
+            (role for role in roles if guidelines_reader.ROLE_PHASES.get(role)), "design"
+        )
+        show = f"invariant guidelines show --phase {phase} --touched"
+    else:
+        phases = ("always",)
+        show = "invariant guidelines show"
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return guidelines_reader.TurnIndex(
+            problem=f"{failure.message}; see invariant check guidelines.ruleset_valid"
+        )
+    always = tuple(rule for rule in ruleset.rules if "always" in rule.phases)
+    files: tuple[str, ...] = ()
+    unknown = False
+    chosen = always
+    if pipeline:
+        changed = _changed_set(ctx)
+        files = _touched(ctx, changed)
+        unknown = not files and not changed.answerable
+        chosen += tuple(
+            rule for rule in guidelines_reader.select(ruleset, roles, files)
+            if "always" not in rule.phases
+        )
+    pinned = (pipeline or {}).get("ruleset")
+    pin = pinned.get("digest") if isinstance(pinned, Mapping) else None
+    return guidelines_reader.TurnIndex(
+        source=guidelines_relpath(ctx, ctx.manifest.get("guidelines.ruleset")) or "",
+        digest=ruleset.digest,
+        total=len(ruleset.rules),
+        phases=phases,
+        rules=chosen,
+        files=files,
+        scope_unknown=unknown,
+        show=show,
+        pin=pin if pin and pin != ruleset.digest else None,
+    )
 
 
 # -- what `guidelines render` would write --------------------------------------

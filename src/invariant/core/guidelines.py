@@ -1629,6 +1629,80 @@ def render_selected(
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+# -- the turn index (ADR-012 ruling 8, D7, the A5 rulings D3, D10 and D12) ----------
+
+
+@dataclass(frozen=True)
+class TurnIndex:
+    """What the turn projection says about the guidelines, as plain data.
+
+    ``core/rules.turn_guidelines`` decides it and :func:`render_turn_index`
+    writes it. ``rules`` holds the always rules first, then the state's
+    other rules over the file scope, each in declared order. ``show`` is the
+    command that prints their full text. ``pin`` is the pipeline's pinned
+    digest when it differs from ``digest``, the tree's (DN-6). ``problem``
+    stands in for everything else: one line saying why there is no index.
+    """
+
+    source: str = ""
+    digest: str = ""
+    total: int = 0
+    phases: tuple[str, ...] = ()
+    rules: tuple[Guideline, ...] = ()
+    files: tuple[str, ...] = ()
+    #: The changed set could not be established and nothing was declared, so
+    #: the empty scope is the whole role index rather than an answer.
+    scope_unknown: bool = False
+    show: str = _SHOW
+    pin: str | None = None
+    problem: str | None = None
+
+
+def render_turn_index(index: TurnIndex, max_lines: int) -> list[str]:
+    """The turn index as plain lines, at most ``max_lines`` of them.
+
+    A header naming the phases, the ruleset and the file scope, then the
+    pin line when the tree's ruleset is not the pinned one, then one line
+    per rule: its id and title, an always rule marked as the managed block
+    marks it. Never a statement and never a verdict standing (D10). Past the
+    cap the last line counts the rules left out and names ``index.show``.
+    A problem is that one line alone. Nothing selected and nothing to say
+    is silence.
+    """
+    if index.problem is not None:
+        return [f"guidelines: {index.problem}"]
+    items = []
+    if index.pin is not None:
+        items.append(
+            f"- the ruleset in the tree ({index.digest}) is not the one this "
+            f"pipeline pinned ({index.pin}): a verdict is refused until they agree"
+        )
+    pinned = len(items)
+    items += [
+        f"- {rule.id} (always): {rule.title}" if "always" in rule.phases
+        else f"- {rule.id}: {rule.title}"
+        for rule in index.rules
+    ]
+    if not items:
+        return []
+    count = len(index.files)
+    if count:
+        scope = f"over {count} {'file' if count == 1 else 'files'}"
+    elif index.scope_unknown:
+        scope = "with no file filter, since the changed files could not be established"
+    else:
+        scope = "with no file filter"
+    header = (
+        f"guidelines for {', '.join(index.phases)} from {index.source} "
+        f"(ruleset {index.digest}): {len(index.rules)} of {index.total} rules, {scope}"
+    )
+    if 1 + len(items) <= max_lines:
+        return [header, *items]
+    kept = items[: max(max_lines - 2, 0)]
+    left = len(index.rules) - max(len(kept) - pinned, 0)
+    return [header, *kept, f"- {left} more: {index.show}"]
+
+
 # -- the baseline (D6) ------------------------------------------------------------
 #
 # The ratchet's record of pre-existing findings, one entry per line:
