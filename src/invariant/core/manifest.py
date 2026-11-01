@@ -328,7 +328,14 @@ DEFAULTS: dict[str, Any] = {
             "backlog-curator",
             "bug-reproducer",
         ],
+        # Project-owned agents the library never touches. A name may not also
+        # be in `library`: an agent is the library's or the project's.
         "local": [],
+        # Agent name -> overlay path, project-relative (ADR-012 D8, A6.3). A
+        # path is read only when it is named here: docs/agents/<name>.yaml is
+        # the documented convention, never an implicit default (ruling 6).
+        # Each must name an agent in `library`.
+        "overlays": {},
         # Which agents satisfy which pipeline role. Installing an agent does
         # not make anything use it, so this mapping is what the agent-role
         # gates read. A role left empty makes its gate "not applicable" rather
@@ -373,6 +380,10 @@ DEFAULTS: dict[str, Any] = {
         "verdicts": {"note_max_chars": 280},
     },
 }
+
+#: The `agents` keys this build reads, and the ones refused with a reason.
+_AGENTS_KEYS = ("library", "local", "roles", "overlays")
+_AGENTS_LATER = {"tiers": "capability tiers arrive with A7 (ADR-012 D9)"}
 
 #: The `guidelines` keys this build reads.
 _GUIDELINES_KEYS = (
@@ -582,6 +593,7 @@ class Manifest:
         self._validate_ecosystem_commands()
         self._validate_freshness_level()
         self._validate_guidelines()
+        self._validate_agents()
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -827,6 +839,72 @@ class Manifest:
                 f"guidelines.verdicts.note_max_chars must be a positive integer, "
                 f"got {note_cap!r}"
             )
+
+    def _validate_agents(self) -> None:
+        """Refuse an `agents` key that would load and do nothing (ADR-012 D13).
+
+        `library` and `local` are lists of agent names, each named once, and
+        no name in both: the renderer installs `library` and never touches
+        `local` (the A6 ruling 11). `overlays` maps a `library` agent to a
+        path. Where that path points, and what the overlay says, is checked
+        by the install that reads it, against the tree in hand.
+        """
+        section = self.data.get("agents")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"agents must be a mapping, got {section!r}")
+        for key in section:
+            if key in _AGENTS_LATER:
+                raise ManifestError(
+                    f"agents.{key} is not read by this build: {_AGENTS_LATER[key]}."
+                )
+            if key not in _AGENTS_KEYS:
+                raise ManifestError(
+                    f"agents.{key} is not a key this build reads; it reads "
+                    f"{', '.join('agents.' + k for k in _AGENTS_KEYS)}."
+                )
+        names: dict[str, list[str]] = {}
+        for key in ("library", "local"):
+            value = section.get(key)
+            if not isinstance(value, list) or not all(_is_path(n) for n in value):
+                # A bare string is refused rather than read as one name: the
+                # AUD-08 precedent for every list a manifest declares.
+                raise ManifestError(
+                    f"agents.{key} must be a list of agent names, got {value!r}"
+                )
+            twice = sorted({n for n in value if value.count(n) > 1})
+            if twice:
+                raise ManifestError(f"agents.{key} names {', '.join(twice)} twice")
+            names[key] = value
+        both = [n for n in names["local"] if n in names["library"]]
+        if both:
+            raise ManifestError(
+                f"agents.local names {both[0]!r}, which agents.library also names; "
+                f"an agent is the library's or the project's, never both. Remove it "
+                f"from agents.library to own it, or from agents.local to install ours."
+            )
+        overlays = section.get("overlays")
+        if not isinstance(overlays, Mapping):
+            raise ManifestError(
+                f"agents.overlays must be a mapping of agent name to overlay path, "
+                f"got {overlays!r}"
+            )
+        for name, path in overlays.items():
+            if not _is_path(path):
+                raise ManifestError(
+                    f"agents.overlays.{name} must be a path, got {path!r}; by "
+                    f"convention docs/agents/{name}.yaml"
+                )
+            if name in names["local"]:
+                raise ManifestError(
+                    f"agents.overlays names {name!r}, a project-local agent; an "
+                    f"overlay amends a library agent, so edit it directly instead."
+                )
+            if name not in names["library"]:
+                raise ManifestError(
+                    f"agents.overlays names {name!r}, which is not in agents.library "
+                    f"({', '.join(names['library']) or 'empty'}); add it there, or "
+                    f"remove the overlay."
+                )
 
     def scheduled_gates(self) -> frozenset[str]:
         """The gates a sweep cadence has moved off the per-change path.

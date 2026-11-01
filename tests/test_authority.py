@@ -33,6 +33,18 @@ from invariant.domains.session import SessionDomain
 HOST = "host-authority-0001"
 
 
+def one_digest_copy(text):
+    """A copy as A6.1 or A6.2 installed it: a one-digest marker holding the
+    digest of the very text written. A6.3 writes three, and must still read
+    these with no history (the A6 ruling 1)."""
+    from invariant.hosts import assets
+
+    front, body = assets.split_frontmatter(text)
+    marker = f"{assets.MARKER_PREFIX} {assets.digest_of(text)}"
+    return "\n".join([assets.FENCE, marker, *front, assets.FENCE, body])
+
+
+
 def run(*argv) -> int:
     return main(list(argv))
 
@@ -671,7 +683,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         shipped = assets.reconstruct_source(target.read_text(encoding="utf-8"))
         older = shipped + "\nWording an earlier release shipped.\n"
         target.write_text(
-            assets.render_managed(older, assets.digest_of(older)), encoding="utf-8"
+            one_digest_copy(older), encoding="utf-8"
         )
         capsys.readouterr()
 
@@ -789,7 +801,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
         target = project / ".claude" / "agents" / "feature-architect.md"
         shipped = assets.reconstruct_source(target.read_text(encoding="utf-8"))
         older = shipped + "\nWording an earlier release shipped.\n"
-        text = assets.render_managed(older, digest_of(older))
+        text = one_digest_copy(older)
         assert assets.marker_digest(text) != digest_of(shipped)
         if edited:
             text += f"\n{self.MARK}\n"

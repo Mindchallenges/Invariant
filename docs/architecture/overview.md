@@ -61,7 +61,7 @@ graph TD
         CGUIDE["guidelines (ADR-012 D3)"]
         CFIND["findings (ADR-012 D4, A3.3)"]
         CVERD["verdicts (ADR-012 D5, A4.1 to A4.7)"]
-        CAGENTS["agents (ADR-012 D8, A6.2)"]
+        CAGENTS["agents (ADR-012 D8, A6.2, A6.3)"]
     end
 
     subgraph domains["domains/ — the seven state domains"]
@@ -231,7 +231,10 @@ graph TD
     MANIFEST --> adapters
     PIPELINE --> adapters
     CC -- reads the sources --> AGENTS
-    CC -- "parse, AgentSource: render_agent and plan_assets render every agent" --> CAGENTS
+    CC -- "parse, merge, AgentSource: plan_assets renders every agent with its overlay" --> CAGENTS
+    CC -- "agents.library, agents.overlays; project_relative" --> MANIFEST
+    CC -- "the overlay's privacy scan" --> PRIVACY
+    CC -- "is_exempt_path: an overlay is policy (D10)" --> RULES
     CLI -- "AgentSource, for agents show and its section list" --> CAGENTS
     CAGENTS -- the neutral format it parses --> AGENTS
     CLI --> SCAFFOLD
@@ -286,6 +289,16 @@ line, the section anchors are dropped, and no model line is written.
 installed copy against the render. `CLI --> CAGENTS` is `agents show`, which
 prints the render or, with `--sections`, the source's anchor ids.
 `core/agents` imports no host, which `tests/test_agents.py` scans for.
+
+A6 increment 3 adds the overlay. `core/agents.merge` applies a project's
+overlay, whose text the host reads and hands in, to the parsed source, so
+the merge stays pure. The host now takes the manifest: `CC --> MANIFEST` is
+`agents.library`, the list an install covers, `agents.overlays`, and
+`project_relative`, which refuses an overlay path outside the project.
+`CC --> RULES` gains `is_exempt_path`, the isolation rule's own question,
+because an overlay is policy and may not be exempt (ADR-012 D10).
+`CC --> PRIVACY` is the scan of the merged text, which refuses only what
+the overlay brings.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1264,7 +1277,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `guidelines` | The project's guidelines ruleset (ADR-012 D3): schema version 1, the model (`Ruleset`, `Section`, `Guideline`, `Check`, exceptions and amendments), the validation that collects every problem and refuses the ruleset whole, the sub-schemas of all five check kinds and which engines this build accepts, reading and validating the registry files a `cochange` rule names (`Registry`), and the content hash (`digest_of`, twelve hex); the generated checklist's text in each `docs.format` (`render_checklist`), its managed marker and reading one back (`split_managed`); the managed instruction-file block (`render_index_block`), its begin/end markers, finding the pairs and refusing a malformed one by line (`find_blocks`, `BlockError`), the three-way state (`block_state`), and rewriting or appending one (`replace_block`, `append_block`); the ratchet baseline's format (`BaselineEntry`, `parse_baseline`, `render_baseline`, and `baseline_rule_problems` against a ruleset), refused whole by line (`BaselineError`); what a rule's findings depend on, compared structurally between two copies of it (`definition_of`, DN-6); `parse` takes a `read` callable for a ruleset read as a revision held it; the one reading of whether a file brings a rule into play (`matches`, `path_exception`, `meets`, A4's DN-3, moved here in A5 increment 1); phase-scoped selection (ADR-012 D7, A5 increment 1): the state roles each rule phase reaches (`ROLE_PHASES`, `BUILD_PHASES`, `phases_for`: design and always for a design state and for a state carrying none of the selection's roles, review, landing and always for a review state, nothing for a landing or abandon state, the union over several roles), `select(ruleset, roles, paths)`, pure, filtering by `meets` with empty paths meaning no file filter, and `render_selected`, the selected rules' full text through the checklist's own per-rule writer; the injected texts' plain data and pure renderers (the A5 ruling D8): the turn index (`TurnIndex`, `render_turn_index`, A5.2) and what an edit carries (`AdvisedFinding`, `EditAdvisory`, `EditGuidelines`, `render_advisory`, moved down from the host, and `render_edit`, the findings then the statements under one cap, A5.3) | Import `core/rules` (the registered ids are a parameter); evaluate a check; write a file (`domains/guidelines` does), or decide where one goes (`core/rules`' render plan does); decide where the ruleset lives (the manifest says, and `core/rules` reads it) |
 | `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames; a judgement rule's mechanical N/A conditions (`na_answer`, `NaAnswer`, A4 increment 2), `no_added_match` and `no_executable_change` over the rule's files, read through `core/guidelines`' `meets` (A4's DN-3) | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, the acting agent the host stamps, and `token`, the submission's, each written only when set and both dropped by `resubmitted`, A4 increment 8); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused; each refused line as a `Refusal` naming its predicate, entry and rule apart from the prose, and `PREDICATES`, every name a refusal gives (A4 increment 7); for `guidelines.verdicts_complete` (A4 increment 3), the owed rules (`owed`, over `not_owed`, the one reading of why a rule is or is not owed), a record read back as a submission (`resubmitted`) and each owed rule's `Standing` (`standings`: current, missing, stale, or answered by the engine's N/A, a pass or fail on it set aside); for `guidelines verdicts show` (A4 increment 4), the recorded verdicts on rules no longer owed (`unowed`) | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
-| `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `tier`, `model`, `tools` and `roles` refused by name | Know a host or its tool names; read a file (the caller hands it the text); render a host's file (that is `hosts/`) |
+| `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `tier`, `model`, `tools` and `roles` refused by name. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`) | Know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
@@ -1596,6 +1609,18 @@ it: `CAPABILITY_TOOLS` maps each capability to tools, `TOOL_ORDER` fixes the
 plus the question tool, is what a test lints the neutral sources for, so this
 host's words stay out of them (ADR-012, "As built: A6 increment 2").
 
+A project amends a library agent with an overlay rather than an edited copy
+(ADR-012, "As built: A6 increment 3"). The plan installs what
+`agents.library` lists and never touches `agents.local`. For each agent it
+reads the overlay `agents.overlays` names, refusing a path outside the
+project, exempt from isolation or naming no file, has `core/agents.merge`
+apply it, scans the merged text, and renders that. Every refusal is raised
+while the plan is built, so nothing is written. The marker records three
+digests: the source's, the overlay's and the body's own, the witness the
+classifier reads. A stale copy's install names which input moved, the
+library, the overlay or the renderer (`assets.changed_input`), and an edited
+copy is skipped with the fix to move the edit into an overlay.
+
 `claude_code_telemetry` is a second, deliberately separate module for the same
 host. It is a different relationship: `claude_code` *drives* the host through
 hooks and installed assets, while this one *reads back* what the host already
@@ -1877,12 +1902,16 @@ turn layer then carries them.
     hooks/                  thin shims that exec the CLI
     agents/                 \
     commands/                > managed host assets: library copies carry an
-    skills/<name>/SKILL.md  /  in-frontmatter content hash; project-owned files
-                               are checked for LOADABILITY but never for drift
+    skills/<name>/SKILL.md  /  in-frontmatter marker (source, overlay and body
+                               digests); project-owned files are checked for
+                               LOADABILITY but never for drift
   docs/                     architecture docs the docs-first gate reads.
     architecture/           `init` scaffolds overview.md here ONLY when the
                             directory is absent — once, and no command
                             rewrites it afterwards; the file is the project's
+    agents/<name>.yaml      by convention, an agent overlay agents.overlays
+                            names (ADR-012 D8); never read unless named, and
+                            never exempt from isolation
     conf.py                 Sphinx config (MyST + mermaid); renders docs/ as
                             one site — architecture, ADRs, audits. `docs/_build/`
                             is gitignored: the site is derived, not committed.

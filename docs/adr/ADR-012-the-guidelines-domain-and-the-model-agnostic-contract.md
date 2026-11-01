@@ -2889,6 +2889,91 @@ overlays.
   `agents show`. `tests/test_assets.py` ships a neutral agent in its
   every-kind library.
 
+**As built: A6 increment 3, overlays and the agents keys.** Built to D8
+("Overlays replace edited copies"), D10 (an overlay is policy), D13's
+`agents.overlays`, and the A6 rulings 1, 4, 5, 6 and 11.
+
+- *The keys (rulings 6 and 11).* `agents.overlays` maps a library agent's
+  name to an overlay path, relative to the project. A path is read only when
+  it is named: `docs/agents/<name>.yaml` is the documented convention and
+  never an implicit default. `agents.library` is the list an install covers,
+  and `agents.local` the project's own agents, which no install, `doctor`
+  row or `uninstall --remove-assets` touches. At load, `Manifest.validate`
+  refuses an `agents` key it does not read (`agents.tiers` by name, until
+  A7), a `library` or `local` that is not a list of names or names one
+  twice, a name in both, an `overlays` that is not a mapping of name to
+  path, and an overlay on an agent outside `library` (on a `local` agent,
+  with the fix to edit it directly). A `library` name the library does not
+  ship is refused by the install, naming the ones it does. With no manifest
+  (`init`), every shipped agent is installed and no overlay is read.
+- *The overlay format (rulings 4 and 5).* A YAML mapping of `version: 1` and
+  an ordered `operations` list. Each entry is one of `append: <id>` with
+  `text`, which adds to the section's end; `insert_after: <id>` with a new
+  `id` and `text`, which adds a section with its own anchor that a later
+  operation can target; `replace: <id>` with `text`; and
+  `description_append`, one line added to the description. A section's
+  separator, its trailing blank and `---` lines, stays put: an append lands
+  before it, a replace keeps it, and an inserted section copies its
+  anchor's. Nothing else may change. `capabilities`, `model`, `tools`,
+  `tier`, `name` and `roles` are refused by name, at the top level or as an
+  operation.
+- *`core/agents.merge` (pure).* It takes a parsed source and the overlay's
+  text, which the host reads and hands in. It refuses the overlay whole
+  (`OverlayError`), each problem an `OverlayProblem` with its fix, in
+  operation order: text that is not YAML or not a mapping; no or another
+  version; no operations; an unknown key or operation, or two in one entry;
+  a missing or non-string text or anchor; text carrying a section anchor
+  (the fix is `insert_after`); a malformed or missing inserted id; a
+  `description_append` that is not one line; an anchor the agent does not
+  carry, naming the nearest real one or else listing them all; and an
+  inserted id that collides with a section, one inserted earlier included.
+- *The host's refusals (D10).* `ClaudeCodeHost` now takes the manifest.
+  Before merging it refuses an overlay path outside the project, one exempt
+  from session isolation (an exempt overlay would land on the base branch
+  unreviewed, as D10 says of the ruleset), and one naming no file. After
+  merging, the privacy scan reads the rendered text, whatever
+  `privacy.scope` says, since it is about to be written into the project.
+  Only what the overlay brings counts; a finding already in the shipped
+  render is the library's. Every refusal is raised while the plan is built,
+  so nothing is written, by either install command. `doctor` reports it on
+  the `library agents current` row with its fix rather than failing to run.
+- *The three-digest marker (ruling 1).* An install writes
+  `# invariant-managed: source=<d> overlay=<d|none> body=<d>`: the neutral
+  source's digest, the overlay's, and the rendered text's own, its witness.
+  `assets.classify` is unchanged: it reads only the witness, so a copy any
+  release wrote classifies with no history. A one-digest marker from A6.1 or
+  A6.2 is that witness alone (`Marker.legacy`), and the matrix of both forms,
+  each current, stale and edited, is tested. A body that no longer matches
+  its witness is `edited locally`, skipped and named with the fix "move the
+  edit into an overlay", in both install commands, their dry runs and the
+  `doctor` row.
+- *Which input changed.* For a stale copy, `assets.changed_input` reads the
+  marker against today's two input digests: the library changed, the
+  overlay changed (added, edited or removed), both, or, where neither moved,
+  the renderer. A one-digest marker records no inputs. An overlay configured
+  now is a change, since no release before this one wrote an overlay;
+  otherwise it says it cannot tell the library from the renderer. `agents
+  install` prints `updated <name> — <input>` for each rewrite, and `assets
+  install` and both dry runs append `— <input>` to the target's line. The
+  JSON carries it as `changed`.
+- *`agents show`* prints the agent as the install would write it, overlay
+  applied, and `--sections` lists the merged ids, inserted ones included.
+- *An install from before A6.3.* Every copy A6.2 wrote carries a one-digest
+  marker matching its body, so it reads as current where the render is
+  unchanged and is rewritten with the three-digest marker on the next
+  install. This repository's manifest does not set `agents.overlays`: the
+  installed build would refuse a key it does not read (BUG_050).
+- *Tests.* `tests/test_agents.py` covers the merge, each operation and every
+  refusal. `tests/test_assets.py` covers the marker, its legacy read, the
+  migration matrix, and `changed_input` for each input.
+  `tests/test_agent_overlays.py` drives a project through the CLI: the
+  overlay installed and recorded, each input named on a rewrite, the
+  one-digest copies, an edited copy kept and named with the overlay fix,
+  `agents.library` and `agents.local`, and each refusal writing nothing.
+  `tests/test_manifest.py` covers the keys' validation. The A6.1-era copies
+  in `tests/test_authority.py` and `tests/test_agent_rendering.py` are now
+  written as one-digest markers explicitly.
+
 ### D9 — Capability tiers are hints, never gates (A7)
 
 `agents.tiers` maps an agent to `light`, `standard` or `deep`. The tier is

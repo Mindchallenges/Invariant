@@ -315,20 +315,30 @@ invariant assets install [--kind ...] [--overwrite-local] [--dry-run]
     `uninstall --remove-assets` read it too, so no two of them can classify
     one target differently.
 
+    Each rewritten stale copy says which input moved: `agent:<name> — the
+    overlay changed` (or the library, both, or the renderer; see "A managed
+    file the operator has edited" below), and --dry-run appends the same to
+    the target's line. --json carries it as `changed`. A skipped agent adds
+    the hint to move the edit into an overlay.
+
 invariant agents list
     Every library agent: installed or not, whether the host can load it, and
-    which pipeline role it answers for.
+    which pipeline role it answers for. The library is the manifest's
+    agents.library (ADR-012, the A6 ruling 11).
 
 invariant agents show <name> [--sections]
     One library agent as the host would install it, without the marker an
     install adds. Writes nothing. The text is the host adapter's render of
-    the agent's host-neutral source (ADR-012 D8, A6 increment 2): for Claude
+    the agent's host-neutral source (ADR-012 D8, A6 increment 2) with the
+    project's overlay applied (agents.overlays, A6 increment 3): for Claude
     Code, the capabilities as a `tools:` line, the section anchors dropped,
     and no model line. Printed byte for byte, so it can be redirected and
-    diffed against an installed copy. --sections lists the source's section
-    anchors instead, in order: the ids an overlay can target. A name the
-    library does not ship is refused naming the ones it does, exit 2, and
-    the host is the manifest's host.kind, as for the other agent commands.
+    diffed against an installed copy. --sections lists the section anchors
+    instead, in order, those an overlay inserts included: the ids an overlay
+    can target. A name the library does not ship is refused naming the ones
+    it does, exit 2, and the host is the manifest's host.kind, as for the
+    other agent commands. An overlay that does not apply is refused as the
+    install refuses it.
 
 invariant agents install [--overwrite-local] [--dry-run]
     Reinstall the library agents and nothing else. Deliberately not a flag on
@@ -339,6 +349,24 @@ invariant agents install [--overwrite-local] [--dry-run]
     that command's plan and writer narrowed to agents, and its loadable row
     is `doctor`'s row, naming `agents install` as the repair; it once kept a
     classifier loop, a writer and a check of its own.
+
+    It installs what agents.library lists, and never touches an agent in
+    agents.local. Each agent is rendered with its overlay, if
+    agents.overlays names one (ADR-012 D8, A6 increment 3; manifest.md,
+    "Agents: the library, the project's own, and overlays"). Each rewritten
+    stale copy is named with the input that moved, `updated <name> — the
+    overlay changed`, and --dry-run says the same. An edited copy is skipped
+    and named, with the fix to move the edit into an overlay.
+
+    A bad overlay is refused before anything is written, exit 1, by this
+    command and by `assets install`, naming each problem with its fix: an
+    unknown key or operation; an anchor the agent does not carry, with the
+    nearest real one; an inserted id that is already a section; an overlay
+    path outside the project, exempt from session isolation (an overlay is
+    policy, ADR-012 D10) or naming no file; and a privacy finding the
+    overlay brings into the merged text. So is an agents.library name the
+    library does not ship. `doctor` reports the refusal on its `library
+    agents current` row rather than failing to run.
 
 invariant config show [--provenance]
     Print resolved configuration and where each value came from.
@@ -367,6 +395,17 @@ render of its host-neutral source, so an installed copy is judged against
 the render, and a copy an earlier release wrote reads as older, not edited,
 when only the format moved (ADR-012, A6 increment 2).
 
+Since A6 increment 3 the marker records three digests (ADR-012, the A6
+ruling 1): `source=<d> overlay=<d|none> body=<d>`, the neutral source's,
+the overlay's, and the rendered body's own. The body digest is the witness,
+and the classifier reads nothing else, so a one-digest marker an earlier
+release wrote, which is that witness alone, classifies the same way with no
+history. The other two say which input a stale copy answers to: the library
+changed, the overlay changed (added, edited or removed), both, or, where
+neither moved, the renderer. A one-digest marker records no inputs, so it is
+"the overlay changed" when one is configured now, and otherwise says it
+cannot tell the library from the renderer.
+
 ```mermaid
 graph TD
     T["an installed asset"] --> A{"is it there, with<br/>frontmatter on line 1?"}
@@ -377,8 +416,10 @@ graph TD
     E -- no --> M{"does its body still hash<br/>to its own marker's digest?"}
     M -- "no, or it has no marker:<br/>it changed after it was written" --> L["edited locally: the operator's work,<br/>whichever release installed it"]
     M -- "yes: some release wrote it<br/>and nobody touched it" --> O["installed from an older version"]
-    L --> S["skipped, and NAMED"]
+    L --> S["skipped, and NAMED, with the fix:<br/>move the edit into an overlay"]
     O --> W["rewritten; this is what<br/>the command exists for"]
+    W --> I{"which input moved?<br/>the marker against today's digests"}
+    I --> IN["named: the library, the overlay,<br/>both, or the renderer"]
 ```
 
 The witness question is the second rule. The first asked whether the
@@ -396,8 +437,12 @@ per-asset skip, no backup, and a `--dry-run` that named nothing it would
 flatten. The knowledge needed to protect the edit existed; the code that acted
 on it did not (BUG_051).
 
-Three consequences are load-bearing:
+Four consequences are load-bearing:
 
+- **An agent edit belongs in an overlay.** An edited agent copy is kept, and
+  the skip, the dry run and the `doctor` row each name the fix: move the
+  edit into an overlay (`agents.overlays`), which every upgrade re-applies,
+  then take the shipped version back with `--overwrite-local`.
 - **A skip is named, never counted.** The defect was an install reporting a
   tidy total while a flattened file went unmentioned; a skip nobody can see is
   the same fault with the opposite sign.

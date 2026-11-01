@@ -71,6 +71,16 @@ _UNSET = object()
 #: install leaves a file alone, because a skip the operator cannot reverse is
 #: only half an improvement on a write they could not prevent.
 _OVERWRITE_LOCAL_HINT = "  pass --overwrite-local to replace them with the shipped version"
+#: Said beside a skipped agent (ADR-012 D8): an overlay survives an upgrade.
+_OVERLAY_HINT = (
+    "  to keep an agent edit, move the edit into an overlay (agents.overlays), "
+    "then pass --overwrite-local"
+)
+
+
+def _because(why: str | None) -> str:
+    """The suffix naming which input a stale copy's rewrite answers to."""
+    return f" — {why}" if why else ""
 
 
 def emit(args, payload: dict, text: str = "") -> int:
@@ -801,7 +811,7 @@ def cmd_doctor(args) -> int:
         for label, ok, detail in get_adapter(ctx.manifest.ecosystems[0]).self_check():
             checks.append((label, ok, detail))
 
-        host = ClaudeCodeHost(ctx.manifest.root)
+        host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
         for label, ok, detail in host.verify():
             checks.append((label, ok, detail))
 
@@ -1150,8 +1160,9 @@ def cmd_uninstall(args) -> int:
     from ..hosts.claude_code import ClaudeCodeHost
 
     ctx = Context(required=False)
-    root = ctx.manifest.root if ctx.manifest.path.is_file() else ctx.cwd
-    host = ClaudeCodeHost(root)
+    loaded = ctx.manifest.path.is_file()
+    root = ctx.manifest.root if loaded else ctx.cwd
+    host = ClaudeCodeHost(root, manifest=ctx.manifest if loaded else None)
 
     plan = host.plan_uninstall(
         remove_assets=args.remove_assets, remove_manifest=args.remove_manifest
@@ -1216,7 +1227,7 @@ def _asset_host(ctx: Context, verb: str):
 
     kind = ctx.manifest.get("host.kind")
     if kind == "claude_code":
-        return ClaudeCodeHost(ctx.manifest.root)
+        return ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
     raise UsageError(
         f"{verb} works through a host adapter, and this project's host.kind is "
         f"{kind!r}, which has none in this release; 'claude_code' is the only one"
@@ -1276,9 +1287,13 @@ def cmd_assets_install(args) -> int:
         lines = [f"would install into {host.claude_dir}:"]
         for step in plan:
             verb = "install" if step.write else "SKIP   "
-            lines.append(f"  {verb} {step.kind}:{step.identity} ({step.state})")
+            lines.append(
+                f"  {verb} {step.kind}:{step.identity} ({step.state})" + _because(step.why)
+            )
         if any(not step.write for step in plan):
             lines.append(_OVERWRITE_LOCAL_HINT)
+        if any(not step.write and step.kind == "agent" for step in plan):
+            lines.append(_OVERLAY_HINT)
         return emit(
             args,
             {
@@ -1290,6 +1305,7 @@ def cmd_assets_install(args) -> int:
                         "state": s.state,
                         "write": s.write,
                         "target": str(s.target),
+                        "changed": s.why,
                     }
                     for s in plan
                 ],
@@ -1303,8 +1319,9 @@ def cmd_assets_install(args) -> int:
         for label, ok, detail in host.asset_checks()
         if not ok and "loadable" in label
     ]
+    changed = dict(result.changed)
     lines = [f"installed {len(result.installed)} asset(s)"]
-    lines += [f"  {i}" for i in result.installed]
+    lines += [f"  {i}" + _because(changed.get(i)) for i in result.installed]
     # Named, never counted. The whole defect was an install that reported a
     # tidy total while a file it had flattened went unmentioned; a skip nobody
     # can see is the same fault with the opposite sign.
@@ -1312,6 +1329,8 @@ def cmd_assets_install(args) -> int:
         lines.append(f"  skipped {label} ({why})")
     if result.skipped:
         lines.append(_OVERWRITE_LOCAL_HINT)
+    if any(label.startswith("agent:") for label, _ in result.skipped):
+        lines.append(_OVERLAY_HINT)
     for label, detail in failures:
         lines.append(f"  STILL BROKEN — {label}: {detail}")
     if not failures:
@@ -1320,6 +1339,7 @@ def cmd_assets_install(args) -> int:
         args,
         {
             "installed": result.installed,
+            "changed": changed,
             "skipped": [{"asset": a, "why": w} for a, w in result.skipped],
             "loadable": not failures,
         },
@@ -1405,9 +1425,10 @@ def cmd_agents_install(args) -> int:
         lines = [f"would install into {agents_dir}:"]
         for step in plan:
             verb = "install  " if step.write else "SKIP     "
-            lines.append(f"  {verb} {step.identity} ({step.state})")
+            lines.append(f"  {verb} {step.identity} ({step.state})" + _because(step.why))
         if any(not step.write for step in plan):
             lines.append(_OVERWRITE_LOCAL_HINT)
+            lines.append(_OVERLAY_HINT)
         return emit(
             args,
             {
@@ -1429,16 +1450,26 @@ def cmd_agents_install(args) -> int:
         )
     }
     ok, detail = checks[CHECK_AGENTS_LOADABLE]
+    changed = {label.partition(":")[2]: why for label, why in result.changed}
     lines = [f"installed {len(installed)} agent(s) into {agents_dir}"]
+    # Which input moved, for each stale copy rewritten: the library, the
+    # overlay or the renderer (the A6 ruling 1).
+    lines += [f"  updated {name}" + _because(why) for name, why in changed.items()]
     lines += [f"  skipped {name} ({why})" for name, why in skipped]
     if skipped:
         lines.append(_OVERWRITE_LOCAL_HINT)
+        lines.append(_OVERLAY_HINT)
     lines.append(f"  {detail}")
     if ok:
         lines.append("  reload the host's configuration for it to pick them up")
     emit(
         args,
-        {"installed": installed, "skipped": [name for name, _ in skipped], "loadable": ok},
+        {
+            "installed": installed,
+            "changed": changed,
+            "skipped": [name for name, _ in skipped],
+            "loadable": ok,
+        },
         "\n".join(lines),
     )
     return EXIT_OK if ok else 1

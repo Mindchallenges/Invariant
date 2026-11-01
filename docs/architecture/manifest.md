@@ -163,7 +163,16 @@ privacy:
 
 agents:
   library: [feature-architect, compliance-reviewer, backlog-curator, bug-reproducer]
-  local: []                    # project-owned agents the library leaves alone
+                               # what an install covers (ADR-012, the A6
+                               # ruling 11); a name the library does not ship
+                               # is refused by the install
+  local: []                    # project-owned agents no install touches; a
+                               # name may not also be in library
+  overlays: {}                 # library agent -> overlay path, relative to the
+                               # project (ADR-012 D8). Read only when named: by
+                               # convention docs/agents/<name>.yaml, never an
+                               # implicit default (ruling 6). Never exempt from
+                               # isolation (D10)
   roles:                       # which agent answers for which pipeline role
     design: [feature-architect]
     review: [compliance-reviewer]
@@ -226,6 +235,53 @@ level comes from the profile, warn in `loose` and `standard` and block in
 `strict` (ruling 7), and `enforcement.rules` raises it. A manifest naming it
 loads only on a build that registers it, so a project raises it after the
 build that ships the gate is installed.
+
+### Agents: the library, the project's own, and overlays
+
+`agents.library` lists the shipped agents an install writes (ADR-012, the A6
+ruling 11, A6 increment 3): `init`, `agents install`, `assets install`,
+`doctor`'s agent rows and `uninstall --remove-assets` all read that list
+through the one install plan. Leaving a shipped agent out means the library
+stops managing it, and `doctor` no longer reports it absent. `agents.local`
+names the project's own agents; nothing the library runs touches them, so a
+project can drop a shipped agent from `library` and own one of that name
+under `local`.
+
+`agents.overlays` amends a library agent without editing its installed copy
+(ADR-012 D8, the A6 rulings 4 to 6). Each entry maps an agent to a YAML file
+in the project, read only because it is named there; `docs/agents/<name>.yaml`
+is the convention, and no location is read by default. The file is a
+`version: 1` mapping with an ordered `operations` list, each against a
+section anchor (`invariant agents show <name> --sections` lists them):
+
+```yaml
+version: 1
+operations:
+  - append: phase-1            # to the section's end
+    text: |
+      Also read docs/architecture/payments.md.
+  - insert_after: phase-2      # a new section with its own anchor
+    id: house-rules
+    text: |
+      ## House rules
+      ...
+  - replace: phase-8
+    text: |
+      ...
+  - description_append: Also files work items.
+```
+
+An overlay changes body sections and the description and nothing else, so
+`capabilities`, `model`, `tools`, `tier`, `name` and `roles` are refused by
+name. It is policy (ADR-012 D10), so a path exempt from session isolation is
+refused like one outside the project. The install refuses a bad overlay
+before writing anything, naming each problem with its fix: an unknown key or
+operation, an anchor the agent does not carry (naming the nearest real one),
+an inserted id that is already a section, a missing file, and a privacy
+finding in the merged text. The installed file's marker records the source's
+digest, the overlay's and the body's own, so an install says which of the
+library, the overlay or the renderer moved (cli.md, "A managed file the
+operator has edited").
 
 ### Generated files are declared, and never exempt
 
@@ -1165,6 +1221,15 @@ way: `session.work_would_be_stranded`, `session.deliverables_complete` and
 `session.branch_is_current` each need its terminal set to know whether the
 session is still in flight, and each FAILS when it cannot be loaded, because a
 skip on a rule a project holds at `block` reads as a pass.
+
+`agents` must be a mapping whose keys this build reads (`library`, `local`,
+`roles` and `overlays`; `tiers` is refused by name until A7 builds it).
+`library` and `local` are each a list of agent names, none named twice and
+none in both; a bare string is refused. `overlays` is a mapping of agent name
+to a non-empty path, and each name must be in `library`: an overlay on a
+`local` agent is refused with the fix to edit that agent directly. Where an
+overlay points, and what it says, is checked by the install that reads it,
+against the tree in hand, not at load.
 
 ### An override either takes effect or says it did not
 

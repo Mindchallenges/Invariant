@@ -219,3 +219,243 @@ class TestCoreAgentsIsHostAgnostic:
             for alias in node.names
         }
         assert not names & {"os", "subprocess", "pathlib", "Path", "open"}
+
+
+# -- overlays (ADR-012 D8, the A6 rulings 4 and 5, A6 increment 3) ----------
+
+#: GOOD with the separator the shipped sources carry between sections.
+RULED = (
+    "---\n"
+    "name: thing\n"
+    "description: Does a thing.\n"
+    "capabilities: [read]\n"
+    "---\n"
+    "<!-- invariant:section intro -->\n"
+    "Intro.\n"
+    "\n"
+    "---\n"
+    "\n"
+    "<!-- invariant:section phase-1 -->\n"
+    "## Phase 1\n"
+    "\n"
+    "Read.\n"
+    "\n"
+    "---\n"
+    "\n"
+    "<!-- invariant:section phase-2 -->\n"
+    "## Phase 2\n"
+    "\n"
+    "Plan.\n"
+)
+
+
+def overlay(*operations, version=1):
+    import yaml
+
+    return yaml.safe_dump({"version": version, "operations": list(operations)})
+
+
+def merged(text, *operations):
+    return agents.merge(parse(text, "thing"), overlay(*operations))
+
+
+def refusals(text, overlay_text):
+    with pytest.raises(agents.OverlayError) as exc:
+        agents.merge(parse(text, "thing"), overlay_text)
+    return exc.value.problems
+
+
+class TestAnOverlayMerges:
+    def test_no_overlay_is_the_source_unchanged(self):
+        source = parse(RULED, "thing")
+        assert agents.merge(source, None) is source
+
+    def test_append_adds_to_the_sections_end_before_its_separator(self):
+        body = merged(RULED, {"append": "phase-1", "text": "Also this.\n"}).body()
+        assert "Read.\n\nAlso this.\n\n---\n\n## Phase 2" in body
+
+    def test_append_to_the_last_section_keeps_the_final_newline(self):
+        body = merged(RULED, {"append": "phase-2", "text": "And this."}).body()
+        assert body.endswith("Plan.\n\nAnd this.\n")
+
+    def test_replace_swaps_the_content_and_keeps_the_separator(self):
+        body = merged(RULED, {"replace": "phase-1", "text": "## Phase 1\n\nOurs.\n"}).body()
+        assert "Intro.\n\n---\n\n## Phase 1\n\nOurs.\n\n---\n\n## Phase 2" in body
+        assert "Read." not in body
+
+    def test_insert_after_adds_a_new_anchored_section(self):
+        agent = merged(
+            RULED, {"insert_after": "phase-1", "id": "house-rules", "text": "## House\n\nRules."}
+        )
+        assert agent.section_ids() == ("intro", "phase-1", "house-rules", "phase-2")
+        assert "Read.\n\n---\n\n## House\n\nRules.\n\n---\n\n## Phase 2" in agent.body()
+
+    def test_insert_after_the_last_section(self):
+        agent = merged(RULED, {"insert_after": "phase-2", "id": "tail", "text": "Last."})
+        assert agent.section_ids()[-1] == "tail"
+        assert agent.body().endswith("Plan.\n\nLast.\n")
+
+    def test_an_inserted_section_can_be_targeted_by_a_later_operation(self):
+        agent = merged(
+            RULED,
+            {"insert_after": "intro", "id": "mine", "text": "Mine."},
+            {"append": "mine", "text": "More."},
+        )
+        assert "Mine.\n\nMore.\n" in agent.body()
+
+    def test_description_append(self):
+        agent = merged(RULED, {"description_append": "Our house rules apply."})
+        assert agent.description == "Does a thing. Our house rules apply."
+
+    def test_operations_run_in_order(self):
+        agent = merged(
+            RULED,
+            {"replace": "phase-2", "text": "First."},
+            {"append": "phase-2", "text": "Second."},
+        )
+        assert agent.body().endswith("First.\n\nSecond.\n")
+
+    def test_nothing_else_changes(self):
+        source = parse(RULED, "thing")
+        agent = agents.merge(source, overlay({"append": "intro", "text": "x"}))
+        assert (agent.name, agent.capabilities) == (source.name, source.capabilities)
+        assert agent.preamble_lines == source.preamble_lines
+
+
+class TestAnOverlayIsRefusedWithAFix:
+    def test_the_refusal_is_an_invariant_error_naming_each_problem_and_fix(self):
+        with pytest.raises(agents.OverlayError) as exc:
+            agents.merge(parse(RULED, "thing"), overlay({"append": "nope", "text": "x"}))
+        assert isinstance(exc.value, InvariantError)
+        assert "fix:" in str(exc.value)
+        assert all(p.fix for p in exc.value.problems)
+
+    def test_not_yaml(self):
+        (found,) = refusals(RULED, "version: [1\n")
+        assert "not valid YAML" in found.problem
+
+    def test_not_a_mapping(self):
+        (found,) = refusals(RULED, "- append: intro\n")
+        assert "mapping" in found.problem
+
+    def test_no_version(self):
+        found = refusals(RULED, "operations: [{append: intro, text: x}]\n")
+        assert any("no version" in p.problem for p in found)
+
+    def test_an_unknown_version(self):
+        (found,) = refusals(RULED, overlay({"append": "intro", "text": "x"}, version=2))
+        assert "version 2" in found.problem and "version 1" in found.fix
+
+    def test_no_operations(self):
+        (found,) = refusals(RULED, "version: 1\noperations: []\n")
+        assert "no operations" in found.problem
+
+    def test_an_unknown_top_level_key(self):
+        text = "version: 1\ntitle: other\noperations: [{append: intro, text: x}]\n"
+        (found,) = refusals(RULED, text)
+        assert "'title'" in found.problem and "only 'version' and 'operations'" in found.fix
+
+    @pytest.mark.parametrize("key", ["capabilities", "model", "tools", "tier", "name"])
+    def test_capabilities_and_model_are_refused_by_name(self, key):
+        text = f"version: 1\n{key}: x\noperations: [{{append: intro, text: x}}]\n"
+        (found,) = refusals(RULED, text)
+        assert repr(key) in found.problem and "ruling 5" in found.problem
+
+    @pytest.mark.parametrize("key", ["capabilities", "model"])
+    def test_an_operation_cannot_change_them_either(self, key):
+        (found,) = refusals(RULED, overlay({key: "x"}))
+        assert "ruling 5" in found.problem
+
+    def test_an_unknown_operation(self):
+        (found,) = refusals(RULED, overlay({"prepend": "intro", "text": "x"}))
+        assert "operation 1" in found.problem and "'prepend'" in found.problem
+        assert "append" in found.fix
+
+    def test_two_operations_in_one_entry(self):
+        (found,) = refusals(RULED, overlay({"append": "intro", "replace": "intro", "text": "x"}))
+        assert "more than one operation" in found.problem
+
+    def test_an_operation_that_is_not_a_mapping(self):
+        (found,) = refusals(RULED, "version: 1\noperations: [append]\n")
+        assert "operation 1" in found.problem
+
+    def test_an_unknown_key_on_an_operation(self):
+        (found,) = refusals(RULED, overlay({"append": "intro", "text": "x", "after": "y"}))
+        assert "'after'" in found.problem
+
+    def test_a_missing_text(self):
+        (found,) = refusals(RULED, overlay({"append": "intro"}))
+        assert "no text" in found.problem
+
+    def test_text_that_is_not_a_string(self):
+        (found,) = refusals(RULED, overlay({"append": "intro", "text": 3}))
+        assert "text" in found.problem
+
+    def test_text_carrying_an_anchor(self):
+        text = "<!-- invariant:section sneaky -->\nx"
+        (found,) = refusals(RULED, overlay({"append": "intro", "text": text}))
+        assert "anchor" in found.problem and "insert_after" in found.fix
+
+    def test_an_anchor_that_is_not_a_string(self):
+        (found,) = refusals(RULED, overlay({"append": 3, "text": "x"}))
+        assert "anchor" in found.problem
+
+    def test_a_missing_anchor_names_the_nearest_real_one(self):
+        (found,) = refusals(RULED, overlay({"append": "phase_1", "text": "x"}))
+        assert "'phase_1'" in found.problem
+        assert "'phase-1'" in found.fix
+
+    def test_a_missing_anchor_far_from_any_names_the_list(self):
+        (found,) = refusals(RULED, overlay({"replace": "zzzzzz", "text": "x"}))
+        assert "intro, phase-1, phase-2" in found.fix
+
+    def test_an_inserted_id_that_collides(self):
+        (found,) = refusals(
+            RULED, overlay({"insert_after": "intro", "id": "phase-2", "text": "x"})
+        )
+        assert "'phase-2'" in found.problem and "already" in found.problem
+
+    def test_an_inserted_id_that_collides_with_an_earlier_insert(self):
+        (found,) = refusals(
+            RULED,
+            overlay(
+                {"insert_after": "intro", "id": "mine", "text": "x"},
+                {"insert_after": "phase-1", "id": "mine", "text": "y"},
+            ),
+        )
+        assert "operation 2" in found.problem
+
+    def test_an_insert_with_no_id(self):
+        (found,) = refusals(RULED, overlay({"insert_after": "intro", "text": "x"}))
+        assert "no id" in found.problem
+
+    @pytest.mark.parametrize("bad", ["Has Caps", "-lead", "", 3])
+    def test_a_malformed_inserted_id(self, bad):
+        (found,) = refusals(RULED, overlay({"insert_after": "intro", "id": bad, "text": "x"}))
+        assert "id" in found.problem
+
+    @pytest.mark.parametrize("bad", ["", "two\nlines", 3])
+    def test_a_description_append_must_be_one_line_of_text(self, bad):
+        (found,) = refusals(RULED, overlay({"description_append": bad}))
+        assert "description_append" in found.problem
+
+    def test_a_description_append_takes_no_other_key(self):
+        (found,) = refusals(RULED, overlay({"description_append": "x", "text": "y"}))
+        assert "'text'" in found.problem
+
+    def test_every_problem_is_named_in_one_refusal(self):
+        found = refusals(
+            RULED,
+            overlay(
+                {"append": "nope", "text": "x"},
+                {"prepend": "intro"},
+                {"insert_after": "intro", "id": "phase-1", "text": "y"},
+            ),
+        )
+        import re
+
+        assert [re.match(r"operation (\d+)", p.problem).group(1) for p in found] == [
+            "1",
+            "2",
+            "3",
+        ]

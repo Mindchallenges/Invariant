@@ -28,8 +28,15 @@ from pathlib import Path
 #: It was once an HTML comment above the block, which pushed the frontmatter to
 #: line 2 and made the host skip the file. A comment within the block is
 #: nothing to a parser and still greppable, which is all provenance needs.
+#:
+#: Since A6 increment 3 it records three digests (ADR-012, the A6 ruling 1):
+#: ``source=<d> overlay=<d|none> body=<d>``. A copy A6.1 or A6.2 installed
+#: carries one, the body's alone, and is read as that (:attr:`Marker.legacy`).
 MARKER_PREFIX = "# invariant-managed:"
-MARKER_TEMPLATE = MARKER_PREFIX + " {digest}"
+MARKER_TEMPLATE = MARKER_PREFIX + " source={source} overlay={overlay} body={body}"
+
+#: How the marker spells "no overlay".
+NO_OVERLAY = "none"
 
 FENCE = "---"
 
@@ -156,15 +163,55 @@ def loadability_problem(kind: AssetKind, text: str, expected: str) -> str | None
     return None
 
 
-def marker_digest(text: str) -> str | None:
+@dataclass(frozen=True)
+class Marker:
+    """What an installed copy's marker records.
+
+    ``body`` is the witness: the digest of the very text the install wrote.
+    ``source`` and ``overlay`` are the digests of the two inputs it was
+    rendered from, so an install can say which one moved; ``overlay`` is
+    ``None`` when the agent had none. A one-digest marker from A6.1 or A6.2
+    records the witness alone, and is ``legacy``.
+    """
+
+    body: str
+    source: str | None = None
+    overlay: str | None = None
+    legacy: bool = False
+
+
+def read_marker(text: str) -> Marker | None:
+    """The marker in this file's frontmatter, or ``None`` if it has none.
+
+    A three-digest marker without a ``body`` has no witness, and reads as no
+    marker: nothing then says the copy is the library's to rewrite.
+    """
     split = split_frontmatter(text)
     if split is None:
         return None
     for line in split[0]:
         stripped = line.strip()
-        if stripped.startswith(MARKER_PREFIX):
-            return stripped[len(MARKER_PREFIX) :].strip()
+        if not stripped.startswith(MARKER_PREFIX):
+            continue
+        value = stripped[len(MARKER_PREFIX) :].strip()
+        if "=" not in value:
+            return Marker(body=value, legacy=True) if value else None
+        fields = dict(part.partition("=")[::2] for part in value.split())
+        if not fields.get("body"):
+            return None
+        overlay = fields.get("overlay")
+        return Marker(
+            body=fields["body"],
+            source=fields.get("source") or None,
+            overlay=None if overlay in (None, "", NO_OVERLAY) else overlay,
+        )
     return None
+
+
+def marker_digest(text: str) -> str | None:
+    """The witness a marker records: the body's own digest, in either form."""
+    marker = read_marker(text)
+    return marker.body if marker else None
 
 
 def is_managed(text: str) -> bool:
@@ -188,7 +235,8 @@ def reconstruct_source(text: str) -> str | None:
 
 
 def digest_of(source_text: str) -> str:
-    """The digest a managed marker records: of the source form, marker-free."""
+    """A digest as a managed marker records it. Of the installed text,
+    marker-free, it is the witness; of an input, the source's or overlay's."""
     return hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
 
 
@@ -218,6 +266,11 @@ def classify(installed: str | None, shipped: str) -> str:
     and both install commands rewrote it unnamed (BUG_106). A copy with
     frontmatter but no marker is the project's own file under a shipped name,
     and is never flattened either.
+
+    The rule reads only the witness, so it is the same for a one-digest
+    marker (A6.1, A6.2) and a three-digest one (A6.3): no history is needed
+    to classify a copy any release wrote. Which input made a stale copy
+    stale is :func:`changed_input`'s question, not this one's.
     """
     if installed is None:
         return ABSENT
@@ -231,10 +284,52 @@ def classify(installed: str | None, shipped: str) -> str:
     return OLDER
 
 
-def render_managed(source_text: str, digest: str) -> str:
-    """A source file with the provenance marker inserted into its frontmatter."""
-    split = split_frontmatter(source_text)
+#: Which input moved, for an install to say (A6 increment 3). Read off a
+#: stale copy's marker against today's source and overlay digests.
+LIBRARY_CHANGED = "the library changed"
+OVERLAY_CHANGED = "the overlay changed"
+BOTH_CHANGED = "the library and the overlay changed"
+RENDERER_CHANGED = "the renderer changed"
+#: A one-digest marker records no inputs, so of the two it cannot say which.
+UNRECORDED = "the library or the renderer changed; its one-digest marker does not say which"
+
+
+def changed_input(installed: str, source_digest: str, overlay_digest: str | None) -> str | None:
+    """Which input moved since ``installed`` was written, or ``None`` with no marker.
+
+    Asked of a copy the classifier calls stale. Where neither input moved,
+    the render did. A one-digest marker predates overlays, so an overlay
+    configured now is a change; otherwise it cannot tell library from
+    renderer, and says so.
+    """
+    marker = read_marker(installed)
+    if marker is None:
+        return None
+    if marker.legacy:
+        return OVERLAY_CHANGED if overlay_digest is not None else UNRECORDED
+    library = marker.source != source_digest
+    overlay = marker.overlay != overlay_digest
+    if library and overlay:
+        return BOTH_CHANGED
+    if library:
+        return LIBRARY_CHANGED
+    if overlay:
+        return OVERLAY_CHANGED
+    return RENDERER_CHANGED
+
+
+def render_managed(text: str, *, source_digest: str, overlay_digest: str | None) -> str:
+    """The host's text with the three-digest marker inserted into its frontmatter.
+
+    ``text`` is what the host reads, and its own digest is the witness.
+    """
+    split = split_frontmatter(text)
     if split is None:
         raise ValueError("source has no frontmatter on line 1")
     front, body = split
-    return "\n".join([FENCE, MARKER_TEMPLATE.format(digest=digest), *front, FENCE, body])
+    marker = MARKER_TEMPLATE.format(
+        source=source_digest,
+        overlay=overlay_digest or NO_OVERLAY,
+        body=digest_of(text),
+    )
+    return "\n".join([FENCE, marker, *front, FENCE, body])

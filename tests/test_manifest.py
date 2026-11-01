@@ -503,3 +503,89 @@ class TestSweepFreshIsCappedAtWarn:
         write_manifest(tmp_path, {"enforcement": {"profile": profile}})
         assert Manifest.load(tmp_path).rule_level("sweep.fresh") is Level.WARN
 
+
+
+class TestTheAgentsKeys:
+    """`agents.library`, `agents.local` and `agents.overlays` are real keys
+    the renderer reads (ADR-012 D8, D13, the A6 rulings 6 and 11)."""
+
+    def load(self, tmp_path, agents):
+        write_manifest(tmp_path, {"agents": agents})
+        return Manifest.load(tmp_path)
+
+    def refused(self, tmp_path, agents):
+        with pytest.raises(ManifestError) as caught:
+            self.load(tmp_path, agents)
+        return str(caught.value)
+
+    def test_the_defaults(self, minimal):
+        assert minimal.get("agents.overlays") == {}
+        assert minimal.get("agents.local") == []
+        assert "feature-architect" in minimal.get("agents.library")
+
+    def test_an_overlay_naming_a_library_agent_loads(self, tmp_path):
+        m = self.load(tmp_path, {"overlays": {"feature-architect": "docs/agents/fa.yaml"}})
+        assert m.get("agents.overlays") == {"feature-architect": "docs/agents/fa.yaml"}
+        assert m.source_of("agents.overlays.feature-architect") == "manifest"
+
+    def test_there_is_no_implicit_overlay_location(self, tmp_path):
+        """docs/agents/<name>.yaml is the convention, never a default (ruling 6)."""
+        (tmp_path / "docs" / "agents").mkdir(parents=True)
+        (tmp_path / "docs" / "agents" / "feature-architect.yaml").write_text("version: 1\n")
+        assert self.load(tmp_path, {}).get("agents.overlays") == {}
+
+    def test_agents_is_a_mapping(self, tmp_path):
+        write_manifest(tmp_path, {"agents": ["feature-architect"]})
+        with pytest.raises(ManifestError, match="agents must be a mapping"):
+            Manifest.load(tmp_path)
+
+    def test_an_unknown_agents_key(self, tmp_path):
+        text = self.refused(tmp_path, {"overlay": {}})
+        assert "agents.overlay " in text and "agents.overlays" in text
+
+    def test_tiers_waits_for_a7(self, tmp_path):
+        assert "A7" in self.refused(tmp_path, {"tiers": {}})
+
+    @pytest.mark.parametrize("key", ["library", "local"])
+    @pytest.mark.parametrize("value", ["feature-architect", [""], [3], None])
+    def test_library_and_local_are_lists_of_names(self, tmp_path, key, value):
+        assert f"agents.{key}" in self.refused(tmp_path, {key: value})
+
+    @pytest.mark.parametrize("key", ["library", "local"])
+    def test_a_name_listed_twice(self, tmp_path, key):
+        names = ["feature-architect", "feature-architect"] if key == "library" else ["a", "a"]
+        assert "twice" in self.refused(tmp_path, {key: names})
+
+    def test_a_local_name_may_not_be_a_library_name(self, tmp_path):
+        text = self.refused(tmp_path, {"local": ["feature-architect"]})
+        assert "'feature-architect'" in text and "agents.library" in text
+
+    def test_a_local_name_the_library_ships_but_the_project_left_out_loads(self, tmp_path):
+        m = self.load(
+            tmp_path, {"library": ["feature-architect"], "local": ["bug-reproducer"]}
+        )
+        assert m.get("agents.local") == ["bug-reproducer"]
+
+    @pytest.mark.parametrize("value", [["docs/agents/fa.yaml"], "docs/agents/fa.yaml", None])
+    def test_overlays_is_a_mapping(self, tmp_path, value):
+        assert "agents.overlays" in self.refused(tmp_path, {"overlays": value})
+
+    @pytest.mark.parametrize("path", ["", 3, None, ["a"]])
+    def test_an_overlay_path_is_a_path(self, tmp_path, path):
+        text = self.refused(tmp_path, {"overlays": {"feature-architect": path}})
+        assert "agents.overlays.feature-architect" in text
+
+    def test_an_overlay_must_name_a_library_agent(self, tmp_path):
+        text = self.refused(tmp_path, {"overlays": {"nobody": "docs/agents/x.yaml"}})
+        assert "'nobody'" in text and "agents.library" in text
+
+    def test_an_overlay_on_a_local_agent_is_refused_with_its_own_fix(self, tmp_path):
+        text = self.refused(
+            tmp_path,
+            {
+                "library": ["feature-architect"],
+                "local": ["mine"],
+                "overlays": {"mine": "docs/agents/mine.yaml"},
+            },
+        )
+        assert "project-local" in text and "edit it directly" in text

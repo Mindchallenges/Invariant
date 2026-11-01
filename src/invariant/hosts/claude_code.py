@@ -15,9 +15,10 @@ those keys; nothing above reads anything else.
 **Hooks are shims; agents are renders.** A hook can be three lines that exec
 the CLI, so it has nothing to drift. An agent definition has to be a real file
 the host reads, so it is rendered from the library's host-neutral source
-(``core/agents``, ADR-012 D8) and written with a content hash recorded *inside*
-its frontmatter, and ``doctor`` reports drift rather than silently overwriting
-local edits.
+(``core/agents``, ADR-012 D8) and the project's overlay, and written with a
+marker recorded *inside* its frontmatter: the source's digest, the overlay's,
+and the body's own, its witness (the A6 ruling 1). ``doctor`` reports drift
+rather than silently overwriting local edits.
 
 The marker's placement is not a detail. It was once written above the
 frontmatter, which moved that block off line 1 and made this host skip every
@@ -32,14 +33,17 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core import agents as agent_sources
 from ..core import plan as plan_reader
-from ..core.agents import AgentSource
+from ..core.agents import AgentSource, OverlayError, OverlayProblem
 from ..core.errors import InvariantError, UsageError
 from ..core.guidelines import render_edit, render_turn_index
+from ..core.manifest import Manifest, project_relative
+from ..core.privacy import PrivacyScanner
 from ..core.rules import (
     AGENT_TOOLS,
     EDIT_TOOLS,
@@ -50,13 +54,14 @@ from ..core.rules import (
     edit_guidelines,
     evaluate_event,
     is_architecture_doc,
+    is_exempt_path,
     standdown_in_force,
     turn_guidelines,
 )
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
 from . import assets
-from .assets import ABSENT, CURRENT, LOCAL, digest_of
+from .assets import ABSENT, CURRENT, LOCAL, OLDER, digest_of
 from .claude_code_launch import HANDOFF_ENV
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -267,8 +272,14 @@ class AssetPlan:
     state: str
     write: bool
     #: What the host reads, before its marker: an agent rendered from its
-    #: neutral source, any other kind the source as shipped.
+    #: neutral source and its overlay, any other kind the source as shipped.
     text: str
+    #: The two inputs' digests the marker records beside the witness (the A6
+    #: ruling 1): the shipped source's, and the overlay's or ``None``.
+    source_digest: str = ""
+    overlay_digest: str | None = None
+    #: For a stale copy, which input moved (``assets.changed_input``).
+    why: str | None = None
 
 
 @dataclass
@@ -284,6 +295,8 @@ class InstallResult:
     installed: list[str] = field(default_factory=list)
     #: (label, why) for a target left alone because it is the operator's work.
     skipped: list[tuple[str, str]] = field(default_factory=list)
+    #: (label, which input changed) for each stale copy rewritten.
+    changed: list[tuple[str, str]] = field(default_factory=list)
 
 
 def _IS_OURS(entry) -> bool:
@@ -297,7 +310,12 @@ def _IS_OURS(entry) -> bool:
     return "/.claude/hooks/invariant-" in json.dumps(entry)
 
 
-def _currency_detail(stale: list[str], repair: str) -> str:
+#: The fix for an edited agent copy (ADR-012 D8): an overlay survives every
+#: upgrade, and an edit to an installed copy does not.
+OVERLAY_FIX = "move the edit into an overlay (agents.overlays) so it survives upgrades"
+
+
+def _currency_detail(stale: list[str], repair: str, kind: str = "agent") -> str:
     """The currency row's text, and — where an edit is the cause — what to do.
 
     A locally edited asset is a persistent FAILED check, and it must not read
@@ -314,6 +332,8 @@ def _currency_detail(stale: list[str], repair: str) -> str:
             f" — your edits are kept; {repair} --overwrite-local "
             f"replaces them with the shipped version"
         )
+        if kind == "agent":
+            detail += f"; {OVERLAY_FIX}"
     return detail
 
 
@@ -384,9 +404,14 @@ def render_agent(source: AgentSource) -> str:
 class ClaudeCodeHost:
     INSTRUCTION_FILES = INSTRUCTION_FILES
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, manifest: Manifest | None = None) -> None:
         self.root = Path(root)
         self.claude_dir = self.root / ".claude"
+        #: The project's manifest, for the `agents` keys an install reads
+        #: (`library`, `overlays`), the privacy scan and the isolation rule.
+        #: ``None`` is a project with none yet (`init`): every shipped agent,
+        #: and no overlay.
+        self.manifest = manifest
         #: What the last :meth:`handle` call signalled about the host's
         #: attention; see there.
         self.attention: AttentionSignal | None = None
@@ -396,7 +421,7 @@ class ClaudeCodeHost:
     def plan_install(self) -> list[str]:
         actions = [f"install {len(EVENTS)} hook shims into .claude/hooks/"]
         actions.append("wire the shims into .claude/settings.json")
-        agents = self._sources_for(assets.BY_NAME["agent"])
+        agents = self._library(assets.BY_NAME["agent"])
         actions.append(f"install {len(agents)} library agents into .claude/agents/")
         return actions
 
@@ -732,9 +757,20 @@ class ClaudeCodeHost:
             # A shipped asset that is absent cannot load, and absence is the
             # strongest form of that. Currency reports it too, but a reader
             # seeing "loadable: ok" beside a missing agent has been told the
-            # wrong thing by the check whose whole job is that question.
+            # wrong thing by the check whose whole job is that question. An
+            # agent the project left out of agents.library is not missing.
+            #
+            # A plan that is refused (an unshipped agents.library name, an
+            # overlay that does not apply) is reported on the currency row,
+            # naming its fix, rather than taking `doctor` down with it.
+            refused: InvariantError | None = None
+            try:
+                shipped = self._library(kind)
+                stale = self._stale_for(kind)
+            except InvariantError as exc:
+                refused, shipped, stale = exc, [], None
             present = {kind.identity(path) for path in installed}
-            for source in self._sources_for(kind):
+            for source in shipped:
                 if kind.identity(source) not in present:
                     unloadable.append(f"{kind.identity(source)} (absent)")
 
@@ -752,13 +788,20 @@ class ClaudeCodeHost:
                 )
             )
 
-            stale = self._stale_for(kind)
-            if stale is not None:
+            if refused is not None:
+                checks.append(
+                    (
+                        f"library {kind.name}s current",
+                        False,
+                        f"{refused} — {repair} refuses until it is fixed",
+                    )
+                )
+            elif stale is not None:
                 checks.append(
                     (
                         f"library {kind.name}s current",
                         not stale,
-                        _currency_detail(stale, repair),
+                        _currency_detail(stale, repair, kind.name),
                     )
                 )
         return checks
@@ -790,8 +833,33 @@ class ClaudeCodeHost:
             return None
         return [f"{s.identity} ({s.state})" for s in plan if s.state != CURRENT]
 
+    def _library(self, kind) -> list[Path]:
+        """The shipped sources an install covers, in a stable order.
+
+        For agents, those `agents.library` lists (the A6 ruling 11), so a
+        project can leave one out and own an agent of that name under
+        `agents.local`, which no install touches. A listed name the library
+        does not ship is refused naming the ones it does. With no manifest,
+        every shipped agent.
+        """
+        sources = self._sources_for(kind)
+        if kind.name != "agent" or self.manifest is None:
+            return sources
+        library = list(self.manifest.get("agents.library") or [])
+        shipped = {kind.identity(path) for path in sources}
+        unshipped = [name for name in library if name not in shipped]
+        if unshipped:
+            raise InvariantError(
+                f"agents.library names {', '.join(repr(n) for n in unshipped)}, which "
+                f"this library does not ship; it ships {', '.join(sorted(shipped))}. "
+                f"Remove it from agents.library; a project's own agent belongs "
+                f"in agents.local."
+            )
+        return [path for path in sources if kind.identity(path) in library]
+
     def agent_source(self, name: str) -> AgentSource:
-        """The library's neutral source for one agent, parsed.
+        """One library agent as the host would install it: its neutral source,
+        parsed, with the project's overlay applied.
 
         A name the library does not ship is refused naming the ones it does.
         """
@@ -802,18 +870,120 @@ class ClaudeCodeHost:
                 f"the library ships no agent named {name!r}; it ships "
                 + ", ".join(sorted(sources))
             )
-        return agent_sources.parse(sources[name].read_text(encoding="utf-8"), name)
+        return self._agent(name, sources[name].read_text(encoding="utf-8"))[0]
 
-    def _shipped_text(self, kind, source: Path) -> str:
-        """What the host reads for one shipped asset, before its marker.
+    def _agent(self, name: str, raw: str) -> tuple[AgentSource, str | None]:
+        """The source merged with its overlay, and the overlay's digest.
 
-        An agent is rendered from its neutral source; a source that does not
-        validate is refused naming every problem, before anything is written.
+        Every refusal is raised before anything is written, each with its
+        fix: a source that does not parse, an overlay outside the project,
+        exempt from isolation, missing or invalid, and merged text the
+        privacy scan flags.
+        """
+        parsed = agent_sources.parse(raw, name)
+        overlay = self._overlay_text(name)
+        if overlay is None:
+            return parsed, None
+        rel, text = overlay
+        subject = f"the overlay {rel} for {name!r}"
+        try:
+            merged = agent_sources.merge(parsed, text)
+        except OverlayError as exc:
+            raise OverlayError(exc.problems, subject) from exc
+        self._scan_overlay(subject, rel, render_agent(parsed), render_agent(merged))
+        return merged, digest_of(text)
+
+    def _overlay_text(self, name: str) -> tuple[str, str] | None:
+        """``(project-relative path, text)`` of the agent's overlay, if named.
+
+        Only a path `agents.overlays` names is read: there is no implicit
+        location (the A6 ruling 6). An overlay is policy (ADR-012 D10), so a
+        path exempt from session isolation is refused like one outside the
+        project: an exempt overlay would land on the base branch unreviewed.
+        """
+        if self.manifest is None:
+            return None
+        configured = (self.manifest.get("agents.overlays") or {}).get(name)
+        if not configured:
+            return None
+        subject = f"the overlay for {name!r} ({configured})"
+        convention = f"docs/agents/{name}.yaml"
+        rel = project_relative(configured, [self.root])
+        if rel is None or rel == ".":
+            raise OverlayError(
+                [
+                    OverlayProblem(
+                        f"agents.overlays.{name} names a path outside the project",
+                        f"give a project-relative path, by convention {convention}",
+                    )
+                ],
+                subject,
+            )
+        path = self.root / rel
+        if is_exempt_path(self.manifest, self.root, path):
+            raise OverlayError(
+                [
+                    OverlayProblem(
+                        f"{rel} is exempt from session isolation, and an overlay is "
+                        f"policy, reviewed like any edit (ADR-012 D10)",
+                        f"move it outside session.exempt_paths and the declared "
+                        f"stores, by convention {convention}",
+                    )
+                ],
+                subject,
+            )
+        try:
+            return rel, path.read_text(encoding="utf-8")
+        except OSError as exc:
+            problem = "no such file" if not path.exists() else type(exc).__name__
+            raise OverlayError(
+                [
+                    OverlayProblem(
+                        f"{rel}: {problem}",
+                        f"create it, or remove agents.overlays.{name}",
+                    )
+                ],
+                subject,
+            ) from exc
+
+    def _scan_overlay(self, subject: str, rel: str, base: str, merged: str) -> None:
+        """Refuse merged text the privacy scan flags, whatever `privacy.scope`
+        says: it is about to be written into the project. Only what the
+        overlay brings counts; the shipped render is the library's."""
+        scanner = PrivacyScanner.from_manifest(self.manifest)
+        shipped = Counter((f.pattern, f.raw) for f in scanner.scan_text(base))
+        brought = []
+        for finding in scanner.scan_text(merged):
+            key = (finding.pattern, finding.raw)
+            if shipped[key]:
+                shipped[key] -= 1
+            else:
+                brought.append(finding)
+        if brought:
+            named = ", ".join(f"{f.pattern} {f.redacted}" for f in brought)
+            raise OverlayError(
+                [
+                    OverlayProblem(
+                        f"the merged text fails the privacy scan ({named})",
+                        f"remove it from {rel}, then install again",
+                    )
+                ],
+                subject,
+            )
+
+    def _shipped_text(self, kind, source: Path) -> tuple[str, str, str | None]:
+        """What the host reads for one shipped asset, before its marker, with
+        the source's and the overlay's digests.
+
+        An agent is rendered from its neutral source and its overlay; a source
+        or an overlay that does not validate is refused naming every problem,
+        before anything is written.
         """
         text = source.read_text(encoding="utf-8")
         if kind.name != "agent":
-            return text
-        return render_agent(agent_sources.parse(text, kind.identity(source)))
+            return text, digest_of(text), None
+        merged, overlay_digest = self._agent(kind.identity(source), text)
+        return render_agent(merged), digest_of(text), overlay_digest
 
     def _target_for(self, kind, identity: str) -> Path:
         base = self.claude_dir / kind.directory
@@ -839,11 +1009,15 @@ class ClaudeCodeHost:
         for kind in assets.KINDS:
             if only and kind.name != only:
                 continue
-            for source in self._sources_for(kind):
+            for source in self._library(kind):
                 identity = kind.identity(source)
                 target = self._target_for(kind, identity)
-                text = self._shipped_text(kind, source)
+                text, source_digest, overlay_digest = self._shipped_text(kind, source)
                 state = classify_installed(text, target)
+                why = None
+                if state == OLDER:
+                    installed = target.read_text(encoding="utf-8")
+                    why = assets.changed_input(installed, source_digest, overlay_digest)
                 # Everything but a local edit is written, including a target
                 # that already matches: rewriting an identical file costs
                 # nothing, and a repair command that reports "installed 0"
@@ -858,6 +1032,9 @@ class ClaudeCodeHost:
                         state=state,
                         write=not (state == LOCAL and not overwrite_local),
                         text=text,
+                        source_digest=source_digest,
+                        overlay_digest=overlay_digest,
+                        why=why,
                     )
                 )
         return plan
@@ -891,7 +1068,11 @@ class ClaudeCodeHost:
                 result.skipped.append((label, step.state))
                 continue
             try:
-                rendered = assets.render_managed(step.text, digest_of(step.text))
+                rendered = assets.render_managed(
+                    step.text,
+                    source_digest=step.source_digest,
+                    overlay_digest=step.overlay_digest,
+                )
             except ValueError as exc:
                 raise InvariantError(
                     f"{step.kind} {step.identity!r} has no YAML frontmatter starting "
@@ -903,6 +1084,8 @@ class ClaudeCodeHost:
             step.target.parent.mkdir(parents=True, exist_ok=True)
             step.target.write_text(rendered, encoding="utf-8")
             result.installed.append(label)
+            if step.why:
+                result.changed.append((label, step.why))
         return result
 
     # -- request handling ----------------------------------------------

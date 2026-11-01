@@ -214,13 +214,13 @@ class TestFrontmatterHelper:
 
     def test_a_marker_round_trips_out_again(self):
         source = "---\nname: a\ndescription: d\n---\nBody.\n"
-        rendered = assets.render_managed(source, "deadbeef")
-        assert assets.marker_digest(rendered) == "deadbeef"
+        rendered = assets.render_managed(source, source_digest="deadbeef", overlay_digest=None)
+        assert assets.marker_digest(rendered) == assets.digest_of(source)
         assert assets.reconstruct_source(rendered) == source
 
     def test_rendering_refuses_a_source_without_frontmatter(self):
         with pytest.raises(ValueError):
-            assets.render_managed("just prose\n", "abc")
+            assets.render_managed("just prose\n", source_digest="abc", overlay_digest=None)
 
 
 class TestTheGateReceiptCannotHashAnEmptyDiff:
@@ -471,8 +471,17 @@ OLDER = SOURCE + "Wording an earlier release shipped.\n"
 
 
 def managed(text):
-    """A copy exactly as some release's install wrote it."""
-    return assets.render_managed(text, assets.digest_of(text))
+    """A copy exactly as A6.1 or A6.2 wrote it: a one-digest marker, the
+    digest of the very text written, which is the body's own witness."""
+    front, body = assets.split_frontmatter(text)
+    marker = f"{assets.MARKER_PREFIX} {assets.digest_of(text)}"
+    return "\n".join([assets.FENCE, marker, *front, assets.FENCE, body])
+
+
+def managed3(text, source="s" * 16, overlay=None):
+    """A copy as A6.3 writes it: the source's, the overlay's and the body's
+    digests (the A6 ruling 1)."""
+    return assets.render_managed(text, source_digest=source, overlay_digest=overlay)
 
 
 class TestOneClassifier:
@@ -518,6 +527,106 @@ class TestOneClassifier:
         assert assets.marker_digest(text) == assets.digest_of(
             assets.reconstruct_source(text)
         )
+
+
+class TestTheThreeDigestMarker:
+    """The A6 ruling 1, amending D8: the marker records the source's digest,
+    the overlay's (or none), and the body's own, its witness."""
+
+    def test_it_records_all_three(self):
+        text = managed3(SOURCE, source="a" * 16, overlay="b" * 16)
+        marker = assets.read_marker(text)
+        assert marker == assets.Marker(
+            body=assets.digest_of(SOURCE), source="a" * 16, overlay="b" * 16
+        )
+        assert f"source={'a' * 16} overlay={'b' * 16} body=" in text
+
+    def test_no_overlay_is_spelled_none_and_read_back_as_none(self):
+        text = managed3(SOURCE)
+        assert "overlay=none" in text
+        assert assets.read_marker(text).overlay is None
+        assert not assets.read_marker(text).legacy
+
+    def test_the_witness_is_still_the_body_digest(self):
+        text = managed3(SOURCE)
+        assert assets.marker_digest(text) == assets.digest_of(assets.reconstruct_source(text))
+        assert assets.reconstruct_source(text) == SOURCE
+
+    def test_a_one_digest_marker_reads_as_legacy_with_no_inputs(self):
+        marker = assets.read_marker(managed(SOURCE))
+        assert marker.legacy
+        assert (marker.body, marker.source, marker.overlay) == (
+            assets.digest_of(SOURCE), None, None
+        )
+
+    def test_a_three_digest_marker_with_no_body_has_no_witness(self):
+        text = managed3(SOURCE).replace(" body=", " bodyx=")
+        assert assets.marker_digest(text) is None
+        assert assets.classify(text, OLDER) == assets.LOCAL
+
+    def test_no_marker_reads_as_none(self):
+        assert assets.read_marker(SOURCE) is None
+        assert assets.read_marker("prose\n") is None
+
+
+class TestTheMigrationMatrix:
+    """A copy any release wrote classifies with no history: A6.1's and A6.2's
+    one-digest marker, and A6.3's three, each current, stale and edited."""
+
+    @pytest.mark.parametrize("write", [managed, managed3], ids=["one-digest", "three-digest"])
+    def test_current(self, write):
+        assert assets.classify(write(SOURCE), SOURCE) == assets.CURRENT
+
+    @pytest.mark.parametrize("write", [managed, managed3], ids=["one-digest", "three-digest"])
+    def test_stale_and_untouched_is_older(self, write):
+        assert assets.classify(write(OLDER), SOURCE) == assets.OLDER
+
+    @pytest.mark.parametrize("write", [managed, managed3], ids=["one-digest", "three-digest"])
+    def test_edited_today_is_local(self, write):
+        assert assets.classify(write(SOURCE) + "mine\n", SOURCE) == assets.LOCAL
+
+    @pytest.mark.parametrize("write", [managed, managed3], ids=["one-digest", "three-digest"])
+    def test_edited_and_stale_is_local(self, write):
+        assert assets.classify(write(OLDER) + "mine\n", SOURCE) == assets.LOCAL
+
+
+class TestWhichInputChanged:
+    """Install messages say what moved: the library, the overlay, or the
+    renderer. Read off the marker against today's two input digests."""
+
+    def test_the_library(self):
+        text = managed3(OLDER, source="a" * 16, overlay=None)
+        assert assets.changed_input(text, "c" * 16, None) == assets.LIBRARY_CHANGED
+
+    def test_the_overlay(self):
+        text = managed3(OLDER, source="a" * 16, overlay="b" * 16)
+        assert assets.changed_input(text, "a" * 16, "d" * 16) == assets.OVERLAY_CHANGED
+
+    def test_an_overlay_added(self):
+        text = managed3(OLDER, source="a" * 16, overlay=None)
+        assert assets.changed_input(text, "a" * 16, "d" * 16) == assets.OVERLAY_CHANGED
+
+    def test_an_overlay_removed(self):
+        text = managed3(OLDER, source="a" * 16, overlay="b" * 16)
+        assert assets.changed_input(text, "a" * 16, None) == assets.OVERLAY_CHANGED
+
+    def test_both(self):
+        text = managed3(OLDER, source="a" * 16, overlay="b" * 16)
+        assert assets.changed_input(text, "c" * 16, "d" * 16) == assets.BOTH_CHANGED
+
+    def test_neither_is_the_renderer(self):
+        text = managed3(OLDER, source="a" * 16, overlay="b" * 16)
+        assert assets.changed_input(text, "a" * 16, "b" * 16) == assets.RENDERER_CHANGED
+
+    def test_a_one_digest_marker_with_no_overlay_cannot_say_which(self):
+        assert assets.changed_input(managed(OLDER), "a" * 16, None) == assets.UNRECORDED
+
+    def test_a_one_digest_marker_with_an_overlay_now_is_the_overlay(self):
+        """No release before A6.3 wrote an overlay, so one configured now is new."""
+        assert assets.changed_input(managed(OLDER), "a" * 16, "d" * 16) == assets.OVERLAY_CHANGED
+
+    def test_no_marker_says_nothing(self):
+        assert assets.changed_input(OLDER, "a" * 16, None) is None
 
 
 # -- one plan, every kind ---------------------------------------------------

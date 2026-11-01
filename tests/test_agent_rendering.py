@@ -124,6 +124,18 @@ ANCHORS = {
 }
 
 
+def one_digest_copy(text):
+    """A copy as A6.1 or A6.2 installed it: a one-digest marker holding the
+    digest of the very text written. A6.3 writes three, and must still read
+    these with no history (the A6 ruling 1)."""
+    from invariant.hosts import assets
+
+    front, body = assets.split_frontmatter(text)
+    marker = f"{assets.MARKER_PREFIX} {assets.digest_of(text)}"
+    return "\n".join([assets.FENCE, marker, *front, assets.FENCE, body])
+
+
+
 def source_text(name):
     return (LIBRARY / f"{name}.md").read_text(encoding="utf-8")
 
@@ -319,7 +331,7 @@ class TestACopyFromBeforeA6_2:
         old = a6_1_text(name)
         path = target(host, name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(assets.render_managed(old, assets.digest_of(old)) + extra, encoding="utf-8")
+        path.write_text(one_digest_copy(old) + extra, encoding="utf-8")
 
     def states(self, host):
         return {s.identity: s.state for s in host.plan_assets(only="agent")}
