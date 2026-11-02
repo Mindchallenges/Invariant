@@ -74,7 +74,7 @@ _OVERWRITE_LOCAL_HINT = "  pass --overwrite-local to replace them with the shipp
 #: Said beside a skipped agent (ADR-012 D8): an overlay survives an upgrade.
 _OVERLAY_HINT = (
     "  to keep an agent edit, move the edit into an overlay (agents.overlays), "
-    "then pass --overwrite-local"
+    "or a model line into agents.tiers and host.tier_map, then pass --overwrite-local"
 )
 
 
@@ -1373,35 +1373,50 @@ def cmd_agents_list(args) -> int:
                 step.identity,
             )
             status = f"UNLOADABLE — {problem}" if problem else "loadable"
+        hint = host.tier_hint(host.agent_source(step.identity))
         rows.append(
-            {"agent": step.identity, "status": status, "role": role_of.get(step.identity, "")}
+            {
+                "agent": step.identity,
+                "status": status,
+                "role": role_of.get(step.identity, ""),
+                "tier": hint.tier,
+                "tier_from": hint.origin,
+                "mapped": hint.value,
+            }
         )
 
     width = max((len(r["agent"]) for r in rows), default=1)
     text = "\n".join(
         f"  {r['agent']:<{width}}  {r['status']}"
         + (f"   [{r['role']} role]" if r["role"] else "")
+        + f"   {_tier_text(r)}"
         for r in rows
     )
     return emit(args, {"agents": rows}, text or "  (none shipped)")
 
 
+def _tier_text(row: dict) -> str:
+    """An `agents list` row's tier, where it came from and what it maps to."""
+    if not row["tier"]:
+        return "no tier"
+    named = f"tier {row['tier']} ({row['tier_from']})"
+    return f"{named} -> {row['mapped']}" if row["mapped"] else f"{named}, not mapped"
+
+
 def cmd_agents_show(args) -> int:
     """One library agent as the host would install it, and nothing written.
 
-    The text is the renderer's, from the neutral source, without the marker an
-    install adds. ``--sections`` lists the source's section anchors instead,
-    the ids an overlay can target (ADR-012 D8).
+    The text is the renderer's, from the neutral source and the tier hint this
+    project resolves, without the marker an install adds. ``--sections`` lists
+    the source's section anchors instead, the ids an overlay can target (ADR-012 D8).
     """
-    from ..hosts.claude_code import render_agent
-
     ctx = Context()
     host = _asset_host(ctx, "agents show")
     source: AgentSource = host.agent_source(args.name)
     if args.sections:
         ids = list(source.section_ids())
         return emit(args, {"agent": args.name, "sections": ids}, "\n".join(ids))
-    text = render_agent(source)
+    text = host.render(source)
     # `emit` ends what it prints with a newline, so the text's own last one is
     # left to it: the output is the rendered bytes, fit to redirect and diff.
     return emit(args, {"agent": args.name, "text": text}, text.removesuffix("\n"))

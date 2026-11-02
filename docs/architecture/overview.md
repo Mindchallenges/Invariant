@@ -232,9 +232,9 @@ graph TD
     PIPELINE --> adapters
     CC -- reads the sources --> AGENTS
     CC -- "parse, merge, AgentSource: plan_assets renders every agent with its overlay" --> CAGENTS
-    CC -- "agents.library, agents.overlays; project_relative" --> MANIFEST
+    CC -- "agents.library, agents.overlays, agents.tiers, host.tier_map; project_relative" --> MANIFEST
     CC -- "the overlay's privacy scan" --> PRIVACY
-    CC -- "is_exempt_path: an overlay is policy (D10); agents_currency, AgentCopy: the library agents current row" --> RULES
+    CC -- "is_exempt_path: an overlay is policy (D10); agents_currency, AgentCopy, AGENTS_REPAIR: the library agents current and agent tier hints rows" --> RULES
     CLI -- "AgentSource, for agents show and its section list" --> CAGENTS
     CAGENTS -- the neutral format it parses --> AGENTS
     MANIFEST -- "TIERS: the vocabulary agents.tiers and host.tier_map are checked against" --> CAGENTS
@@ -338,7 +338,19 @@ deep" cannot be said. A source may state one as its default. `MANIFEST --
 TIERS --> CAGENTS` is how `agents.tiers` and the keys of `host.tier_map` are
 checked against that one list. `core/agents` imports nothing back and stays free
 of anything doing I/O. A `tier_map` value is one line of text the engine never
-interprets. For this increment a tier is validated and otherwise unread.
+interprets.
+
+A7 increment 2 renders the hint (ADR-012 D9, the A7 rulings 1 to 6). `CC -->
+MANIFEST` gains `agents.tiers` and `host.tier_map`, and no other arrow moves.
+`ClaudeCodeHost.tier_hint` resolves an agent to its tier (`agents.tiers`, then the
+source's, then none) and that to the map's value, and `render_agent` writes the
+value as one `model` line after `tools:`. So the render is no longer model-free
+when a project has a map, and with an empty one it is byte for byte what it was.
+A copy differing from the render only in that line is `tier hint moved`, a
+state of `assets.classify` for the agent kind. The host reports such a copy as
+current on its `AgentCopy`, so `agents_currency` and everything behind it never
+see the state, and no gate can read a hint. `doctor`'s `agent tier hints` row is
+the host's own and is outside every gate.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1633,8 +1645,8 @@ Installed assets have one format and one judgement. `hosts/assets` owns the
 managed file: its frontmatter as the host reads it, the provenance marker,
 the digest, loadability per kind, and `classify`, the only answer to how an
 installed copy diverges from what is shipped (current, edited locally,
-installed from an older version, absent, unreadable; the marker is the
-body's own witness, BUG_106). `ClaudeCodeHost.plan_assets` is the one plan
+installed from an older version, absent, unreadable, and for an agent tier hint
+moved; the marker is the body's own witness, BUG_106). `ClaudeCodeHost.plan_assets` is the one plan
 over it, per target: `doctor`'s currency rows, `assets install`, `agents
 install`, `init`, `uninstall --remove-assets` and, through `agent_copies`,
 `agents.rendered_current` all read it, and only an edited copy is withheld
@@ -1646,7 +1658,8 @@ operator has edited").
 A library agent is not shipped in this host's format. Its source is
 host-neutral (`core/agents`), and `render_agent` is this host's rendering of
 it: `CAPABILITY_TOOLS` maps each capability to tools, `TOOL_ORDER` fixes the
-`tools:` line, and the anchors are dropped. `HOST_VOCABULARY`, the tool names
+`tools:` line, the anchors are dropped, and a `host.tier_map` value becomes a
+`model` line (ADR-012, "As built: A7 increment 2"). `HOST_VOCABULARY`, the tool names
 plus the question tool, is what a test lints the neutral sources for, so this
 host's words stay out of them (ADR-012, "As built: A6 increment 2").
 

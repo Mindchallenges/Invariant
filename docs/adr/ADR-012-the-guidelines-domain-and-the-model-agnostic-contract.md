@@ -3236,6 +3236,67 @@ A7.2.
   a section with only `kind`, no section at all, a kind with no adapter, the
   opaque values, and this repository's manifest staying empty.
 
+**As built: A7 increment 2, the tier renderer and the classifier state.** Built to
+D9, D8's "unless the operator's `host.tier_map` supplies one", and the A7 rulings
+1 to 6. This repository's manifest and installed agents are untouched: its
+`tier_map` stays empty (ruling 4), and reinstalling is a post-merge chore.
+
+- *The renderer.* `render_agent(source, model=None)` writes `model: <value>` after
+  `tools:`, the only line a hint changes. The value is opaque, so the one thing
+  asked of it is whether it reads back as itself. It is written bare where YAML
+  returns the same string, because the host and `assets.frontmatter` read these
+  lines one at a time, and as a double-quoted scalar otherwise, so `x: y`, `a #b`
+  and `true` all stay valid frontmatter and stay text.
+- *Resolution.* `ClaudeCodeHost.tier_hint` answers a `TierHint` (tier, origin,
+  value): `agents.tiers`, then the source's, then none; then `host.tier_map`.
+  `ClaudeCodeHost.render` is the render with its hint, which the plan, the removal
+  plan and `agents show` all use. A tier with no entry, or no tier, gives no line.
+  So an empty map leaves the bytes alone, apart from the deleted prose below.
+- *The sources (rulings 2, 3 and 5).* `feature-architect` and `bug-reproducer`
+  state `tier: deep`, `compliance-reviewer` and `backlog-curator` `tier: standard`.
+  The `MODEL:` prose is gone from both descriptions, and the golden test declares
+  each deletion as a pair (`A7_2`). The `tier:` line never reaches the render.
+- *The classifier state (ruling 6).* `assets.classify(..., tier_hints=True)` adds
+  `TIER_MOVED`, "tier hint moved": a copy whose witness is intact and whose text,
+  minus its frontmatter model line, equals the render minus its model line. Only
+  the agent kind asks. A command or skill carries no tier, so a change to a `model:`
+  line in one stays "older". The check follows the witness, so a hand-edited model
+  line is still `edited locally`. A line in the body is body.
+- *Who reads it.* `agent_copies` answers `current=True` for it, so `agents_currency`,
+  `agents.rendered_current` and the `library agents current` row read it as current
+  and `core/rules` never holds the state's name, which a test scans for. The plan
+  still writes it, with `why` = `TIER_CHANGED`, "the tier hint changed", whatever
+  the marker says moved, and both install commands print that. The dry-run agreement
+  test declares this as its one exception.
+- *The `doctor` row.* `agent tier hints` is the host's own row and no gate reads it.
+  It names each copy with the install as the fix.
+- *The fix text.* The edited-copy fix and the install's hint now add "or a model
+  line into agents.tiers and host.tier_map", because an overlay refuses a model.
+  The text is unconditional: telling whether an edit touched the model line would
+  mean a second classifier for a sentence that is true of every edit.
+- *The commands.* `agents show` prints the render with its model line. `agents list`
+  adds `tier`, `tier_from` (`source` or `agents.tiers`) and `mapped`, and says
+  `no tier`, `tier deep (source), not mapped` or `tier deep (source) -> <value>`.
+- *Three readings (the design pass's, not the user's).* Each can be overruled
+  without reopening a ruling. The row exists only while a hint has moved, as
+  there is nothing to name otherwise. It carries the warned flag, so it is seen
+  and `doctor` still exits clean. And `uninstall --remove-assets` removes such a
+  copy, since the witness says it is the library's own.
+- *After the merge.* In this repository `feature-architect` and `bug-reproducer`
+  read as older until reinstalled, because their descriptions changed. The other
+  two render the same bytes, so they read as current.
+- *Not here.* The audit record is A7.3. D1 item 2's wording and the permutation
+  test are A7.4.
+- *Tests.* `tests/test_agent_tiers.py` covers the line and a hostile set of values
+  read back through a YAML parser, the resolution order, the sources, the lint that
+  no shipped agent, scaffold or profile names a model, every classifier case, the
+  rule, both `doctor` rows, install, dry run, uninstall, the hand-edited line and
+  both commands. `tests/test_agent_rendering.py` declares the deletions.
+  `tests/test_agents_current.py` adds the moved tree and its exception to the
+  agreement test, and pins the new fix text. Every concrete value is a placeholder
+  (ruling 4). The lint's own word list and its red examples name model families,
+  as `tests/test_manifest.py`'s scan already does. They are never `tier_map` values.
+
 ### D10 — A ruleset edit goes through its own lane (A8)
 
 A change touching the ruleset, the baseline's additions, the registry files a

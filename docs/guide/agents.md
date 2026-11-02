@@ -115,7 +115,7 @@ the frontmatter carries a digest of what was installed, so `invariant doctor` ca
 current, installed from an older release, or edited by you.
 
 ```bash
-invariant agents list                      # installed? loadable? which role?
+invariant agents list                      # installed? loadable? which role and tier?
 invariant agents show feature-architect    # the text an install would write; writes nothing
 invariant agents show feature-architect --sections  # the section ids it is cut into
 invariant agents install                   # rewrite stale copies; skip and NAME edited ones
@@ -135,6 +135,26 @@ agents:
     design: [feature-architect]
     review: [compliance-reviewer, api-reviewer]
 ```
+
+An agent may state a capability tier, `light`, `standard` or `deep`. It is a hint
+and no gate reads it, and the shipped agents run on your host's default model
+until you say otherwise. To choose, map a tier to whatever your host calls the
+model you want, and override a tier per agent if you need to:
+
+```yaml
+agents:
+  tiers:
+    backlog-curator: light     # overrides the default its source states
+host:
+  tier_map:
+    deep: <your host's name for it>
+```
+
+An install writes that value as the agent's `model` line. A tier with no entry
+writes no line. After changing either key, `doctor` lists the affected agents on
+its *agent tier hints* row and `invariant agents install` applies them. Set the
+model here and not in the installed file: a hand-edited model line makes the copy
+*edited locally*.
 
 The same mechanism covers Claude Code commands and skills
 (`invariant assets list`, `invariant assets install --kind command|skill`),

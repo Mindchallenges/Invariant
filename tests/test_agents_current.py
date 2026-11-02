@@ -199,7 +199,8 @@ class TestTheRule:
         assert verdict.fixes == (
             (
                 "move the edit into an overlay (agents.overlays) so it survives "
-                "upgrades, then: invariant agents install --overwrite-local"
+                "upgrades, or a model line into agents.tiers and host.tier_map, "
+                "then: invariant agents install --overwrite-local"
             ),
         )
 
@@ -257,8 +258,15 @@ class TestTheRule:
         assert "a (absent)" in verdict.message
 
 
+def a_moved_tier_hint(root):
+    configure(root, host={"tier_map": {"deep": "placeholder-one"}})
+    assert run("agents", "install") == 0
+    configure(root, host={"tier_map": {"deep": "placeholder-two"}})
+
+
 PREPARE = {
     "clean": lambda root: None,
+    "tier hint moved": a_moved_tier_hint,
     "edited": edit,
     "older": older,
     "absent": absent,
@@ -269,13 +277,24 @@ PREPARE = {
 
 @pytest.mark.parametrize("prepare", PREPARE.values(), ids=PREPARE.keys())
 def test_it_agrees_with_agents_install_dry_run(project, capsys, prepare):
-    """One plan, so the rule and `agents install --dry-run` cannot disagree."""
+    """One plan, so the rule and `agents install --dry-run` cannot disagree.
+
+    One declared exception (the A7 ruling 6): a copy whose tier hint moved is a
+    write in the dry run and current to the rule.
+    """
     prepare(project)
     capsys.readouterr()
     assert run("--json", "agents", "install", "--dry-run") == 0
     dry = json.loads(capsys.readouterr().out)["plan"]
     verdict = current(project).verdict
-    stale = {step["identity"]: step for step in dry if step["state"] != assets.CURRENT}
+    moved = [step for step in dry if step["state"] == assets.TIER_MOVED]
+    assert all(step["write"] and step["identity"] not in verdict.message for step in moved)
+    assert bool(moved) == (prepare is a_moved_tier_hint)
+    stale = {
+        step["identity"]: step
+        for step in dry
+        if step["state"] not in (assets.CURRENT, assets.TIER_MOVED)
+    }
     assert verdict.ok == (not stale)
     for name, step in stale.items():
         assert f"{name} ({step['state']})" + (

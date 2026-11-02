@@ -44,6 +44,9 @@ FENCE = "---"
 #: everything after the first colon is the value.
 _KEY_LINE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
 
+#: The one frontmatter line a tier hint changes (ADR-012 D9).
+_MODEL_LINE = re.compile(r"^\s*model\s*:")
+
 
 @dataclass(frozen=True)
 class AssetKind:
@@ -248,9 +251,12 @@ ABSENT = "absent"
 LOCAL = "edited locally"
 OLDER = "installed from an older version"
 UNREADABLE = "unreadable"
+#: An untouched agent copy differing from today's render only in its model line
+#: (the A7 ruling 6). An install still applies it, and no gate calls it drift.
+TIER_MOVED = "tier hint moved"
 
 
-def classify(installed: str | None, shipped: str) -> str:
+def classify(installed: str | None, shipped: str, *, tier_hints: bool = False) -> str:
     """How an installed copy diverges from the source this library ships.
 
     The one answer, read by `doctor`, every install and `uninstall`. The
@@ -271,6 +277,10 @@ def classify(installed: str | None, shipped: str) -> str:
     marker (A6.1, A6.2) and a three-digest one (A6.3): no history is needed
     to classify a copy any release wrote. Which input made a stale copy
     stale is :func:`changed_input`'s question, not this one's.
+
+    ``tier_hints`` is for a kind whose model line is a rendered hint, an agent.
+    It only tells apart two copies the witness already calls untouched: a
+    hand-edited model line breaks the witness like any other edit.
     """
     if installed is None:
         return ABSENT
@@ -281,7 +291,19 @@ def classify(installed: str | None, shipped: str) -> str:
         return CURRENT
     if marker_digest(installed) != digest_of(rebuilt):
         return LOCAL
+    if tier_hints and _without_model_line(rebuilt) == _without_model_line(shipped):
+        return TIER_MOVED
     return OLDER
+
+
+def _without_model_line(text: str) -> str | None:
+    """``text`` with any ``model`` key removed from its frontmatter, and only there."""
+    split = split_frontmatter(text)
+    if split is None:
+        return None
+    front, body = split
+    kept = [line for line in front if not _MODEL_LINE.match(line)]
+    return "\n".join([FENCE, *kept, FENCE, body])
 
 
 #: Which input moved, for an install to say (A6 increment 3). Read off a
@@ -290,6 +312,8 @@ LIBRARY_CHANGED = "the library changed"
 OVERLAY_CHANGED = "the overlay changed"
 BOTH_CHANGED = "the library and the overlay changed"
 RENDERER_CHANGED = "the renderer changed"
+#: Named for a :data:`TIER_MOVED` copy, whatever else its marker says moved.
+TIER_CHANGED = "the tier hint changed"
 #: A one-digest marker records no inputs, so of the two it cannot say which.
 UNRECORDED = "the library or the renderer changed; its one-digest marker does not say which"
 

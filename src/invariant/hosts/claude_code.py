@@ -37,6 +37,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 from ..core import agents as agent_sources
 from ..core import plan as plan_reader
 from ..core.agents import AgentSource, OverlayError, OverlayProblem
@@ -46,6 +48,7 @@ from ..core.manifest import Manifest, project_relative
 from ..core.privacy import PrivacyScanner
 from ..core.rules import (
     AGENT_TOOLS,
+    AGENTS_REPAIR,
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
     AgentCopy,
@@ -64,7 +67,7 @@ from ..core.rules import (
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
 from . import assets
-from .assets import ABSENT, CURRENT, LOCAL, OLDER, digest_of
+from .assets import ABSENT, CURRENT, LOCAL, OLDER, TIER_MOVED, digest_of
 from .claude_code_launch import HANDOFF_ENV
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -259,9 +262,12 @@ def _question_text(tool_input: object) -> str | None:
     return None
 
 
-#: The agent kind's two rows from `asset_checks`, by label.
+#: The agent kind's rows from `asset_checks`, by label.
 CHECK_AGENTS_LOADABLE = "agents loadable by host"
 CHECK_AGENTS_CURRENT = "library agents current"
+#: A row of its own, read by no gate (the A7 ruling 6), present only while a
+#: copy's tier hint has moved.
+CHECK_AGENT_TIER_HINTS = "agent tier hints"
 
 
 @dataclass
@@ -350,17 +356,18 @@ def _verdict_row(verdict: Verdict) -> str:
     )
 
 
-def classify_installed(shipped: str, target: Path) -> str:
+def classify_installed(shipped: str, target: Path, *, tier_hints: bool = False) -> str:
     """How ``target`` diverges from the ``shipped`` text this host reads.
 
     The file read around `assets.classify`, which owns the rule. Every reader
     goes through the install plan, so `doctor`, both install commands and
     `uninstall` cannot disagree about what an edit is (BUG_051, BUG_106).
     ``shipped`` is the rendered text, not the neutral source: the host reads
-    the render, so an installed copy is judged against it.
+    the render, so an installed copy is judged against it. ``tier_hints`` says
+    the kind is an agent, whose model line is a rendered hint.
     """
     installed = target.read_text(encoding="utf-8") if target.is_file() else None
-    return assets.classify(installed, shipped)
+    return assets.classify(installed, shipped, tier_hints=tier_hints)
 
 
 #: The files this host reads as standing instructions, project-relative. The
@@ -391,12 +398,31 @@ HOST_VOCABULARY: tuple[str, ...] = (
 )
 
 
-def render_agent(source: AgentSource) -> str:
+def _model_line(value: str) -> str:
+    """``model: <value>``, valid frontmatter whatever the one line of text says.
+
+    The value is the operator's and opaque, so what is asked is only whether it
+    survives as itself. Written bare where it does, because the host and
+    `assets.frontmatter` read these lines one at a time, and as a double-quoted
+    scalar where it would be read as something else: ``x: y`` would not parse,
+    ``a #b`` would lose its end, and ``true`` would stop being text.
+    """
+    try:
+        if yaml.safe_load(f"model: {value}") == {"model": value}:
+            return f"model: {value}"
+    except yaml.YAMLError:
+        pass
+    quoted = yaml.safe_dump(value, default_style='"', allow_unicode=True, width=float("inf"))
+    return f"model: {quoted.rstrip()}"
+
+
+def render_agent(source: AgentSource, model: str | None = None) -> str:
     """A neutral agent source as this host's agent file, before its marker.
 
     The capabilities become a ``tools:`` line and the section anchors are
-    dropped. No model line is ever written: a model reaches this file only
-    through the operator's ``host.tier_map`` (ADR-012 D9), which A7 builds.
+    dropped. ``model`` is the operator's ``host.tier_map`` value for this agent's
+    tier (ADR-012 D9), resolved by :meth:`ClaudeCodeHost.tier_hint`. It writes one
+    line after ``tools:`` and changes nothing else; with none, no line is written.
     """
     granted = {
         tool for capability in source.capabilities for tool in CAPABILITY_TOOLS[capability]
@@ -408,10 +434,22 @@ def render_agent(source: AgentSource) -> str:
             f"name: {source.name}",
             f"description: {source.description}",
             f"tools: {tools}",
+            *([_model_line(model)] if model is not None else []),
             assets.FENCE,
             source.body(),
         ]
     )
+
+
+@dataclass(frozen=True)
+class TierHint:
+    """An agent's effective tier, where it came from, and what it maps to."""
+
+    tier: str | None = None
+    #: ``source`` or ``agents.tiers``; ``None`` with no tier.
+    origin: str | None = None
+    #: The ``host.tier_map`` value, which the engine never interprets.
+    value: str | None = None
 
 
 class ClaudeCodeHost:
@@ -813,13 +851,17 @@ class ClaudeCodeHost:
                 # passes and is listed in `warned_rows`. A REFUSED plan is a
                 # defect, not drift, and fails. An empty library has no row.
                 refusals: list[InvariantError] = []
+                copies: list[AgentCopy] = []
 
-                def plan(noted: list[InvariantError] = refusals) -> list[AgentCopy]:
+                def plan(
+                    noted: list[InvariantError] = refusals, read: list[AgentCopy] = copies
+                ) -> list[AgentCopy]:
                     try:
-                        return self.agent_copies()
+                        read.extend(self.agent_copies())
                     except InvariantError as exc:
                         noted.append(exc)
                         raise
+                    return read
 
                 verdict = agents_currency(plan)
                 if not verdict.skipped:
@@ -828,6 +870,17 @@ class ClaudeCodeHost:
                         self.warned_rows.add(CHECK_AGENTS_CURRENT)
                     checks.append(
                         (CHECK_AGENTS_CURRENT, verdict.ok or drift, _verdict_row(verdict))
+                    )
+                moved = [copy.name for copy in copies if copy.state == TIER_MOVED]
+                if moved:
+                    self.warned_rows.add(CHECK_AGENT_TIER_HINTS)
+                    named = ", ".join(f"{name} ({TIER_MOVED})" for name in moved)
+                    checks.append(
+                        (
+                            CHECK_AGENT_TIER_HINTS,
+                            True,
+                            f"{named}: a hint, and no gate reads it; try: {AGENTS_REPAIR}",
+                        )
                     )
             elif refused is not None:
                 checks.append(
@@ -853,13 +906,14 @@ class ClaudeCodeHost:
         The plan `agents install --dry-run` prints, as the host-neutral
         answer `agents.rendered_current` reads: the CLI hands this method to
         the rule context, since `core/` imports no host. A refused plan raises,
-        as every install does; the rule reports it.
+        as every install does; the rule reports it. A copy whose tier hint moved
+        is current here (the A7 ruling 6), and only this host knows why.
         """
         return [
             AgentCopy(
                 name=step.identity,
                 state=step.state,
-                current=step.state == CURRENT,
+                current=step.state in (CURRENT, TIER_MOVED),
                 edited=step.state == LOCAL,
                 why=step.why,
             )
@@ -953,6 +1007,25 @@ class ClaudeCodeHost:
         self._scan_overlay(subject, rel, render_agent(parsed), render_agent(merged))
         return merged, digest_of(text)
 
+    def tier_hint(self, source: AgentSource) -> TierHint:
+        """The agent's effective tier and its mapped value (ADR-012 D9).
+
+        ``agents.tiers``, then the source's, then none; then ``host.tier_map``.
+        A tier with no map entry has no value, so it runs on the host's default.
+        """
+        configured = self.manifest.get if self.manifest is not None else lambda _key: None
+        override = (configured("agents.tiers") or {}).get(source.name)
+        tier_map = configured("host.tier_map") or {}
+        if override:
+            return TierHint(override, "agents.tiers", tier_map.get(override))
+        if source.tier:
+            return TierHint(source.tier, "source", tier_map.get(source.tier))
+        return TierHint()
+
+    def render(self, source: AgentSource) -> str:
+        """The agent as this project installs it: the render, with its hint."""
+        return render_agent(source, model=self.tier_hint(source).value)
+
     def _overlay_text(self, name: str) -> tuple[str, str] | None:
         """``(project-relative path, text)`` of the agent's overlay, if named.
 
@@ -1043,7 +1116,7 @@ class ClaudeCodeHost:
         if kind.name != "agent":
             return text, digest_of(text), None
         merged, overlay_digest = self._agent(kind.identity(source), text)
-        return render_agent(merged), digest_of(text), overlay_digest
+        return self.render(merged), digest_of(text), overlay_digest
 
     def _target_for(self, kind, identity: str) -> Path:
         base = self.claude_dir / kind.directory
@@ -1090,11 +1163,13 @@ class ClaudeCodeHost:
                         raise
                     plan.append(self._removal_step(kind, identity, source, target))
                     continue
-                state = classify_installed(text, target)
+                state = classify_installed(text, target, tier_hints=kind.name == "agent")
                 why = None
                 if state == OLDER:
                     installed = target.read_text(encoding="utf-8")
                     why = assets.changed_input(installed, source_digest, overlay_digest)
+                elif state == TIER_MOVED:
+                    why = assets.TIER_CHANGED
                 # Everything but a local edit is written, including a target
                 # that already matches: rewriting an identical file costs
                 # nothing, and a repair command that reports "installed 0"
@@ -1127,7 +1202,7 @@ class ClaudeCodeHost:
         copy is kept (the A6.3 review). Neither is ever written.
         """
         try:
-            text = render_agent(
+            text = self.render(
                 agent_sources.parse(source.read_text(encoding="utf-8"), identity)
             )
         except InvariantError:
@@ -1136,7 +1211,7 @@ class ClaudeCodeHost:
                 kind=kind.name, identity=identity, source=source, target=target,
                 state=state, write=False, text="",
             )
-        state = classify_installed(text, target)
+        state = classify_installed(text, target, tier_hints=True)
         return AssetPlan(
             kind=kind.name, identity=identity, source=source, target=target,
             state=state, write=state != LOCAL, text=text,

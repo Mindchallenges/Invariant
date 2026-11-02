@@ -298,7 +298,8 @@ Drift between these keys and what is installed is a rule,
 and it has no key of its own. It reports every agent `agents.library` lists
 whose installed copy is not what the host would render now from its source
 and its overlay: absent, older (naming the input that moved), edited locally
-(naming the overlay fix) or unreadable. It asks the install plan `agents
+(naming the overlay fix) or unreadable. A copy differing only in its tier
+hint is not among them (see below). It asks the install plan `agents
 install --dry-run` prints, which the CLI supplies from the adapter for
 `host.kind`, so a kind with no adapter makes it N/A and keeps it off the
 landing. It warns in every profile, and `enforcement.rules` retunes it like
@@ -321,9 +322,23 @@ host:
 
 The value is one line of text the engine never interprets, and core holds no
 list of model names. The map ships empty, so every agent runs on the host's
-default until an operator says otherwise. No gate reads either key. In this
-build they are validated and otherwise unread (ADR-012, "As built: A7 increment
-1").
+default until an operator says otherwise. No gate reads either key.
+
+The host resolves each library agent when it builds the install plan: `agents.tiers`,
+then the source's tier, then none, and that tier through `host.tier_map`. The
+value becomes one `model` line after `tools:` in the installed file, and it is
+the only line the hint changes. A tier with no map entry, or no tier at all,
+writes no line, so an empty map leaves the render alone. A value is written bare
+where it reads back as itself and as a double-quoted scalar where it would not,
+so `x: y` keeps the frontmatter valid (ADR-012, "As built: A7 increment 2").
+
+A copy nobody touched that differs from today's render only in that line reads
+`tier hint moved`. It is not drift: `agents.rendered_current` and `doctor`'s
+`library agents current` row read it as current, while `agents install` still
+applies it and says so, and `doctor`'s `agent tier hints` row, outside any gate,
+names it. A model line edited by hand breaks the copy's witness and reads as
+edited locally, and the fix names these two keys as the route, because an overlay
+may not carry a model.
 
 ### Generated files are declared, and never exempt
 

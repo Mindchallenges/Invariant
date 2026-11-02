@@ -1343,8 +1343,9 @@ Details that are load-bearing rather than incidental:
   an adapter** (ADR-012 D8, the A6 ruling 10, A6 increment 4). It reports
   each library agent whose installed copy is not what the host would render
   now: absent, installed from an older version (naming which input moved),
-  edited locally (naming the overlay fix) or unreadable. It warns in every
-  profile and installs nothing. Its answer is the host's install plan, the
+  edited locally (naming the overlay fix) or unreadable. A copy differing only
+  in its tier hint counts as current (the A7 ruling 6), because no gate reads a
+  hint. It warns in every profile and installs nothing. Its answer is the host's install plan, the
   one `agents install --dry-run` prints, which the CLI hands `PipelineDomain`
   as a callable (`host_agent_plan`), because no domain imports a host.
   `core/machines` injects `AGENT_CURRENCY_GATES` only when the domain holds

@@ -1553,7 +1553,10 @@ AGENTS_REPAIR = "invariant agents install"
 
 #: The fix for an edited agent copy (ADR-012 D8): an overlay survives every
 #: upgrade, and an edit to an installed copy does not.
-AGENT_OVERLAY_FIX = "move the edit into an overlay (agents.overlays) so it survives upgrades"
+AGENT_OVERLAY_FIX = (
+    "move the edit into an overlay (agents.overlays) so it survives upgrades, "
+    "or a model line into agents.tiers and host.tier_map"
+)
 
 
 @dataclass(frozen=True)
@@ -1564,6 +1567,9 @@ class AgentCopy:
     #: The host's word for how the copy stands against the render: current,
     #: absent, edited locally, installed from an older version, unreadable.
     state: str
+    #: The host's answer, and all a rule reads of how a copy stands. A difference
+    #: only in a capability hint is current (the A7 ruling 6), so no rule can
+    #: tell a hint from anything else.
     current: bool
     #: Changed after an install wrote it: the one copy an install skips.
     edited: bool = False

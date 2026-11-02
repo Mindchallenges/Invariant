@@ -4,7 +4,7 @@ The golden half pins the migration: a shipped source rendered with no overlay
 is the text A6.1 installed, byte for byte, with only the differences the A6
 rulings asked for. Those are declared here, one by one, so a body change cannot
 ride in under the format change unseen: the host-neutral rewrites of A6.2, and
-the bodies moved onto the engine in A6.5.
+the bodies moved onto the engine in A6.5, and the model prose deleted in A7.2.
 """
 
 from __future__ import annotations
@@ -312,6 +312,31 @@ A6_5 = {
     ),
 }
 
+#: A7.2: the model prose is deleted from two descriptions (the A7 ruling 5). A
+#: tier says this now, and the source's `tier:` line never reaches the render.
+A7_2 = {
+    "bug-reproducer": (
+        (
+            (
+                " MODEL: hunting a repro is exploratory; run on the session model unless "
+                "the entry already names an exact in-target assertion."
+            ),
+            "",
+        ),
+    ),
+    "feature-architect": (
+        (
+            (
+                " MODEL: no hardcoded assignment — the parent scores the task's complexity "
+                "per the host-injected rubric and passes `model` at invocation (session "
+                "model for anything with design content; a smaller model only when every "
+                "low-complexity signal holds)."
+            ),
+            "",
+        ),
+    ),
+}
+
 
 #: The sections each shipped agent offers an overlay, in order. A rename here
 #: breaks every overlay that names the old id, so it is pinned.
@@ -408,7 +433,7 @@ def expected_render(name):
     close = lines.index("---", 1)
     front = [line for line in lines[1:close] if not line.startswith("model:")]
     text = "\n".join([lines[0], *front, *lines[close:]])
-    for old, new in (*NEUTRALISED.get(name, ()), *A6_5.get(name, ())):
+    for old, new in (*NEUTRALISED.get(name, ()), *A6_5.get(name, ()), *A7_2.get(name, ())):
         assert text.count(old) == 1, f"{name}: the rewrite no longer matches {old!r}"
         text = text.replace(old, new)
     return text
@@ -432,7 +457,7 @@ class TestTheGolden:
         assert carried == ["compliance-reviewer"]
 
     @pytest.mark.parametrize("name", NAMES)
-    def test_no_model_line_is_ever_written(self, name):
+    def test_no_model_line_is_written_without_a_map(self, name):
         front = assets.frontmatter(rendered(name))
         assert "model" not in front
 
@@ -458,10 +483,6 @@ class TestTheSources:
     @pytest.mark.parametrize("name", NAMES)
     def test_each_source_declares_its_capabilities(self, name):
         assert parse(source_text(name), name).capabilities == ("read", "edit", "shell")
-
-    @pytest.mark.parametrize("name", ("feature-architect", "bug-reproducer"))
-    def test_the_model_hint_prose_is_carried_for_a7(self, name):
-        assert "MODEL:" in parse(source_text(name), name).description
 
     @pytest.mark.parametrize("name", NAMES)
     def test_the_host_reader_still_reads_the_description_as_one_line(self, name):

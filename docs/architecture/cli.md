@@ -246,6 +246,12 @@ invariant doctor
     the row naming the refusal rather than stopping the diagnosis. With an empty agents.library there is no row.
     Commands and skills keep their own currency rows, which no rule reads.
 
+    A copy whose tier hint moved is current on that row. The `agent tier hints`
+    row names it, `<name> (tier hint moved)`, with `invariant agents install`
+    as the way to apply it (the A7 ruling 6). It reads no gate and no gate reads
+    it. It carries `"warn": true`, never fails, and is absent while no hint has
+    moved or the plan is refused.
+
     The `claude window environment` row is machine-wide and warns, never
     fails (IDEA_035). It lists every running `claude` from one `ps -axo
     pid=,tty=,comm=` and reads each one's OWN environment as it was started,
@@ -340,12 +346,15 @@ invariant assets install [--kind ...] [--overwrite-local] [--dry-run]
     overlay changed` (or the library, both, or the renderer; see "A managed
     file the operator has edited" below), and --dry-run appends the same to
     the target's line. --json carries it as `changed`. A skipped agent adds
-    the hint to move the edit into an overlay.
+    the hint to move the edit into an overlay, or a model line into agents.tiers
+    and host.tier_map.
 
 invariant agents list
-    Every library agent: installed or not, whether the host can load it, and
-    which pipeline role it answers for. The library is the manifest's
-    agents.library (ADR-012, the A6 ruling 11).
+    Every library agent: installed or not, whether the host can load it,
+    which pipeline role it answers for, and its capability tier (ADR-012 D9):
+    `tier deep (source) -> <value>`, `tier light (agents.tiers), not mapped`, or
+    `no tier`. --json carries them as `tier`, `tier_from` and `mapped`. The
+    library is the manifest's agents.library (ADR-012, the A6 ruling 11).
 
 invariant agents show <name> [--sections]
     One library agent as the host would install it, without the marker an
@@ -353,7 +362,8 @@ invariant agents show <name> [--sections]
     the agent's host-neutral source (ADR-012 D8, A6 increment 2) with the
     project's overlay applied (agents.overlays, A6 increment 3): for Claude
     Code, the capabilities as a `tools:` line, the section anchors dropped,
-    and no model line. Printed byte for byte, so it can be redirected and
+    and a `model` line only where host.tier_map maps the agent's tier (ADR-012
+    D9, A7 increment 2). Printed byte for byte, so it can be redirected and
     diffed against an installed copy. --sections lists the section anchors
     instead, in order, those an overlay inserts included: the ids an overlay
     can target. A name the library does not ship is refused naming the ones
@@ -386,8 +396,10 @@ invariant agents install [--overwrite-local] [--dry-run]
     agents.overlays names one (ADR-012 D8, A6 increment 3; manifest.md,
     "Agents: the library, the project's own, and overlays"). Each rewritten
     stale copy is named with the input that moved, `updated <name> — the
-    overlay changed`, and --dry-run says the same. An edited copy is skipped
-    and named, with the fix to move the edit into an overlay.
+    overlay changed`, and --dry-run says the same. A copy whose tier hint moved
+    is rewritten too, `updated <name> — the tier hint changed`. An edited copy
+    is skipped and named, with the fix to move the edit into an overlay, or a
+    model line into agents.tiers and host.tier_map.
 
     A bad overlay is refused before anything is written, exit 1, by this
     command and by `assets install`, naming each problem with its fix: an
@@ -443,6 +455,15 @@ neither moved, the renderer. A one-digest marker records no inputs, so it is
 "the overlay changed" when one is configured now, and otherwise says it
 cannot tell the library from the renderer.
 
+An agent's `model` line is a rendered hint (ADR-012 D9, the A7 ruling 6), so one
+more question follows the witness, for agents only. An untouched copy that
+differs from the render only in that line is `tier hint moved`: an install
+rewrites it and names it, `--dry-run` shows the write, and `agents.rendered_current`
+and the `library agents current` row read it as current, the one place the dry
+run and the rule differ. The host answers `current` on its `AgentCopy`, so no
+rule ever sees the state. A model line edited by hand fails the witness first,
+and reads as edited locally.
+
 ```mermaid
 graph TD
     T["an installed asset"] --> A{"is it there, with<br/>frontmatter on line 1?"}
@@ -452,8 +473,10 @@ graph TD
     E -- yes --> C["current: rewritten, at no cost"]
     E -- no --> M{"does its body still hash<br/>to its own marker's digest?"}
     M -- "no, or it has no marker:<br/>it changed after it was written" --> L["edited locally: the operator's work,<br/>whichever release installed it"]
-    M -- "yes: some release wrote it<br/>and nobody touched it" --> O["installed from an older version"]
-    L --> S["skipped, and NAMED, with the fix:<br/>move the edit into an overlay"]
+    M -- "yes: some release wrote it<br/>and nobody touched it" --> H{"an agent, differing from<br/>the render only in its model line?"}
+    H -- yes --> TM["tier hint moved: rewritten and named;<br/>current to every gate"]
+    H -- no --> O["installed from an older version"]
+    L --> S["skipped, and NAMED, with the fix:<br/>move the edit into an overlay,<br/>or a model line into agents.tiers and host.tier_map"]
     O --> W["rewritten; this is what<br/>the command exists for"]
     W --> I{"which input moved?<br/>the marker against today's digests"}
     I --> IN["named: the library, the overlay,<br/>both, or the renderer"]
@@ -1579,9 +1602,11 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     A6 ruling 10, A6 increment 4). Each one that is not is named "<name>
     (<state>)": absent, edited locally, unreadable, or installed from an
     older version followed by "— <the input that moved>" (the library, the
-    overlay, both, or the renderer). The fixes are `invariant agents
-    install`, and, for an edited copy, moving the edit into an overlay then
-    `invariant agents install --overwrite-local`. It reads the plan `agents
+    overlay, both, or the renderer). A copy differing only in its tier hint
+    is current here (the A7 ruling 6). The fixes are `invariant agents
+    install`, and, for an edited copy, moving the edit into an overlay, or a
+    model line into agents.tiers and host.tier_map, then `invariant agents
+    install --overwrite-local`. It reads the plan `agents
     install --dry-run` prints, through a callable the CLI puts on the rule
     context, so the two cannot disagree. A plan the install refuses (an
     overlay that does not apply, a shipped source that does not parse, an

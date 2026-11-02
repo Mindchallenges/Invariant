@@ -201,7 +201,9 @@ A rule you keep overriding is a bug report against the default: change
 
 You changed a shipped agent. That is allowed and it is yours; the row tells you
 `agents install --overwrite-local` is the way to take the shipped version back,
-and plain `agents install` will skip it and say so.
+and plain `agents install` will skip it and say so. If what you edited is the
+model line, set it through `agents.tiers` and `host.tier_map` instead, then take
+the shipped version back.
 
 ### `agents.design_agent_ran` warns although the agent ran
 
