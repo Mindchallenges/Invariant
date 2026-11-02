@@ -234,7 +234,7 @@ graph TD
     CC -- "parse, merge, AgentSource: plan_assets renders every agent with its overlay" --> CAGENTS
     CC -- "agents.library, agents.overlays; project_relative" --> MANIFEST
     CC -- "the overlay's privacy scan" --> PRIVACY
-    CC -- "is_exempt_path: an overlay is policy (D10)" --> RULES
+    CC -- "is_exempt_path: an overlay is policy (D10); agents_currency, AgentCopy: the library agents current row" --> RULES
     CLI -- "AgentSource, for agents show and its section list" --> CAGENTS
     CAGENTS -- the neutral format it parses --> AGENTS
     CLI --> SCAFFOLD
@@ -250,7 +250,7 @@ graph TD
     CFIND -- Guideline and NaCondition, the ruleset model it evaluates; BaselineEntry; matches, meets, path_exception --> CGUIDE
     CFIND -- project_relative --> MANIFEST
     CLI --> GDOM
-    CLI -. injects INSTRUCTION_FILES into the rule context, PIPELINE and OGATES from .-> CC
+    CLI -. injects INSTRUCTION_FILES and agent_copies into the rule context, PIPELINE and OGATES from .-> CC
     GDOM -- render_checklist, split_managed, for show; ROLE_PHASES, phases_for, select, render_selected, for show --phase --> CGUIDE
     GDOM -- plan_render, plan_baseline, ruleset_or_refuse, touched_paths --> RULES
     GDOM -- plan_verdicts, read_standings --> RULES
@@ -299,6 +299,21 @@ the merge stays pure. The host now takes the manifest: `CC --> MANIFEST` is
 because an overlay is policy and may not be exempt (ADR-012 D10).
 `CC --> PRIVACY` is the scan of the merged text, which refuses only what
 the overlay brings.
+
+A6 increment 4 adds the drift rule, `agents.rendered_current` (ADR-012 D8,
+the A6 ruling 10). Its answer has to be the install plan, so "current" means
+what `agents install --dry-run` says, and the plan is the host's. So the
+host answers it as `ClaudeCodeHost.agent_copies`, one `AgentCopy` per agent
+read off `plan_assets`, and the CLI hands that method down as
+`RuleContext.host_agent_plan`, beside the instruction files: on every rule
+context, to `PipelineDomain` and to the oracle's gate cache (`CLI -. injects
+INSTRUCTION_FILES and agent_copies ... .-> CC`). A `host.kind` with no
+adapter gets `None`, the rule is N/A, and `core/machines` leaves it off the
+landing. The judgement is `core.rules.agents_currency`, and the host's own
+`library agents current` row asks it of the same plan (`CC --> RULES`), so
+`doctor` and the landing gate cannot disagree. `uninstall --remove-assets`
+no longer refuses on an agent whose render is refused: its plan judges that
+copy against the render without the overlay, and keeps one it cannot judge.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1266,7 +1281,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; locking the cross-session registry; the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
 | `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands |
-| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set` | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
+| `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set`; the library agents' currency (`agents_currency`, `AgentCopy`, ADR-012 A6.4), the one judgement `agents.rendered_current` and the host's `library agents current` row give, over a host install plan handed in as a callable (`RuleContext.host_agent_plan`) | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches; the structural excuses a match is judged by (a row number, a duration word, an XML identifier), each read from the text immediately left of the match and never from the whole line; reading `privacy.allow` into plain values and path-scoped entries (`parse_allow`, `ScopedAllow`), and deciding whether an entry reaches a match at the path it was handed | Know which files matter: which paths are scanned is `privacy.scope`, decided by the caller, and a path reaches the scanner only to be compared with an allow entry |
@@ -1596,8 +1611,9 @@ installed copy diverges from what is shipped (current, edited locally,
 installed from an older version, absent, unreadable; the marker is the
 body's own witness, BUG_106). `ClaudeCodeHost.plan_assets` is the one plan
 over it, per target: `doctor`'s currency rows, `assets install`, `agents
-install`, `init` and `uninstall --remove-assets` all read it, and only an
-edited copy is withheld from a write. The asset commands reach the host
+install`, `init`, `uninstall --remove-assets` and, through `agent_copies`,
+`agents.rendered_current` all read it, and only an edited copy is withheld
+from a write. The asset commands reach the host
 through the manifest's `host.kind`, and a kind with no adapter is refused by
 name (ADR-012, "As built: A6 increment 1"; cli.md, "A managed file the
 operator has edited").

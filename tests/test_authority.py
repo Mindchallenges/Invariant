@@ -690,7 +690,9 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         run("doctor", "--json")
         before = {c["check"]: c for c in payload(capsys)["checks"]}
         detail = before["library agents current"]["detail"]
-        assert before["library agents current"]["ok"] is False
+        # Drift warns, as agents.rendered_current does: ok, with the warn flag.
+        assert before["library agents current"]["ok"] is True
+        assert before["library agents current"]["warn"] is True
         assert "feature-architect (installed from an older version)" in detail
         assert "your edits are kept" not in detail
 
@@ -703,6 +705,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         run("doctor", "--json")
         after = {c["check"]: c for c in payload(capsys)["checks"]}
         assert after["library agents current"]["ok"] is True
+        assert after["library agents current"]["warn"] is False
 
     def test_dry_run_enumerates_what_it_would_do_to_each_file(self, project, capsys):
         """It returned before any per-file work, so it could not name what it

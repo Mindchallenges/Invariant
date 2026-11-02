@@ -101,6 +101,7 @@ expect:
       docs.diagrams_current: pass
       agents.design_agent_ran: pass
       agents.review_agent_ran: pass
+      agents.rendered_current: warn
       guidelines.ruleset_valid: pass
       guidelines.generated_current: pass
       guidelines.mechanical_clean: pass

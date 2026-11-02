@@ -21,7 +21,7 @@ import posixpath
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
@@ -315,6 +315,13 @@ class RuleContext:
     #: CLI imports a host, so the CLI supplies it. Empty means the host names
     #: none, and then only configured files carry a block.
     host_instruction_files: tuple[str, ...] = ()
+    #: The host adapter's install plan for the library agents, as a callable
+    #: answering one :class:`AgentCopy` per agent: what
+    #: ``agents.rendered_current`` reads (ADR-012 D8, the A6 ruling 10). An
+    #: install plan is a host's, and nothing below the CLI imports a host, so
+    #: the CLI supplies it as it supplies ``host_instruction_files``. ``None``
+    #: means ``host.kind`` names no adapter, and then the rule is N/A.
+    host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None
 
     # -- convenience --------------------------------------------------
 
@@ -1531,6 +1538,111 @@ def _agents_gated_dispatch_has_pipeline(ctx: RuleContext) -> Verdict:
     )
 
 
+# -- agents.rendered_current ----------------------------------------------
+#
+# Whether each library agent's installed copy is what the host would render
+# now (ADR-012 D8, the A6 ruling 10). The answer is the host's install plan,
+# the one `agents install --dry-run` prints, so "current" means one thing
+# everywhere. `core/` may not import a host, so the plan reaches the rule as a
+# callable on the rule context. The host's own `doctor` row is the same
+# function over the same plan (`agents_currency`), so the row and the rule
+# cannot disagree.
+
+#: The command an agent copy is brought current with.
+AGENTS_REPAIR = "invariant agents install"
+
+#: The fix for an edited agent copy (ADR-012 D8): an overlay survives every
+#: upgrade, and an edit to an installed copy does not.
+AGENT_OVERLAY_FIX = "move the edit into an overlay (agents.overlays) so it survives upgrades"
+
+
+@dataclass(frozen=True)
+class AgentCopy:
+    """One library agent's installed copy, as the host's install plan reads it."""
+
+    name: str
+    #: The host's word for how the copy stands against the render: current,
+    #: absent, edited locally, installed from an older version, unreadable.
+    state: str
+    current: bool
+    #: Changed after an install wrote it: the one copy an install skips.
+    edited: bool = False
+    #: For a stale copy, which input moved: the library, the overlay, both,
+    #: or the renderer.
+    why: str | None = None
+
+
+def agents_currency(plan: Callable[[], Sequence[AgentCopy]]) -> Verdict:
+    """How the library agents' installed copies stand against the render now.
+
+    The one judgement: ``agents.rendered_current`` and the host's ``library
+    agents current`` row both ask it, of the same plan. A plan the host
+    refuses (an overlay that does not apply, a shipped source that does not
+    parse, an ``agents.library`` name the library does not ship) fails it,
+    naming the refusal, rather than raising: the install the fix points at
+    refuses the same thing.
+    """
+    try:
+        copies = list(plan())
+    except InvariantError as exc:
+        return Verdict.fail(
+            f"the library agents cannot be checked: {exc}",
+            detail=f"This is what `{AGENTS_REPAIR}` refuses, so installing could "
+            "not bring them current until it is fixed.",
+            fixes=(f"fix what is named, then: {AGENTS_REPAIR}",),
+        )
+    if not copies:
+        return Verdict.na("agents.library names no library agent")
+    stale = [copy for copy in copies if not copy.current]
+    if not stale:
+        return Verdict.clean(f"{len(copies)} library agent(s) current against the render")
+    named = "; ".join(
+        f"{copy.name} ({copy.state})" + (f" — {copy.why}" if copy.why else "")
+        for copy in stale
+    )
+    edited = any(copy.edited for copy in stale)
+    fixes = []
+    if any(not copy.edited for copy in stale):
+        fixes.append(AGENTS_REPAIR)
+    if edited:
+        fixes.append(f"{AGENT_OVERLAY_FIX}, then: {AGENTS_REPAIR} --overwrite-local")
+    return Verdict.fail(
+        f"{len(stale)} of {len(copies)} library agent(s) not current against the "
+        f"render: {named}",
+        detail=" ".join([
+            *(
+                ["your edits are kept: an install skips an edited copy and names it."]
+                if edited
+                else []
+            ),
+            (
+                "Each copy is judged against the host's render of its neutral source "
+                "and overlay (ADR-012 D8). This rule reports; it never installs."
+            ),
+        ]),
+        fixes=tuple(fixes),
+    )
+
+
+@rule(
+    "agents.rendered_current",
+    summary="Every library agent's installed copy is what the host would render now.",
+    events=(),
+)
+def _agents_rendered_current(ctx: RuleContext) -> Verdict:
+    """ADR-012 D8 and the A6 ruling 10. It reports and never installs.
+
+    The plan is the host adapter's, handed in by the CLI; with no adapter for
+    ``host.kind`` there is nothing rendered to compare, and the rule is N/A.
+    """
+    if ctx.host_agent_plan is None:
+        return Verdict.na(
+            f"host.kind {ctx.manifest.get('host.kind')!r} has no host adapter, "
+            f"so no library agent is rendered"
+        )
+    return agents_currency(ctx.host_agent_plan)
+
+
 # -- docs rules --------------------------------------------------------
 
 
@@ -1890,7 +2002,7 @@ def turn_guidelines(
         return guidelines_reader.TurnIndex(
             problem=(
                 f"the turn index could not be computed ({type(exc).__name__}); "
-                f"invariant guidelines show prints the ruleset"
+                f"the ruleset is printed by: invariant guidelines show"
             )
         )
 
@@ -3021,7 +3133,7 @@ def edit_guidelines(
             path=target.name,
             problem=(
                 f"the guideline statements could not be computed for this edit "
-                f"({type(exc).__name__}); invariant guidelines show prints the ruleset"
+                f"({type(exc).__name__}); the ruleset is printed by: invariant guidelines show"
             ),
         )
 

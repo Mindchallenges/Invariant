@@ -10,7 +10,7 @@ cd <project> && invariant doctor
 The shims never change — all logic lives in the library, which is why they
 are three lines — so an upgrade needs no file in your project rewritten.
 `doctor` tells you when the installed agents are from an older release
-(`library agents current: FAIL`); `invariant agents install` rewrites those
+(`library agents current: warn`); `invariant agents install` rewrites those
 and skips, by name, any you have edited.
 
 ## Remove it from a project

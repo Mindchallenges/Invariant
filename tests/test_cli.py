@@ -186,9 +186,35 @@ class TestDoctorAndConfig:
     def test_doctor_reports_agent_drift(self, project, capsys):
         run("init", "--ecosystem", "python")
         agent = next((project / ".claude" / "agents").glob("*.md"))
-        agent.write_text("locally edited\n", encoding="utf-8")
-        assert run("doctor") == 1
-        assert "library agents current" in out(capsys)
+        agent.write_text(
+            agent.read_text(encoding="utf-8") + "\nlocally edited\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+        run("doctor", "--json")
+        rows = {c["check"]: c for c in json.loads(out(capsys))["checks"]}
+        row = rows["library agents current"]
+        # Drift warns (the user's A6.4 ruling): ok, flagged, and not among
+        # the failures that decide doctor's exit code.
+        assert row["ok"] is True
+        assert row["warn"] is True
+        assert "edited locally" in row["detail"]
+
+    def test_doctor_fails_a_refused_agent_plan(self, project, capsys):
+        """A plan the install refuses is a defect, not drift: the row fails."""
+        import yaml
+
+        run("init", "--ecosystem", "python")
+        path = project / ".claude" / "invariant.yaml"
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body.setdefault("agents", {})["library"] = ["no-such-agent"]
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+        capsys.readouterr()
+        assert run("doctor", "--json") == 1
+        rows = {c["check"]: c for c in json.loads(out(capsys))["checks"]}
+        row = rows["library agents current"]
+        assert row["ok"] is False
+        assert row["warn"] is False
+        assert "no-such-agent" in row["detail"]
 
     def test_doctor_flags_absent_architecture_docs(self, project, capsys):
         import shutil

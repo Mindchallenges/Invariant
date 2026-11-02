@@ -169,6 +169,7 @@ class TestRegistry:
         present, which is the failure mode this library exists to remove.
         """
         from invariant.core.machines import (
+            AGENT_CURRENCY_GATES,
             AGENT_ROLE_GATES,
             BASELINE_GATES,
             DOCS_FIRST_GATES,
@@ -181,7 +182,11 @@ class TestRegistry:
         reachable = {
             gate
             for injected in (
-                DOCS_FIRST_GATES, *AGENT_ROLE_GATES.values(), GUIDELINES_GATES, BASELINE_GATES
+                DOCS_FIRST_GATES,
+                *AGENT_ROLE_GATES.values(),
+                GUIDELINES_GATES,
+                BASELINE_GATES,
+                AGENT_CURRENCY_GATES,
             )
             for spec in injected.values()
             for gates in spec.values()

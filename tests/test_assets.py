@@ -196,7 +196,9 @@ class TestInstallRoundTrip:
         target = next((host.claude_dir / "agents").glob("*.md"))
         target.write_text(target.read_text(encoding="utf-8") + "\nlocal\n", encoding="utf-8")
         rows = host.asset_checks()
-        assert not check(rows, "library agents current")[0]
+        # Agent drift warns (the user's A6.4 ruling): the row passes, flagged.
+        assert check(rows, "library agents current")[0]
+        assert "library agents current" in host.warned_rows
         assert check(rows, "agents loadable")[0]
 
 
@@ -685,7 +687,12 @@ class TestOnePlanEveryKind:
             managed(source + "Older wording.\n") + "mine\n", encoding="utf-8"
         )
         ok, detail = check(every_kind.asset_checks(), f"library {kind}s current")
-        assert not ok
+        # An agent's drift warns (passes, flagged); commands and skills fail.
+        if kind == "agent":
+            assert ok
+            assert "library agents current" in every_kind.warned_rows
+        else:
+            assert not ok
         assert "thing (edited locally)" in detail
 
     def test_the_rows_narrow_to_one_kind_and_name_the_given_repair(self, every_kind):

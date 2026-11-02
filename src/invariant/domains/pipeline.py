@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from ..core.manifest import Level
 from ..core.rules import (
     MECHANICAL_GATE,
     VERDICTS_GATE,
+    AgentCopy,
     Evaluated,
     RuleContext,
     apply_acknowledgements,
@@ -427,15 +428,23 @@ class PipelineDomain:
         watermarks: WatermarkSource | None = None,
         clock=time.time,
         host_instruction_files: tuple[str, ...] = (),
+        host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None,
     ) -> None:
         self.manifest = manifest
+        #: The host adapter's install plan for the library agents, handed to
+        #: every gate on the rule context: ``agents.rendered_current`` at the
+        #: landing reads it (ADR-012 D8, the A6 ruling 10). Injected by the
+        #: CLI, because no domain imports a host; with it the machine carries
+        #: that gate, and ``None`` (no adapter for ``host.kind``) leaves it off.
+        self.host_agent_plan = host_agent_plan
+        self._host_agents = host_agent_plan is not None
         self.store = store or JsonStore(manifest.state_root)
         #: The manifest-default machine — the one a NEW pipeline starts under.
         #: A running pipeline is judged by :meth:`machine_for` instead: the
         #: methodology is pinned to the record at ``start``, so neither a
         #: ``--methodology`` override (AUD-02) nor a mid-pipeline manifest edit
         #: (AUD-03) can swap the gate set out from under a pipeline in flight.
-        self.machine = load_pipeline_machine(manifest)
+        self.machine = load_pipeline_machine(manifest, host_agents=self._host_agents)
         #: Whether :attr:`machine` already carries the guidelines landing gates.
         self._configured_ruleset = bool(manifest.get("guidelines.ruleset"))
         #: Injected by the CLI (ADR-002 D2). ``None`` here is normal and
@@ -500,7 +509,10 @@ class PipelineDomain:
         if same_machine and (guidelines is None or self._configured_ruleset):
             return self.machine
         return load_pipeline_machine(
-            self.manifest, pipeline.methodology or None, guidelines=guidelines
+            self.manifest,
+            pipeline.methodology or None,
+            guidelines=guidelines,
+            host_agents=self._host_agents,
         )
 
     # -- lookup --------------------------------------------------------
@@ -564,7 +576,7 @@ class PipelineDomain:
         # (AUD-02), and mutating the shared manifest object was itself an
         # unobserved gate-set change (AUD-03).
         machine = (
-            load_pipeline_machine(self.manifest, methodology)
+            load_pipeline_machine(self.manifest, methodology, host_agents=self._host_agents)
             if methodology
             else self.machine
         )
@@ -674,6 +686,7 @@ class PipelineDomain:
             session=session,
             pipeline=pipeline.to_dict(),
             host_instruction_files=self.host_instruction_files,
+            host_agent_plan=self.host_agent_plan,
         )
         return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
 

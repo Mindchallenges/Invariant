@@ -2974,6 +2974,86 @@ overlays.
   in `tests/test_authority.py` and `tests/test_agent_rendering.py` are now
   written as one-digest markers explicitly.
 
+**As built: A6 increment 4, the `agents.rendered_current` drift rule.**
+Built to D8 ("the installed file was edited by hand: drift. `doctor` names
+it") and the A6 ruling 10, on the pattern of `guidelines.generated_current`
+(A2 increment 5).
+
+- *The rule.* `agents.rendered_current` asks whether every library agent's
+  installed copy is what the host would render now from its neutral source
+  and overlay. It names each copy that is not: absent; installed from an
+  older version, with the input that moved (`— the library changed`, the
+  overlay, both or the renderer); edited locally, with the fix to move the
+  edit into an overlay and then `invariant agents install --overwrite-local`;
+  and unreadable. The other fix is `invariant agents install`. It grades
+  `warn` in `loose`, `standard` and `strict` (ruling 10). It only reports:
+  nothing installs at the landing. An empty `agents.library` is N/A.
+- *One plan, handed in as a callable.* "Current" has to mean what `agents
+  install --dry-run` reports, so the rule asks the same plan,
+  `ClaudeCodeHost.plan_assets`. `core/` never imports a host, so
+  `RuleContext.host_agent_plan` carries it, a callable answering one
+  `AgentCopy` (name, the host's state word, current, edited, which input
+  moved) per agent. The host supplies it as `ClaudeCodeHost.agent_copies`,
+  read off the plan. The CLI's `host_agent_plan(manifest)` hands it on
+  exactly where `host_instruction_files` goes: every rule context it builds,
+  `PipelineDomain`, and the oracle's gate cache (`evaluate_row`'s
+  `agent_plan_for`). For a `host.kind` with no adapter it is `None`, and the
+  rule is N/A. `agents install --dry-run --json` now carries the same `plan`
+  (identity, state, write, changed) that `assets install --dry-run` does.
+- *Injected where an adapter is.* `core/machines.AGENT_CURRENCY_GATES` puts
+  the rule on the landing state's entry. Which kinds have an adapter is the
+  host layer's answer, so `core/machines` is told rather than asked:
+  `load_pipeline_machine(..., host_agents=True)`, which `PipelineDomain`
+  passes when it was handed a plan. A pinned or overridden methodology keeps
+  it. With no plan there is no injection, so `pipeline gates` never lists a
+  rule that cannot apply, as with `sweep.fresh`.
+- *One judgement, two surfaces.* `core.rules.agents_currency(plan)` is the
+  answer. The rule returns it, and the host's `library agents current` row
+  (`asset_checks`, which `doctor` prints through `verify`) is that verdict
+  over the host's own plan: its message, its detail and each fix. The host's
+  second agent currency check (`_stale_for` and `_currency_detail` for the
+  agent kind, and `OVERLAY_FIX`) is gone; commands and skills keep theirs,
+  which no rule reads. *The user's ruling:* the row warns on agent drift,
+  as the rule does, and does not fail. Drift is an agent that is absent,
+  older or edited locally; the row passes, carries the warned flag
+  (`"warn": true` in `--json`), and `doctor`'s exit code stays clean on
+  drift alone. A refused plan stays a failing row: an unparseable shipped
+  source, a broken overlay or an unshipped library name is a defect, not
+  drift. The host tells the two apart by noting whether its plan raised;
+  the judgement itself is still `agents_currency`'s.
+- *A refused plan is reported, never raised.* An overlay that does not
+  apply, a shipped source that does not parse (`AgentSourceError`) and an
+  `agents.library` name the library does not ship fail the rule and the row,
+  naming the refusal, rather than raising. `doctor` reports a failing row
+  for a refusal rather than crashing (the regression the A6.3 review asked for).
+- *`uninstall --remove-assets` under a refused render (the A6.3 review).* It
+  used to refuse whole on a broken overlay. Its plan (`plan_assets(...,
+  for_removal=True)`) now plans such an agent against the render without its
+  overlay. The classifier reads only the copy's own witness, so an untouched
+  copy is removed and an edited one kept, as they would be with the overlay.
+  A source that does not parse leaves nothing to judge against, and its copy
+  is kept (`not classifiable: its render is refused`). Every install still
+  refuses both. An `agents.library` name the library does not ship still
+  refuses the removal, since no target can be listed.
+- *A1, extended.* Every scenario that lands records the rule at `warn` in its
+  known answer: a scenario's `host.kind` is the default `claude_code`, and
+  its tree installs no agents.
+- *After the merge.* This repository's own installed agents read as not
+  current until they are reinstalled, which is a post-merge chore. The rule
+  only warns, and this repository's manifest does not name it (BUG_050).
+- *Boy-Scout.* Two problem lines in `core/rules` (the turn index and the edit
+  layer) read "invariant guidelines show prints the ruleset", which the test
+  that parses every command the rules name read as a command and failed on.
+  They now end "the ruleset is printed by: invariant guidelines show".
+- *Tests.* `tests/test_agents_current.py`: the rule's verdict for each state
+  and each refusal, the grading in every profile, its agreement with `agents
+  install --dry-run` over six prepared trees, the landing injection and its
+  absence, the pipeline and oracle hand-off, the CLI wiring, the `doctor` row
+  as the rule's answer and on an unparseable source, and the uninstall
+  fallback. `tests/test_rules.py` counts the new injection as a route that
+  reaches a rule, and `tests/test_conformance_engine.py` adds the rule to the
+  clean landing set.
+
 ### D9 — Capability tiers are hints, never gates (A7)
 
 `agents.tiers` maps an agent to `light`, `standard` or `deep`. The tier is

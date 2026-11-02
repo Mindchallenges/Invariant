@@ -27,6 +27,11 @@ rules:
   # Said before a design or review agent is dispatched with no pipeline to
   # record it (IDEA_020). Warn everywhere: the dispatch is legitimate.
   agents.gated_dispatch_has_pipeline: warn
+  # Every library agent's installed copy is what the host would render now
+  # (ADR-012 D8, the A6 ruling 10). Injected at the landing only where
+  # host.kind has an adapter. Warns in every profile, strict included: by the
+  # time it sees a hand edit the edit happened, and the fix is an overlay.
+  agents.rendered_current: warn
 
   docs.read_architecture: warn
   docs.updated: warn

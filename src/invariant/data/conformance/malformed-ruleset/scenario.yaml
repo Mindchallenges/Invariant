@@ -90,6 +90,7 @@ expect:
       docs.diagrams_current: pass
       agents.design_agent_ran: pass
       agents.review_agent_ran: pass
+      agents.rendered_current: warn
       guidelines.ruleset_valid: block
       guidelines.generated_current: warn
       guidelines.mechanical_clean: warn

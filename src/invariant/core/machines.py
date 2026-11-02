@@ -8,7 +8,8 @@ The docs-first gates are injected here rather than written into every
 methodology file, and so is ``sweep.fresh`` beside each gate a sweep cadence
 schedules, and the ``guidelines.*`` landing gates on the landing state of a project
 with a guidelines ruleset (``guidelines.baseline_only_shrinks`` only when it keeps a
-baseline too). ADR-001 D12 makes docs-first core policy, so a methodology
+baseline too), and ``agents.rendered_current`` there when the caller holds a host
+adapter's agent install plan. ADR-001 D12 makes docs-first core policy, so a methodology
 cannot opt out by omission — including a methodology this library has never
 seen, which is why the injection is by state role rather than by state name.
 """
@@ -158,6 +159,19 @@ BASELINE_GATES: dict[str, dict[str, list[str]]] = {
 }
 
 
+#: Attached to the landing state's ENTRY wherever ``host.kind`` names a host
+#: adapter (ADR-012 D8, the A6 ruling 10). Which kinds have one is the host
+#: layer's answer, and ``core/`` imports no host, so the caller says: the
+#: pipeline domain injects it when the CLI handed it the adapter's install
+#: plan (``host_agents=True``). Conditional for the reason ``sweep.fresh`` is:
+#: with no adapter the rule is N/A, and ``pipeline gates`` never lists a rule
+#: that cannot apply. It warns in every profile, strict included, and only
+#: reports: nothing installs at the landing.
+AGENT_CURRENCY_GATES: dict[str, dict[str, list[str]]] = {
+    "landing": {"entry": ["agents.rendered_current"]},
+}
+
+
 def shipped_ids() -> list[str]:
     return sorted(p.stem for p in MACHINE_DIR.glob("*.yaml"))
 
@@ -187,7 +201,11 @@ def load_machine(machine_id: str, manifest=None) -> Machine:
 
 
 def load_pipeline_machine(
-    manifest, machine_id: str | None = None, *, guidelines: bool | None = None
+    manifest,
+    machine_id: str | None = None,
+    *,
+    guidelines: bool | None = None,
+    host_agents: bool = False,
 ) -> Machine:
     """A pipeline machine with the docs-first gates attached.
 
@@ -202,6 +220,10 @@ def load_pipeline_machine(
     ``guidelines.ruleset`` mid-pipeline cannot drop them. ``None`` asks the
     manifest, which is right for a pipeline that pinned nothing and for a
     record that predates the pin.
+
+    ``host_agents`` says the caller holds a host adapter's install plan for
+    the library agents, so ``agents.rendered_current`` can be answered and
+    rides the landing entry (``AGENT_CURRENCY_GATES``).
     """
     machine_id = machine_id or manifest.get("methodology.pipeline") or "tdd"
     machine = load_machine(machine_id, manifest)
@@ -220,6 +242,8 @@ def load_pipeline_machine(
         machine = machine.inject_gates(GUIDELINES_GATES)
         if manifest is not None and manifest.get("guidelines.baseline"):
             machine = machine.inject_gates(BASELINE_GATES)
+    if host_agents:
+        machine = machine.inject_gates(AGENT_CURRENCY_GATES)
     scheduled = manifest.scheduled_gates() if manifest is not None else frozenset()
     return machine.inject_beside(scheduled, FRESHNESS_GATE)
 

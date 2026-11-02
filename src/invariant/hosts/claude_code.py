@@ -48,7 +48,10 @@ from ..core.rules import (
     AGENT_TOOLS,
     EDIT_TOOLS,
     HELD_OUT_OF_STANDDOWN,
+    AgentCopy,
     RuleContext,
+    Verdict,
+    agents_currency,
     dispatched_agent,
     edit_advisory,
     edit_guidelines,
@@ -310,12 +313,12 @@ def _IS_OURS(entry) -> bool:
     return "/.claude/hooks/invariant-" in json.dumps(entry)
 
 
-#: The fix for an edited agent copy (ADR-012 D8): an overlay survives every
-#: upgrade, and an edit to an installed copy does not.
-OVERLAY_FIX = "move the edit into an overlay (agents.overlays) so it survives upgrades"
+#: The plan state of a target whose render is refused, in a plan for removal
+#: only: a copy nothing can be judged against is kept (see `plan_assets`).
+UNCLASSIFIED = "not classifiable: its render is refused"
 
 
-def _currency_detail(stale: list[str], repair: str, kind: str = "agent") -> str:
+def _currency_detail(stale: list[str], repair: str) -> str:
     """The currency row's text, and — where an edit is the cause — what to do.
 
     A locally edited asset is a persistent FAILED check, and it must not read
@@ -332,9 +335,19 @@ def _currency_detail(stale: list[str], repair: str, kind: str = "agent") -> str:
             f" — your edits are kept; {repair} --overwrite-local "
             f"replaces them with the shipped version"
         )
-        if kind == "agent":
-            detail += f"; {OVERLAY_FIX}"
     return detail
+
+
+def _verdict_row(verdict: Verdict) -> str:
+    """A rule's verdict as one `doctor` row: the message, its detail and each
+    fix, so the row says exactly what the rule says."""
+    return "; ".join(
+        [
+            verdict.message,
+            *([verdict.detail] if verdict.detail else []),
+            *(f"try: {fix}" for fix in verdict.fixes),
+        ]
+    )
 
 
 def classify_installed(shipped: str, target: Path) -> str:
@@ -415,6 +428,9 @@ class ClaudeCodeHost:
         #: What the last :meth:`handle` call signalled about the host's
         #: attention; see there.
         self.attention: AttentionSignal | None = None
+        #: Labels of the passing rows the last :meth:`asset_checks` call
+        #: reported as warnings (agent drift), which `doctor` prints as `warn`.
+        self.warned_rows: set[str] = set()
 
     # -- installation --------------------------------------------------
 
@@ -520,7 +536,7 @@ class ClaudeCodeHost:
         asset_files: list[Path] = []
         protected: list[str] = []
         if remove_assets:
-            for step in self.plan_assets():
+            for step in self.plan_assets(for_removal=True):
                 if step.state == ABSENT:
                     continue
                 if step.write:
@@ -739,6 +755,7 @@ class ClaudeCodeHost:
         copy of them: it once kept its own, with its own classifier loop.
         """
         checks: list[tuple[str, bool, str]] = []
+        self.warned_rows = set()
         for kind in assets.KINDS:
             if only and kind.name != only:
                 continue
@@ -766,7 +783,7 @@ class ClaudeCodeHost:
             refused: InvariantError | None = None
             try:
                 shipped = self._library(kind)
-                stale = self._stale_for(kind)
+                stale = None if kind.name == "agent" else self._stale_for(kind)
             except InvariantError as exc:
                 refused, shipped, stale = exc, [], None
             present = {kind.identity(path) for path in installed}
@@ -788,7 +805,31 @@ class ClaudeCodeHost:
                 )
             )
 
-            if refused is not None:
+            if kind.name == "agent":
+                # The agents' currency is `agents.rendered_current`'s answer,
+                # asked of this host's own plan, so the row and the rule cannot
+                # disagree (ADR-012 D8, the A6 ruling 10). Drift (absent,
+                # older, edited locally) warns, as the rule does: the row
+                # passes and is listed in `warned_rows`. A REFUSED plan is a
+                # defect, not drift, and fails. An empty library has no row.
+                refusals: list[InvariantError] = []
+
+                def plan(noted: list[InvariantError] = refusals) -> list[AgentCopy]:
+                    try:
+                        return self.agent_copies()
+                    except InvariantError as exc:
+                        noted.append(exc)
+                        raise
+
+                verdict = agents_currency(plan)
+                if not verdict.skipped:
+                    drift = not verdict.ok and not refusals
+                    if drift:
+                        self.warned_rows.add(CHECK_AGENTS_CURRENT)
+                    checks.append(
+                        (CHECK_AGENTS_CURRENT, verdict.ok or drift, _verdict_row(verdict))
+                    )
+            elif refused is not None:
                 checks.append(
                     (
                         f"library {kind.name}s current",
@@ -801,10 +842,29 @@ class ClaudeCodeHost:
                     (
                         f"library {kind.name}s current",
                         not stale,
-                        _currency_detail(stale, repair, kind.name),
+                        _currency_detail(stale, repair),
                     )
                 )
         return checks
+
+    def agent_copies(self) -> list[AgentCopy]:
+        """Each library agent's installed copy against the render, off the plan.
+
+        The plan `agents install --dry-run` prints, as the host-neutral
+        answer `agents.rendered_current` reads: the CLI hands this method to
+        the rule context, since `core/` imports no host. A refused plan raises,
+        as every install does; the rule reports it.
+        """
+        return [
+            AgentCopy(
+                name=step.identity,
+                state=step.state,
+                current=step.state == CURRENT,
+                edited=step.state == LOCAL,
+                why=step.why,
+            )
+            for step in self.plan_assets(only="agent")
+        ]
 
     def _sources_for(self, kind) -> list[Path]:
         """The files this library ships of a kind, in a stable order."""
@@ -992,7 +1052,11 @@ class ClaudeCodeHost:
         return base / f"{identity}.md"
 
     def plan_assets(
-        self, only: str | None = None, overwrite_local: bool = False
+        self,
+        only: str | None = None,
+        overwrite_local: bool = False,
+        *,
+        for_removal: bool = False,
     ) -> list[AssetPlan]:
         """What an install would do to each target, before it does any of it.
 
@@ -1004,6 +1068,13 @@ class ClaudeCodeHost:
         to return before any per-file work and print "would reinstall library
         assets", which names nothing it would flatten — the one thing a dry run
         of a destructive command is for (BUG_051).
+
+        ``for_removal`` is `uninstall`'s plan. An agent whose render is
+        refused (an overlay that does not apply, a source that does not parse)
+        refuses an install, which would otherwise write a render the overlay
+        was meant to change. A removal writes nothing, so it plans that agent
+        through :meth:`_removal_step` instead of refusing every other target
+        with it.
         """
         plan: list[AssetPlan] = []
         for kind in assets.KINDS:
@@ -1012,7 +1083,13 @@ class ClaudeCodeHost:
             for source in self._library(kind):
                 identity = kind.identity(source)
                 target = self._target_for(kind, identity)
-                text, source_digest, overlay_digest = self._shipped_text(kind, source)
+                try:
+                    text, source_digest, overlay_digest = self._shipped_text(kind, source)
+                except InvariantError:
+                    if not (for_removal and kind.name == "agent"):
+                        raise
+                    plan.append(self._removal_step(kind, identity, source, target))
+                    continue
                 state = classify_installed(text, target)
                 why = None
                 if state == OLDER:
@@ -1038,6 +1115,32 @@ class ClaudeCodeHost:
                     )
                 )
         return plan
+
+    def _removal_step(self, kind, identity: str, source: Path, target: Path) -> AssetPlan:
+        """An agent whose render is refused, planned for removal only.
+
+        A removal asks one thing of a copy: is it still what some install
+        wrote? The classifier answers that from the copy's own witness, so it
+        is judged against the render without its overlay: an untouched copy
+        is removed whatever overlay wrote it, and an edited one is kept. A
+        source that does not parse leaves nothing to judge against, and the
+        copy is kept (the A6.3 review). Neither is ever written.
+        """
+        try:
+            text = render_agent(
+                agent_sources.parse(source.read_text(encoding="utf-8"), identity)
+            )
+        except InvariantError:
+            state = UNCLASSIFIED if target.is_file() else ABSENT
+            return AssetPlan(
+                kind=kind.name, identity=identity, source=source, target=target,
+                state=state, write=False, text="",
+            )
+        state = classify_installed(text, target)
+        return AssetPlan(
+            kind=kind.name, identity=identity, source=source, target=target,
+            state=state, write=state != LOCAL, text=text,
+        )
 
     def install_assets(
         self, only: str | None = None, overwrite_local: bool = False

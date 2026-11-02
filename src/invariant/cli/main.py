@@ -303,6 +303,7 @@ class Context:
         return PipelineDomain(
             self.manifest, self.store, watermarks=self.watermarks,
             host_instruction_files=host_instruction_files(self.manifest),
+            host_agent_plan=host_agent_plan(self.manifest),
         )
 
     @property
@@ -617,6 +618,7 @@ class Context:
             extra=extra or {},
             ambiguous=ambiguous,
             host_instruction_files=host_instruction_files(self.manifest),
+            host_agent_plan=host_agent_plan(self.manifest),
         )
 
 
@@ -814,6 +816,9 @@ def cmd_doctor(args) -> int:
         host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
         for label, ok, detail in host.verify():
             checks.append((label, ok, detail))
+        # Agent drift warns and does not fail, as `agents.rendered_current`
+        # does; a refused plan stays a failing row (ADR-012, A6.4).
+        warned |= host.warned_rows
 
         # Item statuses against the configured machine. A project whose backlog
         # says open/investigating/fixed while the machine says filed/triaged
@@ -1435,6 +1440,18 @@ def cmd_agents_install(args) -> int:
                 "would_install": [s.identity for s in plan if s.write],
                 "would_skip": [s.identity for s in plan if not s.write],
                 "into": str(agents_dir),
+                # Each agent's state and the input that moved, as `assets
+                # install --dry-run` carries them: the plan
+                # `agents.rendered_current` reads.
+                "plan": [
+                    {
+                        "identity": s.identity,
+                        "state": s.state,
+                        "write": s.write,
+                        "changed": s.why,
+                    }
+                    for s in plan
+                ],
             },
             "\n".join(lines),
         )
@@ -3340,6 +3357,25 @@ def host_instruction_files(manifest) -> tuple[str, ...]:
     return ()
 
 
+def host_agent_plan(manifest):
+    """The host adapter's agent install plan for ``manifest``'s ``host.kind``.
+
+    A callable answering one ``AgentCopy`` per library agent, which is what
+    ``agents.rendered_current`` reads (ADR-012 D8, the A6 ruling 10). It is
+    ``ClaudeCodeHost.agent_copies``, read off the plan ``agents install
+    --dry-run`` prints. Nothing below the CLI may import a host, so the CLI
+    supplies it as it supplies ``host_instruction_files``: on every rule
+    context it builds, to the pipeline domain, and to the oracle's gate cache.
+    ``None`` for a host kind with no adapter, and then the rule is N/A and no
+    landing carries it.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    if manifest.get("host.kind") == "claude_code":
+        return ClaudeCodeHost(manifest.root, manifest=manifest).agent_copies
+    return None
+
+
 def _guidelines_domain(ctx: Context):
     """The guidelines domain over the CLI's rule context, host default included."""
     return _guidelines_domain_over(ctx.rule_context())
@@ -3794,7 +3830,13 @@ def _oracle_gates():
 
     from ..oracle.gates import GateCache, evaluate_row
 
-    return GateCache(evaluate=partial(evaluate_row, instruction_files_for=host_instruction_files))
+    return GateCache(
+        evaluate=partial(
+            evaluate_row,
+            instruction_files_for=host_instruction_files,
+            agent_plan_for=host_agent_plan,
+        )
+    )
 
 
 def _oracle_row_lines(row: dict) -> list[str]:

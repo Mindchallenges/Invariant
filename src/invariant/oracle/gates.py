@@ -42,14 +42,14 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from ..core import git
 from ..core.manifest import MANIFEST_RELPATH, Manifest
-from ..core.rules import Evaluated
+from ..core.rules import AgentCopy, Evaluated
 from ..core.store import InertStore
 from ..domains.pipeline import PipelineDomain
 from ..domains.session import SessionDomain
@@ -188,6 +188,9 @@ def evaluate_row(
     row: Row,
     *,
     instruction_files_for: Callable[[Manifest], tuple[str, ...]] = lambda manifest: (),
+    agent_plan_for: Callable[[Manifest], Callable[[], Sequence[AgentCopy]] | None] = (
+        lambda manifest: None
+    ),
 ) -> Mapping[str, list[Evaluated]]:
     """``pipeline gates`` for the session ``row`` names, as its worktree sees it.
 
@@ -197,7 +200,10 @@ def evaluate_row(
     no optional lock (ADR-007 D16). ``instruction_files_for`` answers the host
     adapter's instruction files for a manifest, which the drift gate at the
     landing reads (ADR-012 D3); the CLI supplies it, because the oracle
-    imports no host.
+    imports no host. ``agent_plan_for`` answers the host adapter's agent
+    install plan for a manifest, or ``None`` with no adapter, which
+    ``agents.rendered_current`` at the landing reads (ADR-012 D8); the CLI
+    supplies that too.
     """
     workdir = _workdir(row)
     if workdir is None:
@@ -208,7 +214,10 @@ def evaluate_row(
     with git.without_optional_locks():
         session = SessionDomain(manifest, store=store).get(row.session_id)
         return PipelineDomain(
-            manifest, store=store, host_instruction_files=instruction_files_for(manifest)
+            manifest,
+            store=store,
+            host_instruction_files=instruction_files_for(manifest),
+            host_agent_plan=agent_plan_for(manifest),
         ).evaluate_gates_by_destination(
             row.session_id,
             session=session.to_dict() if session is not None else None,

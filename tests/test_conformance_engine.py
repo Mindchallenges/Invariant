@@ -323,10 +323,16 @@ def test_two_replays_in_fresh_trees_agree(name, tmp_path):
 
 
 def test_the_clean_landing_carries_every_landing_gate(tmp_path):
-    """Today's landing set, so a gate added to it is a known-answer change."""
+    """Today's landing set, so a gate added to it is a known-answer change.
+
+    ``agents.rendered_current`` rides it because the scenario's ``host.kind``
+    is the default, ``claude_code``, which has an adapter (A6 increment 4).
+    It warns: a scenario tree installs no agents."""
     outcome = replay(load_named("clean"), workdir=tmp_path).outcome
+    assert outcome.gates["committed"]["agents.rendered_current"] == "warn"
     assert sorted(outcome.gates["committed"]) == [
         "agents.design_agent_ran",
+        "agents.rendered_current",
         "agents.review_agent_ran",
         "coverage.meets_floor",
         "docs.diagrams_current",

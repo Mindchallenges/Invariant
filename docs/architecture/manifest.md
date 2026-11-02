@@ -283,6 +283,18 @@ digest, the overlay's and the body's own, so an install says which of the
 library, the overlay or the renderer moved (cli.md, "A managed file the
 operator has edited").
 
+Drift between these keys and what is installed is a rule,
+`agents.rendered_current` (ADR-012 D8, the A6 ruling 10, A6 increment 4),
+and it has no key of its own. It reports every agent `agents.library` lists
+whose installed copy is not what the host would render now from its source
+and its overlay: absent, older (naming the input that moved), edited locally
+(naming the overlay fix) or unreadable. It asks the install plan `agents
+install --dry-run` prints, which the CLI supplies from the adapter for
+`host.kind`, so a kind with no adapter makes it N/A and keeps it off the
+landing. It warns in every profile, and `enforcement.rules` retunes it like
+any rule. A manifest naming it loads only on a build that registers it.
+`doctor`'s `library agents current` row is its verdict.
+
 ### Generated files are declared, and never exempt
 
 `guidelines.checklist` is the first key of a third kind (ADR-012 ruling 13).

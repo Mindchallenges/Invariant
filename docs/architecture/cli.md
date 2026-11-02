@@ -151,6 +151,15 @@ invariant uninstall [--remove-assets] [--remove-manifest] [--dry-run]
       nicety here: what a removal takes away cannot be got back by running it
       again.
 
+    An agent whose render the install refuses (an overlay that does not
+    apply, a shipped source that does not parse) does not refuse the
+    removal (ADR-012, A6 increment 4). Its copy is judged against the
+    render without the overlay, which gives the same answer, because the
+    classifier reads the copy's own witness: an untouched copy is removed
+    and an edited one kept. A source that does not parse leaves nothing to
+    judge against, so its copy is kept and listed under `kept`. An
+    agents.library name the library does not ship still refuses it.
+
     A COMPLETE removal stops reading as broken. `doctor`'s shim check used to
     offer `hooks install` for any absence, pushing back toward the state the
     operator was leaving; where every shim is gone it now says "not installed"
@@ -224,6 +233,18 @@ invariant doctor
     problem and the fix, and never fails: the gates that read it fail at the
     landing, and a ruleset that does not load is the `guidelines ruleset`
     row's failure. A warned row carries `"warn": true` in `--json`.
+
+    The `library agents current` row is `agents.rendered_current`'s verdict
+    over the host's own install plan (ADR-012, A6 increment 4): its message,
+    its detail and each fix as `try: <fix>`, so the row and the rule give
+    one answer. It passes naming how many library agents are current, and
+    WARNS on any agent that is absent, older or edited locally (the user's
+    A6.4 ruling), naming each one as the rule does; drift alone leaves
+    `doctor`'s exit code clean, and the row carries `"warn": true`. A plan
+    the install refuses, an unparseable shipped agent source, a broken
+    overlay or an unshipped library name among them, is a defect and FAILS
+    the row naming the refusal rather than stopping the diagnosis. With an empty agents.library there is no row.
+    Commands and skills keep their own currency rows, which no rule reads.
 
     The `claude window environment` row is machine-wide and warns, never
     fails (IDEA_035). It lists every running `claude` from one `ps -axo
@@ -366,7 +387,13 @@ invariant agents install [--overwrite-local] [--dry-run]
     policy, ADR-012 D10) or naming no file; and a privacy finding the
     overlay brings into the merged text. So is an agents.library name the
     library does not ship. `doctor` reports the refusal on its `library
-    agents current` row rather than failing to run.
+    agents current` row rather than failing to run, and so does
+    `agents.rendered_current`.
+
+    --dry-run --json carries `plan`, one entry per agent with its
+    `identity`, `state`, `write` and `changed` (the input that moved), as
+    `assets install --dry-run` does, beside `would_install` and
+    `would_skip`. That plan is what `agents.rendered_current` reads.
 
 invariant config show [--provenance]
     Print resolved configuration and where each value came from.
@@ -1527,6 +1554,24 @@ invariant check [<rule-id>...]   Evaluate rules; default is every rule bound
     current pass, the engine's N/A, a rule not owed) is named as unused. A
     blocking rule's fixes name `invariant override <rule> --reason '<why>'`
     beside the verdict. Every other guideline stays in force.
+
+      invariant check agents.rendered_current [--json]
+
+    asks whether every library agent's installed copy is what the host
+    would render now from its neutral source and overlay (ADR-012 D8, the
+    A6 ruling 10, A6 increment 4). Each one that is not is named "<name>
+    (<state>)": absent, edited locally, unreadable, or installed from an
+    older version followed by "— <the input that moved>" (the library, the
+    overlay, both, or the renderer). The fixes are `invariant agents
+    install`, and, for an edited copy, moving the edit into an overlay then
+    `invariant agents install --overwrite-local`. It reads the plan `agents
+    install --dry-run` prints, through a callable the CLI puts on the rule
+    context, so the two cannot disagree. A plan the install refuses (an
+    overlay that does not apply, a shipped source that does not parse, an
+    agents.library name the library does not ship) fails it, naming the
+    refusal. N/A for a host.kind with no adapter and for an empty
+    agents.library. It warns in every profile, installs nothing, and rides
+    the landing entry only where host.kind has an adapter.
 invariant rules list [--level]   Every rule, its bound event, resolved level.
 invariant privacy scan <path>... Report personal-data matches with offsets.
 

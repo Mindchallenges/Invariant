@@ -1339,6 +1339,19 @@ Details that are load-bearing rather than incidental:
   baseline key is read as the manifest stands, not pinned, because clearing
   it shrinks what is honoured rather than widening it.
 
+- **`agents.rendered_current` rides the landing entry where `host.kind` has
+  an adapter** (ADR-012 D8, the A6 ruling 10, A6 increment 4). It reports
+  each library agent whose installed copy is not what the host would render
+  now: absent, installed from an older version (naming which input moved),
+  edited locally (naming the overlay fix) or unreadable. It warns in every
+  profile and installs nothing. Its answer is the host's install plan, the
+  one `agents install --dry-run` prints, which the CLI hands `PipelineDomain`
+  as a callable (`host_agent_plan`), because no domain imports a host.
+  `core/machines` injects `AGENT_CURRENCY_GATES` only when the domain holds
+  that plan (`load_pipeline_machine(..., host_agents=True)`), so a project
+  whose `host.kind` has no adapter, where the rule would be N/A, never lists
+  it. A pinned or overridden methodology keeps it.
+
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —
 no implementation means no test could have failed first, no code means nothing
