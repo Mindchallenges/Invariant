@@ -3,7 +3,8 @@
 The golden half pins the migration: a shipped source rendered with no overlay
 is the text A6.1 installed, byte for byte, with only the differences the A6
 rulings asked for. Those are declared here, one by one, so a body change cannot
-ride in under the format change unseen.
+ride in under the format change unseen: the host-neutral rewrites of A6.2, and
+the bodies moved onto the engine in A6.5.
 """
 
 from __future__ import annotations
@@ -55,6 +56,262 @@ NEUTRALISED = {
         ),
     ),
 }
+
+#: A6.5: the bodies onto the engine (ADR-012 D8, the A6 rulings 9 and 14).
+#: The design agent reads `guidelines show --phase design --touched` before it
+#: plans (a new section, `phase-1c`) and applies those rules at Boy-Scout time;
+#: the review agent runs the review commands in order, submits one verdict per
+#: owed rule, and pastes the engine's standings into its report. Both fall back
+#: to the checklist on the engine's no-ruleset line. Two lines in
+#: `bug-reproducer` were dead or misread by the command scan
+#: (tests/test_agent_bodies.py): `session start` never took `--task`, and a
+#: prose line opened on the word "invariant". Each pair is (A6.1's text, the
+#: new text), applied after NEUTRALISED.
+A6_5 = {
+    "bug-reproducer": (
+        (
+            (
+                "invariant session start repro-<bug_slug> --task <bug_slug>"
+            ),
+            (
+                "invariant session start repro-<bug_slug>"
+            ),
+        ),
+        (
+            (
+                "`fixed` is reachable **only from `reproduced`**. That is the flagship\n"
+                "invariant of the whole lifecycle — a fix for an unreproduced defect proves"
+            ),
+            (
+                "`fixed` is reachable **only from `reproduced`**. That is the\n"
+                "flagship invariant of the whole lifecycle — a fix for an unreproduced defect proves"
+            ),
+        ),
+    ),
+    "compliance-reviewer": (
+        (
+            (
+                "guidelines (the canonical compliance checklist in the architecture docs "
+                "plus the engine's rules), resolves"
+            ),
+            (
+                "guidelines (the engine's guidelines ruleset, or the canonical compliance "
+                "checklist in the architecture docs where a project has none, plus the "
+                "engine's rules), resolves"
+            ),
+        ),
+        (
+            (
+                "## Phase 2 — Review (the canonical checklist)"
+            ),
+            (
+                "## Phase 2 — Review (the guidelines through the engine, then the checklist)"
+            ),
+        ),
+        (
+            (
+                "**Ruleset — single source of truth: the project's canonical compliance checklist in the architecture docs at `paths.docs`.**\n"
+                "Read that doc now; it is the canonical checklist, shared with"
+            ),
+            (
+                "**The guidelines come from the engine.** Run these in order, from the\n"
+                "session's worktree:\n"
+                "\n"
+                "1. `invariant guidelines show --phase review --touched` prints, in full, every\n"
+                "   review, landing and always rule the session's declared and changed files\n"
+                "   bring into play. Read each one. What it prints decides the route, not your\n"
+                "   judgement:\n"
+                "   - **It prints rules** (a header naming the ruleset and its digest, then each\n"
+                "     rule): the project has a guidelines ruleset. Continue with steps 2 to 4.\n"
+                "     The engine answers for the guideline rules, and they are never\n"
+                "     hand-marked.\n"
+                "   - **It prints `no guidelines ruleset configured; nothing to show`:** the\n"
+                "     project has no ruleset. Skip steps 2 to 4 and review against the\n"
+                "     checklist below, marking every rule by hand.\n"
+                "   - **It exits non-zero:** that is a refusal, not the no-ruleset case, so do\n"
+                "     not fall back. A ruleset that does not load is a `[BLOCKER]`, and\n"
+                "     `invariant check guidelines.ruleset_valid` names its problems.\n"
+                "2. `invariant check guidelines.mechanical_clean` evaluates the pattern,\n"
+                "   boundary and cochange rules over the change and names each finding by rule,\n"
+                "   path and line. Each new finding is a `[BLOCKER]` or a `[WARN]` by its rule's\n"
+                "   severity, resolved in Phase 3 like any other.\n"
+                "3. `invariant guidelines verdicts show` lists the judgement rules the change\n"
+                "   owes a verdict, each led by its standing: `current`, `stale`, `missing`, or\n"
+                "   `engine` (the engine answered it, and it owes nothing).\n"
+                "4. Judge each owed rule standing `missing` or `stale` against the diff, and\n"
+                "   submit one verdict per rule, each with its own command:\n"
+                "\n"
+                "   ```\n"
+                "   invariant guidelines verdict <rule-id> --status pass --cite <path> <first-line> <last-line>\n"
+                "   invariant guidelines verdict <rule-id> --status fail --cite <path> <first-line> <last-line>\n"
+                "   invariant guidelines verdict <rule-id> --status na --na-condition <condition-id>\n"
+                "   ```\n"
+                "\n"
+                "   A citation names lines in a touched file, and for a rule whose scope is the\n"
+                "   diff, lines the diff adds or changes. Where the rule accepts a test as\n"
+                "   evidence, `--test <selector>` names one a recorded run in this pipeline\n"
+                "   included. `na` takes only a condition the rule declares; there is no\n"
+                "   free-text N/A. A refused verdict names the predicate that failed and its\n"
+                "   fix: fix the evidence and submit again. A `fail` at blocker severity is a\n"
+                "   `[BLOCKER]` for Phase 3, and once it is fixed the rule is submitted again.\n"
+                "   Then run `invariant guidelines verdicts show` once more. What it prints is\n"
+                "   what the Phase 9 report carries, pasted as printed.\n"
+                "\n"
+                "**The rest of the review is by hand.** `invariant rules list` shows the\n"
+                "engine-enforced rules and each one's resolved level; `invariant check`\n"
+                "evaluates them on demand. With no ruleset, the single source of truth is the\n"
+                "project's canonical compliance checklist in the architecture docs at\n"
+                "`paths.docs`. Read that doc now; it is the canonical checklist, shared with"
+            ),
+        ),
+        (
+            (
+                "doc existed. `invariant rules list` shows the engine-enforced rules and each\n"
+                "one's resolved level; `invariant check` evaluates them on demand."
+            ),
+            (
+                "doc existed. With a ruleset, whatever that checklist holds that the ruleset\n"
+                "does not carry is still reviewed here."
+            ),
+        ),
+        (
+            (
+                "Evaluate **every** rule against the SESSION FILE SET and mark each one\n"
+                "`[BLOCKER]`, `[WARN]`, `[OK]`, or `[N/A]`, using the severity the checklist and\n"
+                "the enforcement profile assign. Coverage below the configured floor and\n"
+                "unresolvable judgment calls are `[BLOCKER]`s — they cannot be silenced by\n"
+                "re-review. The Phase 9 report must list each rule line individually (see its\n"
+                'output contract); do not collapse to "all rules passed".'
+            ),
+            (
+                "Evaluate **every** rule reviewed by hand against the SESSION FILE SET and mark\n"
+                "each one `[BLOCKER]`, `[WARN]`, `[OK]`, or `[N/A]`, using the severity the\n"
+                "checklist and the enforcement profile assign. Coverage below the configured\n"
+                "floor and unresolvable judgment calls are `[BLOCKER]`s — they cannot be\n"
+                "silenced by re-review. The Phase 9 report must list each rule line\n"
+                'individually (see its output contract); do not collapse to "all rules passed".'
+            ),
+        ),
+        (
+            (
+                "Re-run Phase 2 on the now-edited working tree. Any new violations introduced by Phase 3 fixes themselves must be resolved (loop back to Phase 3, up to 2 passes). If after 2 passes there are still `[BLOCKER]`s, bail.\n"
+            ),
+            (
+                "Re-run Phase 2 on the now-edited working tree. With a ruleset, a Phase 3 fix that edited a cited file leaves that verdict `stale` in `invariant guidelines verdicts show`, and the rule is submitted again on the new lines. Any new violations introduced by Phase 3 fixes themselves must be resolved (loop back to Phase 3, up to 2 passes). If after 2 passes there are still `[BLOCKER]`s, bail.\n"
+            ),
+        ),
+        (
+            (
+                '- Then the full Phase-2 review report: every rule you evaluated with `[BLOCKER]`, `[WARN]`, `[OK]`, `[N/A]`, or `[NEEDS-USER]` and a one-line finding (with file:line) for each non-`[OK]`/`[N/A]`. Do NOT collapse to "all rules passed" — list each rule line so the user can see what was checked.'
+            ),
+            (
+                "- Then the `GUIDELINES` block: with a ruleset, the output of `invariant check guidelines.mechanical_clean` and of Phase 2's last `invariant guidelines verdicts show`, each pasted as printed and never re-marked by hand; with none, the no-ruleset line.\n"
+                '- Then the full Phase-2 review report: every rule you evaluated by hand with `[BLOCKER]`, `[WARN]`, `[OK]`, `[N/A]`, or `[NEEDS-USER]` and a one-line finding (with file:line) for each non-`[OK]`/`[N/A]`. Do NOT collapse to "all rules passed" — list each rule line so the user can see what was checked.'
+            ),
+        ),
+        (
+            (
+                "REVIEW (every checklist rule)\n"
+                "  [BLOCKER] coverage   71% on BulkImportViewModel.<ext> — floor is <coverage_min>%"
+            ),
+            (
+                "GUIDELINES (the engine's output, pasted as printed)\n"
+                "  mechanical — invariant check guidelines.mechanical_clean:\n"
+                "    <its output, as printed>\n"
+                "  verdicts — invariant guidelines verdicts show:\n"
+                "    <its output, as printed>\n"
+                "  (with no ruleset: no guidelines ruleset configured; nothing to show)\n"
+                "\n"
+                "REVIEW (every rule reviewed by hand)\n"
+                "  [BLOCKER] coverage   71% on BulkImportViewModel.<ext> — floor is <coverage_min>%"
+            ),
+        ),
+        (
+            (
+                "REVIEW (every checklist rule)\n"
+                "  [BLOCKER] migrations.safe-pattern   in-place schema alteration — migrations/M042.<ext>:14"
+            ),
+            (
+                "GUIDELINES\n"
+                "  <as above, or SKIPPED (bailed at Phase <N>)>\n"
+                "\n"
+                "REVIEW (every rule reviewed by hand)\n"
+                "  [BLOCKER] migrations.safe-pattern   in-place schema alteration — migrations/M042.<ext>:14"
+            ),
+        ),
+    ),
+    "feature-architect": (
+        (
+            (
+                "compliance checklist),"
+            ),
+            (
+                "guidelines: the engine's ruleset, or the compliance checklist where there is none),"
+            ),
+        ),
+        (
+            (
+                "\n"
+                "---\n"
+                "\n"
+                "## Phase 2 — Plan against the diagrams"
+            ),
+            (
+                "\n"
+                "### Phase 1c — Read the design-phase guidelines (before planning)\n"
+                "\n"
+                "Before Phase 2, ask the engine which guidelines this change is held to while it\n"
+                "is designed and built:\n"
+                "\n"
+                "```bash\n"
+                "invariant guidelines show --phase design --touched\n"
+                "```\n"
+                "\n"
+                "It prints, in full, the design and always rules that the session's declared\n"
+                "and changed files bring into play; with no such files yet, every rule of those\n"
+                "phases. Read each one. They are what Phase 2 plans against and what Phase 4\n"
+                "applies to every touched file. What the command prints decides the route, not\n"
+                "your judgement:\n"
+                "\n"
+                "- **It prints rules** (a header naming the ruleset and its digest, then each\n"
+                "  rule): the project has a guidelines ruleset, and those rules are the\n"
+                "  guidelines. Phase 4 applies them; do not read a second copy of them.\n"
+                "- **It prints `no guidelines ruleset configured; nothing to show`:** the\n"
+                "  project has no ruleset. Phase 4 falls back to the canonical compliance\n"
+                "  checklist in the architecture docs at `paths.docs`.\n"
+                "- **It exits non-zero:** that is a refusal, not the no-ruleset case, so do not\n"
+                "  fall back. Report what it names. A ruleset that does not load is\n"
+                "  `invariant check guidelines.ruleset_valid`'s finding to fix first.\n"
+                "\n"
+                "No gate records this read and none is owed: it is how the design gets its\n"
+                "rules, and the review answers for them.\n"
+                "\n"
+                "---\n"
+                "\n"
+                "## Phase 2 — Plan against the diagrams"
+            ),
+        ),
+        (
+            (
+                "compliance checklist."
+            ),
+            (
+                "guidelines (the ruleset below)."
+            ),
+        ),
+        (
+            (
+                "**Ruleset — single source of truth: the project's canonical compliance checklist in the architecture docs at `paths.docs`.**\n"
+                "Read that doc now; it is the canonical checklist shared with `compliance-reviewer` — do **not** keep a private copy here (two inline copies drifted apart before the shared doc existed; that drift is why the single source exists). `invariant rules list` shows the engine-enforced subset and each rule's resolved level. At Boy-Scout time enforce the build-time subset on every touched file: clean architecture & dependency injection, migrations & data safety, the project's documented store/scope invariants, UI rules, testing rules, ecosystem gotchas, and code quality. The coverage floor is handled in Phase 6."
+            ),
+            (
+                "**Ruleset — single source of truth: the rules Phase 1c printed; where it printed the no-ruleset line, the project's canonical compliance checklist in the architecture docs at `paths.docs`.**\n"
+                "With a ruleset, apply every rule Phase 1c printed to every touched file, and for a touched file that read could not see yet, ask for its rules with `invariant guidelines show --phase design --files <path>...`. With no ruleset, read the checklist doc now; it is the canonical checklist shared with `compliance-reviewer` — do **not** keep a private copy here (two inline copies drifted apart before the shared doc existed; that drift is why the single source exists). `invariant rules list` shows the engine-enforced subset and each rule's resolved level. At Boy-Scout time enforce the build-time subset on every touched file: clean architecture & dependency injection, migrations & data safety, the project's documented store/scope invariants, UI rules, testing rules, ecosystem gotchas, and code quality. The coverage floor is handled in Phase 6."
+            ),
+        ),
+    ),
+}
+
 
 #: The sections each shipped agent offers an overlay, in order. A rename here
 #: breaks every overlay that names the old id, so it is pinned.
@@ -111,6 +368,7 @@ ANCHORS = {
         "intro",
         "phase-1",
         "phase-1b",
+        "phase-1c",
         "phase-2",
         "phase-3",
         "phase-4",
@@ -150,7 +408,7 @@ def expected_render(name):
     close = lines.index("---", 1)
     front = [line for line in lines[1:close] if not line.startswith("model:")]
     text = "\n".join([lines[0], *front, *lines[close:]])
-    for old, new in NEUTRALISED.get(name, ()):
+    for old, new in (*NEUTRALISED.get(name, ()), *A6_5.get(name, ())):
         assert text.count(old) == 1, f"{name}: the rewrite no longer matches {old!r}"
         text = text.replace(old, new)
     return text
@@ -337,14 +595,10 @@ class TestACopyFromBeforeA6_2:
         return {s.identity: s.state for s in host.plan_assets(only="agent")}
 
     def test_an_untouched_copy_reads_as_stale_where_the_text_changed(self, host):
+        """Since A6.5 every shipped body differs from A6.1's (NEUTRALISED, A6_5)."""
         for name in NAMES:
             self.install_a6_1(host, name)
-        assert self.states(host) == {
-            "backlog-curator": assets.OLDER,
-            "compliance-reviewer": assets.OLDER,
-            "bug-reproducer": assets.CURRENT,
-            "feature-architect": assets.CURRENT,
-        }
+        assert self.states(host) == dict.fromkeys(NAMES, assets.OLDER)
 
     def test_an_untouched_copy_is_rewritten_unasked(self, host):
         for name in NAMES:

@@ -1,6 +1,6 @@
 ---
 name: feature-architect
-description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's compliance checklist), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase. MODEL: no hardcoded assignment — the parent scores the task's complexity per the host-injected rubric and passes `model` at invocation (session model for anything with design content; a smaller model only when every low-complexity signal holds).
+description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's guidelines: the engine's ruleset, or the compliance checklist where there is none), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase. MODEL: no hardcoded assignment — the parent scores the task's complexity per the host-injected rubric and passes `model` at invocation (session model for anything with design content; a smaller model only when every low-complexity signal holds).
 capabilities: [read, edit, shell]
 ---
 <!-- invariant:section intro -->
@@ -60,6 +60,35 @@ in_progress`) and the compliance-reviewer can mark it done in the same commit.
 Never silently widen scope: a `[COMBINED]` item must appear in the touched-file
 list and the test plan like any other requirement.
 
+<!-- invariant:section phase-1c -->
+### Phase 1c — Read the design-phase guidelines (before planning)
+
+Before Phase 2, ask the engine which guidelines this change is held to while it
+is designed and built:
+
+```bash
+invariant guidelines show --phase design --touched
+```
+
+It prints, in full, the design and always rules that the session's declared
+and changed files bring into play; with no such files yet, every rule of those
+phases. Read each one. They are what Phase 2 plans against and what Phase 4
+applies to every touched file. What the command prints decides the route, not
+your judgement:
+
+- **It prints rules** (a header naming the ruleset and its digest, then each
+  rule): the project has a guidelines ruleset, and those rules are the
+  guidelines. Phase 4 applies them; do not read a second copy of them.
+- **It prints `no guidelines ruleset configured; nothing to show`:** the
+  project has no ruleset. Phase 4 falls back to the canonical compliance
+  checklist in the architecture docs at `paths.docs`.
+- **It exits non-zero:** that is a refusal, not the no-ruleset case, so do not
+  fall back. Report what it names. A ruleset that does not load is
+  `invariant check guidelines.ruleset_valid`'s finding to fix first.
+
+No gate records this read and none is owed: it is how the design gets its
+rules, and the review answers for them.
+
 ---
 
 <!-- invariant:section phase-2 -->
@@ -109,12 +138,12 @@ When bailing: skip Phases 4–7, produce the report with `VERDICT: DO-NOT-IMPLEM
 <!-- invariant:section phase-4 -->
 ## Phase 4 — Boy-Scout review of touched files
 
-For every file in the touched-file list, read it in full and check it against the project's compliance checklist. Anything you find — even pre-existing — is now your obligation to fix as part of this change (Boy-Scout rule: touch = own).
+For every file in the touched-file list, read it in full and check it against the project's guidelines (the ruleset below). Anything you find — even pre-existing — is now your obligation to fix as part of this change (Boy-Scout rule: touch = own).
 
 If any finding meets a Phase-3 BAIL gate, escalate to bail rather than auto-fix.
 
-**Ruleset — single source of truth: the project's canonical compliance checklist in the architecture docs at `paths.docs`.**
-Read that doc now; it is the canonical checklist shared with `compliance-reviewer` — do **not** keep a private copy here (two inline copies drifted apart before the shared doc existed; that drift is why the single source exists). `invariant rules list` shows the engine-enforced subset and each rule's resolved level. At Boy-Scout time enforce the build-time subset on every touched file: clean architecture & dependency injection, migrations & data safety, the project's documented store/scope invariants, UI rules, testing rules, ecosystem gotchas, and code quality. The coverage floor is handled in Phase 6.
+**Ruleset — single source of truth: the rules Phase 1c printed; where it printed the no-ruleset line, the project's canonical compliance checklist in the architecture docs at `paths.docs`.**
+With a ruleset, apply every rule Phase 1c printed to every touched file, and for a touched file that read could not see yet, ask for its rules with `invariant guidelines show --phase design --files <path>...`. With no ruleset, read the checklist doc now; it is the canonical checklist shared with `compliance-reviewer` — do **not** keep a private copy here (two inline copies drifted apart before the shared doc existed; that drift is why the single source exists). `invariant rules list` shows the engine-enforced subset and each rule's resolved level. At Boy-Scout time enforce the build-time subset on every touched file: clean architecture & dependency injection, migrations & data safety, the project's documented store/scope invariants, UI rules, testing rules, ecosystem gotchas, and code quality. The coverage floor is handled in Phase 6.
 
 If the docs keep a duplication registry, cross-check every touched file against it — an OPEN contained entry is a REFACTOR-TODO for that file, a scoped-refactor entry is a Phase-3 bail (B3), an advisory entry is informational; strike a file from the registry doc when you resolve it.
 

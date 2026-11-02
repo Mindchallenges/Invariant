@@ -157,7 +157,7 @@ commands, named for the BUG, not for the session — session-derived worktree
 paths collide between agents running in one session:
 
 ```bash
-invariant session start repro-<bug_slug> --task <bug_slug>
+invariant session start repro-<bug_slug>
 invariant session isolate --execute
 ```
 
@@ -369,8 +369,8 @@ branch; they are data, exempt from the worktree flow.
 
 ### Closing an already-fixed entry
 
-`fixed` is reachable **only from `reproduced`**. That is the flagship
-invariant of the whole lifecycle — a fix for an unreproduced defect proves
+`fixed` is reachable **only from `reproduced`**. That is the
+flagship invariant of the whole lifecycle — a fix for an unreproduced defect proves
 nothing — and the machine has no `filed -> fixed` edge to offer. Telling the
 user to run `invariant item transition BUG_<id> fixed` on an entry sitting in
 `filed` names a command the engine will refuse, and the only way past a

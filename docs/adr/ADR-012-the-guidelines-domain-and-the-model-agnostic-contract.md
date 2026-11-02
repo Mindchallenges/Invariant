@@ -9,8 +9,10 @@
   DN-A14). A4 closed with increment 8, whose design and three rulings
   (a to c) are the user's. A5 closed with increment 4, built to the user's
   twelve A5 rulings (D1 to D12, under D7): all three layers of ruling 8 are
-  built. A6 is built to the user's fourteen A6 rulings (under D8), in five
-  increments; increments 1 and 2 are built.
+  built. A6 closed with increment 5, built to the user's fourteen A6 rulings
+  (under D8) in five increments: the shipped agents are host-neutral sources
+  rendered per host, amended by overlays, watched for drift, and their bodies
+  ask the engine for the guidelines.
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -3053,6 +3055,82 @@ it") and the A6 ruling 10, on the pattern of `guidelines.generated_current`
   fallback. `tests/test_rules.py` counts the new injection as a route that
   reaches a rule, and `tests/test_conformance_engine.py` adds the rule to the
   clean landing set.
+
+**As built: A6 increment 5, the bodies onto the engine, and A6 closed.**
+Built to D8 ("The body speaks only to the invariant CLI and to the ruleset"),
+D7 ("The design agent asks `guidelines show --phase design`... The review
+agent asks `--phase review`"), DN-10 and the A5 ruling D9, and the A6
+rulings 9 and 14.
+
+- *Status.* A6 is closed. Its five increments are built: one asset
+  classifier and one install plan, with BUG_106 fixed (A6.1); the neutral
+  format and the Claude Code renderer (A6.2); overlays and the `agents.*`
+  keys (A6.3); the `agents.rendered_current` drift rule (A6.4); and this one.
+  DN-10's hold on the review agent's text and D9's wait for subagents are
+  both lifted here.
+- *The design agent (ruling 9).* `feature-architect` gains a section,
+  `phase-1c`, between the backlog scan and planning. It runs `invariant
+  guidelines show --phase design --touched` and reads the rules before Phase
+  2 plans against them. Its Boy-Scout phase (`phase-4`) applies those rules
+  to every touched file, and asks `--phase design --files <path>...` for a
+  touched file the first read could not see. Its description says
+  "guidelines" where it said "compliance checklist".
+- *The review agent (ruling 9, DN-10).* `compliance-reviewer`'s Phase 2 runs,
+  in order, `invariant guidelines show --phase review --touched`, `invariant
+  check guidelines.mechanical_clean`, `invariant guidelines verdicts show`,
+  and one `invariant guidelines verdict <rule-id> --status ... --cite ...`
+  per owed rule standing missing or stale. It uses the single form, never a
+  submission file. Then it runs `verdicts show` once more. Phase 4 names the
+  stale verdict a Phase 3 fix leaves on a cited file. Phase 9's report gains
+  a `GUIDELINES` block that pastes the output of `mechanical_clean` and of
+  `verdicts show` as printed, and no guideline rule is hand-marked. The
+  other checklist sections, the engine rules and the rest of the report are
+  unchanged. Every edit is inside Phase 2, Phase 4's first sentence, one
+  Phase 9 bullet, the two report templates' review blocks and the
+  description, so BUG_043's sites (the trailer line, Phase 8b, a new Phase 9
+  slot and the fail-closed constraint) are untouched.
+- *The fallback is the engine's answer.* Both bodies quote the line
+  `guidelines show` prints with no ruleset configured, with or without
+  `--phase`, exit 0: "no guidelines ruleset configured; nothing to show". On
+  that line they fall back to the checklist under `paths.docs`. A non-zero
+  exit is a refusal, not the fallback, and a ruleset that does not load is
+  `guidelines.ruleset_valid`'s finding. A test pins the line equal to what
+  the command prints.
+- *Plain text, never computed.* The commands are literal text in the
+  sources. The render reads no ruleset, and a test shows `agents show` is the
+  same bytes with and without one.
+- *Every command a body names parses (ruling 9).* `tests/test_agent_bodies.py`
+  scans each shipped source for code spans opening on `invariant ` (a span
+  may wrap) and for lines whose text starts with it, inside a fence or out.
+  Each must parse with `build_parser()`, with each `<placeholder>` as one
+  argument (`<n>` as a number), `a|b` read once per alternative, and a
+  trailing `...` dropped. A span that only names a command (`invariant item
+  transition`, `invariant item new idea`), every word a subcommand or a fixed
+  positional choice, passes as a reference. The walk still proves each word
+  exists. The scan found two problems in `bug-reproducer`. `session start
+  repro-<bug_slug> --task <bug_slug>` named a flag `session start` never had,
+  and is now `session start repro-<bug_slug>`. And a prose line opened on the
+  word "invariant", so it is rewrapped.
+- *No gate on the design read (ruling 14).* No rule records or asks for the
+  architect's `guidelines show`. It is how the design gets its rules; the
+  review answers for them through `guidelines.mechanical_clean` and
+  `guidelines.verdicts_complete`.
+- *The golden.* `tests/test_agent_rendering.py` declares every body change
+  as an (A6.1 text, new text) pair in `A6_5`, applied after the A6.2
+  rewrites, so the render is still A6.1's bytes plus only declared changes.
+  The anchor pin adds `phase-1c`. A copy A6.1 installed now reads as
+  `installed from an older version` for all four agents.
+- *After the merge.* This repository's installed agents are stale until they
+  are reinstalled, a post-merge chore; the rule warns (A6.4).
+- *Boy-Scout.* Two tests in `tests/test_host_claude_code.py` still expected
+  the `library agents current` row to fail on a locally edited copy, which
+  A6.4's ruling changed to a passing row that warns. They now assert the
+  pass, the warned flag and the named copy.
+- *Left for later.* A7 builds `tier` and `agents.tiers`. The A6 ruling 13
+  migration helper, which drafts an overlay from an edited copy, is to be
+  filed as an idea. A6 unblocks the downstream project's B4 (its library
+  agents and overlays) and A1 increment 6 (Claude Code under two or more
+  models).
 
 ### D9 — Capability tiers are hints, never gates (A7)
 

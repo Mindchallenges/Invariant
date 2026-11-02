@@ -190,3 +190,26 @@ User rulings: the twelve A5 rulings (D1 to D12), recorded in
 under D7. Per D11 this repository still has no `CLAUDE.md`, and its ruleset
 has no always rules; revisit when one is added. Subagents get only the edit
 layer until A6 renders the agents (D9).
+
+**A6 closed** in session 58e4b6c1, in five increments: one asset classifier
+and one install plan, with [BUG_106](BUG_106.md) fixed (3b52b34, fd92bc6),
+the neutral agent format and the Claude Code renderer (662984b), overlays and
+the `agents.*` keys (e971cdf), the `agents.rendered_current` drift rule
+(aa418f2), and the agent bodies onto the engine with this closure (A6.5).
+The shipped agents are host-neutral sources rendered per host and amended by
+overlays rather than edited copies. `feature-architect` reads `invariant
+guidelines show --phase design --touched` before it plans, and
+`compliance-reviewer` answers the guidelines through `guidelines show --phase
+review --touched`, `check guidelines.mechanical_clean`, `guidelines verdicts
+show` and one `guidelines verdict` per owed rule, pasting the standings into
+its report. Both fall back to the checklist on the engine's no-ruleset line.
+A test parses every command a shipped body names.
+
+User rulings: the fourteen A6 rulings, recorded in
+[ADR-012](../adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract.md)
+under D8. Ruling 14 holds: no gate on the design read. Ruling 13's migration
+helper (draft an overlay from an edited copy) is to be filed as its own idea.
+
+A6 unblocks Heap B4 (the downstream library agents and their overlays) and
+A1 increment 6 (Claude Code under two or more models). This repository's own
+installed agents are reinstalled after the merge.

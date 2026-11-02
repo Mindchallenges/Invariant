@@ -237,6 +237,7 @@ graph TD
     CC -- "is_exempt_path: an overlay is policy (D10); agents_currency, AgentCopy: the library agents current row" --> RULES
     CLI -- "AgentSource, for agents show and its section list" --> CAGENTS
     CAGENTS -- the neutral format it parses --> AGENTS
+    AGENTS -. names commands, each parsed by a test .-> CLI
     CLI --> SCAFFOLD
     CREPLAY -- drives in-process --> CLI
     CREPLAY --> CONF
@@ -314,6 +315,21 @@ landing. The judgement is `core.rules.agents_currency`, and the host's own
 `doctor` and the landing gate cannot disagree. `uninstall --remove-assets`
 no longer refuses on an agent whose render is refused: its plan judges that
 copy against the render without the overlay, and keeps one it cannot judge.
+
+A6 increment 5 moves the agent bodies onto the engine (ADR-012 D8, the A6
+rulings 9 and 14). `AGENTS -. names commands .-> CLI` is how a body
+reaches the engine. It is dotted because a body is text an agent follows,
+not code that imports. `feature-architect` reads `invariant
+guidelines show --phase design --touched` before it plans, and
+`compliance-reviewer` runs `guidelines show --phase review --touched`, `check
+guidelines.mechanical_clean`, `guidelines verdicts show` and one `guidelines
+verdict` per owed rule, then pastes the standings into its report. On the
+line `guidelines show` prints with no ruleset, both fall back to the checklist
+under `paths.docs`. The commands are literal text, so the render never reads
+a ruleset. `tests/test_agent_bodies.py` parses every command a shipped body
+names with the CLI's own parser, so a renamed flag fails a test rather than
+leaving an instruction nobody can run. No gate asks whether the design agent
+read its rules (ruling 14).
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it

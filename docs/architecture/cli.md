@@ -361,6 +361,16 @@ invariant agents show <name> [--sections]
     other agent commands. An overlay that does not apply is refused as the
     install refuses it.
 
+    A body names the invariant commands it runs as literal text, so the
+    render never reads the ruleset (A6 increment 5). Every command a shipped
+    body names, in a code span or on a line of its own, parses with this
+    CLI's parser (tests/test_agent_bodies.py): a renamed flag or subcommand
+    fails a test instead of leaving an instruction nobody can run. The
+    review agent runs, in order, `guidelines show --phase review --touched`,
+    `check guidelines.mechanical_clean`, `guidelines verdicts show`, and one
+    `guidelines verdict` per owed rule, and pastes the standings into its
+    report.
+
 invariant agents install [--overwrite-local] [--dry-run]
     Reinstall the library agents and nothing else. Deliberately not a flag on
     `init`: `init --force` rewrites the manifest, so routing an agent repair
@@ -1269,6 +1279,13 @@ invariant guidelines show [--phase <role> [--files <path>...]... [--touched]]
     (rules), the ruleset digest, the files and the text. Refused, exit 1,
     writing nothing: an unknown phase, naming the four; --touched with no
     session; and --files or --touched without --phase.
+
+    The shipped agents call it (ADR-012, "As built: A6 increment 5"):
+    feature-architect asks --phase design --touched before it plans, and
+    compliance-reviewer asks --phase review --touched first in its review.
+    Both take the no-ruleset line, "no guidelines ruleset configured;
+    nothing to show", as the signal to fall back to the checklist under
+    paths.docs, so its wording is pinned by a test.
 
 invariant guidelines baseline (--record [--rule <id>]... | --prune) [--dry-run]
     Write the ratchet baseline guidelines.baseline names (ADR-012 D6, A3

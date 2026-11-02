@@ -269,12 +269,16 @@ class TestVerifyLoadable:
 
 
 class TestVerifyCurrency:
+    """Agent drift warns and does not fail the row (A6.4, the user's ruling):
+    the row passes, is listed in `warned_rows`, and names the copy."""
+
     def test_local_edit_is_reported_as_drift(self, installed):
         target = agents_dir(installed) / SHIPPED[0].name
         text = target.read_text(encoding="utf-8")
         target.write_text(text + "\n\nlocal addition\n", encoding="utf-8")
         ok, detail = check(installed.verify(), CHECK_AGENTS_CURRENT)
-        assert not ok
+        assert ok
+        assert CHECK_AGENTS_CURRENT in installed.warned_rows
         assert SHIPPED[0].stem in detail
 
     def test_drift_does_not_make_a_file_unloadable(self, installed):
@@ -288,7 +292,8 @@ class TestVerifyCurrency:
             target.read_text(encoding="utf-8") + "\nlocal\n", encoding="utf-8"
         )
         checks = installed.verify()
-        assert not check(checks, CHECK_AGENTS_CURRENT)[0]
+        assert CHECK_AGENTS_CURRENT in installed.warned_rows
+        assert CHECK_AGENTS_LOADABLE not in installed.warned_rows
         assert check(checks, CHECK_AGENTS_LOADABLE)[0]
 
 
