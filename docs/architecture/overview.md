@@ -93,6 +93,7 @@ graph TD
     CC --> PLAN
     CC --> RULES
     CC -. reads the claim token named by .-> CCLAUNCH
+    CC -- "subagent_model: the audit's one bounded read" --> CCTEL
     CC -- "plan_assets: every install, doctor, uninstall" --> CCASSETS
     CLI --> SESSION
     CLI --> PIPELINE
@@ -351,6 +352,19 @@ state of `assets.classify` for the agent kind. The host reports such a copy as
 current on its `AgentCopy`, so `agents_currency` and everything behind it never
 see the state, and no gate can read a hint. `doctor`'s `agent tier hints` row is
 the host's own and is outside every gate.
+
+A7 increment 3 adds the audit record (ADR-012 rulings 9 to 11), and one arrow:
+`CC --> CCTEL`, labelled for the one name it carries. `claude_code` asks
+`subagent_model` for the model a subagent run's own transcript shows, the first
+time that run acts in a pipeline and at a verdict stamp. The two modules stay
+apart for the reason given below, where `claude_code_telemetry` is described: the
+hook owns when to ask and what the answer is for, and the reader owns the
+undocumented format. Both are one host's modules, so no layer boundary is crossed
+and nothing needs injecting, as with `CC -. reads the claim token named by .->
+CCLAUNCH`. It adds no import weight to the hook path, since `claude_code` already
+reached the reader through `claude_code_launch`. `core/rules.RuleContext` removes
+`evidence.audit` when it is built, so no rule can see the record, whoever builds
+the context.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1683,7 +1697,10 @@ module about hook payload schemas, and the split keeps a change to one from
 touching the other. Besides the cost samples, it reads a transcript's newest
 turn from the file's tail (`last_turn`, BUG_078), which the oracle's probe
 takes as a host's last activity, its subagents' transcripts included
-(BUG_096; [oracle.md](oracle.md), "Last activity").
+(BUG_096; [oracle.md](oracle.md), "Last activity"). `subagent_model` reads the
+newest model from one subagent run's file by the same tail rules, for the audit
+record (ADR-012 A7.3). That one name is the only thing `claude_code` imports from
+here, and everything about the format stays on this side of it.
 
 `claude_code_launch` is the third module for the same host, and the third
 relationship: `claude_code` drives a running host, the telemetry reader reads

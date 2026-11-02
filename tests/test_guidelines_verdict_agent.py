@@ -15,7 +15,9 @@ CLI cannot know which agent submitted it. The host can:
   yet, and never overwrites (ruling a).
 
 It is audit only (D1 item 2, DN-12): no gate, standing or landing record
-reads the agent or the token, which the last class pins.
+reads the agent or the token, which the last class pins. A7 increment 3 adds
+a set-once model stamp on the same route and ``evidence.audit`` beside the
+verdicts, and the pin holds over both (rulings 10 and 11).
 """
 
 from __future__ import annotations
@@ -71,16 +73,22 @@ class TestTheRecord:
         assert "token" not in _record().record()
         assert _record(token=TOKEN_A).record()["token"] == TOKEN_A
 
-    def test_the_token_and_the_agent_are_dropped_when_read_back(self):
-        stamped = _record(token=TOKEN_A, agent="compliance-reviewer").record()
+    def test_the_model_is_written_only_when_set(self):
+        assert "model" not in _record().record()
+        assert _record(model="model-placeholder").record()["model"] == "model-placeholder"
+
+    def test_the_token_the_agent_and_the_model_are_dropped_when_read_back(self):
+        stamped = _record(
+            token=TOKEN_A, agent="compliance-reviewer", model="model-placeholder"
+        ).record()
         plain_sub, plain_problems = verdicts.resubmitted(_record().record())
         sub, problems = verdicts.resubmitted(stamped)
         assert (sub, problems) == (plain_sub, plain_problems)
         assert problems == ()
 
-    @pytest.mark.parametrize("key", ["token", "agent"])
-    def test_a_submitter_supplying_either_is_refused_as_an_unknown_key(self, key):
-        """Ruling (b): the token is the engine's, and so is the agent."""
+    @pytest.mark.parametrize("key", ["token", "agent", "model"])
+    def test_a_submitter_supplying_one_is_refused_as_an_unknown_key(self, key):
+        """Ruling (b): the token is the engine's, the agent and the model the host's."""
         entry = {"rule": "data.single-open", "status": "pass", key: TOKEN_A}
         sub, problems = verdicts.parse_entry(entry)
         assert sub is None
@@ -271,6 +279,48 @@ class TestStampVerdictAgent:
         assert _verdicts(pipelines, sid)[0] == "junk"
 
 
+class TestStampVerdictModel:
+    """The A7 ruling 11: a model stamp on the A4.8 token route, set once."""
+
+    MODEL = "model-placeholder-a"
+    OTHER = "model-placeholder-b"
+
+    def test_it_lands_with_the_agent_on_every_record_of_the_token(self, reviewing):
+        pipelines, sid = reviewing
+        _seed(pipelines, sid, A1, A2, B1)
+        assert pipelines.stamp_verdict_agent(sid, TOKEN_A, "reviewer", model=self.MODEL) == 2
+        stored = _verdicts(pipelines, sid)
+        assert [r.get("model") for r in stored] == [self.MODEL, self.MODEL, None]
+
+    def test_it_never_overwrites(self, reviewing):
+        pipelines, sid = reviewing
+        _seed(pipelines, sid, A1)
+        pipelines.stamp_verdict_agent(sid, TOKEN_A, "reviewer", model=self.MODEL)
+        pipelines.stamp_verdict_agent(sid, TOKEN_A, "reviewer", model=self.OTHER)
+        assert _verdicts(pipelines, sid)[0]["model"] == self.MODEL
+
+    @pytest.mark.parametrize("model", [None, "", 7])
+    def test_no_model_stamps_the_agent_and_no_key(self, reviewing, model):
+        pipelines, sid = reviewing
+        _seed(pipelines, sid, A1)
+        assert pipelines.stamp_verdict_agent(sid, TOKEN_A, "reviewer", model=model) == 1
+        assert _verdicts(pipelines, sid) == [dict(A1, agent="reviewer")]
+
+    def test_a_later_model_fills_an_agent_stamp_that_had_none(self, reviewing):
+        pipelines, sid = reviewing
+        _seed(pipelines, sid, A1)
+        pipelines.stamp_verdict_agent(sid, TOKEN_A, "reviewer")
+        assert pipelines.stamp_verdict_agent(sid, TOKEN_A, "reviewer", model=self.MODEL) == 0
+        assert _verdicts(pipelines, sid)[0]["model"] == self.MODEL
+
+    def test_a_record_another_agent_holds_does_not_take_this_ones_model(self, reviewing):
+        """The stamp says what the record's own agent ran on."""
+        pipelines, sid = reviewing
+        _seed(pipelines, sid, dict(A1, agent="first"))
+        pipelines.stamp_verdict_agent(sid, TOKEN_A, "second", model=self.MODEL)
+        assert _verdicts(pipelines, sid) == [dict(A1, agent="first")]
+
+
 # -- reading the token out of the command's output (hosts/claude_code) -----------------------
 
 
@@ -304,7 +354,7 @@ class StampingPipelines(FakePipelines):
         self.stamps: list[tuple[str, str, str]] = []
         self.raises = raises
 
-    def stamp_verdict_agent(self, session_id, token, agent):
+    def stamp_verdict_agent(self, session_id, token, agent, model=None):
         if self.raises:
             raise self.raises
         self.stamps.append((session_id, token, agent))
@@ -459,7 +509,7 @@ class TestTheStampIsPlacedAsAnActorRowIs:
         assert ctx.pipelines.stamps == [("s1", TOKEN_A, "compliance-reviewer")]
 
 
-# -- DN-12: nothing reads the agent or the token -------------------------------------------
+# -- DN-12: nothing reads the agent, the token, the model or the audit -------------------------------------------
 
 
 @pytest.fixture
@@ -479,15 +529,32 @@ VARIANTS = {
     "agent": {"agent": "compliance-reviewer"},
     "token": {"token": TOKEN_A},
     "both": {"agent": "feature-architect", "token": TOKEN_B},
+    "model": {"model": "model-placeholder-a"},
+    "all": {"agent": "feature-architect", "token": TOKEN_B, "model": "model-placeholder-b"},
+}
+
+#: Two ``evidence.audit`` records that disagree on every fact, and none (A7.3).
+AUDITS = {
+    "none": None,
+    "one": {"host": "claude_code", "agents": {"compliance-reviewer": {
+        "tier": "standard", "asked": "model-placeholder-a",
+        "models": ["model-placeholder-a"], "runs": ["r1"],
+    }}},
+    "other": {"host": "another-host", "agents": {"feature-architect": {
+        "tier": None, "asked": None, "models": [], "runs": [],
+    }}},
 }
 
 
 class TestDN12NothingReadsTheStamp:
-    def _read(self, repo, records, runs, last_fail=False):
+    def _read(self, repo, records, runs, last_fail=False, audit=None):
         recorded = [dict(r) for r in records]
         if last_fail:
             recorded[-1] = dict(recorded[-1], status="fail")
-        ctx = context(repo, pipe=pipeline(verdicts_=recorded, runs=runs))
+        pipe = pipeline(verdicts_=recorded, runs=runs)
+        if audit is not None:
+            pipe["evidence"]["audit"] = audit
+        ctx = context(repo, pipe=pipe)
         result = gate(ctx)
         landing = guidelines_landing(
             "reviewing", "committed", forced=False,
@@ -517,3 +584,35 @@ class TestDN12NothingReadsTheStamp:
         assert not plain[0].ok
         for extra in VARIANTS.values():
             assert self._read(repo, [dict(r, **extra) for r in base], runs) == plain
+
+    @pytest.mark.parametrize("last_fail", [False, True])
+    @pytest.mark.parametrize("name", ["one", "other"])
+    def test_the_audit_record_changes_none_of_the_three(self, repo, last_fail, name):
+        runs = [green(SELECTOR)]
+        base = every_pass(repo, runs)
+        plain = self._read(repo, base, runs, last_fail)
+        assert self._read(repo, base, runs, last_fail, audit=AUDITS[name]) == plain
+
+    def test_a_missing_verdict_is_still_missing_with_an_audit_record(self, repo):
+        runs = [green(SELECTOR)]
+        base = every_pass(repo, runs)[:-1]
+        plain = self._read(repo, base, runs)
+        assert not plain[0].ok
+        assert self._read(repo, base, runs, audit=AUDITS["one"]) == plain
+
+    def test_every_stamp_and_every_audit_together_change_nothing(self, repo):
+        runs = [green(SELECTOR)]
+        base = every_pass(repo, runs)
+        plain = self._read(repo, base, runs)
+        for extra in VARIANTS.values():
+            for audit in AUDITS.values():
+                stamped = [dict(r, **extra) for r in base]
+                assert self._read(repo, stamped, runs, audit=audit) == plain
+
+    def test_the_landing_record_copies_none_of_it(self, repo):
+        runs = [green(SELECTOR)]
+        base = [dict(r, **VARIANTS["all"]) for r in every_pass(repo, runs)]
+        _, _, landing = self._read(repo, base, runs, audit=AUDITS["one"])
+        text = json.dumps(landing)
+        for word in ("model-placeholder", "audit", TOKEN_B, "feature-architect"):
+            assert word not in text

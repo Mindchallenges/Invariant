@@ -8,6 +8,7 @@ between a gate that verifies and a gate that can be satisfied by accident.
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, LANDING_ROLE, load_pipeline_machine
 from ..core.manifest import Level
 from ..core.rules import (
+    AUDIT_KEY,
     MECHANICAL_GATE,
     VERDICTS_GATE,
     AgentCopy,
@@ -346,6 +348,11 @@ def _scope(selectors: Sequence[str]) -> str:
 #: the agent's own work being observed rather than a request for it.
 VIA_DISPATCH = "dispatch"
 VIA_ACTOR = "actor"
+
+def _text_or_none(value: Any) -> str | None:
+    """A host's fact as the audit keeps it: non-empty text, or not known."""
+    return value if isinstance(value, str) and value else None
+
 
 #: What :meth:`PipelineDomain.record_agent_run` did. Returned rather than
 #: logged, so the hook that called it can surface a drop to the session that
@@ -917,7 +924,9 @@ class PipelineDomain:
         self._save(session_id, pipeline)
         return len(records)
 
-    def stamp_verdict_agent(self, session_id: str, token: Any, agent: Any) -> int:
+    def stamp_verdict_agent(
+        self, session_id: str, token: Any, agent: Any, model: Any = None
+    ) -> int:
         """Set the acting agent on the verdicts one submission recorded (A4.8).
 
         ADR-012 DN-12 and the user's rulings: a host that can name the agent
@@ -926,30 +935,123 @@ class PipelineDomain:
         string this never interprets. Every record in
         ``evidence["verdicts"]`` carrying exactly that token and no agent yet
         gets it. Set once (ruling a): a record that has an agent keeps it, and
-        nothing else on any record changes. Returns how many were stamped.
+        nothing else on any record changes. Returns how many got an agent.
+
+        ``model`` is the model the host observed that agent running on, also
+        opaque, stamped the same way (the A7 ruling 11): set once, only on a
+        record of this token whose agent is this agent, because the stamp says
+        what the record's own agent ran on. No model stamps none.
 
         Audit only (D1 item 2): no gate, standing or landing record reads
-        ``agent`` or ``token``. An empty token or agent, no pipeline, or no
-        record carrying the token stamps nothing and writes nothing; none of
-        them is a refusal, because the verdict was accepted already.
+        ``agent``, ``model`` or ``token``. An empty token or agent, no
+        pipeline, or no record carrying the token stamps nothing and writes
+        nothing; none of them is a refusal, because the verdict was accepted
+        already.
         """
         if not isinstance(token, str) or not token or not isinstance(agent, str) or not agent:
             return 0
         pipeline = self.current(session_id)
         if pipeline is None:
             return 0
+        model = _text_or_none(model)
         stamped = 0
+        modelled = False
         for record in pipeline.evidence.get("verdicts") or ():
-            if (
-                isinstance(record, dict)
-                and record.get("token") == token
-                and record.get("agent") is None
-            ):
+            if not isinstance(record, dict) or record.get("token") != token:
+                continue
+            if record.get("agent") is None:
                 record["agent"] = agent
                 stamped += 1
-        if stamped:
+            if model is not None and record["agent"] == agent and record.get("model") is None:
+                record["model"] = model
+                modelled = True
+        if stamped or modelled:
             self._save(session_id, pipeline)
         return stamped
+
+    def audit_unread(self, session_id: str, agent: Any, run: Any) -> bool:
+        """Does this subagent run still owe the audit record its one read?
+
+        Asked by a host before it opens anything, because it is asked on every
+        call a subagent makes and the answer is nearly always no. ``run`` is the
+        host's id for the run. A host that has none reads once per agent. No
+        pipeline, no agent or a malformed record owes nothing.
+        """
+        pipeline = self.current(session_id)
+        if pipeline is None or not isinstance(agent, str) or not agent:
+            return False
+        if AUDIT_KEY not in pipeline.evidence:
+            return True
+        audit = pipeline.evidence[AUDIT_KEY]
+        agents = audit.get("agents") if isinstance(audit, dict) else None
+        if not isinstance(agents, dict):
+            return False
+        if agent not in agents:
+            return True
+        runs = agents[agent].get("runs") if isinstance(agents[agent], dict) else None
+        if not isinstance(runs, list):
+            return False
+        return isinstance(run, str) and bool(run) and run not in runs
+
+    def record_audit(
+        self,
+        session_id: str,
+        *,
+        host: Any,
+        agent: Any,
+        tier: Any = None,
+        requested: Any = None,
+        rendered: Any = None,
+        model: Any = None,
+        run: Any = None,
+    ) -> bool:
+        """Add what a host learned about a subagent to ``evidence["audit"]``.
+
+        ADR-012 D1 item 2 and the A7 rulings 9 and 10. Every value is an opaque
+        string this never interprets, and anything else counts as not known: a
+        missing fact stays null, and a null never clears a fact.
+
+        ``requested`` is the model a dispatch asked for and ``rendered`` the one
+        on the agent's installed line. Both answer ``asked``, and the request
+        wins whichever arrives first, because a foreground subagent acts before
+        the host sees the dispatch that started it. ``model`` is observed, never
+        derived from either, and gathers once per value, as ``run`` does.
+
+        Returns whether anything was written. No pipeline, no host, no agent or
+        a malformed record records nothing and is no refusal: the record is
+        audit only, so it may never cost the call that fed it. No gate can read
+        any of this, because ``RuleContext`` removes it.
+        """
+        host = _text_or_none(host)
+        agent = _text_or_none(agent)
+        pipeline = self.current(session_id)
+        if host is None or agent is None or pipeline is None:
+            return False
+        audit = pipeline.evidence.get(AUDIT_KEY, {"host": host, "agents": {}})
+        agents = audit.get("agents") if isinstance(audit, dict) else None
+        if not isinstance(agents, dict):
+            return False
+        before = copy.deepcopy(audit)
+        entry = agents.setdefault(agent, {"tier": None, "asked": None, "models": [], "runs": []})
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("models"), list)
+            or not isinstance(entry.get("runs"), list)
+        ):
+            return False
+        entry["tier"] = _text_or_none(tier) or entry.get("tier")
+        entry["asked"] = (
+            _text_or_none(requested) or entry.get("asked") or _text_or_none(rendered)
+        )
+        for key, value in (("models", model), ("runs", run)):
+            value = _text_or_none(value)
+            if value is not None and value not in entry[key]:
+                entry[key].append(value)
+        if audit == before:
+            return False
+        pipeline.evidence[AUDIT_KEY] = audit
+        self._save(session_id, pipeline)
+        return True
 
     def _fresh_bundle(self, session_id: str, kind: str) -> Path:
         """A per-run result-bundle path, per SESSION and per KIND, never shared.
@@ -1288,6 +1390,31 @@ class PipelineDomain:
             self.relpath(session_id),
             {"current": pipeline.to_dict(), "completed": completed},
         )
+
+
+def audit_line(evidence: Mapping[str, Any]) -> str | None:
+    """The audit record as the one line ``pipeline status`` prints, or ``None``.
+
+    No record, or none readable, is no line: a pipeline older than the record
+    has nothing to say. A fact it does not hold reads as ``none``.
+    """
+    audit = evidence.get(AUDIT_KEY)
+    agents = audit.get("agents") if isinstance(audit, dict) else None
+    if not isinstance(agents, dict):
+        return None
+    described = []
+    for name, entry in agents.items():
+        if not isinstance(entry, dict):
+            continue
+        models = entry.get("models")
+        observed = " + ".join(str(m) for m in models) if isinstance(models, list) else ""
+        described.append(
+            f"{name} tier {entry.get('tier') or 'none'}, "
+            f"asked {entry.get('asked') or 'none'}, observed {observed or 'none'}"
+        )
+    if not described:
+        return None
+    return f"{audit.get('host') or 'unknown'}: " + "; ".join(described)
 
 
 #: The evidence key each landing's guidelines record is appended to

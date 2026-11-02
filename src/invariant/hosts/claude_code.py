@@ -34,6 +34,7 @@ import json
 import os
 import re
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,6 +70,7 @@ from ..domains.session import ambiguity_message
 from . import assets
 from .assets import ABSENT, CURRENT, LOCAL, OLDER, TIER_MOVED, digest_of
 from .claude_code_launch import HANDOFF_ENV
+from .claude_code_telemetry import subagent_model
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -225,7 +227,11 @@ _QUESTION_TOOL = "AskUserQuestion"
 #: the command runs on in the background.
 _SHELL_TOOL = "Bash"
 
-#: A task id becomes a key in the attention record: a plain name, bounded.
+#: This adapter's name in the audit record: what ``host.kind`` says to reach it.
+HOST_KIND = "claude_code"
+
+#: A task id becomes a key in the attention record: a plain name, bounded. An
+#: agent's name becomes a file name in the audit's read under the same shape.
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 #: How Claude Code tells the main turn background work ended: a user turn
@@ -1572,7 +1578,8 @@ class ClaudeCodeHost:
         # Reading an architecture doc feeds the docs-first gate; dispatching a
         # subagent feeds the agent-role gates; and so does being one. A fourth
         # is recorded for audit and read by no gate: the agent that submitted
-        # a verdict (ADR-012 DN-12).
+        # a verdict (ADR-012 DN-12). So is the audit record: which subagent ran
+        # and on what model (the A7 rulings 9 to 11).
         tool = str(payload.get("tool_name", ""))
 
         # A session registered through the CLI cannot see the host identifier:
@@ -1669,6 +1676,7 @@ class ClaudeCodeHost:
                 return _context_response("PostToolUse", _UNRECORDED_DISPATCH.format(
                     agent=agent_type, session=session.id
                 ))
+            self._audit_dispatch(payload, ctx, session.id, str(agent_type))
         except InvariantError:
             # Evidence is a side effect. A hook that raises turns every dispatch
             # in the project into a failed tool call, which is strictly worse
@@ -1849,7 +1857,84 @@ class ClaudeCodeHost:
                 return
             ctx.pipelines.record_agent_run(session.id, agent_type, how=VIA_ACTOR)
         except InvariantError:
-            pass
+            return
+        self._audit_first_act(payload, ctx, session.id, agent_type)
+
+    def _audit_first_act(self, payload: dict, ctx, session_id: str, agent: str) -> None:
+        """Audit a subagent run the first time it acts in a pipeline.
+
+        The A7 rulings 9 to 11. This sits on every call a subagent makes, so
+        the question is asked before anything is opened and a run is read once.
+        Any failure records nothing and leaves the hook's answer alone: nothing
+        may turn a record no gate reads into a failed tool call. The same for
+        :meth:`_audit_dispatch` and the audit half of the verdict stamp.
+        """
+        with suppress(Exception):
+            run = payload.get("agent_id")
+            if ctx.pipelines.audit_unread(session_id, agent, run):
+                self._write_audit(ctx, session_id, agent, run=run, model=_run_model(payload))
+
+    def _audit_dispatch(self, payload: dict, ctx, session_id: str, agent: str) -> None:
+        """Audit the model a dispatch asked for, if it asked for one.
+
+        ``tool_input.model`` is the key the Agent call carries in a transcript
+        (`claude_code_telemetry._blocks`). No hook fixture pins it, so a
+        dispatch without it is a null request. The dispatch names no run.
+        """
+        with suppress(Exception):
+            tool_input = payload.get("tool_input") or {}
+            self._write_audit(ctx, session_id, agent, requested=tool_input.get("model"))
+
+    @staticmethod
+    def _write_audit(ctx, session_id: str, agent: str, **facts) -> None:
+        """One audit write, with the hints of the project the call is placed in.
+
+        A new host over ``ctx.manifest``, because a call placed in another
+        project (ADR-011) reaches this on a context rooted there.
+        """
+        manifest = getattr(ctx, "manifest", None)
+        tier, rendered = None, None
+        if manifest is not None:
+            placed = ClaudeCodeHost(manifest.root, manifest)
+            tier, rendered = placed._audit_tier(agent), placed._rendered_model(agent)
+        ctx.pipelines.record_audit(
+            session_id, host=HOST_KIND, agent=agent, tier=tier, rendered=rendered, **facts
+        )
+
+    def _audit_tier(self, agent: str) -> str | None:
+        """The agent's effective tier, or ``None``.
+
+        Only a library agent has one (the A7 ruling 14). An overlay that does
+        not load is a refusal elsewhere and not known here.
+        """
+        if agent not in (self.manifest.get("agents.library") or ()):
+            return None
+        try:
+            return self.tier_hint(self.agent_source(agent)).tier
+        except InvariantError:
+            return None
+
+    def _rendered_model(self, agent: str) -> str | None:
+        """The ``model`` line of the agent's installed copy, or ``None``.
+
+        The file, not the render, because the file is what the host acted on: a
+        hint moved since the last install is still on the old line.
+        """
+        if not _TASK_ID.match(agent):
+            return None
+        directory = assets.BY_NAME["agent"].directory
+        try:
+            text = (self.claude_dir / directory / f"{agent}.md").read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            return None
+        value = (assets.frontmatter(text) or {}).get("model")
+        if value and value.startswith('"'):
+            # `render_agent` quotes a value that would not read back as itself.
+            try:
+                value = yaml.safe_load(value)
+            except yaml.YAMLError:
+                return None
+        return value if isinstance(value, str) and value else None
 
     def _stamp_verdict_agent(self, payload: dict, ctx) -> None:
         """Stamp the acting agent on the verdicts this shell call recorded.
@@ -1869,6 +1954,11 @@ class ClaudeCodeHost:
         that cannot name one sends none; either way nothing is stamped and
         the verdict, already accepted, stands. Silent, like the actor row:
         evidence for audit is never a reason to fail a completed call.
+
+        The stamp also carries the model this run's own transcript shows (the
+        A7 ruling 11), read here whether or not the run has been read before,
+        since a verdict is rare and a run can change model. What it shows joins
+        the audit record too. A model it cannot read stamps the agent alone.
         """
         agent_type = payload.get("agent_type")
         if not isinstance(agent_type, str) or not agent_type:
@@ -1885,10 +1975,13 @@ class ClaudeCodeHost:
             session = self._actor_session(resolution, payload, ctx)
             if session is None:
                 return
+            model = _run_model(payload)
             for token in tokens:
-                ctx.pipelines.stamp_verdict_agent(session.id, token, agent_type)
+                ctx.pipelines.stamp_verdict_agent(session.id, token, agent_type, model=model)
         except InvariantError:
-            pass
+            return
+        with suppress(Exception):
+            self._write_audit(ctx, session.id, agent_type, run=payload.get("agent_id"), model=model)
 
     @staticmethod
     def _actor_session(resolution, payload: dict, ctx):
@@ -2188,6 +2281,18 @@ def _response_text(payload: dict) -> str:
     if isinstance(response, dict):
         response = response.get("stdout") or response.get("output") or ""
     return str(response or "")
+
+
+def _run_model(payload: dict) -> str | None:
+    """The model this subagent run's own transcript shows, or ``None``.
+
+    From the payload's ``agent_id`` and ``transcript_path``, never a model field:
+    no fixture of a tool payload shows one, and a missing fact stays null.
+    """
+    try:
+        return subagent_model(payload.get("transcript_path"), payload.get("agent_id"))
+    except Exception:  # noqa: BLE001 - audit only; see _audit_first_act
+        return None
 
 
 def _submission_tokens(response: str) -> tuple[str, ...]:

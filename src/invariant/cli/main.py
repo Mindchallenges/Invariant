@@ -39,7 +39,7 @@ from ..core.rules import (
     sweep_cadence_summary,
 )
 from ..core.store import InertStore, JsonStore
-from ..domains.pipeline import PipelineDomain, describe_run, summarise
+from ..domains.pipeline import PipelineDomain, audit_line, describe_run, summarise
 from ..domains.session import (
     SessionDomain,
     name_ambiguity_message,
@@ -2872,6 +2872,9 @@ def cmd_pipeline_status(args) -> int:
         text.append(f"  ruleset  {pin['path']} could not be loaded at start: {pin.get('error')}")
     if pipeline.overrides:
         text.append(f"  forced  {len(pipeline.overrides)} override(s) recorded")
+    audit = audit_line(pipeline.evidence)
+    if audit is not None:
+        text.append(f"  audit   {audit}")
     return emit(args, pipeline.to_dict(), "\n".join(text))
 
 

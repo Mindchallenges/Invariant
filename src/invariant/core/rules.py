@@ -293,6 +293,29 @@ class Evaluated:
         return "\n".join(lines)
 
 
+#: The evidence key holding the audit record (ADR-012 D1 item 2, the A7 ruling
+#: 10). Which adapter saw which subagent, and what model it ran on. Written by a
+#: host through ``PipelineDomain.record_audit`` and read by ``pipeline status``.
+AUDIT_KEY = "audit"
+
+
+def _without_audit(pipeline: dict | None) -> dict | None:
+    """``pipeline`` with no audit record, leaving the caller's dict as it was.
+
+    A record without one comes back as the same object, so this costs nothing
+    on the common path and no caller holds a copy it did not expect.
+    """
+    if not pipeline:
+        return pipeline
+    evidence = pipeline.get("evidence")
+    if not isinstance(evidence, dict) or AUDIT_KEY not in evidence:
+        return pipeline
+    return {
+        **pipeline,
+        "evidence": {key: value for key, value in evidence.items() if key != AUDIT_KEY},
+    }
+
+
 @dataclass
 class RuleContext:
     """Everything a rule may read. Rules never reach outside this."""
@@ -322,6 +345,12 @@ class RuleContext:
     #: the CLI supplies it as it supplies ``host_instruction_files``. ``None``
     #: means ``host.kind`` names no adapter, and then the rule is N/A.
     host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None
+
+    def __post_init__(self) -> None:
+        # Here rather than at each caller, so no rule can see the audit record
+        # whoever builds the context, the oracle's gate cache included (the A7
+        # ruling 10). A gate's verdict may not depend on which model ran (D1).
+        self.pipeline = _without_audit(self.pipeline)
 
     # -- convenience --------------------------------------------------
 

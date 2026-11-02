@@ -963,7 +963,14 @@ invariant pipeline status [--json]
     ruleset: "ruleset <path> @ <digest>", or the reason it could not be
     loaded at start. No line when nothing was pinned. --json is the record,
     `ruleset` included, and the evidence, each landing's guidelines record
-    included.
+    and `audit` included.
+
+    One more line when the host recorded subagents (ADR-012 A7.3):
+    "audit   <host>: <agent> tier <t>, asked <m>, observed <m> + <m>; ...",
+    with "none" for a fact it does not hold. asked is the model requested at
+    dispatch, or the one on the agent's installed model line. observed is what
+    the run's own transcript showed. No gate reads any of it, and a pipeline
+    older than the record prints no line.
 invariant pipeline advance <state> [--force]
     Validates the transition against the FSM and runs the gates. --force
     records an override with a required --reason rather than bypassing
@@ -1451,13 +1458,15 @@ invariant guidelines verdicts submit <file.json>
 
     The token is 32 random hex digits, one per accepted submission, on
     every record it wrote (A4 increment 8). It is the engine's: an object
-    naming token, like one naming agent, state or surface, is refused as
-    an unknown key. Its only reader is the host. A host that can name the
+    naming token, like one naming agent, model, state or surface, is refused
+    as an unknown key. Its only reader is the host. A host that can name the
     agent acting in the call (Claude Code's agent_type, on a subagent's
     own shell calls) reads the token out of this output after the command
     returns and stamps that agent on the records, once. A main-loop call
-    is not stamped. No gate reads the agent or the token (ADR-012 DN-12);
-    pipeline status --json prints both.
+    is not stamped. The same stamp carries the model that agent's own
+    transcript shows, when it can be read (A7.3), and a submission naming
+    model is refused as an unknown key too. No gate reads the agent, the
+    model or the token (ADR-012 DN-12); pipeline status --json prints them.
 
 invariant guidelines verdicts show
     Show what guidelines.verdicts_complete sees over the change in hand

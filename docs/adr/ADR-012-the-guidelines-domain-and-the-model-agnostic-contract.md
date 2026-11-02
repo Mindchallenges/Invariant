@@ -3297,6 +3297,91 @@ D9, D8's "unless the operator's `host.tier_map` supplies one", and the A7 ruling
   (ruling 4). The lint's own word list and its red examples name model families,
   as `tests/test_manifest.py`'s scan already does. They are never `tier_map` values.
 
+**As built: A7 increment 3, the audit record.** Built to D1 item 2, D9, DN-12, the
+A4.8 token route and the A7 rulings 9, 10 and 11. No gate was added and no gate's
+inputs changed. D1 item 2's wording and the permutation test and scan are A7.4.
+
+- *Where (ruling 10).* `evidence.audit`, written by the host through
+  `PipelineDomain.record_audit`, with the shape state_model.md gives. Every value
+  is an opaque string, anything else counts as not known, and a null never clears
+  a fact. `RuleContext.__post_init__` removes the key from a copy of the record,
+  so no rule can see it whoever builds the context. The oracle's gate cache
+  evaluates through `evaluate_gates`, and a test watches that context. An audit
+  write moves the record's write time, which is part of the cache's fingerprint,
+  so the cache evaluates once more and gets the same answer. The landing record
+  copies none of it.
+- *The verdict stamp (ruling 11).* `VerdictRecord.model`, written only when set,
+  joins `_RECORD_ONLY_KEYS`, so the gate's re-check drops it and a submitted
+  `model` is still an unknown key. `stamp_verdict_agent` takes it on the A4.8
+  route in the same save: set once, and only on a record of that token whose
+  agent is this agent, because the stamp says what the record's own agent ran on.
+  The return value still counts agents stamped. A main-loop turn stamps neither.
+- *Asked and observed (ruling 9).* Kept apart, and neither is derived from the
+  other.
+  - *Observed* comes from `claude_code_telemetry.subagent_model`, which runs
+    `last_model` over `<main transcript's stem>/subagents/agent-<agent_id>.jsonl`,
+    the layout BUG_096 recorded. It is the newest complete `assistant` line
+    within `last_turn`'s budget, and `_scan_tail` now takes the line parser, so
+    both readers share one set of tail rules.
+  - *Asked* is `tool_input.model` from the dispatch's `PostToolUse`, or else the
+    `model` line of the installed copy, which is the file the host acted on.
+  - *The new arrow.* `claude_code` imports `subagent_model` from
+    `claude_code_telemetry`. The hook owns when to ask and what the answer is
+    for, and the reader owns the undocumented format, so the reason the two
+    modules are kept apart still holds. overview.md draws it.
+- *A4.8 and transcripts.* Increment 8 rejected reading transcripts (its Option D)
+  as the way to link a submission to its agent. That ruling does not bind this
+  use: the token still makes that link, and here a transcript only gives up a
+  model value for a run already identified by the payload's `agent_id`. Nothing
+  is attributed from it, and being wrong or absent can change no gate.
+- *What the payload was checked for.* No fixture in the code or tests shows a
+  tool payload carrying a model, so none is read, and a test feeds one and shows
+  it ignored.
+  - `agent_id` and `agent_type` have fixtures (`tests/test_oracle_attention.py`).
+  - `tool_input.model` has a fixture only on the transcript's own record of the
+    Agent call (`tests/test_host_telemetry.py`).
+  - `transcript_path` has no fixture. Its only record is ADR-011's table, as
+    measured under BUG_010, so the fixture in `tests/test_audit_record.py` pins
+    this code's reading and not the host's.
+
+  No live payload was inspected. Each of these missing gives a null, so a wrong
+  reading shows as an empty `models` in `pipeline status`, and never as a wrong
+  value.
+- *When.* On `PostToolUse`: the first time a run acts in a pipeline, asked first
+  through `audit_unread` so a later call opens nothing; when a dispatch resolves
+  here, which is rare; and at a verdict stamp, which reads again because a run can
+  change model. A failure records nothing and never reaches the hook's answer.
+- *Who reads it.* `invariant pipeline status`: `--json`, plus one line from
+  `audit_line`.
+- *Readings taken where the rulings are silent (the design pass's, not the
+  user's).* Each can be overruled without reopening a ruling.
+  - *The dispatch is a third moment.* The accepted design names the first act and
+    the verdict stamp as when to read, and asks for the model requested at
+    dispatch. A dispatch's own `PostToolUse` is the only event that holds that
+    value, so it writes `asked` and the tier, and reads no transcript.
+  - *`asked` is per agent.* The accepted shape has no per-run slot, so of an agent
+    dispatched twice the last dispatch naming a model answers. One naming none
+    clears nothing.
+  - *A run is read once even when the read found nothing.* If the first read comes
+    before the transcript holds a complete line, `models` stays empty until a
+    verdict stamp reads it again.
+  - *A host with no run id reads once per agent per pipeline*, so it stays off the
+    every-call path.
+- *One defect fixed in a touched file.* `_resolves_under` called `Path.is_dir`,
+  which raises on a permission error under this project's Python, against its own
+  docstring. So `test_an_unreadable_directory_narrows_the_scan_and_never_raises`
+  was failing before this increment. It now asks `os.path.isdir`.
+- *Tests.* `tests/test_audit_record.py` covers the bounded read, `subagent_model`
+  and hostile ids, the context, every rule of the record, `audit_unread`, the line,
+  the status command, and the hook through `_post_tool_use` with fixture payloads:
+  the first act, later calls, a second run, a main-loop call, a guess, an unplaced
+  call, no way to the transcript, a failure at each step, the dispatch, the hints,
+  the stamp, and the hook over the real domain.
+  `tests/test_guidelines_verdict_agent.py` adds the record, the model stamp and the
+  DN-12 pin: the gate's verdict, standings and landing record stay equal across
+  every stamp and two disagreeing audit records, for a current pass, a current fail
+  and a missing verdict.
+
 ### D10 — A ruleset edit goes through its own lane (A8)
 
 A change touching the ruleset, the baseline's additions, the registry files a

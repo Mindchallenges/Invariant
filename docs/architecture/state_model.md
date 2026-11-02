@@ -1061,7 +1061,8 @@ one invalid entry enters nothing (DN-11). One entry:
   "state": "reviewing",
   "surface": "cli",
   "token": "<32 hex digits, one per submission>",
-  "agent": "compliance-reviewer"
+  "agent": "compliance-reviewer",
+  "model": "<the host's own value>"
 }
 ```
 
@@ -1083,7 +1084,8 @@ one invalid entry enters nothing (DN-11). One entry:
   back over a latest one gone stale (A4 increment 3).
 - **Append-only, with one set-once exception.** No record is rewritten or
   removed, except that the host may set `agent` once on a record that has
-  none (the user's A4.8 ruling a). Nothing else on a record ever changes.
+  none (the user's A4.8 ruling a), and `model` once on a record of that agent
+  that has none (the A7 ruling 11). Nothing else on a record ever changes.
 - **`token`** is the submission's: 32 random hex digits, the same on every
   record one accepted submission wrote, and printed by the command (A4
   increment 8). The engine owns it, so a submission naming it is refused as
@@ -1099,10 +1101,15 @@ one invalid entry enters nothing (DN-11). One entry:
   records carrying that token with no agent yet, and never overwrites. A
   main-loop turn, or a host that cannot name the agent, stamps nothing, and
   the verdict stands as accepted.
+- **`model`** is what that agent's own transcript showed it running on, on the
+  same stamp in the same save (the A7 ruling 11, A7 increment 3). An opaque
+  string, read fresh for the stamp. When it cannot be read, the key is absent
+  and the agent is still stamped. A record whose agent is another agent's does
+  not take it. A submission naming it is refused as an unknown key.
 - **Audit only.** No gate, standing, staleness check or landing record reads
-  `agent` or `token` (D1 item 2). The gate's re-check drops both with
-  `state` and `surface`. `invariant pipeline status --json` prints them.
-  Neither needs a migration: a record without them loads unchanged.
+  `agent`, `model` or `token` (D1 item 2). The gate's re-check drops all three
+  with `state` and `surface`. `invariant pipeline status --json` prints them.
+  None needs a migration: a record without them loads unchanged.
 
 ```mermaid
 sequenceDiagram
@@ -1115,7 +1122,8 @@ sequenceDiagram
     C-->>A: recorded 1 verdict (..., token <hex>)
     H->>H: agent_type on the payload, verdict command, token in the output
     H->>H: _actor_session (the actor row's place check)
-    H->>P: stamp_verdict_agent(session, token, agent), set once
+    H->>H: subagent_model (that run's own transcript, bounded tail read)
+    H->>P: stamp_verdict_agent(session, token, agent, model), set once
 ```
 
 `invariant guidelines verdicts show` reads the list and writes nothing (A4
@@ -1124,6 +1132,53 @@ the records on rules the change no longer owes.
 
 The key is additive. A record older than it has no `verdicts`, which reads as
 "no verdict submitted", and no record is migrated.
+
+**The audit record is evidence no rule can read** (ADR-012 D1 item 2, the A7
+rulings 9 to 11, A7 increment 3). `evidence["audit"]` says which subagents a
+host saw in this pipeline and what models they ran on:
+
+```json
+{
+  "host": "claude_code",
+  "agents": {
+    "compliance-reviewer": {
+      "tier": "standard",
+      "asked": null,
+      "models": ["<the host's own value>"],
+      "runs": ["<the host's id for the run>"]
+    }
+  }
+}
+```
+
+- **`host`** is the adapter that observed. The first one stays.
+- **`tier`** is the agent's effective tier at the last read, or null. A local
+  agent has none.
+- **`asked`** is the model requested at dispatch, or else the `model` line of
+  the agent's installed copy, or null. A dispatch's request wins whichever
+  arrives first, because a foreground subagent acts before the hook sees the
+  dispatch that started it. It is per agent, so the last dispatch naming a model
+  answers: a later one naming none clears nothing.
+- **`models`** is what was observed, read from that run's own transcript, never
+  derived from `asked`. Possibly empty.
+- **`runs`** is the run ids already read, so a run is read once.
+
+The host writes it through `PipelineDomain.record_audit` on `PostToolUse`: the
+first time a subagent run acts in a pipeline (asked first through
+`audit_unread`, since this sits on every call), when a dispatch resolves here,
+and at a verdict stamp. Each write passes the same place check as the record
+beside it, an actor row's or a dispatch's. A main-loop turn names no agent and
+is not recorded. Any failure records nothing and leaves the hook's answer alone,
+and a missing fact stays null.
+
+- **No rule can see it.** `RuleContext` removes the key when it is built, on a
+  copy, so this holds whoever builds the context, the oracle's gate cache
+  included. An audit write still moves the record's write time, so the cache
+  evaluates once more and gets the same answer.
+- **The landing record copies none of it.** A test pins the gate's verdict, the
+  standings and the landing record equal with and without it.
+- **Who reads it.** `invariant pipeline status`: `--json` and one text line.
+- **No migration.** A record older than the key has none and prints no line.
 
 **A landing keeps what the guidelines family decided** (ADR-012 DN-7, A4
 increment 6). An advance that succeeds into a state with the `landing` role,

@@ -44,8 +44,8 @@ and :func:`unused_grants` names each grant that passes nothing.
 A refused verdict never enters evidence (ruling 6): a check answers the record
 only when no predicate failed, and names every problem when one did. The
 engine never reads the note (D5, item 6), and no check reads the acting agent
-(D1 item 2, DN-12): :attr:`VerdictRecord.agent` and the submission's
-:attr:`VerdictRecord.token` are audit only.
+(D1 item 2, DN-12): :attr:`VerdictRecord.agent`, :attr:`VerdictRecord.model`
+and the submission's :attr:`VerdictRecord.token` are audit only.
 """
 
 from __future__ import annotations
@@ -173,8 +173,9 @@ class VerdictRecord:
     record one submission writes, set by ``domains/guidelines`` and printed
     by the command, so the host can find these records again (A4.8, the
     user's ruling b). ``agent`` is what the host then stamps there, once
-    (DN-12, ruling a). Each is written only when set, and no gate may ever
-    read either (D1 item 2).
+    (DN-12, ruling a), and ``model`` is what that agent's own transcript
+    showed it running on, stamped the same way (the A7 ruling 11). Each is
+    written only when set, and no gate may ever read any of them (D1 item 2).
     """
 
     rule: str
@@ -190,6 +191,7 @@ class VerdictRecord:
     surface: str
     agent: str | None = None
     token: str | None = None
+    model: str | None = None
 
     def record(self) -> dict[str, Any]:
         recorded: dict[str, Any] = {
@@ -207,6 +209,8 @@ class VerdictRecord:
             recorded["agent"] = self.agent
         if self.token is not None:
             recorded["token"] = self.token
+        if self.model is not None:
+            recorded["model"] = self.model
         return recorded
 
 
@@ -812,7 +816,7 @@ STALE = "stale"
 ENGINE = "engine"
 
 #: The keys of a record the engine writes and a submission may not carry.
-_RECORD_ONLY_KEYS = frozenset({"state", "surface", "agent", "token"})
+_RECORD_ONLY_KEYS = frozenset({"state", "surface", "agent", "token", "model"})
 
 
 @dataclass(frozen=True)
@@ -947,7 +951,7 @@ def resubmitted(record: Mapping[str, Any]) -> tuple[Submitted | None, tuple[Prob
     """A recorded verdict read back as the submission it was, to check again.
 
     The keys only the engine writes (``state``, ``surface``, ``agent``,
-    ``token``) are dropped. The recorded ``ruleset`` and blobs stay, so the checks compare
+    ``token``, ``model``) are dropped. The recorded ``ruleset`` and blobs stay, so the checks compare
     them with the tree in hand: that is what makes a drifted ruleset or an
     edited cited file stale.
     """

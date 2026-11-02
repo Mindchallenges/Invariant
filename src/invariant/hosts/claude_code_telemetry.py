@@ -38,6 +38,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TypeVar
 
 from ..core import git
 from ..core.stats import Sample, SourceRef, Usage
@@ -82,6 +83,9 @@ TURN_TEXT_CAP = 4000
 #: ``<project dir>/<host id>/subagents/agent-<agent id>.jsonl`` (BUG_096).
 SUBAGENTS_DIR = "subagents"
 SUBAGENT_PREFIX = "agent-"
+
+
+T = TypeVar("T")
 
 
 def claude_home() -> Path:
@@ -256,7 +260,7 @@ def _turn_from(raw: bytes, cap: int) -> TranscriptTurn | None:
     """
     try:
         record = json.loads(raw.decode("utf-8", errors="replace"))
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(record, dict) or record.get("type") not in TURN_TYPES:
         return None
@@ -300,14 +304,25 @@ def last_turn(
     holds no turn, or hides it beyond the budget. The caller picks the
     fallback; this reader does not.
     """
+    def parse(raw: bytes) -> TranscriptTurn | None:
+        found = _turn_from(raw, cap)
+        return found if found is not None and (accept is None or accept(found)) else None
+
     try:
         with Path(path).open("rb") as handle:
-            return _scan_tail(handle, accept, block_size, budget, cap)
+            return _scan_tail(handle, parse, block_size, budget)
     except OSError:
         return None
 
 
-def _scan_tail(handle, accept, block_size: int, budget: int, cap: int) -> TranscriptTurn | None:
+def _scan_tail(
+    handle, parse: Callable[[bytes], T | None], block_size: int, budget: int
+) -> T | None:
+    """The newest complete line ``parse`` answers for, read from the end.
+
+    The open-tail, join-across-blocks and budget rules :func:`last_turn` names
+    live here, for every reader of a tail.
+    """
     position = os.fstat(handle.fileno()).st_size
     pending = b""
     in_open_tail = True
@@ -328,10 +343,65 @@ def _scan_tail(handle, accept, block_size: int, budget: int, cap: int) -> Transc
             lines.pop()
             in_open_tail = False
         for raw in reversed(lines):
-            found = _turn_from(raw, cap)
-            if found is not None and (accept is None or accept(found)):
+            found = parse(raw)
+            if found is not None:
                 return found
     return None
+
+
+def _model_from(raw: bytes) -> str | None:
+    """The model on one complete ``assistant`` line, or ``None``."""
+    try:
+        record = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, RecursionError):
+        # A line nested past the parser's depth raises this, not a ValueError.
+        return None
+    if not isinstance(record, dict) or record.get("type") != "assistant":
+        return None
+    message = record.get("message")
+    model = message.get("model") if isinstance(message, dict) else None
+    if not model or not isinstance(model, str) or model == SYNTHETIC_MODEL:
+        return None
+    return model
+
+
+def last_model(
+    path: Path,
+    *,
+    block_size: int = TAIL_BLOCK_BYTES,
+    budget: int = TAIL_BUDGET_BYTES,
+) -> str | None:
+    """The model the newest ``assistant`` entry in ``path`` names.
+
+    Read from the end under :func:`last_turn`'s rules, so the cost is the tail
+    and no more than ``budget`` bytes. ``None`` means none was found, whatever
+    the reason, and the caller records that as not known. A model further back
+    than the budget is not found rather than read for.
+    """
+    try:
+        with Path(path).open("rb") as handle:
+            return _scan_tail(handle, _model_from, block_size, budget)
+    except (OSError, ValueError):
+        return None
+
+
+def subagent_model(main_transcript, agent_id) -> str | None:
+    """The newest model one subagent run's own transcript names (ADR-012, A7.3).
+
+    ``main_transcript`` and ``agent_id`` are the hook payload's values, so
+    neither is trusted to be there, or to be text. The file is the one
+    :data:`SUBAGENTS_DIR` lays out for that run and no other, and an id that
+    could leave that directory is no id. ``None`` for all of it: this is the
+    audit's read, and no input reaches an exception.
+    """
+    if not isinstance(main_transcript, str) or not main_transcript:
+        return None
+    if not isinstance(agent_id, str) or not agent_id or set(agent_id) & set("/\\\0"):
+        return None
+    main = Path(main_transcript)
+    return last_model(
+        main.parent / main.stem / SUBAGENTS_DIR / f"{SUBAGENT_PREFIX}{agent_id}.jsonl"
+    )
 
 
 def _watermark(path: Path) -> str:
@@ -365,15 +435,16 @@ def _resolves_under(base: Path, parts: list[str]) -> bool:
     cannot say which. The filesystem can, so this walks it, trying every way of
     re-joining the leading segments before descending into the match.
 
-    ``Path.is_dir`` answers ``False`` rather than raising for a path it cannot
+    ``os.path.isdir`` answers ``False`` rather than raising for a path it cannot
     stat, so a directory this process may not read narrows the scan instead of
     reaching the caller — which is the rule the whole module is written to.
+    ``Path.is_dir`` is not that answer: it raises on a permission error.
     """
     if not parts:
         return True
     for cut in range(1, len(parts) + 1):
         child = base / PATH_MARK.join(parts[:cut])
-        if child.is_dir() and _resolves_under(child, parts[cut:]):
+        if os.path.isdir(child) and _resolves_under(child, parts[cut:]):
             return True
     return False
 
