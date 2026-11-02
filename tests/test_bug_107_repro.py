@@ -1,7 +1,7 @@
 """Repro for BUG_107 — see the work-item entry (`invariant item show BUG_107`).
 
-Fails while the defect is live. When the fix lands, delete the expected-failure
-wrappers; the assertions must then pass unchanged.
+The fix has landed and the expected-failure wrappers are gone; the assertions
+are unchanged from the proof.
 
 Symptom: two evidence writers running at once in one session lose each other's
 writes. Evidence that was recorded disappears from the pipeline record, and a
@@ -30,9 +30,8 @@ process over the same temporary state root, as a parallel hook is.
   decides nothing about the verdict on the live defect and turns a deadlock
   into a failure.
 
-A harness failure goes through ``pytest.fail``. The markers below expect only
-``AssertionError``, so a hang or a writer that crashed is a real failure and
-never reads as this defect.
+A harness failure goes through ``pytest.fail``, so a hang or a writer that
+crashed reads as itself and never as this defect.
 """
 
 from __future__ import annotations
@@ -168,11 +167,6 @@ def _interleave(m, tmp_path: Path, operation: str) -> dict:
     return PipelineDomain(m).require(SESSION)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="BUG_107 is live — delete this marker with the fix",
-)
 def test_BUG_107_a_second_writers_evidence_survives_the_first_writers_save(tmp_path):
     m = git_project(tmp_path / "proj")
 
@@ -190,11 +184,6 @@ def test_BUG_107_a_second_writers_evidence_survives_the_first_writers_save(tmp_p
     assert not lost, f"recorded and then lost: {lost}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="BUG_107 is live — delete this marker with the fix",
-)
 def test_BUG_107_a_stale_save_does_not_undo_an_advance(tmp_path):
     m = git_project(tmp_path / "proj")
 

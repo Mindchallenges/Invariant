@@ -38,7 +38,7 @@ from ..core.rules import (
     guideline_gate_of,
     sweep_cadence_summary,
 )
-from ..core.store import InertStore, JsonStore
+from ..core.store import LOCK_TIMEOUT_SECONDS, InertStore, JsonStore
 from ..domains.pipeline import PipelineDomain, audit_line, describe_run, summarise
 from ..domains.session import (
     SessionDomain,
@@ -218,8 +218,12 @@ class Context:
         manifest_start: Path | None = None,
         probe: bool = False,
         crossed_from: Path | None = None,
+        pipeline_lock_timeout: float = LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
+        #: How long this context's pipeline writers wait for the record's lock.
+        #: A hook passes the host's budget; see `HOOK_LOCK_SECONDS`.
+        self.pipeline_lock_timeout = pipeline_lock_timeout
         #: ``manifest_start`` separates "which project governs this call" from
         #: "where is this process standing". Hooks pass the host's project
         #: directory here (AUD-04): the host guarantees that to its hooks,
@@ -304,6 +308,7 @@ class Context:
             self.manifest, self.store, watermarks=self.watermarks,
             host_instruction_files=host_instruction_files(self.manifest),
             host_agent_plan=host_agent_plan(self.manifest),
+            lock_timeout=self.pipeline_lock_timeout,
         )
 
     @property
@@ -501,6 +506,7 @@ class Context:
                 manifest_start=foreign.root,
                 probe=self._probe,
                 crossed_from=root,
+                pipeline_lock_timeout=self.pipeline_lock_timeout,
             )
 
         if unreadable is not None:
@@ -4902,7 +4908,12 @@ _TOOL_EVENTS = frozenset({"pre-tool-use", "post-tool-use"})
 
 
 def cmd_hook(args) -> int:
-    from ..hosts.claude_code import DEGRADED_KEY, ClaudeCodeHost, is_probe
+    from ..hosts.claude_code import (
+        DEGRADED_KEY,
+        HOOK_LOCK_SECONDS,
+        ClaudeCodeHost,
+        is_probe,
+    )
 
     raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     body: object = None
@@ -4927,6 +4938,7 @@ def cmd_hook(args) -> int:
             host_session_id=host_session_id,
             manifest_start=manifest_start,
             probe=is_probe(body),
+            pipeline_lock_timeout=HOOK_LOCK_SECONDS,
         )
     except InvariantError as exc:
         # No manifest found anywhere. A shim only exists where `init` put it,

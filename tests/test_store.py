@@ -119,6 +119,37 @@ class TestLocking:
             fcntl.flock(blocker.fileno(), fcntl.LOCK_UN)
             blocker.close()
 
+    def test_a_lock_alone_reads_and_writes_nothing(self, store):
+        """For a read-modify-write that may decide to write nothing (BUG_107)."""
+        with store.lock("registry.json"):
+            assert not store.exists("registry.json")
+        assert not store.exists("registry.json")
+
+    def test_a_lock_is_released_when_its_body_raises(self, store):
+        with pytest.raises(ValueError), store.lock("registry.json"):
+            raise ValueError("mid-mutation failure")
+        with store.lock("registry.json", timeout=0):
+            pass
+
+    def test_a_lock_file_that_cannot_be_opened_is_a_state_error(self, store, monkeypatch):
+        """A hook absorbs a StateError. A bare OSError would answer degraded."""
+        store.ensure_root()
+
+        def refuse(*_args, **_kwargs):
+            raise PermissionError("read-only state root")
+
+        monkeypatch.setattr("builtins.open", refuse)
+        with pytest.raises(StateError, match="cannot open the lock"), store.lock("registry.json"):
+            pass
+
+    def test_a_lock_the_system_refuses_is_a_state_error(self, store, monkeypatch):
+        def refuse(*_args, **_kwargs):
+            raise OSError("no locks available")
+
+        monkeypatch.setattr("invariant.core.store.fcntl.flock", refuse)
+        with pytest.raises(StateError, match="cannot lock"), store.lock("registry.json", timeout=0):
+            pass
+
     def test_concurrent_writers_do_not_lose_updates(self, store):
         store.write("registry.json", {"n": 0})
         errors = []

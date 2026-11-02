@@ -118,6 +118,17 @@ CHECK_WIRED = "hooks wired in settings"
 #: silence. See ``_hook_degraded``.
 DEGRADED_KEY = "invariantDegraded"
 
+#: What each installed hook is given before the host cancels it.
+HOOK_TIMEOUT_SECONDS = 15
+
+#: How long a hook waits for a pipeline record's lock, against the store's ten
+#: seconds. One tool call can reach up to four evidence writes (the actor row,
+#: a verdict stamp or a docs read, and the audit behind them), and a wedged lock
+#: would make each of them wait, so the store's own wait would have the host
+#: cancel the hook. A write that gives up here is lost like any other store
+#: failure a hook absorbs (BUG_107). The lock is normally held for milliseconds.
+HOOK_LOCK_SECONDS = 2.0
+
 #: Marks a hook payload as ``doctor``'s liveness probe. A host never sends it.
 #: ``invariant hook`` honours it before anything else is built: the call runs
 #: the whole path against a state store that discards every write, so a probe
@@ -533,7 +544,7 @@ class ClaudeCodeHost:
                 command in json.dumps(entry) for entry in entries
             ):
                 continue
-            entry = {"hooks": [{"type": "command", "command": command, "timeout": 15}]}
+            entry = {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}
             if host_event in {"PreToolUse", "PostToolUse"}:
                 entry["matcher"] = "*"
             entries.append(entry)

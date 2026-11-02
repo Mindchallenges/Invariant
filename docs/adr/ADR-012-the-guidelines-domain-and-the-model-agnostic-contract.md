@@ -3382,6 +3382,59 @@ inputs changed. D1 item 2's wording and the permutation test and scan are A7.4.
   every stamp and two disagreeing audit records, for a current pass, a current fail
   and a missing verdict.
 
+**As built: A7 increment 3b (BUG_107), the pipeline record's lock.** Added to the
+plan by the user's ruling that the race be fixed before A7 merges, because A7.3's
+`evidence.audit` adds saves at the moment a subagent starts, typically during
+parallel doc reads. The race predates A7. No gate was added, and no gate's
+inputs or verdict changed. state_model.md, Domain: pipeline, "The record's lock",
+has the writer list, the advance diagram and the timeout table.
+
+- *The lock.* `JsonStore.lock` is the existing lock with the read and the write
+  left out, and `locked` is now built on it. The reason for the split: most hook
+  writes change nothing, and `locked` always writes back, which moves the write
+  time the oracle's gate cache fingerprints. Every failure to open or take it is
+  now a `StateError`. A bare `OSError` from `open` was already possible in `locked`
+  and would have reached a hook's outer net instead of its `except InvariantError`.
+  An `InertStore` overrides `lock` and inherits `locked`.
+- *Writers.* Eleven, all under the lock across load and save. The four a hook
+  calls go through `_change`, which answers "nothing to do" from a plain read, so
+  the usual call takes no lock and cannot wait behind one.
+- *Advance (the design pass's reading, not a ruling).* Gates stay outside the
+  lock. Under it the record is re-read and compared with what the evaluation
+  started from, and any difference re-decides the edge and the gates, up to
+  `ADVANCE_ATTEMPTS` (5), then refuses with nothing written. Comparing the state
+  alone would close the backwards step and leave a fail-open: a red run landing
+  during the evaluation would be kept on the record and passed over by the green
+  verdict. The comparison covers everything but the audit record, through the
+  same `_without_audit` that removes it from every gate's `RuleContext`, so an
+  audit write costs no second evaluation and is kept. Behaviour is unchanged on an
+  uncontended record: one evaluation, one save.
+- *Hooks (also the design pass's reading).* A hook waits `HOOK_LOCK_SECONDS` (2)
+  instead of the store's 10, through a `lock_timeout` on the domain that `Context`
+  sets. Four writes at 10 seconds each would pass the 15 the host cancels a hook
+  at. The wait applies to the pipeline record only.
+- *One defect found on the way.* A failing unlock in `locked`'s `finally` would have
+  replaced whatever the body raised. It is now suppressed, since closing the handle
+  releases the lock anyway.
+- *The session record.* Checked as the curator asked: it has the same race and it
+  is not fixed here. A forced interleave over a temporary root lost a declared
+  file to a stale save. `_save` writes a caller's copy from 18 call sites, many
+  holding it across gates, so this is not the small fix this increment's scope
+  allows. The doc's "worst case is a duplicated row" is corrected, and the
+  "Concurrency" paragraph names what is still exposed.
+- *What it cannot do until it merges.* The installed build is an editable install
+  of the main checkout, so hooks run the unlocked build until this lands, and a
+  process of the old build ignores the lock. The race closes for every writer only
+  once they all run this code.
+- *Tests.* `tests/test_bug_107_repro.py` lost its strict markers, with its
+  assertions unchanged. `tests/test_pipeline_record_lock.py` covers each writer's
+  load and save under the lock, with scans for an unlisted writer in the domain
+  and for any writer outside it; nothing slow
+  under it; the lost red run and the lost fail verdict; an advance over a record
+  that moves; a timeout for each kind of writer and hook path; and who gets the
+  short wait. `tests/test_store.py` and `tests/test_cross_root_attribution.py` add
+  the store's `lock` and the crossing.
+
 ### D10 — A ruleset edit goes through its own lane (A8)
 
 A change touching the ruleset, the baseline's additions, the registry files a

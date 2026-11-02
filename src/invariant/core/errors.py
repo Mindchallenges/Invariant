@@ -72,7 +72,7 @@ class StateError(InvariantError):
 
 
 class LockTimeout(StateError):
-    """The registry lock could not be acquired in time.
+    """A store lock could not be acquired in time.
 
     Deliberately an error rather than an unbounded wait: a wedged lock must be
     visible, because the recovery path is a human running ``state repair``.

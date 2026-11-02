@@ -4,6 +4,13 @@ The evidence dictionary is the point of this module. Gates do not re-derive
 whether the suite passed or whether the docs were read; they read what was
 recorded at the moment those things actually happened. That is the difference
 between a gate that verifies and a gate that can be satisfied by accident.
+
+So evidence that vanishes changes a verdict, and one session is many writers:
+parallel hooks and its own commands, each a process of its own. Every
+read-modify-write of the record holds the store's lock across its load and its
+save, and holds it for nothing else (BUG_107). No gate is evaluated, no suite
+run and no transcript read under it; :meth:`PipelineDomain.advance` says how a
+transition stays safe with its gates evaluated outside.
 """
 
 from __future__ import annotations
@@ -19,7 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import get_adapter
-from ..core.errors import GateFailure, InvariantError, TransitionError, UsageError
+from ..core.errors import (
+    GateFailure,
+    InvariantError,
+    StateError,
+    TransitionError,
+    UsageError,
+)
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, LANDING_ROLE, load_pipeline_machine
 from ..core.manifest import Level
@@ -30,6 +43,7 @@ from ..core.rules import (
     AgentCopy,
     Evaluated,
     RuleContext,
+    _without_audit,
     apply_acknowledgements,
     evaluate,
     get_rule,
@@ -37,7 +51,7 @@ from ..core.rules import (
     ruleset_pin,
 )
 from ..core.stats import Usage, WatermarkSource
-from ..core.store import JsonStore, PreservesUnknownKeys
+from ..core.store import LOCK_TIMEOUT_SECONDS, JsonStore, PreservesUnknownKeys
 
 
 def _refuse_chained_coverage(coverage: str, report: str, bundle: str) -> None:
@@ -361,6 +375,12 @@ RECORDED = "recorded"
 ALREADY = "already"
 NO_PIPELINE = "no-pipeline"
 
+#: How many times :meth:`PipelineDomain.advance` evaluates its gates before it
+#: gives up on a record that keeps changing under them. Each pass is a fresh
+#: answer about a record that moved during the last one, and a refusal costs one
+#: retry, so this only has to outlast a burst of parallel writes.
+ADVANCE_ATTEMPTS = 5
+
 
 @dataclass
 class Pipeline(PreservesUnknownKeys):
@@ -436,8 +456,13 @@ class PipelineDomain:
         clock=time.time,
         host_instruction_files: tuple[str, ...] = (),
         host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None,
+        lock_timeout: float = LOCK_TIMEOUT_SECONDS,
     ) -> None:
         self.manifest = manifest
+        #: How long a writer waits for the record's lock. A person's command
+        #: takes the store's default. A hook passes less, because it makes
+        #: several writes inside the budget the host cancels it at.
+        self.lock_timeout = lock_timeout
         #: The host adapter's install plan for the library agents, handed to
         #: every gate on the rule context: ``agents.rendered_current`` at the
         #: landing reads it (ADR-012 D8, the A6 ruling 10). Injected by the
@@ -559,22 +584,7 @@ class PipelineDomain:
         session's worktree when it has one, else ``cwd`` (``load_ruleset``'s
         tree in hand).
         """
-        existing = self.current(session_id)
-        if existing:
-            try:
-                terminal = self.machine_for(existing).terminal
-            except InvariantError:
-                # The recorded machine no longer loads — a deleted project
-                # machine file, say. Every other operation on that pipeline
-                # honestly refuses, so starting a fresh one, which ARCHIVES
-                # the old record rather than discarding it, is the one route
-                # out that loses nothing.
-                terminal = None
-            if terminal is not None and existing.state not in terminal:
-                raise UsageError(
-                    f"a pipeline is already running in state {existing.state!r}; "
-                    f"finish or abandon it first"
-                )
+        self._refuse_a_running_pipeline(self.current(session_id))
 
         # An explicit override for this one task, without editing the manifest
         # — a chore in a TDD project is the motivating case. Resolved here and
@@ -602,8 +612,32 @@ class PipelineDomain:
             usage_at_start_host=baseline_host,
             ruleset=pinned,
         )
-        self._save(session_id, pipeline, archive=existing)
+        # Asked again under the lock: the pin above is a read of the tree, and
+        # another `start` may have landed while it ran.
+        with self._record_lock(session_id):
+            existing = self.current(session_id)
+            self._refuse_a_running_pipeline(existing)
+            self._save(session_id, pipeline, archive=existing)
         return pipeline
+
+    def _refuse_a_running_pipeline(self, existing: Pipeline | None) -> None:
+        """Refuse to start over a pipeline that has not finished."""
+        if not existing:
+            return
+        try:
+            terminal = self.machine_for(existing).terminal
+        except InvariantError:
+            # The recorded machine no longer loads — a deleted project
+            # machine file, say. Every other operation on that pipeline
+            # honestly refuses, so starting a fresh one, which ARCHIVES
+            # the old record rather than discarding it, is the one route
+            # out that loses nothing.
+            return
+        if existing.state not in terminal:
+            raise UsageError(
+                f"a pipeline is already running in state {existing.state!r}; "
+                f"finish or abandon it first"
+            )
 
     # -- gates ---------------------------------------------------------
 
@@ -759,9 +793,10 @@ class PipelineDomain:
         if level is Level.OFF:
             raise UsageError(f"{rule_id} is off in this project; nothing to acknowledge")
 
-        pipeline = self.require(session_id)
-        pipeline.evidence.setdefault("acknowledged", {})[rule_id] = reason.strip()
-        self._save(session_id, pipeline)
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            pipeline.evidence.setdefault("acknowledged", {})[rule_id] = reason.strip()
+            self._save(session_id, pipeline)
         return pipeline
 
     def advance(
@@ -773,87 +808,121 @@ class PipelineDomain:
         session: dict | None = None,
         cwd: Path | None = None,
     ) -> tuple[Pipeline, list[Evaluated]]:
-        pipeline = self.require(session_id)
-        machine = self.machine_for(pipeline)
+        """Walk one edge, if the record its gates judged is still the record.
 
-        structural_override = False
-        if pipeline.state != target:
-            try:
-                machine.require_edge(pipeline.state, target)
-            except TransitionError:
-                if not force:
-                    raise
-                structural_override = True
+        The gates are evaluated outside the record's lock, because they can run
+        git and read the tree, and every hook in the session would wait behind
+        them. So the verdicts answer about what the record held when they were
+        reached. Under the lock the record is read again and compared with what
+        the evaluation started from, as a gate can read it: the audit record is
+        left out, because no gate can see it and it lands on nearly every
+        subagent's first call. The same record takes the transition, and any
+        audit write made meanwhile is kept, because the transition is applied to
+        the re-read record. Any other change, to the state or to a piece of
+        evidence, sends the whole decision round again, edge and gates, because a
+        red run that landed during the evaluation is exactly what a stale green
+        verdict must not pass over (BUG_107). A gate is a read, so evaluating it
+        twice costs only the time. A record that never holds still is refused
+        with nothing written.
+        """
+        for _ in range(ADVANCE_ATTEMPTS):
+            seen = self.require(session_id)
+            machine = self.machine_for(seen)
 
-        verdicts = self.evaluate_gates(session_id, target, session=session, cwd=cwd)
-        blocking = [v for v in verdicts if v.blocks]
+            structural_override = False
+            if seen.state != target:
+                try:
+                    machine.require_edge(seen.state, target)
+                except TransitionError:
+                    if not force:
+                        raise
+                    structural_override = True
 
-        if blocking and not force:
-            raise GateFailure(
-                f"{len(blocking)} gate(s) block {pipeline.state!r} -> {target!r}",
-                verdicts=verdicts,
-            )
+            verdicts = self.evaluate_gates(session_id, target, session=session, cwd=cwd)
+            blocking = [v for v in verdicts if v.blocks]
 
-        if force and (blocking or structural_override):
-            if not reason:
+            if blocking and not force:
+                raise GateFailure(
+                    f"{len(blocking)} gate(s) block {seen.state!r} -> {target!r}",
+                    verdicts=verdicts,
+                )
+
+            overriding = force and (blocking or structural_override)
+            if overriding and not reason:
                 raise UsageError(
                     "--force requires --reason: an override that records no "
                     "rationale is indistinguishable from the gate never having "
                     "run"
                 )
-            pipeline.overrides.append(
-                {
-                    "from": pipeline.state,
-                    "to": target,
-                    "reason": reason,
-                    "structural": structural_override,
-                    "gates": [v.rule_id for v in blocking],
-                }
-            )
 
-        # ADR-002 D3. `elapsed` is derived from an anchor reconstructed out of
-        # the durations already recorded, and the watermark is a pair of
-        # counters — so per-state attribution costs no stored clock time, and
-        # spend has no boundary problem: it is a subtraction of two counts
-        # rather than an arbitrary assignment of a response to one side of a
-        # transition.
-        now = self.clock()
-        entered = pipeline.state_entered()
-        host_session_id = (session or {}).get("host_session_id")
-        usage, usage_host = self._reading(host_session_id)
-        pipeline.history.append(
-            {
-                "from": pipeline.state,
-                "to": target,
-                "reason": reason,
-                "forced": bool(force),
-                "elapsed": None if entered is None else max(0.0, now - entered),
-                "usage": usage,
-                "usage_host": usage_host,
-            }
+            host_session_id = (session or {}).get("host_session_id")
+            usage, usage_host = self._reading(host_session_id)
+
+            with self._record_lock(session_id):
+                pipeline = self.require(session_id)
+                if _without_audit(pipeline.to_dict()) != _without_audit(seen.to_dict()):
+                    continue
+                if overriding:
+                    pipeline.overrides.append(
+                        {
+                            "from": pipeline.state,
+                            "to": target,
+                            "reason": reason,
+                            "structural": structural_override,
+                            "gates": [v.rule_id for v in blocking],
+                        }
+                    )
+
+                # ADR-002 D3. `elapsed` is derived from an anchor reconstructed
+                # out of the durations already recorded, and the watermark is a
+                # pair of counters — so per-state attribution costs no stored
+                # clock time, and spend has no boundary problem: it is a
+                # subtraction of two counts rather than an arbitrary assignment
+                # of a response to one side of a transition.
+                now = self.clock()
+                entered = pipeline.state_entered()
+                pipeline.history.append(
+                    {
+                        "from": pipeline.state,
+                        "to": target,
+                        "reason": reason,
+                        "forced": bool(force),
+                        "elapsed": None if entered is None else max(0.0, now - entered),
+                        "usage": usage,
+                        "usage_host": usage_host,
+                    }
+                )
+                if LANDING_ROLE in machine.state(target).roles:
+                    landing = guidelines_landing(
+                        pipeline.state, target, forced=bool(force), verdicts=verdicts
+                    )
+                    if landing is not None:
+                        pipeline.evidence.setdefault(LANDINGS_KEY, []).append(landing)
+                pipeline.state = target
+                if target in machine.terminal:
+                    pipeline.finished = now
+                self._save(session_id, pipeline)
+                return pipeline, verdicts
+
+        raise StateError(
+            f"the pipeline record changed during each of {ADVANCE_ATTEMPTS} evaluations "
+            f"of the gates on {target!r}, so no answer was about the record as it "
+            "stood. Nothing was recorded; run the advance again once the parallel "
+            "work has settled."
         )
-        if LANDING_ROLE in machine.state(target).roles:
-            landing = guidelines_landing(
-                pipeline.state, target, forced=bool(force), verdicts=verdicts
-            )
-            if landing is not None:
-                pipeline.evidence.setdefault(LANDINGS_KEY, []).append(landing)
-        pipeline.state = target
-        if target in machine.terminal:
-            pipeline.finished = now
-        self._save(session_id, pipeline)
-        return pipeline, verdicts
 
     # -- evidence ------------------------------------------------------
 
     def record_docs_read(self, session_id: str, path: str) -> None:
-        pipeline = self.current(session_id)
-        if pipeline is None:
-            return  # reading docs outside a pipeline is fine, just unrecorded
-        read = pipeline.evidence.setdefault("docs_read", [])
-        if path not in read:
+        def apply(pipeline: Pipeline) -> bool:
+            read = pipeline.evidence.setdefault("docs_read", [])
+            if path in read:
+                return False
             read.append(path)
-            self._save(session_id, pipeline)
+            return True
+
+        # No pipeline: reading docs outside one is fine, just unrecorded.
+        self._change(session_id, apply)
 
     def record_agent_run(
         self, session_id: str, agent_type: str, *, how: str = VIA_DISPATCH
@@ -878,23 +947,22 @@ class PipelineDomain:
         pipeline — the agent's own work, not somebody's account of it. An actor
         reading is never downgraded to a dispatch reading.
         """
-        pipeline = self.current(session_id)
-        if pipeline is None:
-            return NO_PIPELINE
+        def apply(pipeline: Pipeline) -> bool:
+            ran = pipeline.evidence.setdefault("agents_run", [])
+            via = pipeline.evidence.setdefault("agents_run_how", {})
+            changed = False
+            if agent_type not in ran:
+                ran.append(agent_type)
+                changed = True
+            if via.get(agent_type) not in (VIA_ACTOR, how):
+                via[agent_type] = how
+                changed = True
+            return changed
 
-        ran = pipeline.evidence.setdefault("agents_run", [])
-        via = pipeline.evidence.setdefault("agents_run_how", {})
-        changed = False
-        if agent_type not in ran:
-            ran.append(agent_type)
-            changed = True
-        if via.get(agent_type) not in (VIA_ACTOR, how):
-            via[agent_type] = how
-            changed = True
-        if not changed:
-            return ALREADY
-        self._save(session_id, pipeline)
-        return RECORDED
+        changed = self._change(session_id, apply)
+        if changed is None:
+            return NO_PIPELINE
+        return RECORDED if changed else ALREADY
 
     def record_verdicts(self, session_id: str, records: Sequence[Mapping[str, Any]]) -> int:
         """Append accepted judgement verdicts to ``evidence["verdicts"]`` (ADR-012 D5).
@@ -911,17 +979,18 @@ class PipelineDomain:
         """
         from ..core.rules import VerdictRefused
 
-        pipeline = self.require(session_id)
-        moved = sorted({
-            str(r.get("state")) for r in records if r.get("state") != pipeline.state
-        })
-        if moved:
-            raise VerdictRefused.precondition(
-                f"pipeline: the pipeline moved to {pipeline.state!r} after the verdicts "
-                f"were checked in {', '.join(moved)}; fix: submit them again"
-            )
-        pipeline.evidence.setdefault("verdicts", []).extend(dict(r) for r in records)
-        self._save(session_id, pipeline)
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            moved = sorted({
+                str(r.get("state")) for r in records if r.get("state") != pipeline.state
+            })
+            if moved:
+                raise VerdictRefused.precondition(
+                    f"pipeline: the pipeline moved to {pipeline.state!r} after the verdicts "
+                    f"were checked in {', '.join(moved)}; fix: submit them again"
+                )
+            pipeline.evidence.setdefault("verdicts", []).extend(dict(r) for r in records)
+            self._save(session_id, pipeline)
         return len(records)
 
     def stamp_verdict_agent(
@@ -950,24 +1019,25 @@ class PipelineDomain:
         """
         if not isinstance(token, str) or not token or not isinstance(agent, str) or not agent:
             return 0
-        pipeline = self.current(session_id)
-        if pipeline is None:
-            return 0
         model = _text_or_none(model)
         stamped = 0
-        modelled = False
-        for record in pipeline.evidence.get("verdicts") or ():
-            if not isinstance(record, dict) or record.get("token") != token:
-                continue
-            if record.get("agent") is None:
-                record["agent"] = agent
-                stamped += 1
-            if model is not None and record["agent"] == agent and record.get("model") is None:
-                record["model"] = model
-                modelled = True
-        if stamped or modelled:
-            self._save(session_id, pipeline)
-        return stamped
+
+        def apply(pipeline: Pipeline) -> bool:
+            nonlocal stamped
+            stamped = 0
+            modelled = False
+            for record in pipeline.evidence.get("verdicts") or ():
+                if not isinstance(record, dict) or record.get("token") != token:
+                    continue
+                if record.get("agent") is None:
+                    record["agent"] = agent
+                    stamped += 1
+                if model is not None and record["agent"] == agent and record.get("model") is None:
+                    record["model"] = model
+                    modelled = True
+            return bool(stamped or modelled)
+
+        return stamped if self._change(session_id, apply) else 0
 
     def audit_unread(self, session_id: str, agent: Any, run: Any) -> bool:
         """Does this subagent run still owe the audit record its one read?
@@ -1024,34 +1094,38 @@ class PipelineDomain:
         """
         host = _text_or_none(host)
         agent = _text_or_none(agent)
-        pipeline = self.current(session_id)
-        if host is None or agent is None or pipeline is None:
+        if host is None or agent is None:
             return False
-        audit = pipeline.evidence.get(AUDIT_KEY, {"host": host, "agents": {}})
-        agents = audit.get("agents") if isinstance(audit, dict) else None
-        if not isinstance(agents, dict):
-            return False
-        before = copy.deepcopy(audit)
-        entry = agents.setdefault(agent, {"tier": None, "asked": None, "models": [], "runs": []})
-        if (
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("models"), list)
-            or not isinstance(entry.get("runs"), list)
-        ):
-            return False
-        entry["tier"] = _text_or_none(tier) or entry.get("tier")
-        entry["asked"] = (
-            _text_or_none(requested) or entry.get("asked") or _text_or_none(rendered)
-        )
-        for key, value in (("models", model), ("runs", run)):
-            value = _text_or_none(value)
-            if value is not None and value not in entry[key]:
-                entry[key].append(value)
-        if audit == before:
-            return False
-        pipeline.evidence[AUDIT_KEY] = audit
-        self._save(session_id, pipeline)
-        return True
+
+        def apply(pipeline: Pipeline) -> bool:
+            audit = pipeline.evidence.get(AUDIT_KEY, {"host": host, "agents": {}})
+            agents = audit.get("agents") if isinstance(audit, dict) else None
+            if not isinstance(agents, dict):
+                return False
+            before = copy.deepcopy(audit)
+            entry = agents.setdefault(
+                agent, {"tier": None, "asked": None, "models": [], "runs": []}
+            )
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("models"), list)
+                or not isinstance(entry.get("runs"), list)
+            ):
+                return False
+            entry["tier"] = _text_or_none(tier) or entry.get("tier")
+            entry["asked"] = (
+                _text_or_none(requested) or entry.get("asked") or _text_or_none(rendered)
+            )
+            for key, value in (("models", model), ("runs", run)):
+                value = _text_or_none(value)
+                if value is not None and value not in entry[key]:
+                    entry[key].append(value)
+            if audit == before:
+                return False
+            pipeline.evidence[AUDIT_KEY] = audit
+            return True
+
+        return bool(self._change(session_id, apply))
 
     def _fresh_bundle(self, session_id: str, kind: str) -> Path:
         """A per-run result-bundle path, per SESSION and per KIND, never shared.
@@ -1134,46 +1208,47 @@ class PipelineDomain:
         # at 100% measured on a run where twelve tests failed is a different
         # fact from the same number measured on a green run, and the record
         # should not flatten them into one.
-        pipeline = self.require(session_id)
-        pipeline.evidence["coverage_run"] = {
-            # The resolved command, as test_runs already records. Without it,
-            # a reader of this evidence cannot tell WHICH run produced the
-            # numbers — scoped or whole-suite, which simulator, which flags —
-            # and that ambiguity is not recoverable later. A peer hit exactly
-            # that: unable to tell whether an annotation was missing because
-            # nothing was recorded or because nothing needed annotating.
-            "command": command,
-            # And said outright, because a held path under a sweep cadence
-            # owes a FULL run, and a command string is not a reliable answer
-            # to "was this one" (ADR-010 D1, D8).
-            "selectors": list(selectors),
-            "scope": _scope(selectors),
-            # Whose command ran and whose adapter read it (ADR-013 D2).
-            "ecosystem": ecosystem,
-            "executed": outcome.total,
-            "failed": outcome.failed,
-            "exit_code": run.exit_code,
-            # Kept apart on purpose. One number used to stand for both, and
-            # which one it stood for depended on which command the shell
-            # happened to finish with — so the evidence could not answer "did
-            # the suite fail, or did the reader fail?" at all.
-            "report_command": run.report_command,
-            "report_exit_code": run.report_exit,
-            "suite_passed": outcome.passed,
-            # A hazard on the measuring run travels with the measurement. Exit
-            # 65 can mean whole suites never ran, which makes coverage
-            # UNDERSTATED — and an understated number is still a number
-            # somebody will act on. Annotating beats silently trusting, for the
-            # same reason TestResult.trustworthy is narrower than passed.
-            "hazards": [h.id for h in outcome.hazards],
-            # Split at record time, because the reader of the evidence cannot
-            # re-derive it: the adapter knows which way each hazard bends a
-            # measurement, the rule does not.
-            "overstating_hazards": [
-                h.id for h in outcome.hazards if h.may_overstate
-            ],
-        }
-        self._save(session_id, pipeline)
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            pipeline.evidence["coverage_run"] = {
+                # The resolved command, as test_runs already records. Without it,
+                # a reader of this evidence cannot tell WHICH run produced the
+                # numbers — scoped or whole-suite, which simulator, which flags —
+                # and that ambiguity is not recoverable later. A peer hit exactly
+                # that: unable to tell whether an annotation was missing because
+                # nothing was recorded or because nothing needed annotating.
+                "command": command,
+                # And said outright, because a held path under a sweep cadence
+                # owes a FULL run, and a command string is not a reliable answer
+                # to "was this one" (ADR-010 D1, D8).
+                "selectors": list(selectors),
+                "scope": _scope(selectors),
+                # Whose command ran and whose adapter read it (ADR-013 D2).
+                "ecosystem": ecosystem,
+                "executed": outcome.total,
+                "failed": outcome.failed,
+                "exit_code": run.exit_code,
+                # Kept apart on purpose. One number used to stand for both, and
+                # which one it stood for depended on which command the shell
+                # happened to finish with — so the evidence could not answer "did
+                # the suite fail, or did the reader fail?" at all.
+                "report_command": run.report_command,
+                "report_exit_code": run.report_exit,
+                "suite_passed": outcome.passed,
+                # A hazard on the measuring run travels with the measurement. Exit
+                # 65 can mean whole suites never ran, which makes coverage
+                # UNDERSTATED — and an understated number is still a number
+                # somebody will act on. Annotating beats silently trusting, for the
+                # same reason TestResult.trustworthy is narrower than passed.
+                "hazards": [h.id for h in outcome.hazards],
+                # Split at record time, because the reader of the evidence cannot
+                # re-derive it: the adapter knows which way each hazard bends a
+                # measurement, the rule does not.
+                "overstating_hazards": [
+                    h.id for h in outcome.hazards if h.may_overstate
+                ],
+            }
+            self._save(session_id, pipeline)
 
         return {
             "command": command,
@@ -1199,9 +1274,10 @@ class PipelineDomain:
         }
 
     def record_coverage(self, session_id: str, coverage: dict[str, float]) -> None:
-        pipeline = self.require(session_id)
-        pipeline.evidence["coverage"] = dict(coverage)
-        self._save(session_id, pipeline)
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            pipeline.evidence["coverage"] = dict(coverage)
+            self._save(session_id, pipeline)
 
     def run_tests(
         self,
@@ -1330,7 +1406,6 @@ class PipelineDomain:
         ran the suite and recorded it somewhere else left the test rules
         answering about a different run than the one that just happened.
         """
-        pipeline = self.require(session_id)
         record = {
             "phase": phase,
             # The RESOLVED command, placeholders substituted. A discovered
@@ -1372,15 +1447,50 @@ class PipelineDomain:
             "hazards": [h.id for h in result.hazards],
             "note": result.note,
         }
-        pipeline.evidence.setdefault("test_runs", []).append(record)
-        self._save(session_id, pipeline)
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            pipeline.evidence.setdefault("test_runs", []).append(record)
+            self._save(session_id, pipeline)
         return record
 
     # -- internals -----------------------------------------------------
 
+    def _record_lock(self, session_id: str):
+        """The lock every read-modify-write of this session's record holds.
+
+        Held across the load and the save and for nothing slower. Taking it
+        twice in one call waits out the timeout (`JsonStore.lock`).
+        """
+        return self.store.lock(self.relpath(session_id), timeout=self.lock_timeout)
+
+    def _change(self, session_id: str, apply: Callable[[Pipeline], bool]) -> bool | None:
+        """One conditional write: ``apply`` mutates and says whether it did.
+
+        For the writers a hook calls, most of whose calls change nothing. An
+        agent already on the record is the usual answer on every tool call it
+        makes, so that answer is taken from a plain read, which needs no lock
+        and cannot wait behind one. Anything else is decided again from a read
+        under the lock, so ``apply`` runs twice and must only touch the record
+        it is given. Returns ``None`` when there is no pipeline.
+        """
+        seen = self.current(session_id)
+        if seen is None:
+            return None
+        if not apply(seen):
+            return False
+        with self._record_lock(session_id):
+            pipeline = self.current(session_id)
+            if pipeline is None:
+                return None
+            if not apply(pipeline):
+                return False
+            self._save(session_id, pipeline)
+        return True
+
     def _save(
         self, session_id: str, pipeline: Pipeline, archive: Pipeline | None = None
     ) -> None:
+        """Write the record. The caller holds :meth:`_record_lock`."""
         self.store.ensure_root()
         raw = self.store.read(self.relpath(session_id), {}) or {}
         completed = list(raw.get("completed", []))

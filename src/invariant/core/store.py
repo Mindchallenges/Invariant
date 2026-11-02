@@ -2,11 +2,15 @@
 
 Two access patterns, deliberately different (``docs/architecture/state_model.md``):
 
-* **Per-session files** are written only by their owning session. They need
-  atomicity — a reader must never see a half-written file — but not locking.
-  ``os.replace`` over a same-directory temporary file provides exactly that.
-* **The registry** is written by every session on the machine, so a
-  read-modify-write must hold an advisory lock across both halves.
+* **Every write is atomic**, so a reader never sees a half-written file and a
+  plain read takes no lock. ``os.replace`` over a same-directory temporary file
+  provides exactly that.
+* **A read-modify-write holds an advisory lock across both halves** wherever a
+  second writer can run. The registry is written by every session on the
+  machine. A pipeline record is written by one session and many processes: its
+  parallel hooks and its commands, which lost each other's writes while this
+  module said an owner was one writer (BUG_107). The session record still has
+  no lock and is still exposed to that race (``docs/architecture/state_model.md``).
 
 Everything is plain JSON on purpose. When a state file wedges, the recovery
 path is a human opening it, so the format has to survive being read by one.
@@ -25,7 +29,7 @@ import json
 import os
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, TypeVar
@@ -230,23 +234,22 @@ class JsonStore:
     # -- locked read-modify-write --------------------------------------
 
     @contextmanager
-    def locked(
-        self,
-        rel: str,
-        default: Any = None,
-        timeout: float = LOCK_TIMEOUT_SECONDS,
-    ) -> Iterator[dict]:
-        """Yield ``rel``'s contents for mutation, holding an exclusive lock.
+    def lock(self, rel: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+        """Hold ``rel``'s exclusive lock. What happens under it is the caller's.
 
-        The yielded object is written back on clean exit. On an exception the
-        write is skipped, so a failed mutation leaves the previous document
-        intact rather than a partial one.
+        For a read-modify-write that may decide to write nothing, which
+        :meth:`locked` cannot do. ``flock`` is not re-entrant across handles, so
+        taking a lock already held in this process waits out the timeout: never
+        nest it. It releases when its holder dies, so a crash wedges nothing.
+        Every failure here is a :class:`StateError`, which is what a hook absorbs.
         """
         self.ensure_root()
         lock_path = self._path(f"locks/{Path(rel).stem}.lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-        handle = open(lock_path, "a+")  # noqa: SIM115 - released in finally
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(lock_path, "a+")  # noqa: SIM115 - released in finally
+        except OSError as exc:
+            raise StateError(f"cannot open the lock for {rel}: {exc}") from exc
         try:
             deadline = time.monotonic() + timeout
             while True:
@@ -260,15 +263,33 @@ class JsonStore:
                             f"session may be wedged; try 'invariant state repair'"
                         ) from None
                     time.sleep(LOCK_POLL_SECONDS)
+                except OSError as exc:
+                    raise StateError(f"cannot lock {rel}: {exc}") from exc
+            yield
+        finally:
+            # Closing releases it too, and a failure here must not replace
+            # whatever the body or the acquisition raised.
+            with suppress(OSError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
 
+    @contextmanager
+    def locked(
+        self,
+        rel: str,
+        default: Any = None,
+        timeout: float = LOCK_TIMEOUT_SECONDS,
+    ) -> Iterator[dict]:
+        """Yield ``rel``'s contents for mutation, holding an exclusive lock.
+
+        The yielded object is written back on clean exit. On an exception the
+        write is skipped, so a failed mutation leaves the previous document
+        intact rather than a partial one.
+        """
+        with self.lock(rel, timeout=timeout):
             data = self.read(rel, default if default is not None else {})
             yield data
             self.write(rel, data)
-        finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
 
 
 class InertStore(JsonStore):
@@ -302,12 +323,7 @@ class InertStore(JsonStore):
         return False
 
     @contextmanager
-    def locked(
-        self,
-        rel: str,
-        default: Any = None,
-        timeout: float = LOCK_TIMEOUT_SECONDS,
-    ) -> Iterator[dict]:
+    def lock(self, rel: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
         # No lock: nothing is written back, so there is no read-modify-write
         # to protect, and a lock file is itself a write to the state root.
-        yield self.read(rel, default if default is not None else {})
+        yield

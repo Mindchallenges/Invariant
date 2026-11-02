@@ -205,8 +205,13 @@ Three properties are decisions rather than consequences:
 No migration. A record already sitting in `isolated` — with commits, as every
 session before this fix did — advances on its next qualifying edit, and until
 then reads as it always did. Two hooks racing on a session's first two edits
-can each write the row; per-session documents are written by their owner, so
-the worst case is a duplicated `isolated -> working` row, not a wrong state.
+can each write the row. That duplicated `isolated -> working` row is not the
+worst case, though it was long documented as one on the argument that an owner
+is one writer. It is not. The session record takes no lock, and each of its
+saves writes back the whole record its caller loaded earlier, so a parallel hook
+can lose what another process just wrote: a plan entry, a declared file, a
+binding (Storage layout, "Concurrency"). BUG_107 disproved the argument for the
+pipeline record and closed it there; the session record is still open.
 
 ### What the record carries beyond the state
 
@@ -1423,6 +1428,85 @@ a doc and a schema together. Privacy still blocks and the docs are still read
 and updated — only the diagram gate steps aside, and only for a pipeline that
 has declared there is no structure to draw.
 
+### The record's lock
+
+One session is many writers, so every read-modify-write of `pipelines/<sid>.json`
+holds the store's lock across its load and its save (BUG_107). The writers:
+`start`, `acknowledge`, `advance`, `record_docs_read`, `record_agent_run`,
+`record_verdicts`, `stamp_verdict_agent`, `record_audit`, `record_coverage`,
+`_record_test_run` (`run_tests` and `run_coverage` reach it) and `run_coverage`'s
+own `coverage_run` write. A test lists them and scans the domain for a writer it
+does not list. Reads take no lock, because a write is atomic.
+
+- **Nothing slow runs under it.** A test run, a coverage run, a gate evaluation,
+  a usage reading and the ruleset pin all happen before the lock is taken. It is
+  held for one load, one mutation and one save, milliseconds on a normal record,
+  so a hook is never queued behind somebody's suite.
+- **A write that changes nothing takes no lock.** `record_docs_read`,
+  `record_agent_run`, `stamp_verdict_agent` and `record_audit` go through
+  `_change`, which first asks a plain read. An agent already on the record is the
+  usual answer on every tool call a subagent makes, and it writes nothing, waits
+  for nothing and creates no lock file. Anything else is decided again from a
+  read under the lock.
+- **`record_verdicts` checks the state under the lock**, so "the pipeline moved
+  after the verdicts were checked" and the append are one step.
+- **`advance` evaluates outside the lock and commits only what it judged.**
+  Gates can run git and read the tree, so they cannot sit under a lock every hook
+  waits on. The price is that a verdict answers about the record as it stood.
+
+```mermaid
+sequenceDiagram
+    participant A as advance
+    participant R as record
+    participant G as gates
+    loop at most ADVANCE_ATTEMPTS
+        A->>R: read, no lock (seen)
+        A->>G: edge and gates, no lock
+        G-->>A: verdicts (a block refuses here)
+        A->>R: take the lock, read again
+        alt the record equals seen, audit aside
+            A->>R: history row, state, save, release
+        else anything changed
+            A->>R: release, decide again from the top
+        end
+    end
+    A-->>A: still moving: refuse, nothing written
+```
+
+Any change a gate could read sends it round, not only a change of state: a red
+run landing during the evaluation is what a stale green verdict must not pass
+over, and evidence landing during it survives, because the transition is applied
+to the re-read record. The audit record alone is left out of the comparison,
+since `RuleContext` removes it from what every gate reads, and it lands on a
+subagent's first call, so it would otherwise cost an evaluation for nothing. A
+gate is a read, and none runs a suite, so a second evaluation costs only the
+time. If the state moved, the edge is decided again from the new state, so a
+stale advance refuses rather than walking backwards. A record still changing
+after the last attempt is refused as a `StateError` naming the retry; nothing is
+recorded. Each pass takes as long as the gates do, several seconds here, so a
+parallel agent making a new write in each of the five can cause that refusal: a
+new file read is such a write, because `docs_read` keeps every path. Run it again
+once that agent has stopped.
+
+**When the lock cannot be had.** A command waits the store's 10 seconds, and a
+hook waits `HOOK_LOCK_SECONDS` (2 seconds), because one tool call can reach four
+writes and the host cancels a hook at `HOOK_TIMEOUT_SECONDS` (15 seconds). The
+wait belongs to `PipelineDomain`, and `invariant hook` sets it through `Context`,
+across a crossing into another project too. The registry's wait is unchanged.
+
+| Writer | Who calls it | On a timeout |
+|---|---|---|
+| `advance`, `start`, `acknowledge`, `record_verdicts` | A command | Exit 3 and the store's message; the record is untouched; run it again |
+| `_record_test_run`, `record_coverage`, `coverage_run` | `pipeline test`, `pipeline coverage` | The same. The run happened and is not on the record, so the gate reads what it read before; run it again |
+| `record_docs_read` | Hook | Absorbed. Fails closed: the docs gate blocks until the doc is read again |
+| `record_agent_run` | Hook | Absorbed. Fails closed: the agent's next call records it, and a dispatch re-records on the next dispatch |
+| `stamp_verdict_agent` | Hook | Absorbed. The stamp is lost for good, and it is audit only: no gate reads it |
+| `record_audit` | Hook | Absorbed. A first act is asked again on the run's next call, because the run is still unread; a dispatch's requested model is lost. No gate reads it |
+
+The hook's answer is the same in every case. A failure to open or take the lock
+is a `StateError` like the timeout, so the hook's existing `except InvariantError`
+absorbs it. The doctor probe's `InertStore` takes no lock and creates no lock file.
+
 ### A proof is an outcome: `bugfix`'s `reproduced`
 
 ```mermaid
@@ -1993,7 +2077,7 @@ that names more than one swept commit.
 
 ```
 <git-common-dir>/invariant/state/
-  registry.json           cross-session index; the only locked file
+  registry.json           cross-session index
   sessions/<sid>.json     one file per session
   pipelines/<sid>.json    current + historical pipelines for a session
   stats/<host-id>.json    one telemetry record per host session; derived and
@@ -2005,6 +2089,7 @@ that names more than one swept commit.
   sweeps/<kind>.xcresult  the sweep's per-run result bundles, cleared before
                           each use; never committed (ADR-010)
   locks/registry.lock     advisory lock file
+  locks/<sid>.lock        one per pipeline record, held across its load and save
   locks/sweep.lock        held for the whole of a `sweep run`, so two sweeps
                           cannot file at once
 ```
@@ -2031,13 +2116,35 @@ has not isolated yet, having no worktree, would be unreachable by the command
 that isolates it. Ambiguity there is reported with the candidates listed rather
 than guessed at.
 
-**Concurrency.** Per-session files are written only by their owning session, so
-they need atomicity but not locking: write to a temporary file in the same
-directory, then `os.replace`, which is atomic on a single filesystem. The
-registry is written by every session, so it is guarded by an advisory lock
-(`flock`) held across a read-modify-write. Lock acquisition has a timeout; a
-timeout is reported as a real error rather than waited out forever, because a
-wedged lock must be visible.
+**Concurrency.** Every write is atomic: a temporary file in the same directory,
+then `os.replace`, which is atomic on a single filesystem. So a reader never sees
+a half-written file and a plain read takes no lock. Atomicity does not protect a
+read-modify-write, and two kinds of file need more:
+
+- The **registry** is written by every session, so it is guarded by an advisory
+  lock (`flock`) held across its read-modify-write.
+- A **pipeline record** has one owner and many writers. Parallel hooks and the
+  session's own commands are separate processes, and while this paragraph said
+  an owner needed no lock they lost each other's evidence, and a stale save could
+  carry the state backwards (BUG_107). Every read-modify-write of the record now
+  holds `locks/<sid>.lock` across its load and its save, and nothing slower: no
+  gate, suite or transcript read runs under it. Domain: pipeline, "The record's
+  lock", says how.
+
+The **session record is still unlocked and still exposed.** It has the same
+shape of defect: `SessionDomain._save` writes back the whole record its caller
+loaded, from 18 call sites, many of them with a session loaded far up the stack
+and with gates evaluated in between. Taking a lock in those saves alone would not
+close it. So the fix is its own piece of work, and until it lands a parallel
+hook can lose a session's plan entry or declared file. The lock's name also has
+to change for it: a lock file is named for the document's stem, so
+`sessions/<sid>.json` and `pipelines/<sid>.json` would share one, and `flock`
+across two handles in one process waits out its timeout rather than nesting.
+
+Lock acquisition has a timeout, because a wedged lock must be visible; a holder
+that dies releases its lock with it. What the timeout costs depends on the
+caller. A command reports it as a real error, having written nothing. A hook
+waits less and absorbs it, losing that one write (Domain: pipeline).
 
 **The round trip, in both directions.** A record is a dataclass, and the two
 builds at either end of a document need not be the same one. Forward: unknown

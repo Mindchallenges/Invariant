@@ -296,6 +296,14 @@ class TestPlacedAcrossRoots:
         warned = json.dumps(_hook(monkeypatch, capsys, "pre-tool-use", pre))
         assert "no pipeline" in warned.lower()
 
+    def test_a_crossing_keeps_the_hooks_shorter_wait_for_the_pipeline_lock(self, world):
+        """BUG_107: the host's budget does not grow because the call crossed."""
+        payload = _tool("Read", world["worktree"] / "src.py")
+        ctx = Context(manifest_start=world["a"], host_session_id=HOST, pipeline_lock_timeout=0.5)
+        placed = ctx.for_payload(payload)
+        assert placed is not ctx
+        assert placed.pipelines.lock_timeout == 0.5
+
     def test_a_probe_stays_inert_across_roots(self, world):
         from invariant.core.store import InertStore
 
