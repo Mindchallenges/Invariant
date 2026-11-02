@@ -481,6 +481,36 @@ class TestChecksAndPrivacy:
         run("privacy", "scan", str(target), "--reveal")
         assert "a.person@example.com" in out(capsys)
 
+    def vendored(self, project, capsys):
+        run("init", "--ecosystem", "python")
+        path = project / ".claude" / "invariant.yaml"
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body.setdefault("privacy", {})["allow"] = [
+            {"paths": ["design/vendor/"], "reason": "vendored third-party assets"}
+        ]
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+        target = project / "design" / "vendor" / "lib.js"
+        target.parent.mkdir(parents=True)
+        target.write_text("mail a.person@example.com\n", encoding="utf-8")
+        (project / "design" / "leak.md").write_text("mail a.person@example.com\n")
+        capsys.readouterr()
+        return target
+
+    def test_a_path_scoped_allow_reaches_an_absolute_argument(self, project, capsys):
+        target = self.vendored(project, capsys)
+        assert run("privacy", "scan", str(target)) == 0
+
+    def test_a_path_scoped_allow_reaches_a_path_typed_from_a_subdirectory(
+        self, project, capsys, monkeypatch
+    ):
+        self.vendored(project, capsys)
+        monkeypatch.chdir(project / "design")
+        assert run("privacy", "scan", "vendor/lib.js") == 0
+        assert run("privacy", "scan", ".") == 1
+        text = out(capsys)
+        assert "leak.md" in text and "lib.js" not in text
+        assert str(project) not in text, "a finding keeps the spelling it was asked by"
+
 
 class TestHookBridge:
     def test_pre_tool_use_denies_an_unattributed_edit(self, project, capsys, monkeypatch):

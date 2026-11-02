@@ -17,7 +17,7 @@ import shlex
 import sys
 import time
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..core import plan as plan_reader
@@ -3601,7 +3601,16 @@ def cmd_privacy_scan(args) -> int:
 
     ctx = Context()
     scanner = PrivacyScanner.from_manifest(ctx.manifest)
-    findings = scanner.scan_paths([Path(p) for p in args.paths])
+    findings = []
+    for typed in (Path(p) for p in args.paths):
+        # Scanned absolute, so a path-scoped allow entry compares the place
+        # the file is in the project, not the spelling relative to wherever
+        # the command was typed; reported in the spelling it was asked by.
+        absolute = typed.absolute()
+        findings += [
+            replace(f, path=typed / f.path.relative_to(absolute))
+            for f in scanner.scan_paths([absolute])
+        ]
     text = "\n".join(f"  {f.describe(reveal=args.reveal)}" for f in findings) or "  clean"
     emit(args, {"findings": [
         {"pattern": f.pattern, "path": str(f.path), "line": f.line,

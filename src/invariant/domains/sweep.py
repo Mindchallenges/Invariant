@@ -431,7 +431,11 @@ class SweepDomain:
         if self.manifest.get("privacy.enabled", True):
             scanner = PrivacyScanner.from_manifest(self.manifest)
             findings = scanner.scan_text(text, path=Path(report.record_path))
-            findings += scanner.scan_text(message, path=Path("commit message"))
+            # A message lives at no path, so no path-scoped allow entry may
+            # reach it; it is NAMED as one only in what is printed.
+            findings += [
+                replace(f, path=Path("commit message")) for f in scanner.scan_text(message)
+            ]
             for rel in item_paths:
                 # Named project-relative, like the record: a finding is printed,
                 # and the absolute spelling would print a home path.

@@ -388,6 +388,19 @@ class TestPrivacy:
         again = domain(proj, Suite()).run()
         assert again.record.seq == 1, "an uncommitted record is never a baseline"
 
+    def test_the_commit_message_lives_at_no_path_a_scoped_allow_could_name(self, proj):
+        # The message used to be scanned as though it were a file called
+        # "commit message", so an entry scoped to that spelling exempted it.
+        m = manifest(
+            proj,
+            privacy__extra=[r"\(\d+ filed\)"],
+            privacy__allow=[{"paths": ["commit message"], "reason": "r"}],
+        )
+        report = domain(proj, Suite(), m=m).run()
+        assert not report.committed
+        assert len(report.privacy) == 1
+        assert report.privacy[0].startswith("commit message:1:")
+
 
 class TestHazards:
     def test_a_hazard_on_the_run_is_recorded(self, proj):

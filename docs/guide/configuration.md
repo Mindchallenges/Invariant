@@ -260,17 +260,48 @@ privacy:
   enabled: true
   patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
   extra: ['ACME-[0-9]{6}']     # project-specific regexes
-  allow: ["github.com/acme/widgets"]   # literal strings exempt wherever they appear
+  allow:
+    - "github.com/acme/widgets"        # a value, exempt wherever it appears
+    - paths: ["design/vendor/"]        # a place: every finding under it
+      reason: "vendored third-party assets (register entry 3)"
+    - paths: ["Tests/"]                # a place, narrowed
+      patterns: [links, clock_times]   # only these patterns
+      values: ["example.com"]          # only matches containing one of these
+      reason: "reserved-domain fixtures (register entry 4)"
   scope: [docs, memory, reports, commit_messages, "docs/"]
 ```
 
 `scope` keywords resolve through `paths.*`; any other entry is a
 project-relative prefix, which is how to widen the scan beyond what the paths
-name (here, to all of `docs/` rather than only `docs/architecture`). `allow`
-is for a *value* that is legitimately public — your own repository's URL;
-the in-text marker `invariant: allow-privacy` is for a *place* and reaches
-only the block it precedes. `device_ids` exists but is opt-in: hex device ids
-collide with git hashes, which documents cite constantly.
+name (here, to all of `docs/` rather than only `docs/architecture`).
+
+`allow` takes two kinds of entry. A plain string is a *value* that is
+legitimately public — your own repository's URL — and is exempt wherever a
+match contains it. A mapping is *path-scoped*: `paths` (required, a non-empty
+list) are project-relative prefixes or globs, matched the way every other
+declared glob is — the path itself or anything beneath it, so
+`design/vendor/` does not reach `design/vendored/`. `patterns` and `values`
+are optional narrowings, and every condition an entry gives must hold.
+`reason` is required, so the manifest says why a place is exempt — cite the
+entry in your exceptions register. A scoped entry reaches only text that has
+a path: a commit message or a handoff note is reached by plain values alone.
+An unknown key, an unknown pattern name, an empty list, a `reason` left out,
+or a path that is absolute, climbs out of the project or names the whole of
+it refuses the manifest at load rather than loading and matching nothing.
+
+The in-text marker `invariant: allow-privacy` is for a *place* inside a
+file, and reaches only the block it precedes.
+
+Two patterns exist but are opt-in. `device_ids`: hex device ids collide with
+git hashes, which documents cite constantly. `durations`: a countdown or an
+elapsed time (`mm:ss` past the 23 that `clock_times` stops at, or `h:mm:ss`),
+for a tree whose mock durations should be found; no duration word excuses
+one. `clock_times` is excused by a duration, version or ratio word written
+immediately before the time (`took`, `timeout=`, `version`, `of`), not by one
+elsewhere on the line. `links` does not flag a URI a parser only compares as
+a string: an XML namespace (`xmlns="…"`, `xmlns:xlink="…"`), the URIs of an
+`xsi:schemaLocation`, or a DOCTYPE's system identifier; the same host in an
+`href` is still a link.
 
 `privacy.clean` is held out of `standdown` by design, and `loose` keeps it at
 `block`. It is the one gate whose failure cannot be undone after the fact.

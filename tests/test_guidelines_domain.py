@@ -164,6 +164,14 @@ class TestRefusals:
         self.refused(dom)
         assert not (tree / CHECKLIST_REL).exists()
 
+    def test_an_allow_entry_scoped_to_the_checklist_reaches_it(self, make_manifest, tree):
+        write(tree, RULESET_REL, RULESET.replace(
+            "A view never reaches", "Ask TICKET-4242 first. A view never reaches"
+        ))
+        allow = [{"paths": [CHECKLIST_REL], "reason": "r"}]
+        dom = domain(make_manifest, tree, privacy={"extra": ["TICKET-[0-9]+"], "allow": allow})
+        dom.render(dry_run=True)
+
     @pytest.mark.parametrize(
         "privacy",
         [
@@ -530,6 +538,19 @@ class TestInstructionBlockRefusals:
         self.refused(dom, insert=(INDEX,))
         assert (blocks_tree / CLAUDE).read_text(encoding="utf-8") == OURS
         assert not (blocks_tree / CHECKLIST_REL).exists()
+
+    def test_an_allow_entry_scoped_to_the_instruction_file_reaches_its_block(
+        self, make_manifest, blocks_tree
+    ):
+        extra = [r"always\): Never skip"]
+        scoped = [{"paths": [CLAUDE], "reason": "r"}]
+        dom = host_default(make_manifest, blocks_tree, privacy={"extra": extra, "allow": scoped})
+        dom.render(insert=(INDEX,), dry_run=True)
+        elsewhere = [{"paths": ["docs/"], "reason": "r"}]
+        dom = host_default(
+            make_manifest, blocks_tree, privacy={"extra": extra, "allow": elsewhere}
+        )
+        assert f"{CLAUDE} ({INDEX} block" in str(self.refused(dom, insert=(INDEX,), dry_run=True))
 
     def test_a_block_that_is_not_written_is_not_refused_for_privacy(
         self, make_manifest, blocks_tree
@@ -973,6 +994,14 @@ class TestBaselineRefusals:
             dom.baseline(mode="record")
         assert "TICKET-4242" not in str(caught.value)
         assert not (repo / BASELINE_REL).exists()
+
+    def test_an_allow_entry_scoped_to_the_baseline_reaches_it(self, repo):
+        import subprocess
+
+        write(repo, "app/TICKET-4242.py", "print(t)\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        privacy = {"extra": ["TICKET-[0-9]+"], "allow": [{"paths": [BASELINE_REL], "reason": "r"}]}
+        baseline_domain(repo, privacy=privacy).baseline(mode="record", dry_run=True)
 
 
 class TestTheBaselineCommand:

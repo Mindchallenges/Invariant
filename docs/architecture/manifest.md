@@ -155,7 +155,8 @@ privacy:
   # shapes collide with git commit hashes, which documents cite routinely.
   patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
   extra: []                    # project-specific regexes
-  allow: []                    # literal strings exempted
+  allow: []                    # plain strings: values exempt everywhere;
+                               # mappings: path-scoped. See "Privacy allow"
   # Keywords resolve through paths.*; any other entry is a project-relative
   # path prefix. See "Privacy scope" below.
   scope: [docs, memory, reports, commit_messages]
@@ -640,6 +641,83 @@ it widens an exemption and is its own decision.
   a repository whose `paths.docs` is `docs/architecture` can declare `docs/`
   so its audits and ADRs — committed prose where a leak is just as permanent —
   are scanned too (AUD-15). This library's own manifest does exactly that.
+
+### Privacy allow
+
+`privacy.allow` answers a different question from `privacy.scope`: not which
+places are read, but which matches inside them are not findings. It used to
+hold only literal values, each exempting any match that contains it wherever
+it appears — the right reach for a value that is public everywhere (the
+project's own repository address), and far too wide for a place that is
+legitimately full of matches. A consuming project's exceptions register
+named three such places: vendored third-party canvas assets (every finding
+under one prefix), a test tree of reserved-domain URLs and synthetic
+identifiers (some patterns only, under one prefix), and captured pages (every
+finding under one prefix). Expressed as values, each would have exempted the
+same strings in the project's documents too.
+
+So an entry is one of two kinds:
+
+```yaml
+privacy:
+  allow:
+    - "github.com/acme/widgets"          # a value, everywhere
+    - paths: ["design/vendor/"]         # required, non-empty
+      patterns: [links, clock_times]    # optional: only these pattern names
+      values: ["example.com"]           # optional: only matches containing one
+      reason: "register entry 3"        # required
+```
+
+```mermaid
+graph TD
+    M["a match, its pattern name,<br/>and the path of the text, if any"] --> V{"contains a<br/>plain value?"}
+    V -- yes --> X["not a finding"]
+    V -- no --> P{"does the text<br/>have a path?"}
+    P -- "no: a commit message,<br/>a note, a value" --> F["a finding"]
+    P -- yes --> R["spell it project-relative<br/>(project_relative, against the root)"]
+    R --> O{"inside the project?"}
+    O -- no --> F
+    O -- yes --> E{"some scoped entry: path under one of its paths<br/>(glob_matches) AND pattern named, if given<br/>AND a value contained, if given?"}
+    E -- yes --> X
+    E -- no --> F
+```
+
+Five properties are deliberate:
+
+- **A scoped entry needs a place.** Text scanned without a path — a commit
+  message, a handoff note, a guidelines verdict note, a value the oracle
+  masks — is reached by plain values only. The sweep used to scan its commit
+  message as though it were a file called `commit message`; it now scans it
+  path-less and only *names* it so in what it prints.
+- **Paths are compared project-relative, whatever the caller held.** An
+  absolute path is spelled against the manifest root through
+  `project_relative`, the same normaliser every declared path goes through;
+  one under no checkout it knows is outside the project and no scoped entry
+  reaches it — the noisy side, not the silent one. A relative path is taken
+  as already project-relative, which is how every caller spells one (a
+  staged path, a path on the review boundary, a generated file's target).
+  `invariant privacy scan` resolves what was typed against the directory it
+  was typed in before scanning, and reports in the spelling it was given.
+- **Declared paths are globs, matched by `glob_matches`.** A prefix is a
+  path segment, not a string prefix: `design/vendor/` does not reach
+  `design/vendored/`.
+- **Every malformed entry refuses the manifest at load** — an unknown key, an
+  unknown pattern name, an empty `paths`, `patterns` or `values`, a missing
+  `reason`, a path that is absolute, climbs out with `..`, or names the
+  project root. Each would otherwise load and match nothing (the finding it
+  was written for keeps blocking with no word why) or match everything (the
+  root, which a plain value already says more honestly). A bare string given
+  for the whole list is refused for the same reason the glob lists are: it
+  would be iterated character by character, and a single letter allows
+  almost every match. A pattern name that exists but is not enabled is
+  accepted; the entry takes effect if the pattern is.
+- **`reason` is required** because a scoped entry is the widest exemption the
+  manifest can state, and the manifest is where a reviewer reads it.
+
+Out of scope here and still open: BUG_063, a session merge reads
+`privacy.allow` from the manifest the merge replaces, so an entry cannot land
+with the content it allows. Scoped entries share that limit; they do not
+widen it.
 
 The gate reads every payload shape the edit tools produce: `content`
 (Write), `new_string` (Edit), `edits[].new_string` (MultiEdit) and

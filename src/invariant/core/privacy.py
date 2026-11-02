@@ -23,9 +23,10 @@ hide a leak. See `PrivacyScanner._exempt_lines`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping, Pattern, Sequence
+from re import Pattern
 
 
 @dataclass(frozen=True)
@@ -120,8 +121,11 @@ PATTERNS: dict[str, Pattern[str]] = {
             [a-z][a-z0-9+.-]*://
             (?:[^\s/?\#@]*@)?
             (?:
-                # a dotted name ending in a TLD-like suffix,
-                [A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{{2,}}
+                # a dotted name ending in a TLD-like suffix: letters, or the
+                # punycode form of an internationalised one, which carries
+                # digits and hyphens a letters-only suffix cannot consume
+                # (IDEA_001),
+                [A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:[A-Za-z]{{2,}}|xn--[A-Za-z0-9-]+)
                 # or an IP literal, v4 or bracketed v6.
               | {_IPV4}
               | \[[0-9A-Fa-f:]+\]
@@ -139,6 +143,14 @@ PATTERNS: dict[str, Pattern[str]] = {
         )""",
         re.VERBOSE,
     ),
+    # A countdown or an elapsed time: `45:00`, `59:59`, `1:23:45`. Not a time
+    # of day — `clock_times` stops its hour at 23, so `24:10` and `45:00` are
+    # out of its reach by design — and off by default for the reason
+    # `device_ids` is: the shape is common in prose that leaks nothing (a
+    # chapter-and-verse, an aspect ratio). A project whose tree carries mock
+    # durations it means to wipe opts in. No duration word excuses one: that
+    # word is what introduces exactly what this pattern is for.
+    "durations": re.compile(r"(?<![\d.:])\d{1,3}:[0-5]\d(?::[0-5]\d)?(?![\d.:])"),
     "device_ids": re.compile(
         r"\b(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
         r"|[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}"
@@ -167,10 +179,37 @@ DEFAULT_PATTERNS: tuple[str, ...] = (
     "links",
 )
 
-#: Substrings whose presence on a line makes a clock-time match a false alarm.
-#: Durations, versions, and ratios all look like times without being one.
+#: A word that, written IMMEDIATELY before a clock-time match, makes it a false
+#: alarm: durations, versions and ratios all look like times without being one.
+#:
+#: Tested against the text left of the MATCH, as `_ROW_NUMBER_REFERENCE` is.
+#: It used to be searched over the whole line, so a duration word anywhere on
+#: it hid every real time beside it — `took 3m; the crash fired at 14:05` was
+#: clean. A separator (`:` or `=`) and a `~` may sit between the word and the
+#: time; anything else, and the word is introducing something else.
 _TIME_FALSE_ALARM = re.compile(
-    r"\b(?:took|elapsed|duration|ratio|version|v\d|timeout|ETA|of\s+\d)\b", re.I
+    r"(?:\b(?:took|elapsed|durations?|ratios?|version|timeouts?|ETA)\s*[:=]?\s*~?"
+    r"|\bof\s+|\bv)$",
+    re.IGNORECASE,
+)
+
+#: The left context of a URI that a parser compares as a STRING and nothing
+#: dereferences: an XML namespace name (`xmlns="…"`, `xmlns:xlink="…"`), the
+#: URIs of an `xsi:schemaLocation` value, and a DOCTYPE's system identifier
+#: (`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://…">`). Every
+#: plist, SVG and XHTML file carries one, and none names a resource the
+#: document reaches for — a vendor's spec host, the same for every reader.
+#:
+#: Adjacency again: the attribute or the DOCTYPE head must sit right against
+#: the match, inside the quoted value. The same host in an ordinary `href` is
+#: still a link, and so is a URI written after a DOCTYPE on its line.
+_XML_IDENTIFIER = re.compile(
+    r"""(?:
+        \bxmlns(?::[\w.-]+)?\s*=\s*["']
+      | \bschemaLocation\s*=\s*["'][^"']*
+      | <!DOCTYPE\s+[\w:.-]+\s+(?:PUBLIC\s+(?:"[^"]*"|'[^']*')|SYSTEM)\s+["']
+    )$""",
+    re.VERBOSE | re.IGNORECASE,
 )
 
 #: A number introduced by a reference marker is a row or a section, not an
@@ -202,8 +241,140 @@ _ROW_NUMBER_REFERENCE = re.compile(r"[#\u00a7\u00b6]$")
 #: contributor's address in the same trailer is still a finding, because it
 #: still is one.
 _NON_IDENTIFYING_ADDRESS = re.compile(
-    r"^(?:no-?reply|do-?not-?reply)@|@(?:[\w.-]+\.)?no-?reply\.[\w.-]+$", re.I
+    r"^(?:no-?reply|do-?not-?reply)@|@(?:[\w.-]+\.)?no-?reply\.[\w.-]+$", re.IGNORECASE
 )
+
+
+#: The keys a path-scoped allow entry may carry.
+_ALLOW_KEYS = ("paths", "patterns", "values", "reason")
+
+
+@dataclass(frozen=True)
+class ScopedAllow:
+    """One path-scoped ``privacy.allow`` entry: a finding is exempt when its
+    path falls under one of ``paths`` and every narrowing given also holds.
+
+    ``paths`` are canonical project-relative globs (``project_relative``),
+    matched as every other declared glob is (``glob_matches``): the path
+    itself or anything beneath it. ``patterns`` and ``values`` are ``None``
+    when the entry does not narrow by them. ``reason`` is required so the
+    manifest says why — a scope that silences every finding under a prefix
+    is the widest thing an operator can write here.
+    """
+
+    paths: tuple[str, ...]
+    reason: str
+    patterns: frozenset[str] | None = None
+    values: tuple[str, ...] | None = None
+
+    def covers(self, name: str, raw: str, rel: str) -> bool:
+        from .manifest import glob_matches
+
+        if self.patterns is not None and name not in self.patterns:
+            return False
+        if self.values is not None and not any(v in raw for v in self.values):
+            return False
+        return any(glob_matches(rel, glob) for glob in self.paths)
+
+
+def parse_allow(entries: object) -> tuple[frozenset[str], tuple[ScopedAllow, ...]]:
+    """``privacy.allow`` read into its plain values and its scoped entries.
+
+    Every problem is a ``ValueError`` naming ``privacy.allow``, raised at
+    construction and therefore at manifest load. An entry that loaded and
+    matched nothing — a mistyped pattern name, a path the comparison could
+    never produce — would leave the finding it was written for blocking with
+    no word as to why, and an entry that matched more than it says (a bare
+    string iterated as characters) would silence findings nobody exempted.
+    """
+    # ValueError, not TypeError, for a wrong shape too: it is the one error a
+    # caller catches for "this configuration cannot build a scanner".
+    if isinstance(entries, (str, bytes)) or not isinstance(entries, Iterable):
+        raise ValueError(  # noqa: TRY004
+            f"privacy.allow must be a list of values and path-scoped entries, "
+            f"got {entries!r}"
+        )
+    values: set[str] = set()
+    scoped: list[ScopedAllow] = []
+    for index, entry in enumerate(entries):
+        if isinstance(entry, str):
+            if entry:
+                values.add(entry)
+        elif isinstance(entry, Mapping):
+            scoped.append(_scoped_allow(index, entry))
+        else:
+            raise ValueError(  # noqa: TRY004
+                f"privacy.allow[{index}] must be a string or a mapping with "
+                f"paths, got {entry!r}"
+            )
+    return frozenset(values), tuple(scoped)
+
+
+def _scoped_allow(index: int, entry: Mapping) -> ScopedAllow:
+    from .manifest import project_relative
+
+    where = f"privacy.allow[{index}]"
+    unknown = sorted(str(k) for k in entry if k not in _ALLOW_KEYS)
+    if unknown:
+        raise ValueError(
+            f"{where} has unknown key(s) {', '.join(unknown)}; an entry takes "
+            + ", ".join(_ALLOW_KEYS)
+        )
+    paths = _non_empty_strings(where, "paths", entry.get("paths"))
+    if paths is None:
+        raise ValueError(
+            f"{where} needs paths: a non-empty list of project-relative "
+            f"prefixes or globs. A value allowed everywhere is a plain string."
+        )
+    canonical: list[str] = []
+    for path in paths:
+        if Path(path).is_absolute():
+            raise ValueError(
+                f"{where} paths entry {path!r} must be spelled project-relative"
+            )
+        rel = project_relative(path)
+        if rel is None:
+            raise ValueError(f"{where} paths entry {path!r} names a place outside the project")
+        if rel == ".":
+            raise ValueError(
+                f"{where} paths entry {path!r} names the whole project; a value "
+                f"allowed everywhere is a plain string"
+            )
+        canonical.append(rel)
+    reason = entry.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(
+            f"{where} needs a reason: the register entry or the cause that "
+            f"makes every finding it scopes legitimate"
+        )
+    patterns = _non_empty_strings(where, "patterns", entry.get("patterns"))
+    if patterns is not None:
+        unknown = [n for n in patterns if n not in PATTERNS]
+        if unknown:
+            raise ValueError(
+                f"{where} names unknown pattern(s) {', '.join(unknown)}; available: "
+                + ", ".join(sorted(PATTERNS))
+            )
+    values = _non_empty_strings(where, "values", entry.get("values"))
+    return ScopedAllow(
+        paths=tuple(canonical),
+        reason=reason.strip(),
+        patterns=frozenset(patterns) if patterns is not None else None,
+        values=tuple(values) if values is not None else None,
+    )
+
+
+def _non_empty_strings(where: str, key: str, value: object) -> list[str] | None:
+    """A list of non-empty strings, or ``None`` for a key left out."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(v, str) and v.strip() for v in value)
+    ):
+        raise ValueError(f"{where} {key} must be a non-empty list of non-empty strings")
+    return list(value)
 
 
 class PrivacyScanner:
@@ -211,7 +382,8 @@ class PrivacyScanner:
         self,
         patterns: Iterable[str] | None = None,
         extra: Iterable[str] = (),
-        allow: Iterable[str] = (),
+        allow: Iterable[str | Mapping] = (),
+        root: Path | None = None,
     ) -> None:
         names = list(patterns) if patterns is not None else list(DEFAULT_PATTERNS)
         unknown = [n for n in names if n not in PATTERNS]
@@ -224,41 +396,84 @@ class PrivacyScanner:
         self.compiled: dict[str, Pattern[str]] = {n: PATTERNS[n] for n in names}
         for index, source in enumerate(extra):
             self.compiled[f"custom[{index}]"] = re.compile(source)
-        self.allow = {a for a in allow if a}
+        self.allow, self.scoped_allow = parse_allow(allow)
+        #: The project root an absolute path is spelled against before a
+        #: scoped entry compares it. ``None``: an absolute path is in no
+        #: project, so no scoped entry reaches it.
+        self.root = Path(root) if root is not None else None
 
     # -- scanning ------------------------------------------------------
 
     def scan_text(self, text: str, path: Path | None = None) -> list[Finding]:
+        """Every finding in ``text``.
+
+        ``path`` is where the text lives, if it lives anywhere: relative to
+        the project root, or absolute. It is what a path-scoped allow entry
+        is compared with, so text with no path — a commit message, a note —
+        is reached only by the plain values.
+        """
         findings: list[Finding] = []
+        rel = self._relative(path)
         lines = text.splitlines()
         exempt = self._exempt_lines(lines)
         for lineno, line in enumerate(lines, start=1):
             if lineno in exempt:
                 continue
+            clock_spans: set[tuple[int, int]] = set()
+            on_line: list[tuple[str, re.Match[str]]] = []
             for name, pattern in self.compiled.items():
-                if name == "clock_times" and _TIME_FALSE_ALARM.search(line):
-                    continue
                 for match in pattern.finditer(line):
-                    raw = match.group(0)
-                    if any(allowed in raw for allowed in self.allow):
+                    if self._excused(name, match, line, rel):
                         continue
-                    if name == "emails" and _NON_IDENTIFYING_ADDRESS.search(raw):
-                        continue
-                    if name == "ip_addresses" and _ROW_NUMBER_REFERENCE.search(
-                        line[: match.start()]
-                    ):
-                        continue
-                    findings.append(
-                        Finding(
-                            pattern=name,
-                            line=lineno,
-                            column=match.start() + 1,
-                            redacted=_redact(raw),
-                            raw=raw,
-                            path=path,
-                        )
+                    if name == "clock_times":
+                        clock_spans.add(match.span())
+                    on_line.append((name, match))
+            for name, match in on_line:
+                # One span, one finding: a time of day `durations` also
+                # matches is reported as the clock time it is.
+                if name == "durations" and match.span() in clock_spans:
+                    continue
+                raw = match.group(0)
+                findings.append(
+                    Finding(
+                        pattern=name,
+                        line=lineno,
+                        column=match.start() + 1,
+                        redacted=_redact(raw),
+                        raw=raw,
+                        path=path,
                     )
+                )
         return findings
+
+    def _excused(self, name: str, match: re.Match[str], line: str, rel: str | None) -> bool:
+        """Whether a match is not a finding: allowed, or structurally not one."""
+        raw = match.group(0)
+        left = line[: match.start()]
+        if any(allowed in raw for allowed in self.allow):
+            return True
+        if rel is not None and any(e.covers(name, raw, rel) for e in self.scoped_allow):
+            return True
+        if name == "emails":
+            return bool(_NON_IDENTIFYING_ADDRESS.search(raw))
+        if name == "ip_addresses":
+            return bool(_ROW_NUMBER_REFERENCE.search(left))
+        if name == "clock_times":
+            return bool(_TIME_FALSE_ALARM.search(left))
+        if name == "links":
+            return bool(_XML_IDENTIFIER.search(left))
+        return False
+
+    def _relative(self, path: Path | None) -> str | None:
+        """``path`` spelled as a scoped entry's paths are, or ``None`` when it
+        names no place in the project (or the scanner has nothing to compare)."""
+        if path is None or not self.scoped_allow:
+            return None
+        from .manifest import project_relative
+
+        bases = [self.root] if self.root is not None else []
+        rel = project_relative(Path(path).as_posix(), bases)
+        return None if rel in (None, ".") else rel
 
     def scan_file(self, path: Path) -> list[Finding]:
         try:
@@ -338,10 +553,12 @@ class PrivacyScanner:
     # -- construction from configuration -------------------------------
 
     @classmethod
-    def from_manifest(cls, manifest) -> "PrivacyScanner":
+    def from_manifest(cls, manifest) -> PrivacyScanner:
         cfg: Mapping = manifest.get("privacy") or {}
+        root = getattr(manifest, "root", None)
         return cls(
             patterns=cfg.get("patterns"),
             extra=cfg.get("extra") or (),
             allow=cfg.get("allow") or (),
+            root=Path(root) if root is not None else None,
         )

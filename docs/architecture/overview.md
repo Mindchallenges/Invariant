@@ -223,7 +223,8 @@ graph TD
     WORKITEM --> GIT
     MANIFEST --> GIT
     CCTEL --> GIT
-    MANIFEST --> PRIVACY
+    MANIFEST -- DEFAULT_PATTERNS, parse_allow --> PRIVACY
+    PRIVACY -. project_relative, glob_matches, imported at call time .-> MANIFEST
     MANIFEST --> adapters
     PIPELINE --> adapters
     CC --> AGENTS
@@ -820,9 +821,16 @@ the registry for the verdicts. `PipelineDomain.advance` has worked this way
 from the start; `SessionDomain._advance` joined it when AUD-05 found the
 session machine's gates were read by two hardcoded CLI call sites instead of by
 the one function every transition passes through. `MANIFEST → PRIVACY` carries
-exactly one name — `DEFAULT_PATTERNS`, the single authoritative default
-pattern set — so the manifest's default and a bare `PrivacyScanner()` cannot
-drift apart (AUD-15).
+two names. `DEFAULT_PATTERNS`, the single authoritative default pattern set,
+so the manifest's default and a bare `PrivacyScanner()` cannot drift apart
+(AUD-15). And `parse_allow`, so a malformed `privacy.allow` entry refuses the
+manifest at load rather than at the first scan (manifest.md, Privacy allow).
+The dashed `PRIVACY → MANIFEST` is the other direction of the same pair: a
+path-scoped allow entry is compared through `project_relative` and
+`glob_matches`, the one spelling and the one matcher every declared path goes
+through, rather than a third copy of either. It is imported at call time, as
+`MANIFEST → GIT` is, because the module-level arrow already runs the other
+way.
 
 `SWEEPD` and `CSWEEP` are the sweep (IDEA_032 increments 3 and 4, ADR-010 D4,
 D6, D9): the whole suite run once on a cadence from the main checkout, its
@@ -1231,7 +1239,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set` | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
-| `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches | Know which files matter |
+| `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches; the structural excuses a match is judged by (a row number, a duration word, an XML identifier), each read from the text immediately left of the match and never from the whole line; reading `privacy.allow` into plain values and path-scoped entries (`parse_allow`, `ScopedAllow`), and deciding whether an entry reaches a match at the path it was handed | Know which files matter: which paths are scanned is `privacy.scope`, decided by the caller, and a path reaches the scanner only to be compared with an allow entry |
 | `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record`; every rename git detects from the merge base to the working tree (`renamed_files`), which a baseline entry follows (DN-7) — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |

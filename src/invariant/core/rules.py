@@ -2045,7 +2045,7 @@ def plan_render(
 
     scanner = PrivacyScanner.from_manifest(manifest)
     text = guidelines_reader.render_checklist(ruleset, fmt, source=source)
-    findings = scanner.scan_text(text)
+    findings = scanner.scan_text(text, path=Path(rel))
     if findings:
         named = ", ".join(f"{rel}:{f.line} {f.pattern} {f.redacted}" for f in findings)
         raise RenderRefused(
@@ -2064,12 +2064,16 @@ def plan_render(
     ]
     writing = [block for block in blocks if block.text is not None]
     name = guidelines_reader.INDEX_BLOCK
-    findings = scanner.scan_text(guidelines_reader.block_text(name, body))
-    if findings and writing:
-        named = ", ".join(
-            f"{block.result.relpath} ({name} block, line {f.line}) {f.pattern} {f.redacted}"
-            for block in writing for f in findings
-        )
+    rendered = guidelines_reader.block_text(name, body)
+    # Scanned once per file it is written into: a path-scoped allow entry
+    # reaches the block in the file it names and in no other.
+    found = [
+        f"{block.result.relpath} ({name} block, line {f.line}) {f.pattern} {f.redacted}"
+        for block in writing
+        for f in scanner.scan_text(rendered, path=Path(block.result.relpath))
+    ]
+    if found:
+        named = ", ".join(found)
         raise RenderRefused(
             f"the rendered block fails the privacy scan ({named}); nothing was written",
             f"remove it from {source}, then render again",
@@ -3275,7 +3279,7 @@ def plan_baseline(
             f"{'; '.join(exc.problems)}; nothing was written",
             "rename the file so its path has no line break and no space at either end",
         ) from exc
-    found = PrivacyScanner.from_manifest(ctx.manifest).scan_text(text)
+    found = PrivacyScanner.from_manifest(ctx.manifest).scan_text(text, path=Path(rel))
     if found:
         named = ", ".join(f"{rel}:{f.line} {f.pattern} {f.redacted}" for f in found)
         raise BaselineRefused(

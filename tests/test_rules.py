@@ -1174,6 +1174,48 @@ class TestPrivacyRule:
         assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
 
 
+class TestPrivacyPathScopedAllowReachesEveryRoute:
+    """A path-scoped allow entry is compared with where the text lands, on
+    every route that has a place: an edit's target, a staged path. A commit
+    message has none, so no scoped entry can reach it."""
+
+    VENDOR = "docs/architecture/vendor"
+
+    @pytest.fixture(autouse=True)
+    def _scoped(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "privacy": {"allow": [{"paths": [f"{self.VENDOR}/"], "reason": "vendored"}]},
+        })
+
+    def test_an_edit_under_the_prefix_passes(self, ctx_factory):
+        doc = ctx_factory.main / self.VENDOR / "lib.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "contact a.person@example.com"))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_an_edit_beside_the_prefix_is_still_blocked(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "contact a.person@example.com"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_staged_path_under_the_prefix_passes(self, ctx_factory):
+        main = ctx_factory.main
+        shell_write(main, f"{self.VENDOR}/lib.md", "contact a.person@example.com")
+        stage(main, f"{self.VENDOR}/lib.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'vendor a lib'"))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_commit_message_is_not_reached(self, ctx_factory):
+        main = ctx_factory.main
+        shell_write(main, f"{self.VENDOR}/lib.md", "nothing here")
+        stage(main, f"{self.VENDOR}/lib.md")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload("git commit -m 'by a.person@example.com'")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+
 def multiedit_payload(path, *new_strings):
     return {
         "tool_name": "MultiEdit",

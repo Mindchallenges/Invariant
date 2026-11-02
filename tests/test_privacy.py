@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -263,6 +264,7 @@ class TestLinksNameANetworkHost:
         "www.a.example",
         "a.invalid",
         "host.example.invalid",
+        "a.xn--zckzah",     # a punycode IDN top-level domain (IDEA_001)
         "user@a.example",   # userinfo does not stop it being a host
         "192.0.2.10",       # IPv4 literal
         "192.0.2.10:8443",  # ...with a port
@@ -782,3 +784,299 @@ class TestExemptionMarkerScope:
         from invariant.core.rules import EXEMPTION_MARKER as advised
 
         assert EXEMPTION_MARKER == self.MARKER == advised
+
+
+class TestPathScopedAllow:
+    """An allow entry may name WHERE it applies, not only what it allows.
+
+    A plain string is still a value exempted everywhere. A mapping entry is
+    scoped: its ``paths`` are required, ``patterns`` and ``values`` narrow it
+    further, and every condition given must hold. Text scanned without a path
+    (a commit message, a note) is never reached by a scoped entry.
+    """
+
+    VENDOR: ClassVar[dict] = {"paths": ["design/vendor/"], "reason": "register entry 3"}
+
+    def scanner(self, *entries, root=None, names=("emails", "links", "clock_times")):
+        return PrivacyScanner(patterns=list(names), allow=list(entries), root=root)
+
+    def test_a_plain_value_is_still_exempt_everywhere(self):
+        scanner = self.scanner("ok@x.example")
+        assert scanner.scan_text("mail ok@x.example") == []
+        assert scanner.scan_text("mail ok@x.example", path=Path("src/a.py")) == []
+
+    def test_a_path_entry_exempts_every_finding_under_its_prefix(self):
+        scanner = self.scanner(self.VENDOR)
+        text = "see https://cdn.example/react.js at 14:05 from a@b.example"
+        assert scanner.scan_text(text, path=Path("design/vendor/babel/x.js")) == []
+
+    def test_a_path_entry_does_not_reach_outside_its_prefix(self):
+        scanner = self.scanner(self.VENDOR)
+        found = scanner.scan_text("mail a@b.example", path=Path("design/other.md"))
+        assert patterns(found) == {"emails"}
+
+    def test_a_prefix_is_matched_by_segment_not_by_characters(self):
+        scanner = self.scanner(self.VENDOR)
+        found = scanner.scan_text("mail a@b.example", path=Path("design/vendored/x.md"))
+        assert patterns(found) == {"emails"}
+
+    def test_the_prefix_itself_names_a_file(self):
+        scanner = self.scanner({"paths": ["HeapTests/Fixture.swift"], "reason": "r"})
+        assert scanner.scan_text("a@b.example", path=Path("HeapTests/Fixture.swift")) == []
+
+    def test_text_without_a_path_is_never_reached_by_a_scoped_entry(self):
+        scanner = self.scanner(self.VENDOR)
+        assert patterns(scanner.scan_text("mail a@b.example")) == {"emails"}
+
+    def test_a_glob_is_matched_like_every_other_declared_glob(self):
+        scanner = self.scanner({"paths": ["HeapTests/**/*.swift"], "reason": "r"})
+        assert scanner.scan_text("a@b.example", path=Path("HeapTests/Unit/A.swift")) == []
+        assert scanner.scan_text("a@b.example", path=Path("HeapTests/A.md")) != []
+
+    def test_patterns_narrow_the_entry_to_those_names(self):
+        scanner = self.scanner(
+            {"paths": ["HeapTests/"], "patterns": ["links", "clock_times"], "reason": "r"}
+        )
+        found = scanner.scan_text(
+            "https://a.example at 14:05 by a@b.example", path=Path("HeapTests/T.swift")
+        )
+        assert patterns(found) == {"emails"}
+
+    def test_values_narrow_the_entry_to_matches_containing_one(self):
+        scanner = self.scanner(
+            {"paths": ["HeapTests/"], "values": ["example.com"], "reason": "r"}
+        )
+        found = scanner.scan_text(
+            "https://example.com/x and https://real.example/y",
+            path=Path("HeapTests/T.swift"),
+        )
+        assert [f.raw for f in found] == ["https://real.example/y"]
+
+    def test_every_given_condition_must_hold(self):
+        scanner = self.scanner(
+            {"paths": ["HeapTests/"], "patterns": ["emails"], "values": ["example.com"],
+             "reason": "r"}
+        )
+        text = "https://example.com/x and a@example.com"
+        found = scanner.scan_text(text, path=Path("HeapTests/T.swift"))
+        assert patterns(found) == {"links"}
+
+    def test_a_spelled_variant_of_the_path_is_the_same_path(self):
+        scanner = self.scanner({"paths": ["./design//vendor/"], "reason": "r"})
+        assert scanner.scan_text("a@b.example", path=Path("./design/vendor/x.js")) == []
+
+    def test_an_absolute_path_is_compared_project_relative(self, tmp_path):
+        scanner = self.scanner(self.VENDOR, root=tmp_path)
+        inside = tmp_path / "design" / "vendor" / "x.js"
+        assert scanner.scan_text("a@b.example", path=inside) == []
+
+    def test_an_absolute_path_outside_the_project_is_not_exempt(self, tmp_path):
+        scanner = self.scanner(self.VENDOR, root=tmp_path / "proj")
+        outside = tmp_path / "elsewhere" / "design" / "vendor" / "x.js"
+        assert patterns(scanner.scan_text("a@b.example", path=outside)) == {"emails"}
+
+    def test_an_absolute_path_with_no_root_is_not_exempt(self, tmp_path):
+        scanner = self.scanner(self.VENDOR)
+        path = tmp_path / "design" / "vendor" / "x.js"
+        assert patterns(scanner.scan_text("a@b.example", path=path)) == {"emails"}
+
+    def test_a_relative_path_climbing_out_is_not_exempt(self):
+        scanner = self.scanner(self.VENDOR)
+        path = Path("../design/vendor/x.js")
+        assert patterns(scanner.scan_text("a@b.example", path=path)) == {"emails"}
+
+    def test_scan_file_carries_the_path_to_the_entry(self, tmp_path):
+        target = tmp_path / "design" / "vendor" / "x.js"
+        target.parent.mkdir(parents=True)
+        target.write_text("a@b.example\n", encoding="utf-8")
+        assert self.scanner(self.VENDOR, root=tmp_path).scan_paths([tmp_path]) == []
+
+    def test_a_pattern_named_but_not_enabled_is_accepted(self):
+        scanner = self.scanner({"paths": ["x/"], "patterns": ["durations"], "reason": "r"})
+        assert patterns(scanner.scan_text("a@b.example", path=Path("x/y"))) == {"emails"}
+
+    def test_from_manifest_scopes_against_the_project_root(self, make_manifest):
+        m = make_manifest(
+            {"privacy": {"patterns": ["emails"], "allow": [dict(self.VENDOR)]}}
+        )
+        scanner = PrivacyScanner.from_manifest(m)
+        assert scanner.scan_text("a@b.example", path=m.root / "design/vendor/a") == []
+        assert scanner.scan_text("a@b.example", path=m.root / "src/a") != []
+
+
+class TestPathScopedAllowIsCheckedLoudly:
+    """A mistyped allow entry must not load and do nothing (BUG_050's shape)."""
+
+    @pytest.mark.parametrize(
+        "entry, says",
+        [
+            ({"reason": "r"}, "paths"),
+            ({"paths": [], "reason": "r"}, "paths"),
+            ({"paths": "design/vendor/", "reason": "r"}, "paths"),
+            ({"paths": [""], "reason": "r"}, "paths"),
+            ({"paths": [3], "reason": "r"}, "paths"),
+            ({"paths": ["/abs/design"], "reason": "r"}, "project-relative"),
+            ({"paths": ["../sibling"], "reason": "r"}, "outside the project"),
+            ({"paths": ["."], "reason": "r"}, "whole project"),
+            ({"paths": ["x/"]}, "reason"),
+            ({"paths": ["x/"], "reason": "  "}, "reason"),
+            ({"paths": ["x/"], "patterns": ["linkz"], "reason": "r"}, "linkz"),
+            ({"paths": ["x/"], "patterns": [], "reason": "r"}, "patterns"),
+            ({"paths": ["x/"], "patterns": "links", "reason": "r"}, "patterns"),
+            ({"paths": ["x/"], "values": [], "reason": "r"}, "values"),
+            ({"paths": ["x/"], "values": [""], "reason": "r"}, "values"),
+            ({"paths": ["x/"], "reason": "r", "path": ["y/"]}, "path"),
+            (3, "string or a mapping"),
+        ],
+    )
+    def test_a_malformed_entry_is_refused(self, entry, says):
+        with pytest.raises(ValueError, match="privacy.allow") as caught:
+            PrivacyScanner(allow=[entry])
+        assert says in str(caught.value)
+
+    def test_a_bare_string_for_the_whole_list_is_refused(self):
+        # Iterated character by character it would allow every match that
+        # contains any of its letters: a narrowing become a project-wide one.
+        with pytest.raises(ValueError, match="must be a list"):
+            PrivacyScanner(allow="github.com/acme/widgets")
+
+    def test_an_empty_plain_string_is_still_ignored(self):
+        assert PrivacyScanner(patterns=["emails"], allow=[""]).scan_text("a@b.example")
+
+    def test_the_manifest_refuses_it_at_load(self, make_manifest):
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError, match="privacy.allow"):
+            make_manifest({"privacy": {"allow": [{"paths": ["x/"], "patterns": ["nope"],
+                                                   "reason": "r"}]}})
+
+    def test_the_manifest_refuses_a_bare_string(self, make_manifest):
+        from invariant.core.errors import ManifestError
+
+        with pytest.raises(ManifestError, match="privacy.allow"):
+            make_manifest({"privacy": {"allow": "github.com/acme/widgets"}})
+
+
+class TestXmlIdentifiersAreNotLinks:
+    """A DOCTYPE identifier and an XML namespace name are URIs that address
+    nothing a document is reaching for: a parser compares them as strings.
+    Judged by what sits immediately left of the match, like a row number."""
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["links"])
+
+    def links(self, text):
+        return [f.raw for f in self.scanner.scan_text(text)]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            (
+                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                '"http://www.apple.example/DTDs/PropertyList-1.0.dtd">'
+            ),
+            (
+                "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN' "
+                "'http://www.w3.example/TR/xhtml1/DTD/xhtml1-strict.dtd'>"
+            ),
+            '<!DOCTYPE note SYSTEM "https://schemas.example/note.dtd">',
+            '<svg xmlns="http://www.w3.example/2000/svg" width="4">',
+            '<svg xmlns:xlink="http://www.w3.example/1999/xlink">',
+            "<a xmlns = 'http://ns.example/a'>",
+            '<r xsi:schemaLocation="http://ns.example/a http://ns.example/a.xsd">',
+        ],
+    )
+    def test_an_xml_identifier_is_not_a_link(self, text):
+        assert self.links(text) == []
+
+    def test_an_href_to_the_same_host_is_still_a_link(self):
+        text = '<svg xmlns="http://www.w3.example/2000/svg"><a href="http://www.w3.example/x">'
+        assert self.links(text) == ['http://www.w3.example/x">']
+
+    def test_xmlns_in_prose_is_still_a_link(self):
+        assert self.links("the xmlns http://ns.example/a is ours") != []
+
+    def test_a_link_after_a_doctype_on_its_line_is_still_a_link(self):
+        assert self.links("<!DOCTYPE html> see https://real.example/x") != []
+
+    def test_a_doctype_without_a_quoted_identifier_does_not_excuse_one(self):
+        assert self.links("<!DOCTYPE html PUBLIC https://real.example/x") != []
+
+
+class TestClockTimeFalseAlarmIsAdjacent:
+    """A duration word excuses the time it introduces, not the whole line."""
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["clock_times"])
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the build took 12:30 of wall clock",
+            "version 10:15 of the spec",
+            "duration: 1:23:45",
+            "timeout=00:30",
+            "ETA 14:00",
+            "elapsed 03:15",
+            "a ratio of 16:10",
+            "release v1:20",
+        ],
+    )
+    def test_a_word_right_before_the_match_still_excuses_it(self, text):
+        assert self.scanner.scan_text(text) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "the build took 3m; the crash fired at 14:05",
+            "timeout raised, logged at 09:41",
+            "v1.2 shipped at 10:30",
+            "duration unknown, reported 22:15",
+        ],
+    )
+    def test_a_word_elsewhere_on_the_line_does_not_hide_a_time(self, text):
+        assert patterns(self.scanner.scan_text(text)) == {"clock_times"}
+
+
+class TestDurationsAreOptIn:
+    """A countdown or a duration is not a time of day, and ``clock_times``
+    stops at 23 hours. ``durations`` catches the shape for a project that
+    wants mock durations found, and is off by default, like ``device_ids``."""
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["durations"])
+
+    def test_it_is_not_a_default(self):
+        from invariant.core.privacy import DEFAULT_PATTERNS
+
+        assert "durations" not in DEFAULT_PATTERNS
+        assert PrivacyScanner().scan_text("countdown 45:00") == []
+
+    @pytest.mark.parametrize("value", ["24:10", "45:00", "59:59", "1:23:45", "120:00", "0:05"])
+    def test_a_duration_shape_is_a_finding(self, value):
+        assert [f.raw for f in self.scanner.scan_text(f"counting {value} down")] == [value]
+
+    @pytest.mark.parametrize("text", ["took 45:00", "duration 1:23:45", "timeout 30:00"])
+    def test_a_duration_word_does_not_excuse_a_duration(self, text):
+        assert patterns(self.scanner.scan_text(text)) == {"durations"}
+
+    @pytest.mark.parametrize(
+        "text", ["aspect 16:9", "build 1.2:30", "12:345", "1:2", "a 12:60 split", "1:23:45:67"]
+    )
+    def test_not_a_duration(self, text):
+        assert self.scanner.scan_text(text) == []
+
+    def test_a_span_both_patterns_match_is_reported_once_as_a_clock_time(self):
+        scanner = PrivacyScanner(patterns=["clock_times", "durations"])
+        found = scanner.scan_text("at 14:05, then 45:00 left")
+        assert [(f.pattern, f.raw) for f in found] == [
+            ("clock_times", "14:05"),
+            ("durations", "45:00"),
+        ]
+
+    def test_an_allow_entry_may_name_it(self):
+        scanner = PrivacyScanner(
+            patterns=["durations"],
+            allow=[{"paths": ["HeapTests/"], "patterns": ["durations"], "reason": "r"}],
+        )
+        assert scanner.scan_text("45:00", path=Path("HeapTests/T.swift")) == []

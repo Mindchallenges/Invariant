@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 
 from .errors import ManifestError, UnknownRuleError
-from .privacy import DEFAULT_PATTERNS
+from .privacy import DEFAULT_PATTERNS, parse_allow
 
 MANIFEST_RELPATH = Path(".claude") / "invariant.yaml"
 
@@ -555,6 +555,13 @@ class Manifest:
         scope = self.data["privacy"]["scope"]
         if not isinstance(scope, list):
             raise ManifestError("privacy.scope must be a list")
+        # Read at load, not when a scanner is first built: a scoped entry
+        # naming a pattern that does not exist would otherwise load, match
+        # nothing, and leave the finding it was written for blocking.
+        try:
+            parse_allow(self.data["privacy"].get("allow") or [])
+        except ValueError as exc:
+            raise ManifestError(str(exc)) from exc
         # The coverage glob lists are each a RELAXATION, and a bare string
         # given for one is iterated character by character downstream — so
         # `"web/**"` contributes a lone `*`, which matches every path in the
