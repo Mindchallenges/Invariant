@@ -1080,3 +1080,83 @@ class TestDurationsAreOptIn:
             allow=[{"paths": ["HeapTests/"], "patterns": ["durations"], "reason": "r"}],
         )
         assert scanner.scan_text("45:00", path=Path("HeapTests/T.swift")) == []
+
+
+class TestBUG110Repro:
+    """Repro for BUG_110, one test per symptom: see the work-item entry.
+
+    Each fails while its defect is live. When a fix lands, delete that test's
+    expected-failure line; the assertion must then pass unchanged. The lines
+    are a consuming project's own source, and the pattern set is its manifest's.
+    """
+
+    PATTERNS: ClassVar[list[str]] = [
+        "home_paths",
+        "emails",
+        "ip_addresses",
+        "tokens",
+        "clock_times",
+        "durations",
+        "links",
+        "device_ids",
+    ]
+
+    def findings_per_line(self, *lines):
+        scanner = PrivacyScanner(patterns=self.PATTERNS)
+        return {
+            line: [(f.pattern, f.raw) for f in scanner.scan_text(line)] for line in lines
+        }
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_110 image scale suffix is live: delete this line with the fix"
+    )
+    def test_BUG_110_an_image_scale_suffix_is_not_an_email(self):
+        lines = (
+            '{ "filename" : "preview@2x.png", "idiom" : "universal", "scale" : "2x" },',
+            "AppIcon-Eclipse~ipad@2x.png",
+        )
+        assert self.findings_per_line(*lines) == {line: [] for line in lines}
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_110 9:16 ratio is live: delete this line with the fix"
+    )
+    def test_BUG_110_a_quoted_aspect_ratio_is_not_a_time(self):
+        lines = (
+            'static let cropAspects: [String] = ["Free", "1:1", "4:5", "9:16", "16:9", "Orig"]',
+            'case "9:16": return 9.0/16.0',
+        )
+        assert self.findings_per_line(*lines) == {line: [] for line in lines}
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_110 24:00 bound is live: delete this line with the fix"
+    )
+    def test_BUG_110_the_midnight_bound_names_no_moment(self):
+        lines = (
+            "///     (Feb 30, 24:00); without a modifier",
+            "2026-06-15T24:00:00Z",
+        )
+        assert self.findings_per_line(*lines) == {line: [] for line in lines}
+
+    @pytest.mark.xfail(
+        strict=True, reason="BUG_110 manifest's own allow value is live: delete this line with the fix"
+    )
+    def test_BUG_110_a_manifest_does_not_flag_the_values_it_declares(self, make_manifest):
+        m = make_manifest(
+            {
+                "privacy": {
+                    "patterns": self.PATTERNS,
+                    "allow": [
+                        {
+                            "paths": ["HeapTests/"],
+                            "patterns": ["links", "ip_addresses", "emails"],
+                            "values": ["localhost", "127.0.0.1"],
+                            "reason": "reserved test hosts",
+                        }
+                    ],
+                }
+            }
+        )
+        found = PrivacyScanner.from_manifest(m).scan_text(
+            'values: ["localhost", "127.0.0.1"]', path=m.path
+        )
+        assert [(f.pattern, f.raw) for f in found] == []
