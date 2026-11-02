@@ -11,6 +11,7 @@ import ast
 from pathlib import Path
 
 import pytest
+import yaml
 
 from invariant.core import agents
 from invariant.core.agents import AgentSourceError, parse
@@ -119,7 +120,6 @@ class TestEveryProblemIsNamed:
     @pytest.mark.parametrize(
         ("key", "said"),
         [
-            ("tier", "A7"),
             ("model", "never names a model"),
             ("tools", "capabilities"),
             ("roles", "agents.roles"),
@@ -195,6 +195,80 @@ class TestEveryProblemIsNamed:
         assert found == (f"line 6: a malformed section anchor: {line.strip()!r}",)
 
 
+class TestTheTierVocabulary:
+    """A tier is a hint with three names and no order (ADR-012 D9, A7.1)."""
+
+    FRONT = "name: a\ndescription: d\ncapabilities: [read]\n"
+
+    def test_there_are_three_tiers(self):
+        assert set(agents.TIERS) == {"light", "standard", "deep"}
+        assert len(agents.TIERS) == 3
+
+    def test_a_tier_is_optional(self):
+        assert parse(source(self.FRONT)).tier is None
+
+    @pytest.mark.parametrize("tier", ["light", "standard", "deep"])
+    def test_each_tier_is_read(self, tier):
+        assert parse(source(f"{self.FRONT}tier: {tier}\n")).tier == tier
+
+    @pytest.mark.parametrize("value", ["heavy", "Deep", "opus", "deep,light", "1"])
+    def test_an_unknown_tier_is_refused_naming_the_three(self, value):
+        (found,) = problems(source(f"{self.FRONT}tier: {value}\n"))
+        assert found.startswith("tier:") and repr(value) in found
+        assert all(tier in found for tier in agents.TIERS)
+
+    def test_an_empty_tier_is_refused_naming_the_three(self):
+        (found,) = problems(source(f"{self.FRONT}tier:\n"))
+        assert found.startswith("tier:")
+        assert all(tier in found for tier in agents.TIERS)
+
+    def test_a_tier_declared_twice_is_refused(self):
+        (found,) = problems(source(f"{self.FRONT}tier: deep\ntier: light\n"))
+        assert found == "tier: declared twice"
+
+    def test_a_bad_tier_is_named_with_every_other_problem(self):
+        found = problems(source("name: a\ncapabilities: [fly]\ntier: heavy\n"))
+        assert len(found) == 3, found
+
+    def test_a_tier_is_not_part_of_the_body(self):
+        without = parse(source(self.FRONT))
+        stated = parse(source(f"{self.FRONT}tier: deep\n"))
+        assert stated.body() == without.body()
+
+    def test_an_overlay_keeps_the_tier_the_source_states(self):
+        text = source(f"{self.FRONT}tier: deep\n", "<!-- invariant:section intro -->\nHello.\n")
+        amended = agents.merge(parse(text), overlay({"append": "intro", "text": "More."}))
+        assert amended.tier == "deep"
+
+    def test_a_tier_has_no_order_and_no_comparison(self):
+        """Nothing can say "at least deep": the three are names and nothing else."""
+        assert not [
+            name
+            for name in vars(agents)
+            if "tier" in name.lower() and name != "TIERS" and not name.startswith("_")
+        ]
+        tree = ast.parse(Path(agents.__file__).read_text(encoding="utf-8"))
+        positional = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "TIERS"
+        ]
+        method_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "TIERS"
+        ]
+        assert not positional and not method_calls
+
+    def test_core_agents_names_no_model(self):
+        text = Path(agents.__file__).read_text(encoding="utf-8").lower()
+        assert not [word for word in ("sonnet", "opus", "haiku", "gpt") if word in text]
+
+
 class TestCoreAgentsIsHostAgnostic:
     """D8: the neutral model lives in ``core/``, so it cannot know a host."""
 
@@ -219,6 +293,16 @@ class TestCoreAgentsIsHostAgnostic:
             for alias in node.names
         }
         assert not names & {"os", "subprocess", "pathlib", "Path", "open"}
+
+    def test_it_does_not_import_the_manifest_back(self):
+        """`core/manifest` imports TIERS from here (A7.1), so the arrow is one way."""
+        tree = ast.parse(Path(agents.__file__).read_text(encoding="utf-8"))
+        modules = [
+            node.module or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        ]
+        assert not [name for name in modules if "manifest" in name], modules
 
 
 # -- overlays (ADR-012 D8, the A6 rulings 4 and 5, A6 increment 3) ----------
@@ -250,8 +334,6 @@ RULED = (
 
 
 def overlay(*operations, version=1):
-    import yaml
-
     return yaml.safe_dump({"version": version, "operations": list(operations)})
 
 
@@ -365,6 +447,25 @@ class TestAnOverlayIsRefusedWithAFix:
     def test_an_operation_cannot_change_them_either(self, key):
         (found,) = refusals(RULED, overlay({key: "x"}))
         assert "ruling 5" in found.problem
+
+    def test_a_tier_at_the_top_level_names_agents_tiers_as_the_route(self):
+        text = "version: 1\ntier: deep\noperations: [{append: intro, text: x}]\n"
+        (found,) = refusals(RULED, text)
+        assert "'tier'" in found.problem and "agents.tiers" in found.fix
+
+    def test_a_tier_as_an_operation_names_agents_tiers_as_the_route(self):
+        (found,) = refusals(RULED, overlay({"tier": "deep"}))
+        assert "'tier'" in found.problem and "agents.tiers" in found.fix
+
+    def test_a_tier_beside_an_operation_names_agents_tiers_as_the_route(self):
+        (found,) = refusals(RULED, overlay({"append": "intro", "text": "x", "tier": "deep"}))
+        assert "'tier'" in found.problem and "agents.tiers" in found.fix
+
+    @pytest.mark.parametrize("key", ["capabilities", "model"])
+    def test_only_a_tier_names_that_route(self, key):
+        text = f"version: 1\n{key}: x\noperations: [{{append: intro, text: x}}]\n"
+        (found,) = refusals(RULED, text)
+        assert "agents.tiers" not in found.fix
 
     def test_an_unknown_operation(self):
         (found,) = refusals(RULED, overlay({"prepend": "intro", "text": "x"}))

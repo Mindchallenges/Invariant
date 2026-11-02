@@ -173,12 +173,21 @@ agents:
                                # convention docs/agents/<name>.yaml, never an
                                # implicit default (ruling 6). Never exempt from
                                # isolation (D10)
+  tiers: {}                    # library agent -> light | standard | deep: the
+                               # operator's override of the default its source
+                               # states (ADR-012 D9, the A7 ruling 1). A hint,
+                               # read by no gate
   roles:                       # which agent answers for which pipeline role
     design: [feature-architect]
     review: [compliance-reviewer]
 
 host:
   kind: claude_code
+  tier_map: {}                 # tier -> this host's own choice for that tier,
+                               # as `deep: <your host's name for it>`: one line
+                               # of text the engine never interprets. Empty
+                               # means the host's default for every agent
+                               # (ADR-012 D9, ruling 10)
 
 guidelines:                    # the project's coding guidelines (ADR-012 D3, D13)
   ruleset: null                # path of the one YAML ruleset; null = no
@@ -273,7 +282,8 @@ operations:
 
 An overlay changes body sections and the description and nothing else, so
 `capabilities`, `model`, `tools`, `tier`, `name` and `roles` are refused by
-name. It is policy (ADR-012 D10), so a path exempt from session isolation is
+name, and the refusal of `tier` names `agents.tiers` as the route. It is policy
+(ADR-012 D10), so a path exempt from session isolation is
 refused like one outside the project. The install refuses a bad overlay
 before writing anything, naming each problem with its fix: an unknown key or
 operation, an anchor the agent does not carry (naming the nearest real one),
@@ -294,6 +304,26 @@ install --dry-run` prints, which the CLI supplies from the adapter for
 landing. It warns in every profile, and `enforcement.rules` retunes it like
 any rule. A manifest naming it loads only on a build that registers it.
 `doctor`'s `library agents current` row is its verdict.
+
+`agents.tiers` and `host.tier_map` are the capability hints (ADR-012 D9, the
+A7 rulings 1, 4 and 14). A tier is one of `light`, `standard` or `deep`. They
+are names with no order, so nothing can ask for "at least deep". An agent's
+source may state a default, and `agents.tiers` is the operator's override of it
+for a library agent. A local agent is the project's own file, so it takes no
+entry. `host.tier_map` turns a tier into this host's own choice:
+
+```yaml
+host:
+  kind: claude_code
+  tier_map:
+    deep: <your host's name for it>
+```
+
+The value is one line of text the engine never interprets, and core holds no
+list of model names. The map ships empty, so every agent runs on the host's
+default until an operator says otherwise. No gate reads either key. In this
+build they are validated and otherwise unread (ADR-012, "As built: A7 increment
+1").
 
 ### Generated files are declared, and never exempt
 
@@ -1325,13 +1355,24 @@ session is still in flight, and each FAILS when it cannot be loaded, because a
 skip on a rule a project holds at `block` reads as a pass.
 
 `agents` must be a mapping whose keys this build reads (`library`, `local`,
-`roles` and `overlays`; `tiers` is refused by name until A7 builds it).
+`roles`, `overlays` and `tiers`).
 `library` and `local` are each a list of agent names, none named twice and
 none in both; a bare string is refused. `overlays` is a mapping of agent name
 to a non-empty path, and each name must be in `library`: an overlay on a
 `local` agent is refused with the fix to edit that agent directly. Where an
 overlay points, and what it says, is checked by the install that reads it,
-against the tree in hand, not at load.
+against the tree in hand, not at load. `tiers` is a mapping of agent name to one
+of `light`, `standard` or `deep`, and each name must be in `library`: a `local`
+agent is refused with the fix to remove it, and any other name with the fix to
+add it to `library` or remove its tier.
+
+`host` must be a mapping whose keys this build reads (`kind` and `tier_map`). Any
+other key is refused by name, because it would load and do nothing, so a
+downstream manifest with a stray host key now fails at load (the A7 ruling 14).
+`tier_map` is a mapping whose keys are tiers and whose values are each one line
+of text: empty, not a string, or holding a line break, a trailing one included,
+is refused. What a value says is never checked. `kind` is not judged at load:
+the commands that need an adapter refuse a kind with none, by name.
 
 ### An override either takes effect or says it did not
 

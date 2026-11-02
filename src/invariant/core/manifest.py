@@ -29,6 +29,7 @@ from typing import Any
 
 import yaml
 
+from .agents import TIERS
 from .errors import ManifestError, UnknownRuleError
 from .privacy import DEFAULT_PATTERNS, parse_allow
 
@@ -336,6 +337,9 @@ DEFAULTS: dict[str, Any] = {
         # the documented convention, never an implicit default (ruling 6).
         # Each must name an agent in `library`.
         "overlays": {},
+        # Library agent -> tier, the operator's override of the default its
+        # source states (ADR-012 D9, the A7 ruling 1). A hint: no gate reads it.
+        "tiers": {},
         # Which agents satisfy which pipeline role. Installing an agent does
         # not make anything use it, so this mapping is what the agent-role
         # gates read. A role left empty makes its gate "not applicable" rather
@@ -346,7 +350,10 @@ DEFAULTS: dict[str, Any] = {
             "review": ["compliance-reviewer"],
         },
     },
-    "host": {"kind": "claude_code"},
+    # `tier_map` is tier -> this host's own choice for that tier, one line of
+    # text the engine never interprets (ADR-012 D9, ruling 10). Empty by default
+    # and in every shipped file, so every agent runs on the host's default.
+    "host": {"kind": "claude_code", "tier_map": {}},
     # The project's coding guidelines (ADR-012 D3, D13). `ruleset` is the
     # path of the one YAML ruleset; null means no guidelines, and every
     # `guidelines.*` rule is N/A. The documented location is
@@ -381,9 +388,11 @@ DEFAULTS: dict[str, Any] = {
     },
 }
 
-#: The `agents` keys this build reads, and the ones refused with a reason.
-_AGENTS_KEYS = ("library", "local", "roles", "overlays")
-_AGENTS_LATER = {"tiers": "capability tiers arrive with A7 (ADR-012 D9)"}
+#: The `agents` keys this build reads.
+_AGENTS_KEYS = ("library", "local", "roles", "overlays", "tiers")
+
+#: The `host` keys this build reads.
+_HOST_KEYS = ("kind", "tier_map")
 
 #: The `guidelines` keys this build reads.
 _GUIDELINES_KEYS = (
@@ -594,6 +603,7 @@ class Manifest:
         self._validate_freshness_level()
         self._validate_guidelines()
         self._validate_agents()
+        self._validate_host()
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -847,16 +857,13 @@ class Manifest:
         no name in both: the renderer installs `library` and never touches
         `local` (the A6 ruling 11). `overlays` maps a `library` agent to a
         path. Where that path points, and what the overlay says, is checked
-        by the install that reads it, against the tree in hand.
+        by the install that reads it, against the tree in hand. `tiers` maps a
+        `library` agent to a tier (the A7 rulings 1 and 14).
         """
         section = self.data.get("agents")
         if not isinstance(section, Mapping):
             raise ManifestError(f"agents must be a mapping, got {section!r}")
         for key in section:
-            if key in _AGENTS_LATER:
-                raise ManifestError(
-                    f"agents.{key} is not read by this build: {_AGENTS_LATER[key]}."
-                )
             if key not in _AGENTS_KEYS:
                 raise ManifestError(
                     f"agents.{key} is not a key this build reads; it reads "
@@ -904,6 +911,65 @@ class Manifest:
                     f"agents.overlays names {name!r}, which is not in agents.library "
                     f"({', '.join(names['library']) or 'empty'}); add it there, or "
                     f"remove the overlay."
+                )
+        self._validate_tiers(section.get("tiers"), names)
+
+    @staticmethod
+    def _validate_tiers(tiers: Any, names: Mapping[str, list[str]]) -> None:
+        if not isinstance(tiers, Mapping):
+            raise ManifestError(
+                f"agents.tiers must be a mapping of library agent to tier, got {tiers!r}"
+            )
+        for name, tier in tiers.items():
+            if name in names["local"]:
+                raise ManifestError(
+                    f"agents.tiers names {name!r}, a project-local agent; a tier "
+                    f"overrides a library agent's default, and the project owns that "
+                    f"agent's file, so remove it from agents.tiers."
+                )
+            if name not in names["library"]:
+                raise ManifestError(
+                    f"agents.tiers names {name!r}, which is not in agents.library "
+                    f"({', '.join(names['library']) or 'empty'}); add it there, or "
+                    f"remove its tier."
+                )
+            if not _is_tier(tier):
+                raise ManifestError(
+                    f"agents.tiers.{name} must be one of {', '.join(TIERS)}, got {tier!r}"
+                )
+
+    def _validate_host(self) -> None:
+        """Refuse a `host` key that would load and do nothing (the A7 ruling 14).
+
+        `tier_map` maps a tier to one line of text the host adapter hands its
+        host. The engine checks the shape and never what the value says, so
+        core holds no list of model names (ADR-012 D1 item 3, ruling 10).
+        `kind` is not judged here: which kinds have an adapter is the host
+        layer's answer, asked by the commands that need one.
+        """
+        section = self.data.get("host")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"host must be a mapping, got {section!r}")
+        for key in section:
+            if key not in _HOST_KEYS:
+                raise ManifestError(
+                    f"host.{key} is not a key this build reads; it reads "
+                    f"{', '.join('host.' + k for k in _HOST_KEYS)}."
+                )
+        tier_map = section.get("tier_map")
+        if not isinstance(tier_map, Mapping):
+            raise ManifestError(
+                f"host.tier_map must be a mapping of tier to the host's own choice, "
+                f"got {tier_map!r}"
+            )
+        for tier, choice in tier_map.items():
+            if not _is_tier(tier):
+                raise ManifestError(
+                    f"host.tier_map names {tier!r}, which is not one of {', '.join(TIERS)}."
+                )
+            if not _is_one_line(choice):
+                raise ManifestError(
+                    f"host.tier_map.{tier} must be one line of text, got {choice!r}"
                 )
 
     def scheduled_gates(self) -> frozenset[str]:
@@ -1324,3 +1390,14 @@ def _flatten(node: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, A
 def _is_path(value: Any) -> bool:
     """A declared path: a string with something in it."""
     return isinstance(value, str) and bool(value.strip())
+
+
+def _is_tier(value: Any) -> bool:
+    """A name from the tier vocabulary. An unhashable or non-string value is not."""
+    return isinstance(value, str) and value in TIERS
+
+
+def _is_one_line(value: Any) -> bool:
+    """Text with something in it and no line break of any kind, a trailing one
+    included: it is rendered into a single line of a host's file."""
+    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]

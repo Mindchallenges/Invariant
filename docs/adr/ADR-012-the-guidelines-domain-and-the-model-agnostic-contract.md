@@ -12,7 +12,8 @@
   built. A6 closed with increment 5, built to the user's fourteen A6 rulings
   (under D8) in five increments: the shipped agents are host-neutral sources
   rendered per host, amended by overlays, watched for drift, and their bodies
-  ask the engine for the guidelines.
+  ask the engine for the guidelines. A7 is in progress, built to the user's
+  fourteen A7 rulings (under D9).
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -3146,6 +3147,94 @@ through the operator's optional `host.tier_map` (ruling 10), which the host
 adapter renders into its own field. It is empty by default, so every agent
 runs on the host's default model, and no host adapter ships a tier-to-model
 table of its own.
+
+**A7 rulings (the user's).** The user ruled on all fourteen A7 questions before
+A7 was built. They bind every A7 increment.
+
+| # | Question | Ruling |
+|---|---|---|
+| 1 | Where a tier is stated | In the agent source, as a default, with `agents.tiers` as the operator's override. |
+| 2 | `compliance-reviewer`'s default | `standard`. |
+| 3 | The other shipped agents' defaults | `feature-architect` and `bug-reproducer` default to `deep`; `backlog-curator` to `standard`. |
+| 4 | What ships in `tier_map` | The shipped `tier_map` is empty. The docs show placeholders and no model names. This repository's own manifest stays empty. |
+| 5 | The `MODEL:` prose in `feature-architect` and `bug-reproducer` | Deleted. |
+| 6 | Is a tier hint change drift | Not in `agents.rendered_current`: an intact copy differing only in its model line reads as current, the install still applies it, and a `doctor` row outside any gate names it. |
+| 7 | The role gates and the D1 test | Role gates stay. The D1 test permutes model, host, tier and verdict stamps and adds a consistent rename. D1 item 2's wording is amended. |
+| 8 | Which host is permuted | Only the recorded host. `host.kind` is configuration, an input to which gates apply. |
+| 9 | What Claude Code records | Asked and observed models separately, with observed from a bounded read of the run's transcript. |
+| 10 | Where the record lives | In `evidence.audit`, and it is removed from `RuleContext`. |
+| 11 | How far the record reaches | Subagents, plus a per-verdict model stamp. Not the main loop. |
+| 12 | How the permutations are made | A fixed hostile set plus seeded stdlib random, with no new dependency. |
+| 13 | What the scan covers | `core/rules`, `core/guidelines`, `core/verdicts` and `core/findings`. |
+| 14 | Keys that load and do nothing | Unknown `host.*` keys, and `agents.tiers` on a local agent, are refused. |
+
+**Three readings of those rulings (the design pass's, not the user's).** The
+user did not rule on these. Each can be overruled without reopening a ruling.
+
+- *Ruling 1 amends D9.* D9 gives `agents.tiers` as the map and shows
+  `compliance-reviewer` taking `tier: standard`, without saying that a source
+  states a default or that the manifest overrides it. The reading is that this
+  is an amendment to D9 and not a restatement of it.
+- *D1 item 2's new wording waits for A7.4.* Ruling 7 says the wording is amended
+  and does not say when. The reading is that it changes with the test it
+  describes, so the ADR never describes a test that does not exist yet.
+- *`core/stats`' price table is an older exception to D1 item 3.* It names models
+  for the telemetry, it predates this ADR, and no gate reads it. Ruling 13's scan
+  does not list it. The reading is that A7 leaves it alone.
+
+A7 is built in four increments, recorded on its session's plan: the tier
+vocabulary and the manifest keys (A7.1), the renderer and the classifier
+(A7.2), the audit record (A7.3), and the D1 test with A7's closure (A7.4).
+
+**As built: A7 increment 1, the tier vocabulary and the manifest keys.** Built
+to D9, D13's `agents.tiers` and `host.tier_map`, ruling 10, and the A7 rulings
+1, 4 and 14. For this one increment a tier is validated and otherwise unread:
+no shipped source carries a tier line yet, and nothing renders one. Those are
+A7.2.
+
+- *`core/agents`.* `TIERS` is `light`, `standard` and `deep`. They are names
+  with no order and no comparison, so "at least deep" cannot be expressed. The
+  tuple is there to be named in a refusal, and nothing indexes it. A test scans
+  the module for any such use.
+- *The source key.* `tier` is an optional frontmatter key, kept on
+  `AgentSource.tier` and unchanged by an overlay. A value outside the three is
+  refused naming them, an empty one included, and a repeated key is refused as
+  any other is. `model`, `tools` and `roles` stay refused by name.
+- *An overlay.* It still refuses `tier`, at the top level, as an operation and
+  beside one. The fix now names `agents.tiers` as the route. The other refused
+  keys keep their own fixes.
+- *`agents.tiers`.* A mapping of library agent to tier. A value outside the
+  three is refused naming them. An agent outside `agents.library` is refused
+  with the fix to add it there or remove its tier, and a local agent with the
+  fix to remove it, because the project owns that agent's file. The "arrives
+  with A7" refusal is gone.
+- *`host.tier_map`.* A mapping whose keys must be tiers and whose values are
+  each one line of text, with no line break of any kind, a trailing one
+  included. The engine checks that shape and never reads what a value says.
+  The default is empty. No module this increment touches holds a list of model
+  names, and a test scans `core/agents` and `core/manifest` for that.
+  `core/stats`' price table names models and is untouched here (the third
+  reading above).
+- *Unknown `host.*` keys are refused at load.* This closes a gap the design pass
+  found: `host.tier_map` and a mistyped host key both loaded silently, the
+  BUG_050 shape. `host` must be a mapping whose keys are `kind` and `tier_map`.
+  `host.kind` is not judged at load, because which kinds have an adapter is the
+  host layer's answer. **A downstream manifest with a stray host key now fails
+  at load.** Two real manifests were checked and neither breaks: the downstream
+  project's host section holds only `kind: claude_code`, and this repository's
+  has no host section.
+- *The one new arrow.* `core/manifest` imports `TIERS` from `core/agents`, so
+  the manifest and the source cannot disagree about the vocabulary. `core/agents`
+  stays free of anything doing I/O and imports nothing back. Tests scan for both.
+- *What is not here.* No shipped source, manifest or installed agent changed,
+  and the `MODEL:` prose is still in the descriptions; those are A7.2. How a
+  value is written into a host's file is A7.2's too. D1 item 2's wording is
+  amended with its test, in A7.4 (the second reading above).
+- *Tests.* `tests/test_agents.py` covers the vocabulary, each acceptance and
+  refusal of the source key, the overlay's route at all three places, and the
+  arrow's direction. `tests/test_manifest.py` covers both keys, every refusal,
+  a section with only `kind`, no section at all, a kind with no adapter, the
+  opaque values, and this repository's manifest staying empty.
 
 ### D10 — A ruleset edit goes through its own lane (A8)
 

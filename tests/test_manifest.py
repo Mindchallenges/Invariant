@@ -1,8 +1,10 @@
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
 import yaml
 
+from invariant import core
 from invariant.core.errors import ManifestError
 from invariant.core.manifest import MANIFEST_RELPATH, Level, Manifest
 
@@ -543,9 +545,6 @@ class TestTheAgentsKeys:
         text = self.refused(tmp_path, {"overlay": {}})
         assert "agents.overlay " in text and "agents.overlays" in text
 
-    def test_tiers_waits_for_a7(self, tmp_path):
-        assert "A7" in self.refused(tmp_path, {"tiers": {}})
-
     @pytest.mark.parametrize("key", ["library", "local"])
     @pytest.mark.parametrize("value", ["feature-architect", [""], [3], None])
     def test_library_and_local_are_lists_of_names(self, tmp_path, key, value):
@@ -589,3 +588,143 @@ class TestTheAgentsKeys:
             },
         )
         assert "project-local" in text and "edit it directly" in text
+
+
+class TestTheTierOverride:
+    """`agents.tiers` is the operator's override of a source's default tier
+    (ADR-012 D9, D13, the A7 rulings 1 and 14). A hint: validated, and read by
+    no gate."""
+
+    def load(self, tmp_path, agents):
+        write_manifest(tmp_path, {"agents": agents})
+        return Manifest.load(tmp_path)
+
+    def refused(self, tmp_path, agents):
+        with pytest.raises(ManifestError) as caught:
+            self.load(tmp_path, agents)
+        return str(caught.value)
+
+    def test_the_default_is_empty(self, minimal):
+        assert minimal.get("agents.tiers") == {}
+
+    @pytest.mark.parametrize("tier", ["light", "standard", "deep"])
+    def test_a_library_agent_may_take_each_tier(self, tmp_path, tier):
+        m = self.load(tmp_path, {"tiers": {"compliance-reviewer": tier}})
+        assert m.get("agents.tiers") == {"compliance-reviewer": tier}
+        assert m.source_of("agents.tiers.compliance-reviewer") == "manifest"
+
+    @pytest.mark.parametrize("value", [["compliance-reviewer"], "deep", None, 3])
+    def test_it_is_a_mapping(self, tmp_path, value):
+        assert "agents.tiers must be a mapping" in self.refused(tmp_path, {"tiers": value})
+
+    @pytest.mark.parametrize("tier", ["heavy", "Deep", "opus", 3, None, True, ["deep"]])
+    def test_an_unknown_tier_is_refused_naming_the_three(self, tmp_path, tier):
+        text = self.refused(tmp_path, {"tiers": {"compliance-reviewer": tier}})
+        assert "agents.tiers.compliance-reviewer" in text
+        assert all(name in text for name in ("light", "standard", "deep"))
+
+    def test_an_agent_outside_the_library_is_refused_with_its_fix(self, tmp_path):
+        text = self.refused(tmp_path, {"tiers": {"nobody": "deep"}})
+        assert "'nobody'" in text and "agents.library" in text
+        assert "add it there" in text and "remove" in text
+
+    def test_the_library_it_reads_is_the_projects(self, tmp_path):
+        text = self.refused(
+            tmp_path,
+            {"library": ["feature-architect"], "tiers": {"compliance-reviewer": "deep"}},
+        )
+        assert "'compliance-reviewer'" in text and "feature-architect" in text
+
+    def test_an_empty_library_says_so(self, tmp_path):
+        text = self.refused(tmp_path, {"library": [], "tiers": {"nobody": "deep"}})
+        assert "empty" in text
+
+    def test_a_local_agent_is_refused_with_its_own_fix(self, tmp_path):
+        text = self.refused(
+            tmp_path,
+            {"library": ["feature-architect"], "local": ["mine"], "tiers": {"mine": "deep"}},
+        )
+        assert "project-local" in text and "'mine'" in text
+        assert "remove" in text
+
+
+class TestTheHostKeys:
+    """`host.kind` and `host.tier_map` are the keys; any other is refused at
+    load (the A7 rulings 4 and 14). A host key nobody reads used to load and
+    do nothing, the BUG_050 shape."""
+
+    def load(self, tmp_path, host):
+        write_manifest(tmp_path, {"host": host})
+        return Manifest.load(tmp_path)
+
+    def refused(self, tmp_path, host):
+        with pytest.raises(ManifestError) as caught:
+            self.load(tmp_path, host)
+        return str(caught.value)
+
+    def test_the_defaults(self, minimal):
+        assert minimal.get("host.kind") == "claude_code"
+        assert minimal.get("host.tier_map") == {}
+
+    def test_a_manifest_with_no_host_section_loads(self, minimal):
+        assert minimal.get("host") == {"kind": "claude_code", "tier_map": {}}
+
+    def test_a_host_section_with_only_kind_loads(self, tmp_path):
+        assert self.load(tmp_path, {"kind": "claude_code"}).get("host.kind") == "claude_code"
+
+    def test_a_kind_with_no_adapter_still_loads(self, tmp_path):
+        """Which kinds have an adapter is the host layer's answer, at use."""
+        assert self.load(tmp_path, {"kind": "other"}).get("host.kind") == "other"
+
+    @pytest.mark.parametrize("key", ["tiermap", "tier_maps", "model", "knd"])
+    def test_an_unknown_key_is_refused_naming_what_is_read(self, tmp_path, key):
+        text = self.refused(tmp_path, {"kind": "claude_code", key: "x"})
+        assert f"host.{key} " in text
+        assert "host.kind" in text and "host.tier_map" in text
+
+    @pytest.mark.parametrize("value", [["claude_code"], "claude_code", None, 3])
+    def test_host_is_a_mapping(self, tmp_path, value):
+        assert "host must be a mapping" in self.refused(tmp_path, value)
+
+    def test_a_tier_map_loads_and_keeps_its_values_as_written(self, tmp_path):
+        """A value is the operator's, handed to the host untouched: placeholders
+        here stand for whatever that host calls a model."""
+        tier_map = {"light": "cheap-one", "standard": "any string: at all", "deep": " x "}
+        m = self.load(tmp_path, {"tier_map": tier_map})
+        assert m.get("host.tier_map") == tier_map
+        assert m.source_of("host.tier_map.light") == "manifest"
+
+    def test_a_partial_tier_map_loads(self, tmp_path):
+        m = self.load(tmp_path, {"tier_map": {"deep": "big-one"}})
+        assert m.get("host.tier_map") == {"deep": "big-one"}
+
+    @pytest.mark.parametrize("value", [["deep"], "deep", None, 3])
+    def test_a_tier_map_is_a_mapping(self, tmp_path, value):
+        assert "host.tier_map must be a mapping" in self.refused(tmp_path, {"tier_map": value})
+
+    @pytest.mark.parametrize("key", ["heavy", "Deep", "sonnet", 3])
+    def test_a_tier_map_key_must_be_a_tier(self, tmp_path, key):
+        text = self.refused(tmp_path, {"tier_map": {key: "x"}})
+        assert "host.tier_map" in text and repr(key) in text
+        assert all(name in text for name in ("light", "standard", "deep"))
+
+    @pytest.mark.parametrize(
+        "value", ["", "   ", 3, None, True, ["x"], {"a": "b"}, "a\nb", "a\n", "a\rb", "a\u2028b"]
+    )
+    def test_a_tier_map_value_is_one_line_of_text(self, tmp_path, value):
+        text = self.refused(tmp_path, {"tier_map": {"deep": value}})
+        assert "host.tier_map.deep" in text and "one line" in text
+
+    @pytest.mark.parametrize("module", ["agents", "manifest"])
+    def test_core_holds_no_list_of_model_names(self, module):
+        """The vocabulary stops at the tier; the map's values are the operator's."""
+        path = Path(core.__file__).parent / f"{module}.py"
+        text = path.read_text(encoding="utf-8").lower()
+        assert not [word for word in ("sonnet", "opus", "haiku", "gpt") if word in text]
+
+    def test_this_repository_configures_no_tier(self):
+        """The shipped map is empty and so is this repository's (the A7 ruling 4)."""
+        root = Path(__file__).resolve().parents[1]
+        body = yaml.safe_load((root / MANIFEST_RELPATH).read_text(encoding="utf-8"))
+        assert "tiers" not in (body.get("agents") or {})
+        assert "tier_map" not in (body.get("host") or {})

@@ -1,14 +1,19 @@
 """Host-neutral agent sources (ADR-012 D8, A6 increment 2).
 
 A library agent is written once, in a form no host reads directly: a markdown
-body under a frontmatter of ``name``, ``description`` and ``capabilities``.
-Each host adapter renders it into its own file, so the source never names a
-host's tools or a model.
+body under a frontmatter of ``name``, ``description``, ``capabilities`` and an
+optional ``tier``. Each host adapter renders it into its own file, so the source
+never names a host's tools or a model.
 
 ``capabilities`` is a bracketed list drawn from :data:`CAPABILITIES`; the host
 maps each to its own tools. ``roles`` was dropped by the A6 ruling 7, because
 the manifest's ``agents.roles`` already owns which agent answers for which
-role. ``tier`` arrives with A7 and is refused by name until then.
+role.
+
+``tier`` is one of :data:`TIERS`, the agent's default capability hint, and the
+manifest's ``agents.tiers`` is the operator's override of it (ADR-012 D9, the A7
+ruling 1). A tier is a name and nothing more: it has no rank and no comparison,
+so "at least deep" cannot be said, and no gate reads it.
 
 The body is cut into sections by whole-line anchors::
 
@@ -61,16 +66,20 @@ from .errors import InvariantError
 #: What an agent may ask its host for, in the order a renderer lists them.
 CAPABILITIES = ("read", "edit", "shell", "dispatch")
 
+#: The capability hints an agent may state (ADR-012 D9). Listed to be named, and
+#: never ranked: nothing compares two of them, and the listing is not an order.
+TIERS = ("light", "standard", "deep")
+
 FENCE = "---"
 ANCHOR_MARK = "invariant:section"
 _ANCHOR = re.compile(r"^<!-- invariant:section ([a-z0-9][a-z0-9-]*) -->$")
 _KEY_LINE = re.compile(r"^([A-Za-z0-9_-]+)\s*:\s*(.*)$")
 
 _REQUIRED = ("name", "description", "capabilities")
+_OPTIONAL = ("tier",)
 
 #: Keys a host's own agent file carries, refused by name so the reason is said.
 _REFUSED = {
-    "tier": "capability tiers arrive with A7 (ADR-012 D9) and are not read yet",
     "model": "a neutral source never names a model (ADR-012 D1, D9)",
     "tools": "a neutral source declares capabilities, not a host's tool names",
     "roles": "dropped by the A6 ruling 7; the manifest's agents.roles owns it",
@@ -107,6 +116,7 @@ class AgentSource:
     capabilities: tuple[str, ...]
     preamble_lines: tuple[str, ...]
     sections: tuple[Section, ...]
+    tier: str | None = None
 
     @property
     def preamble(self) -> str:
@@ -136,6 +146,7 @@ def parse(text: str, expected_name: str | None = None) -> AgentSource:
     if expected_name is not None and name and name != expected_name:
         problems.append(f"name: declares {name!r} but the source is named {expected_name!r}")
     capabilities = _capabilities(front.get("capabilities"), problems)
+    tier = _tier(front.get("tier"), problems)
     preamble, sections = _sections(lines[close + 1 :], close + 2, problems)
 
     if problems:
@@ -146,6 +157,7 @@ def parse(text: str, expected_name: str | None = None) -> AgentSource:
         capabilities=capabilities,
         preamble_lines=preamble,
         sections=sections,
+        tier=tier,
     )
 
 
@@ -172,7 +184,7 @@ def _read_frontmatter(lines: list[str], problems: list[str]) -> dict[str, str]:
             problems.append(f"{key}: declared twice")
         elif key in _REFUSED:
             problems.append(f"{key}: {_REFUSED[key]}")
-        elif key not in _REQUIRED:
+        elif key not in _REQUIRED and key not in _OPTIONAL:
             problems.append(f"{key}: not a key of a neutral agent source")
         else:
             found[key] = value
@@ -200,6 +212,15 @@ def _capabilities(value: str | None, problems: list[str]) -> tuple[str, ...]:
         else:
             seen.append(item)
     return tuple(seen)
+
+
+def _tier(value: str | None, problems: list[str]) -> str | None:
+    if value is None:
+        return None
+    if value not in TIERS:
+        problems.append(f"tier: {value!r} is not one of {', '.join(TIERS)}")
+        return None
+    return value
 
 
 def _sections(
@@ -247,6 +268,8 @@ _RULING_5 = (
     "an overlay changes body sections and the description only (the A6 ruling 5)"
 )
 _SHOW_SECTIONS = "'invariant agents show <name> --sections' lists the anchors"
+#: A project's tier has a home of its own, so the refusal says where it goes.
+_TIER_FIX = "remove 'tier' from the overlay; a project sets a tier in the manifest's agents.tiers"
 
 
 @dataclass(frozen=True)
@@ -318,7 +341,10 @@ def _read_overlay(text: str) -> tuple[tuple[Operation, ...], _Problems]:
     for key in raw:
         if key in _OVERLAY_REFUSED:
             problems.append(
-                OverlayProblem(f"{key!r}: {_RULING_5}", f"remove {key!r} from the overlay")
+                OverlayProblem(
+                    f"{key!r}: {_RULING_5}",
+                    _TIER_FIX if key == "tier" else f"remove {key!r} from the overlay",
+                )
             )
         elif key not in _OVERLAY_KEYS:
             problems.append(
@@ -383,7 +409,10 @@ def _operation(index: int, entry: object, problems: list[OverlayProblem]) -> Ope
         named = extra[0] if extra else None
         if named in _OVERLAY_REFUSED:
             problems.append(
-                OverlayProblem(f"{where}: {named!r}: {_RULING_5}", f"remove {where}")
+                OverlayProblem(
+                    f"{where}: {named!r}: {_RULING_5}",
+                    _TIER_FIX if named == "tier" else f"remove {where}",
+                )
             )
         else:
             problems.append(
@@ -400,7 +429,9 @@ def _operation(index: int, entry: object, problems: list[OverlayProblem]) -> Ope
             problems.append(
                 OverlayProblem(
                     f"{where} ({kind}): {key!r} is not a key it takes",
-                    f"{kind} takes " + (", ".join(allowed) if allowed else "no other key"),
+                    _TIER_FIX
+                    if key == "tier"
+                    else f"{kind} takes " + (", ".join(allowed) if allowed else "no other key"),
                 )
             )
     value = entry[kind]
