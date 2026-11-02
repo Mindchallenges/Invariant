@@ -2,9 +2,22 @@
 id: IDEA_001
 type: idea
 title: The links pattern's TLD-like suffix rule drops a punycode IDN top-level domain
-status: proposed
+status: done
 residue: []
-history: []
+history:
+- from: proposed
+  to: accepted
+  reason: 'Implemented in 7faaafa lineage (merged as cb3815b): punycode TLDs now flagged
+    by links'
+  forced: false
+- from: accepted
+  to: in_progress
+  reason: landed in cb3815b
+  forced: false
+- from: in_progress
+  to: done
+  reason: shipped on main in cb3815b with a punycode corpus member in tests/test_privacy.py
+  forced: false
 area: core/privacy
 severity: low
 priority: low
