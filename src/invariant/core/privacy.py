@@ -147,9 +147,11 @@ PATTERNS: dict[str, Pattern[str]] = {
     # of day — `clock_times` stops its hour at 23, so `24:10` and `45:00` are
     # out of its reach by design — and off by default for the reason
     # `device_ids` is: the shape is common in prose that leaks nothing (a
-    # chapter-and-verse, an aspect ratio). A project whose tree carries mock
-    # durations it means to wipe opts in. No duration word excuses one: that
-    # word is what introduces exactly what this pattern is for.
+    # chapter-and-verse, an unquoted aspect ratio). A project whose tree carries
+    # mock durations it means to wipe opts in. No duration word excuses one:
+    # that word is what introduces exactly what this pattern is for. Two exact
+    # values are excused structurally (BUG_110): the portrait ratio as the whole
+    # of a quoted literal, and the midnight bound.
     "durations": re.compile(r"(?<![\d.:])\d{1,3}:[0-5]\d(?::[0-5]\d)?(?![\d.:])"),
     "device_ids": re.compile(
         r"\b(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
@@ -243,6 +245,56 @@ _ROW_NUMBER_REFERENCE = re.compile(r"[#\u00a7\u00b6]$")
 _NON_IDENTIFYING_ADDRESS = re.compile(
     r"^(?:no-?reply|do-?not-?reply)@|@(?:[\w.-]+\.)?no-?reply\.[\w.-]+$", re.IGNORECASE
 )
+
+#: A scale factor and an image extension in the domain position: `name@2x.png`,
+#: the filename an asset catalog writes for every scaled variant. None of these
+#: extensions is a top-level domain, so this is a file and no address: 26 false
+#: `emails` findings in one consuming project's catalogs (BUG_110).
+#:
+#: The whole domain must fit, so `2x.com` and `host.2x.png` stay addresses.
+_IMAGE_SCALE_DOMAIN = (
+    r"@\d+(?:\.\d+)?x\.(?:png|jpe?g|gif|webp|svg|pdf|heic|avif|tiff?|bmp|ico)"
+)
+_IMAGE_SCALE_ADDRESS = re.compile(rf"{_IMAGE_SCALE_DOMAIN}$", re.IGNORECASE)
+
+#: The same filename with a colon and a word after it, `name@2x.png:12`, which the
+#: scp-style arm of `links` reads as a remote and a path. Anchored at the start
+#: to the shape that arm alone produces, because `links` swallows `\S*`: a real
+#: URL ending in a scaled image also has this suffix, and stays a link.
+_IMAGE_SCALE_SCP = re.compile(
+    rf"^[A-Za-z0-9._-]+{_IMAGE_SCALE_DOMAIN}:\S+$", re.IGNORECASE
+)
+
+#: The portrait video aspect ratio, the one common ratio shaped like a valid time:
+#: `16:9` and `1:1` are out of reach of both patterns, and `9:16` is in reach of
+#: both, so a crop view model's chip list and its switch case are false findings
+#: on `clock_times` and on `durations` alike (BUG_110).
+#:
+#: Excused only as the WHOLE of a quoted literal, the character on each side of
+#: the match being the same quote, so prose (`at 9:16`) and every other spelling
+#: of the time (zero-padded, with seconds or a meridiem) stay findings. The
+#: residue: a time written unpadded, alone in quotes or backticks, at exactly
+#: that one minute passes.
+_PORTRAIT_RATIO = "9:16"
+_LITERAL_QUOTES = frozenset("\"'`")
+
+#: Hour 24 at exactly zero minutes is the end-of-day bound a date format allows,
+#: and names no moment anything observed (BUG_110). `durations` reads the whole
+#: of it. `clock_times` stops its hour at 23, so on the long form it reads only
+#: the tail, `00:00`, and that excuse needs the `24:` on its left, which must
+#: not itself be the end of a longer run: `time:24:00:00` keeps its finding.
+#:
+#: Narrowed here rather than in the `clock_times` lookbehind, which would drop
+#: `time:14:05` and the like. The residue: a mock duration of exactly `24:00` no
+#: longer trips `durations`.
+_MIDNIGHT_BOUND = frozenset({"24:00", "24:00:00"})
+_MIDNIGHT_TAIL = re.compile(r"^00:00Z?$")
+_MIDNIGHT_HEAD = re.compile(r"(?<![\d.:])24:$")
+
+#: What `links` swallows after a value written in a YAML flow list, since its
+#: `\S*` runs to the next space. Stripped before a match is compared with a
+#: value the manifest declares (BUG_110, `PrivacyScanner._declares`).
+_FLOW_PUNCTUATION = "\"'`,]})"
 
 
 #: The keys a path-scoped allow entry may carry.
@@ -377,6 +429,15 @@ def _non_empty_strings(where: str, key: str, value: object) -> list[str] | None:
     return list(value)
 
 
+def _is_quoted_ratio(raw: str, left: str, right: str) -> bool:
+    """Whether ``raw`` is the portrait ratio and all of a quoted literal."""
+    return (
+        raw == _PORTRAIT_RATIO
+        and left[-1:] in _LITERAL_QUOTES
+        and left[-1:] == right[:1]
+    )
+
+
 class PrivacyScanner:
     def __init__(
         self,
@@ -384,6 +445,7 @@ class PrivacyScanner:
         extra: Iterable[str] = (),
         allow: Iterable[str | Mapping] = (),
         root: Path | None = None,
+        manifest_path: Path | None = None,
     ) -> None:
         names = list(patterns) if patterns is not None else list(DEFAULT_PATTERNS)
         unknown = [n for n in names if n not in PATTERNS]
@@ -401,6 +463,13 @@ class PrivacyScanner:
         #: scoped entry compares it. ``None``: an absolute path is in no
         #: project, so no scoped entry reaches it.
         self.root = Path(root) if root is not None else None
+        #: The manifest's own place, spelled as ``_relative`` spells a path, and
+        #: every value its scoped entries declare. ``None``: this scanner was
+        #: not built from a manifest, so no text is the manifest.
+        self.manifest_rel = self._spelled(manifest_path)
+        self.declared_values = frozenset(
+            value for entry in self.scoped_allow for value in entry.values or ()
+        )
 
     # -- scanning ------------------------------------------------------
 
@@ -450,24 +519,63 @@ class PrivacyScanner:
         """Whether a match is not a finding: allowed, or structurally not one."""
         raw = match.group(0)
         left = line[: match.start()]
+        right = line[match.end() :]
         if any(allowed in raw for allowed in self.allow):
             return True
         if rel is not None and any(e.covers(name, raw, rel) for e in self.scoped_allow):
             return True
+        if self._declares(raw, rel):
+            return True
         if name == "emails":
-            return bool(_NON_IDENTIFYING_ADDRESS.search(raw))
+            return bool(
+                _NON_IDENTIFYING_ADDRESS.search(raw) or _IMAGE_SCALE_ADDRESS.search(raw)
+            )
         if name == "ip_addresses":
             return bool(_ROW_NUMBER_REFERENCE.search(left))
+        if name in ("clock_times", "durations") and _is_quoted_ratio(raw, left, right):
+            return True
+        if name == "durations":
+            return raw in _MIDNIGHT_BOUND
         if name == "clock_times":
+            if _MIDNIGHT_TAIL.search(raw) and _MIDNIGHT_HEAD.search(left):
+                return True
             return bool(_TIME_FALSE_ALARM.search(left))
         if name == "links":
+            if "://" not in raw and _IMAGE_SCALE_SCP.search(raw):
+                return True
             return bool(_XML_IDENTIFIER.search(left))
         return False
+
+    def _declares(self, raw: str, rel: str | None) -> bool:
+        """Whether the text scanned is the manifest and ``raw`` is exactly a
+        value one of its scoped entries declares.
+
+        A scoped entry's paths do not reach the manifest that declares it, so a
+        list of values could never be clean once ``privacy.scope`` covered the
+        manifest (BUG_110). The value is the operator's own literal, so this
+        ignores the entry's ``patterns``. Equality rather than ``covers``'
+        containment, so that a declared `10.` does not excuse every address
+        beginning with it. The values are the loaded list, never the scanned
+        text, so a new address-shaped value still needs its marker on the first
+        write.
+        """
+        if rel is None or rel != self.manifest_rel:
+            return False
+        return (
+            raw in self.declared_values
+            or raw.rstrip(_FLOW_PUNCTUATION) in self.declared_values
+        )
 
     def _relative(self, path: Path | None) -> str | None:
         """``path`` spelled as a scoped entry's paths are, or ``None`` when it
         names no place in the project (or the scanner has nothing to compare)."""
-        if path is None or not self.scoped_allow:
+        if not self.scoped_allow:
+            return None
+        return self._spelled(path)
+
+    def _spelled(self, path: Path | None) -> str | None:
+        """``path`` project-relative against the root, or ``None`` for no place."""
+        if path is None:
             return None
         from .manifest import project_relative
 
@@ -561,4 +669,5 @@ class PrivacyScanner:
             extra=cfg.get("extra") or (),
             allow=cfg.get("allow") or (),
             root=Path(root) if root is not None else None,
+            manifest_path=getattr(manifest, "path", None),
         )

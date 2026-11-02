@@ -298,7 +298,25 @@ elapsed time (`mm:ss` past the 23 that `clock_times` stops at, or `h:mm:ss`),
 for a tree whose mock durations should be found; no duration word excuses
 one. `clock_times` is excused by a duration, version or ratio word written
 immediately before the time (`took`, `timeout=`, `version`, `of`), not by one
-elsewhere on the line. `links` does not flag a URI a parser only compares as
+elsewhere on the line.
+
+<!-- invariant: allow-privacy -->
+
+Neither time pattern flags the portrait aspect ratio
+`9:16` when it is exactly the whole of a quoted literal, so a time written
+unpadded, alone in quotes or backticks, at that one minute also passes. Neither
+flags the end-of-day bound `24:00`, with or without seconds, so a mock duration
+of exactly that value is not found. `emails` does not flag a scaled image name
+such as `name@2x.png`, where the whole domain is a scale factor and an image
+extension. Neither does the `user@host:path` form of `links` when the same name
+has a line number or other word after the colon. When the text scanned is the manifest itself, a match
+exactly equal to a value in any scoped `allow` entry is not a finding, whichever
+pattern it trips. That goes by equality, so the same value elsewhere in the
+manifest is excused too, a declared prefix excuses nothing longer, and two URIs
+in a flow list with no space between them stay a finding. A new address-shaped
+value still needs the inline marker on the edit that first adds it.
+
+`links` does not flag a URI a parser only compares as
 a string: an XML namespace (`xmlns="…"`, `xmlns:xlink="…"`), the URIs of an
 `xsi:schemaLocation`, or a DOCTYPE's system identifier; the same host in an
 `href` is still a link.

@@ -747,10 +747,12 @@ graph TD
     O -- no --> F
     O -- yes --> E{"some scoped entry: path under one of its paths<br/>(glob_matches) AND pattern named, if given<br/>AND a value contained, if given?"}
     E -- yes --> X
-    E -- no --> F
+    E -- no --> D{"is the text the manifest itself, and the match<br/>exactly a value some scoped entry declares?"}
+    D -- yes --> X
+    D -- no --> F
 ```
 
-Five properties are deliberate:
+Six properties are deliberate:
 
 - **A scoped entry needs a place.** Text scanned without a path — a commit
   message, a handoff note, a guidelines verdict note, a value the oracle
@@ -781,6 +783,32 @@ Five properties are deliberate:
   accepted; the entry takes effect if the pattern is.
 - **`reason` is required** because a scoped entry is the widest exemption the
   manifest can state, and the manifest is where a reviewer reads it.
+- **A manifest does not flag the values it declares** (BUG_110). A scoped
+  entry's paths do not reach the manifest that declares the entry, so a values
+  list could never be clean once `privacy.scope` covered the manifest. When the
+  text scanned is the manifest, a match exactly equal to a value of any scoped
+  entry is not a finding, whichever pattern it trips and whatever that entry's
+  `patterns` narrow to, because the value is the operator's own literal. The
+  edges are these:
+  - **Equality, not the containment a plain value or `values` uses elsewhere**,
+    so a declared `10.` excuses no address beginning with it. Trailing quote,
+    comma and bracket punctuation is stripped from the match first, because
+    `links` runs to the next space. So a URI in a spaced flow list is excused,
+    and two written with no space between them are one match that stays a
+    finding: the noisy side.
+  - **Position is not seen.** The same declared value written elsewhere in the
+    manifest, outside the allow list, is excused too.
+  - **The values are the loaded list, never the scanned text.** A new
+    address-shaped value still needs the inline marker on the edit that first
+    adds it, since the edit gate builds its scanner from the manifest on disk,
+    which does not hold the value yet. The commit gate reads the same disk, so
+    a value that reached it by a route no edit gate saw counts as in force at
+    the commit, as a plain allow string already does. This is a property of the
+    scanner alone: BUG_063, below, still governs a merge.
+  - **The path is the manifest's own**, spelled once at construction through
+    `project_relative` against the root. `from_manifest` hands it over, and a
+    scanner built without it has no such excuse. The same value in any other
+    file with no covering entry stays a finding.
 
 Out of scope here and still open: BUG_063, a session merge reads
 `privacy.allow` from the manifest the merge replaces, so an entry cannot land
@@ -1003,7 +1031,9 @@ Two consequences of the test being structural, both deliberate:
   indistinguishable this pattern errs noisy rather than silent.
 
 The schemeless `www.` form and the scp-style `user@host:path` a git remote is
-written in are separate arms and are unaffected by any of the above.
+written in are separate arms and are unaffected by any of the above. The scp arm
+has one excuse of its own, in "What `emails`, `clock_times` and `durations` do
+not flag" below: a scaled image name with a line number or other word after it.
 
 ### What `ip_addresses` flags
 
@@ -1084,6 +1114,66 @@ and `links` asking whether a URI's authority is one. The narrowing lives on the
 `ip_addresses` entry alone: under a scheme, the authority position has already
 proved the number is an address, and a guard that reached `_IPV4` would have
 cost `links` a real class of finding to fix a false one here.
+
+### What `emails`, `clock_times` and `durations` do not flag
+
+A consuming iOS project could not widen its scope to its whole tree, because
+three shapes in ordinary source read as personal data (BUG_110). Each excuse
+is one named constant in `core/privacy`, reached through `_excused`, in the
+adjacency style of the two sections above. The bullets need the marker, since
+each names the shape it excuses and this text lands before the scanner that
+excuses it:
+
+<!-- invariant: allow-privacy -->
+
+- **A scaled image name is no address.** `name@2x.png` is the filename an asset
+  catalog writes for each scaled variant. An `emails` match whose whole domain
+  is a scale factor and an image extension is excused
+  (`_IMAGE_SCALE_ADDRESS`). So is the scp arm of `links` reading the same name
+  with a line number, or any other word, after the colon (`_IMAGE_SCALE_SCP`).
+  That one is anchored to the
+  shape the scp arm alone produces, because `links` swallows the rest of the
+  word, and a real URL ending in a scaled image has the same suffix.
+- **The portrait ratio, as the whole of a quoted literal, is no time.** `9:16`
+  is the one common ratio that is also a valid time, and it is in reach of both
+  `clock_times` and `durations`, so an excuse on one would move the finding to
+  the other (`_PORTRAIT_RATIO`). The match must be exactly that value, and the
+  characters on its two sides must be the same quote: a double quote, a single
+  quote or a backtick.
+- **The midnight bound names no moment.** `24:00` and `24:00:00` are the
+  end-of-day bound a date format allows. `durations` reads them whole
+  (`_MIDNIGHT_BOUND`). `clock_times` stops its hour at 23, so on the long form
+  it reads only the tail. That tail is excused when the text left of it ends in
+  a `24:` that is not itself the end of a longer run (`_MIDNIGHT_HEAD`). The
+  `clock_times` lookbehind is left alone, because tightening it would drop
+  every time written after a colon.
+
+Worked both ways. This block needs the marker, because the must-match column
+is time-shaped and address-shaped by construction.
+
+<!-- invariant: allow-privacy -->
+
+| written as | verdict | why |
+|---|---|---|
+| `name@2x.png`, `name@1.5x.webp` | not an address | the whole domain is a scale and an image extension |
+| `name@2x.png:12`, `name@2x.png:assets/img` | not a link | the same name and any word after the colon, on the scp arm |
+| `someone@2x.com`, `someone@2x.co.uk` | an address | no image extension |
+| `someone@host.2x.png` | an address | the scale is not the whole domain |
+| `https://name@2x.png/x` | a link | a scheme proves the authority is a host |
+| `git@2x.com:org/repo` | a link | no image extension |
+| `"9:16"`, `'9:16'`, a backticked one | not a time | the exact ratio, the whole of a quoted literal |
+| `at 9:16`, `"09:16"`, `"9:16 PM"`, `"9:16:00"`, `"9:17"` | a time | anything else |
+| a mismatched `"9:16'`, an escaped `\"9:16\"` | a time | the two sides differ; the noisy side |
+| `ratio 9:16` | a duration, when on | a word excuses a clock time, and no word excuses a duration |
+| `24:00`, `T24:00:00Z` | neither | the bound |
+| `24:10`, `124:00`, `24:01:00` | a duration, when on | not the bound |
+| `time:24:00:00` | a time, on the tail | the `24:` ends a longer run |
+| `T14:00:00Z`, `time:14:05` | a time | hour 14 |
+| `T24:00:00+02:00` | a time, on the offset | only the tail is excused |
+
+**The accepted residue, stated rather than discovered later.** A time written
+unpadded, alone in quotes or backticks, at exactly that one minute passes. A
+mock duration of exactly the bound no longer trips `durations`.
 
 ### The exemption marker, and how far it reaches
 

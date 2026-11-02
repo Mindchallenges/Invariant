@@ -1107,9 +1107,6 @@ class TestBUG110Repro:
             line: [(f.pattern, f.raw) for f in scanner.scan_text(line)] for line in lines
         }
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_110 image scale suffix is live: delete this line with the fix"
-    )
     def test_BUG_110_an_image_scale_suffix_is_not_an_email(self):
         lines = (
             '{ "filename" : "preview@2x.png", "idiom" : "universal", "scale" : "2x" },',
@@ -1117,9 +1114,6 @@ class TestBUG110Repro:
         )
         assert self.findings_per_line(*lines) == {line: [] for line in lines}
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_110 9:16 ratio is live: delete this line with the fix"
-    )
     def test_BUG_110_a_quoted_aspect_ratio_is_not_a_time(self):
         lines = (
             'static let cropAspects: [String] = ["Free", "1:1", "4:5", "9:16", "16:9", "Orig"]',
@@ -1127,9 +1121,6 @@ class TestBUG110Repro:
         )
         assert self.findings_per_line(*lines) == {line: [] for line in lines}
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_110 24:00 bound is live: delete this line with the fix"
-    )
     def test_BUG_110_the_midnight_bound_names_no_moment(self):
         lines = (
             "///     (Feb 30, 24:00); without a modifier",
@@ -1137,9 +1128,6 @@ class TestBUG110Repro:
         )
         assert self.findings_per_line(*lines) == {line: [] for line in lines}
 
-    @pytest.mark.xfail(
-        strict=True, reason="BUG_110 manifest's own allow value is live: delete this line with the fix"
-    )
     def test_BUG_110_a_manifest_does_not_flag_the_values_it_declares(self, make_manifest):
         m = make_manifest(
             {
@@ -1160,3 +1148,286 @@ class TestBUG110Repro:
             'values: ["localhost", "127.0.0.1"]', path=m.path
         )
         assert [(f.pattern, f.raw) for f in found] == []
+
+
+class TestBUG110ImageScaleGuards:
+    """What the image-scale excuse must leave standing: it reads the domain
+    position, whole, and only an image extension after a scale factor fits."""
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["emails", "links"])
+
+    def found(self, text):
+        return [(f.pattern, f.raw) for f in self.scanner.scan_text(text)]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "icon@2x.png",
+            "icon@3x.jpeg",
+            "icon@1.5x.webp",
+            "icon@2X.PNG",
+            "icon@2x.pdf",
+            "icon@2x.png:12",
+            "icon@2x.png:assets/img",
+            "Contents.json:icon@3x.png:12",
+        ],
+    )
+    def test_a_scaled_image_name_is_no_finding(self, text):
+        assert self.found(text) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "someone@2x.com",
+            "someone@2x.co.uk",
+            "someone@host.2x.png",
+            "someone@2x.png.example.net",
+            "someone@x.png",
+            "someone@2.png",
+        ],
+    )
+    def test_an_address_is_still_an_email(self, text):
+        assert self.found(text) == [("emails", text)]
+
+    def test_a_url_with_scaled_userinfo_is_still_a_link(self):
+        assert self.found("https://name@2x.png/x") == [("links", "https://name@2x.png/x")]
+
+    def test_a_url_ending_in_a_scaled_image_is_still_a_link(self):
+        raw = "https://cdn.example.net/icon@2x.png"
+        assert self.found(raw) == [("links", raw)]
+
+    def test_a_schemeless_url_ending_in_a_scaled_image_is_still_a_link(self):
+        raw = "www.example.net/icon@2x.png"
+        assert self.found(raw) == [("links", raw)]
+
+    def test_a_scp_remote_on_a_scale_shaped_host_is_still_a_link(self):
+        assert ("links", "git@2x.com:org/repo") in self.found("git@2x.com:org/repo")
+
+    def test_a_scp_form_carrying_a_url_is_still_a_link(self):
+        raw = "name@2x.png:https://example.net/x"
+        assert ("links", raw) in self.found(raw)
+
+
+class TestBUG110QuotedRatioGuards:
+    """Only the exact portrait ratio, as the whole of a quoted literal. It is
+    excused on both patterns, since an excuse on one moves the finding to the
+    other, and the quotes must match on the two sides of the match."""
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["clock_times", "durations"])
+
+    def found(self, text):
+        return [(f.pattern, f.raw) for f in self.scanner.scan_text(text)]
+
+    @pytest.mark.parametrize("text", ['"9:16"', "'9:16'", "`9:16`", 'x = ["16:9", "9:16"]'])
+    def test_the_whole_of_a_quoted_literal_is_no_finding(self, text):
+        hits = [hit for hit in self.found(text) if hit[1] == "9:16"]
+        assert hits == []
+
+    @pytest.mark.parametrize("name", ["clock_times", "durations"])
+    def test_each_pattern_excuses_it_alone(self, name):
+        assert PrivacyScanner(patterns=[name]).scan_text('"9:16"') == []
+
+    @pytest.mark.parametrize(
+        ("text", "raw"),
+        [
+            ("at 9:16", "9:16"),
+            ("the crash fired at 9:16", "9:16"),
+            ('"09:16"', "09:16"),
+            ('"9:16 PM"', "9:16 PM"),
+            ('"9:16:00"', "9:16:00"),
+            ('"9:17"', "9:17"),
+            ("\"9:16'", "9:16"),
+            ('\\"9:16\\"', "9:16"),
+            ('"at 9:16"', "9:16"),
+            ('"9:16', "9:16"),
+            ('9:16"', "9:16"),
+        ],
+    )
+    def test_anything_else_is_still_a_time(self, text, raw):
+        assert ("clock_times", raw) in self.found(text)
+
+    def test_a_ratio_word_does_not_excuse_a_duration(self):
+        assert self.found("ratio 9:16") == [("durations", "9:16")]
+
+
+class TestBUG110MidnightBoundGuards:
+    """Hour 24 at exactly zero minutes names no moment. The tail of its long
+    form is a clock time only because the lookbehind cannot see the `24:`, and
+    the excuse reads exactly that much of the left context."""
+
+    def setup_method(self):
+        self.scanner = PrivacyScanner(patterns=["clock_times", "durations"])
+
+    def found(self, text):
+        return [(f.pattern, f.raw) for f in self.scanner.scan_text(text)]
+
+    @pytest.mark.parametrize(
+        "text",
+        ["24:00", "24:00:00", "until 24:00", "T24:00:00", "T24:00:00Z", "24:00:00Z", "(24:00)"],
+    )
+    def test_the_bound_is_no_finding(self, text):
+        assert self.found(text) == []
+
+    @pytest.mark.parametrize("value", ["24:10", "124:00", "24:01:00", "24:00:01"])
+    def test_another_value_is_still_a_duration(self, value):
+        assert ("durations", value) in self.found(f"counting {value} down")
+
+    @pytest.mark.parametrize(
+        ("text", "raw"),
+        [
+            ("time:24:00:00", "00:00"),
+            ("124:00:00", "00:00"),
+            ("1.24:00:00", "00:00"),
+            ("T14:00:00Z", "14:00:00Z"),
+            ("time:14:05", "14:05"),
+            ("T24:00:00+02:00", "02:00"),
+            ("T24:00:00+00:00", "00:00"),
+            ("24:01:00", "01:00"),
+            ("14:00", "14:00"),
+            ("00:00", "00:00"),
+        ],
+    )
+    def test_a_real_time_is_still_a_clock_time(self, text, raw):
+        assert ("clock_times", raw) in self.found(text)
+
+    def test_an_offset_is_the_only_finding_on_a_midnight_stamp(self):
+        assert self.found("T24:00:00+02:00") == [("clock_times", "02:00")]
+
+
+class TestBUG110ManifestValueGuards:
+    """A manifest does not flag the values it declares, and only that: the
+    excuse is exact equality with a loaded value, on the manifest's own path."""
+
+    LOOPBACK = "127.0.0.1"
+    URI = "https://fixtures.example.net"
+
+    def manifest(self, make_manifest, *, patterns=("links", "ip_addresses"), values=None, entry_patterns=None):
+        entry = {
+            "paths": ["Tests/"],
+            "values": values or [self.LOOPBACK, self.URI],
+            "reason": "reserved test hosts",
+        }
+        if entry_patterns is not None:
+            entry["patterns"] = entry_patterns
+        return make_manifest({"privacy": {"patterns": list(patterns), "allow": [entry]}})
+
+    @staticmethod
+    def found(manifest, text, path):
+        scanner = PrivacyScanner.from_manifest(manifest)
+        return [(f.pattern, f.raw) for f in scanner.scan_text(text, path=path)]
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [".claude/invariant.yaml", "./.claude/invariant.yaml", "absolute"],
+    )
+    def test_every_spelling_of_the_manifest_path(self, make_manifest, spelling):
+        m = self.manifest(make_manifest)
+        path = m.path if spelling == "absolute" else Path(spelling)
+        assert self.found(m, f"values: [{self.LOOPBACK}]", path) == []
+
+    def test_from_a_linked_worktree(self, make_manifest, tmp_path):
+        worktree = tmp_path / "wt"
+        m = make_manifest(
+            {
+                "privacy": {
+                    "patterns": ["ip_addresses"],
+                    "allow": [
+                        {"paths": ["Tests/"], "values": [self.LOOPBACK], "reason": "fixtures"}
+                    ],
+                }
+            },
+            root=worktree,
+        )
+        text = f"values: [{self.LOOPBACK}]"
+        assert m.root == worktree
+        assert self.found(m, text, worktree / ".claude/invariant.yaml") == []
+        assert self.found(m, text, Path(".claude/invariant.yaml")) == []
+
+    def test_a_full_uri_value_in_a_spaced_flow_list(self, make_manifest):
+        m = self.manifest(make_manifest)
+        text = f'values: ["{self.URI}", "https://other.example.net"]'
+        assert self.found(m, text, m.path) == [("links", 'https://other.example.net"]')]
+
+    @pytest.mark.parametrize("tail", ['"', "'", ",", '",', '"]', "]", '"]}', "}"])
+    def test_trailing_flow_punctuation_is_stripped(self, make_manifest, tail):
+        m = self.manifest(make_manifest)
+        assert self.found(m, f"values: {self.URI}{tail}", m.path) == []
+
+    def test_a_compact_flow_list_stays_a_finding(self, make_manifest):
+        m = self.manifest(make_manifest)
+        text = f'values: ["{self.URI}","https://other.example.net"]'
+        assert [name for name, _ in self.found(m, text, m.path)] == ["links"]
+
+    def test_the_entry_patterns_narrowing_is_ignored(self, make_manifest):
+        m = self.manifest(make_manifest, entry_patterns=["links"])
+        assert self.found(m, f"values: [{self.LOOPBACK}]", m.path) == []
+
+    def test_equality_not_containment(self, make_manifest):
+        m = self.manifest(make_manifest, values=["10."])
+        assert self.found(m, "values: [10.0.0.5]", m.path) == [("ip_addresses", "10.0.0.5")]
+
+    def test_an_undeclared_value_in_the_manifest_is_a_finding(self, make_manifest):
+        m = self.manifest(make_manifest)
+        assert self.found(m, "values: [192.0.2.10]", m.path) == [("ip_addresses", "192.0.2.10")]
+
+    def test_the_same_value_in_another_file_is_a_finding(self, make_manifest):
+        m = self.manifest(make_manifest)
+        assert self.found(m, self.LOOPBACK, Path("docs/notes.md")) == [
+            ("ip_addresses", self.LOOPBACK)
+        ]
+
+    def test_text_with_no_path_is_a_finding(self, make_manifest):
+        m = self.manifest(make_manifest)
+        assert self.found(m, self.LOOPBACK, None) == [("ip_addresses", self.LOOPBACK)]
+
+    def test_a_declared_value_elsewhere_in_the_manifest_is_excused_too(self, make_manifest):
+        """Equality cannot see position: documented in manifest.md."""
+        m = self.manifest(make_manifest)
+        assert self.found(m, f"# reached at {self.LOOPBACK}", m.path) == []
+
+    def test_values_come_from_the_loaded_list_not_the_scanned_text(self, make_manifest):
+        m = self.manifest(make_manifest)
+        text = 'values: ["192.0.2.10"]'
+        assert self.found(m, text, m.path) == [("ip_addresses", "192.0.2.10")]
+
+    def test_a_bare_scanner_has_no_such_excuse(self):
+        allow = [{"paths": ["Tests/"], "values": [self.LOOPBACK], "reason": "fixtures"}]
+        scanner = PrivacyScanner(patterns=["ip_addresses"], allow=allow)
+        found = scanner.scan_text(self.LOOPBACK, path=Path(".claude/invariant.yaml"))
+        assert [f.raw for f in found] == [self.LOOPBACK]
+
+    def test_a_manifest_outside_the_root_has_no_such_excuse(self, tmp_path):
+        allow = [{"paths": ["Tests/"], "values": [self.LOOPBACK], "reason": "fixtures"}]
+        scanner = PrivacyScanner(
+            patterns=["ip_addresses"],
+            allow=allow,
+            root=tmp_path / "project",
+            manifest_path=tmp_path / "elsewhere/invariant.yaml",
+        )
+        found = scanner.scan_text(self.LOOPBACK, path=tmp_path / "elsewhere/invariant.yaml")
+        assert [f.raw for f in found] == [self.LOOPBACK]
+
+    def test_a_manifest_with_no_path_attribute_builds_a_bare_scanner(self):
+        class Stub:
+            root = None
+
+            def get(self, _key):
+                return {
+                    "patterns": ["ip_addresses"],
+                    "allow": [
+                        {"paths": ["Tests/"], "values": ["127.0.0.1"], "reason": "fixtures"}
+                    ],
+                }
+
+        found = PrivacyScanner.from_manifest(Stub()).scan_text(
+            "127.0.0.1", path=Path(".claude/invariant.yaml")
+        )
+        assert [f.raw for f in found] == ["127.0.0.1"]
+
+    def test_a_plain_value_still_exempts_by_containment(self, make_manifest):
+        m = make_manifest(
+            {"privacy": {"patterns": ["ip_addresses"], "allow": ["192.0.2."]}}
+        )
+        assert self.found(m, "192.0.2.10", m.path) == []
