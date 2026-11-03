@@ -335,6 +335,7 @@ class TestTheCommands:
     def test_doctor_json_carries_no_warning_on_a_current_row(self, project, capsys):
         self.configure(project)
         run("guidelines", "render", "--insert", INDEX)
+        run("agents", "install")
         capsys.readouterr()
         run("--json", "doctor")
         rows = self.doctor_rows(capsys)

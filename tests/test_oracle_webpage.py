@@ -150,7 +150,12 @@ globalThis.history = {
     for (const fn of winListeners.popstate || []) fn({state: this.state});
   },
 };
-globalThis.navigator = {clipboard: {writeText: (text) => { copied.push(text); return Promise.resolve(); }}};
+// Not a plain assignment: under Node, globalThis.navigator is a getter with no
+// setter, so assigning it is silently dropped (BUG_112).
+Object.defineProperty(globalThis, "navigator", {
+  value: {clipboard: {writeText: (text) => { copied.push(text); return Promise.resolve(); }}},
+  configurable: true, writable: true,
+});
 globalThis.location = {reloads: 0, reload() { this.reloads += 1; }};
 Date.now = () => fakeNow;
 globalThis.setTimeout = (fn, ms) => { timers.push({fn: fn, ms: ms}); return timers.length; };
