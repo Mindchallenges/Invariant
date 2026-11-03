@@ -138,7 +138,8 @@ scenarios. A1 increments 2–6 are tracked here, not in a session.
   baselined, baseline-grown and fixed-not-pruned scenarios.
 * Increment 4: the scenarios are done, landed with A4 increment 7:
   vague-verdict, judgement-fail, judgement-fail-standard, stale-verdict and
-  engine-answers. The model/host permutation test still arrives with A7.
+  engine-answers. The model/host permutation test landed with A7 increment 4,
+  which discharges this increment.
 * Increment 5: the scripted CLI driver plus `invariant conformance run|show`,
   after A4.
 * Increment 6: Claude Code under two or more models, after A4 and A6.
@@ -213,3 +214,29 @@ helper (draft an overlay from an edited copy) is to be filed as its own idea.
 A6 unblocks Heap B4 (the downstream library agents and their overlays) and
 A1 increment 6 (Claude Code under two or more models). This repository's own
 installed agents are reinstalled after the merge.
+
+**A7 closed** in session 5cb38a2f, in five increments: the tier vocabulary and
+the manifest keys (A7.1), the tier renderer and the classifier state (A7.2), the
+audit record (A7.3), the record's lock with BUG_107 (A7.3b), and the D1 test with
+this closure (A7.4). A tier is a hint
+in the agent source with `agents.tiers` as the override, and it becomes a model
+only through the operator's `host.tier_map`, empty as shipped. Model and host are
+recorded in `evidence.audit`, which `RuleContext` removes before any rule runs.
+
+The D1 test discharges A1 increment 4's owed test and meets the acceptance line
+that a gate's outcome does not change when only the recorded model or host does.
+It is a source scan plus replays over hostile records, four configurations and a
+consistent rename. It proves engine independence only. Whether models agree is
+the driven layer's question, A1 increments 5 and 6.
+
+The test found one real read: a malformed `agents_run_how` made `record_agent_run`
+raise and lose the run, which moved both role gates at the landing. The user
+chose to fix the writer rather than narrow the test, so a field of the wrong shape
+reads as empty. The same fix went into `agents_run`, `docs_read`, `test_runs`,
+`verdicts`, `guidelines_landings` and `acknowledged`, and `stamp_verdict_agent`
+now skips a malformed list. `apply_acknowledgements`, the one reader that had no
+net under it, now treats a malformed `acknowledged` as acknowledging nothing.
+
+User rulings: the fourteen A7 rulings, recorded in ADR-012 under D9. This
+repository's own manifest and `tier_map` stay empty, and its installed agents are
+reinstalled after the merge.

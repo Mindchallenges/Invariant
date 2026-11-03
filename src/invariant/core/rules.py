@@ -577,7 +577,7 @@ def apply_acknowledgements(
     differently (ADR-001 D20). Their appeal is ``invariant override``.
     """
     acknowledged = ((pipeline or {}).get("evidence") or {}).get("acknowledged") or {}
-    if not acknowledged:
+    if not acknowledged or not isinstance(acknowledged, Mapping):
         return verdicts
 
     out: list[Evaluated] = []

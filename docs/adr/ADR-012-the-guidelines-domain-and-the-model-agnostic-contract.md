@@ -12,8 +12,9 @@
   built. A6 closed with increment 5, built to the user's fourteen A6 rulings
   (under D8) in five increments: the shipped agents are host-neutral sources
   rendered per host, amended by overlays, watched for drift, and their bodies
-  ask the engine for the guidelines. A7 is in progress, built to the user's
-  fourteen A7 rulings (under D9).
+  ask the engine for the guidelines. A7 closed with increment 4, built to the
+  user's fourteen A7 rulings (under D9): tiers are hints no gate reads, the
+  audit record is evidence no rule can see, and the D1 test holds both.
 - **Date:** 2026-10-27
 - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
   from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -98,16 +99,29 @@ checked against them.
 
 1. **A gate's verdict is a function of the ruleset, the tree and the recorded
    evidence.** It is never a function of which model, which host or which
-   capability tier produced that evidence.
-2. **The model and the host are recorded for audit only.** Evidence carries
-   them when the host can say (`agent_type` already travels this way), so a
-   reader can see who did what. No rule reads them. A7 ships a test that
-   enforces this: an import-and-attribute scan over `core/rules` and
-   `core/guidelines`, plus a property test that permutes the recorded model and
-   host fields over a fixed evidence set and asserts identical verdicts.
+   capability tier produced that evidence. `host.kind` is not an exception,
+   because it does not say who produced anything: it is configuration, an input
+   to which gates apply, as `agents.rendered_current` rides a landing only where
+   the kind has an adapter (the A7 ruling 8). The host here is the recorded one.
+2. **The model and the host are recorded for audit only, and a role gate asks
+   only that a role was filled.** Evidence carries model and host when the host
+   can say, so a reader can see who did what, and no rule reads them.
+   `agent_type` does reach a gate: ADR-003's role gates read `agents_run` and
+   ask whether a member of the role ran. They need the role filled and do not
+   care what fills it, so a project may name any agent for it (the A7 ruling 7).
+   A7 ships the test that enforces this
+   (`tests/test_conformance_engine.py`): a scan of the source of `core/rules`,
+   `core/guidelines`, `core/verdicts` and `core/findings` (ruling 13), plus
+   replays that rewrite the recorded model, recorded host, tier and verdict
+   stamps under the engine, vary the tier configuration, and rename the role's
+   agents consistently, and require identical outcomes. That proves engine
+   independence only. Whether two models given one brief reach one verdict is
+   the driven layer's question (D11).
 3. **What an agent needs from a model is a capability tier, never a model
    id.** A tier is a hint the host adapter may act on (D9). No shipped asset
-   names a model.
+   depends on a model. `core/stats`' price table names models to put a price on
+   telemetry already recorded. It is outside this item: it asks nothing of a
+   model, it predates this record, and no gate reads it.
 4. **Judgement stays a model's, and becomes checkable.** A judgement rule is
    answered by a structured, cited verdict (D5). The engine never reads prose
    to decide anything. It checks the verdict's structure, its citations against
@@ -2705,7 +2719,8 @@ to D3, D7, ruling 8 and the A5 rulings D11 and D12.
 ### D8 — Host-neutral agent definitions, rendered per host, with project overlays (A6)
 
 **The source is host-neutral.** A library agent is a markdown body with
-neutral frontmatter: `name`, `description`, `tier` (D9), and `capabilities`
+neutral frontmatter: `name`, `description`, an optional `tier` (the source's
+default, D9), and `capabilities`
 (read, edit, shell, dispatch) rather than a host's tool names. The record
 first listed `roles` (design, review, intake, repro) among them; the A6
 ruling 7 drops it, because the manifest's `agents.roles` already owns which
@@ -2716,7 +2731,9 @@ agents read today.
 
 **The host adapter renders it.** For Claude Code that is `.claude/agents/
 <name>.md` with `tools:` mapped from capabilities. It never carries a model id
-unless the operator's `host.tier_map` supplies one (ruling 10, D9). Rendering stays under
+unless the operator's `host.tier_map` supplies one (ruling 10, D9), which it
+writes as a `model:` line after `tools:`. The `tier:` line itself is never
+rendered, and an overlay may not set it: `agents.tiers` is the route. Rendering stays under
 `hosts/`. The host-neutral model and the overlay merge are host-agnostic, so
 they live in a new `core/agents` module.
 
@@ -2732,6 +2749,10 @@ to re-render. Together they separate three cases the single digest cannot:
 
 - the library changed: re-render;
 - the overlay changed: re-render;
+- the tier hint moved (A7): the witness holds and only the `model` line differs.
+  This is not drift. `agents.rendered_current` reads the copy as current, the
+  install applies the new line, and a `doctor` row outside any gate names it
+  (the A7 ruling 6);
 - the installed file was edited by hand: drift. `doctor` names it, and the fix
   is to move the edit into the overlay.
 
@@ -3135,14 +3156,18 @@ rulings 9 and 14.
 
 ### D9 — Capability tiers are hints, never gates (A7)
 
-`agents.tiers` maps an agent to `light`, `standard` or `deep`. The tier is
-rendered by the host adapter as a hint. It is read by no rule, and the D1 test
-enforces that. Model and host are recorded on evidence when the host reports
-them, for audit, and appear in reports and the harness output. They never
-appear in a gate's inputs.
+A library agent's source states its tier, `light`, `standard` or `deep`, as a
+default, and `agents.tiers` is the operator's override (ruling 1). The tier
+reaches a host only as the hint the host adapter renders. It is read by no rule,
+and the D1 test enforces that. Model and host are recorded when the host reports
+them, for audit, in `evidence.audit` and on a verdict's stamps. `pipeline status`
+prints them, and the driven layer's report will carry them (D11). They never
+appear in a gate's inputs: `RuleContext` removes the audit record before any rule
+runs, and the gate's re-check drops the stamps.
 
 The shipped agents lose any model id. `compliance-reviewer`'s `model: sonnet`
-becomes `tier: standard`. A tier becomes a host-specific model choice only
+becomes `tier: standard`, `backlog-curator` is `standard` too, and
+`feature-architect` and `bug-reproducer` are `deep`. A tier becomes a host-specific model choice only
 through the operator's optional `host.tier_map` (ruling 10), which the host
 adapter renders into its own field. It is empty by default, so every agent
 runs on the host's default model, and no host adapter ships a tier-to-model
@@ -3177,14 +3202,17 @@ user did not rule on these. Each can be overruled without reopening a ruling.
   is an amendment to D9 and not a restatement of it.
 - *D1 item 2's new wording waits for A7.4.* Ruling 7 says the wording is amended
   and does not say when. The reading is that it changes with the test it
-  describes, so the ADR never describes a test that does not exist yet.
+  describes, so the ADR never describes a test that does not exist yet. A7.4
+  made the change.
 - *`core/stats`' price table is an older exception to D1 item 3.* It names models
   for the telemetry, it predates this ADR, and no gate reads it. Ruling 13's scan
-  does not list it. The reading is that A7 leaves it alone.
+  does not list it. The reading is that A7 leaves it alone. Its code did not
+  change, and A7.4 wrote the exception into D1 item 3.
 
-A7 is built in four increments, recorded on its session's plan: the tier
+A7 was built in four increments, recorded on its session's plan: the tier
 vocabulary and the manifest keys (A7.1), the renderer and the classifier
-(A7.2), the audit record (A7.3), and the D1 test with A7's closure (A7.4).
+(A7.2), the audit record (A7.3), and the D1 test with A7's closure (A7.4). The
+user added a fifth before A7 merged, the record's lock (A7.3b).
 
 **As built: A7 increment 1, the tier vocabulary and the manifest keys.** Built
 to D9, D13's `agents.tiers` and `host.tier_map`, ruling 10, and the A7 rulings
@@ -3435,6 +3463,98 @@ has the writer list, the advance diagram and the timeout table.
   short wait. `tests/test_store.py` and `tests/test_cross_root_attribution.py` add
   the store's `lock` and the crossing.
 
+**As built: A7 increment 4, the D1 test and A7's closure. This closes A7.** Built
+to D1 items 1 and 2, D11, and the A7 rulings 7, 8, 12 and 13. It discharges A1
+increment 4's owed test. The test found one real read, and the fix was the user's
+choice. No gate was added, and no gate's inputs changed.
+
+- *The scan (ruling 13).* An AST walk of `core/rules`, `core/guidelines`,
+  `core/verdicts` and `core/findings`. It refuses an import of `hosts`, the tier
+  vocabulary, the audit key, and any attribute or whole-string literal naming
+  model, tier, audit, agent or token, a literal `agents_run_how`, and
+  `agents.tiers` and `host.tier_map` anywhere in a string. A comment or a docstring is not read.
+  Everything it finds must match `ALLOWED_READS` exactly, by module, definition
+  and count, so a second read in a listed definition fails, and so does an entry
+  that stopped matching. There are thirteen entries, all of them the audit key's
+  own removal, fix text an operator reads, a verdict writing itself out, and the
+  keys a verdict's re-check drops. Two parametrized tests hold the scan to
+  refusing each kind of read and to leaving prose alone. It looks for honest
+  reads, not for evasion: a key built by concatenation or a module named to
+  `importlib` gets past it, and the replays are what stand behind that.
+- *The replays (ruling 12).* `PermutingCli` is the real CLI with the state record
+  rewritten before each call, so the engine only ever reads hostile values. It
+  rewrites the audit record, `agents_run_how` and each verdict's `agent`, `model`
+  and `token`, either field by field or by replacing the record whole. The values
+  are a fixed set of ten kinds plus stdlib random under fixed seeds, with no new
+  dependency and no real model name (ruling 4). Each replay must match the known
+  answer and every gate the plain replay of that scenario saw.
+- *The configuration.* Four valid manifests: nothing set, `agents.tiers` only,
+  `host.tier_map` only, and both, with values awkward as YAML. Installed copies
+  rendered under one configuration and landed under another cover ruling 6.
+- *The rename (ruling 7).* The role's agents renamed consistently, in the manifest
+  and the dispatches, change no outcome, across a landing that passes, a refused
+  one and one with a verdict. Rename the roles and not the dispatches, and neither
+  role gate passes, so the rename is not passing because the gates read nothing.
+- *The harness's own proof.* One test shows the hostile value is on disk when the
+  last call reads it, on every field the rulings name. Another empties
+  `agents_run`, which a gate is meant to read, and the outcome changes.
+- *The matrix chosen (the design pass's reading, not a ruling).* Fifteen replays,
+  one per shipped scenario, each under a chosen value kind, all but one under a
+  non-default configuration, and nine of them over installed copies from a
+  different configuration, plus `clean` from the first hook to the landing under
+  each of the fourteen permutations. Replays are the slow part, so tests that only
+  read a scenario's plain replay now share one, and the file runs in about 300
+  seconds.
+- *What the matrix leaves out.*
+  - The full product of scenario, value and configuration, about 600 replays. That
+    would only add a scenario reading one value kind differently from another,
+    which takes a gate reading the field, and that is what the scan looks for.
+  - Role membership. ADR-003's gates are meant to read it.
+  - `host.kind`, which is configuration (ruling 8). Only `audit.host` is permuted.
+  - Hand-edited agent bytes. That is a change the project made, and
+    `agents.rendered_current` answers for it. Only the model line is covered.
+  - An invalid `agents.tiers` or `host.tier_map` value, which is refused at load,
+    so it never reaches a gate.
+- *The finding, and the user's choice.* The test failed on one real read, four
+  tests with one cause. `record_agent_run` read an `agents_run_how` that was on
+  the record and was not a mapping, and raised. The `agents_run` append went with
+  the failed save, the hook still exited 0, and both role gates moved from pass to
+  warn at the landing. So a malformed field that says how an agent got here could
+  change a verdict. The user ruled to fix the writer, so the field reads as empty,
+  and the test stayed as it was. No test assertion was edited to pass.
+- *The same read in the other writers.* The user asked for each to be checked.
+  `_evidence_list` and `_evidence_mapping` are the one rule: a field of the wrong
+  shape reads as empty and is replaced, because it says nothing a reader could use
+  and raising costs the write the caller came to make.
+  - `agents_run`, `docs_read`, `test_runs`, `verdicts` and `guidelines_landings`
+    each raised on a non-list, and `acknowledged`, which was not on the list asked
+    for, on a non-mapping. All six now read as empty. A landing was the worst of
+    these: the advance raised after its gates had passed.
+  - A text `docs_read` was a quieter form: `in` matched a substring, so a path
+    could read as recorded and nothing was written.
+  - `stamp_verdict_agent` raised on a number or a boolean. A malformed list holds
+    nothing to stamp, so it stamps nothing and leaves the field as it was.
+  - `coverage` and `coverage_run` read nothing before they write, so they had no
+    such failure. A test pins that.
+  - `record_audit`, the pattern the ruling named, is unchanged. Neither raises,
+    and they differ in one point (a reading, not a ruling): it records nothing and
+    leaves the malformed value in place, where these replace it, as "reads as
+    empty" requires. An audit is read by nobody who decides anything, and these
+    fields hold what a gate waits for.
+- *The readers.* Readers were outside the fix. A rule that raises on a malformed
+  field is caught by `evaluate` and answers as a failure at that gate's level,
+  naming the exception. `apply_acknowledgements` is not a rule and had no such
+  net: a truthy non-mapping `acknowledged` raised out of the gate evaluation, which
+  stopped a landing with a traceback and sent every pre-tool-use and stop hook down
+  the degraded path, enforcement off. It now returns the verdicts as they were,
+  because such a field acknowledges nothing, so a warning stays a warning. That
+  one-line guard was the commit review's call. It is not a ruling.
+- *After the merge.* Reinstalling this repository's agents is a post-merge chore.
+- *Tests.* `tests/test_conformance_engine.py` holds the D1 test.
+  `tests/test_pipeline_malformed_evidence.py` pins each writer on every wrong JSON
+  shape, that the fact is kept for a fresh reader, and that a well-formed field
+  keeps what it holds.
+
 ### D10 — A ruleset edit goes through its own lane (A8)
 
 A change touching the ruleset, the baseline's additions, the registry files a
@@ -3582,7 +3702,7 @@ None of this was built in increment 1.
 |---|---|---|
 | 2 | scenarios over the gates A2 adds; `malformed-ruleset` landed with A2 increment 1, and `valid-ruleset` (all five kinds) with A2 increment 2 | A2 |
 | 3 | `seeded pattern`, `baselined` and `missing test`, over A3's checkers and baseline | A3 |
-| 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test. The scenarios are delivered with A4 increment 7: `vague-verdict`, `judgement-fail`, `judgement-fail-standard`, `stale-verdict` and `engine-answers`. The permutation test is still owed, with A7 |
+| 4 | `vague verdict` and `judgement fail`; the D1 permutation test | A4, and A7 for the permutation test. The scenarios are delivered with A4 increment 7: `vague-verdict`, `judgement-fail`, `judgement-fail-standard`, `stale-verdict` and `engine-answers`. The permutation test is discharged by A7 increment 4 |
 | 5 | the scripted driver, `conformance run --driver script` and `conformance show` | the engine layer |
 | 6 | Claude Code as the driver under at least two models | A4 and A6 |
 
@@ -3732,17 +3852,24 @@ guidelines:
 
 agents:
   overlays: {}               # agent name -> overlay path (D8)
-  tiers: {}                  # agent name -> light | standard | deep (D9); a hint,
-                             # read by no gate
+  tiers: {}                  # library agent -> light | standard | deep (D9); the
+                             # operator's override of the source's default. A
+                             # hint, read by no gate. A local agent is refused
+                             # (the A7 ruling 14)
 
 host:
-  tier_map: {}               # tier -> the host's own model choice; read only by
-                             # hosts/ when rendering, never by a gate (ruling 10)
+  kind: claude_code          # configuration, an input to which gates apply (the
+                             # A7 ruling 8); not judged at load
+  tier_map: {}               # tier -> the host's own model choice, one line of
+                             # opaque text; empty as shipped (the A7 ruling 4);
+                             # read only by hosts/ when rendering, never by a
+                             # gate (ruling 10)
 ```
 
 Validation follows the manifest's existing rules: glob lists must be lists of
 strings, a path that names nothing in the project is dropped rather than
-matched, and a key the schema does not know is refused at load (BUG_050).
+matched, and a key the schema does not know is refused at load (BUG_050), which
+`host.*` joined with A7.
 `config show` prints every value with its provenance.
 
 ## Amendment: check-kind sub-schemas (accepted 2026-10-27)

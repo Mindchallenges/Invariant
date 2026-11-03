@@ -795,7 +795,7 @@ class PipelineDomain:
 
         with self._record_lock(session_id):
             pipeline = self.require(session_id)
-            pipeline.evidence.setdefault("acknowledged", {})[rule_id] = reason.strip()
+            _evidence_mapping(pipeline, "acknowledged")[rule_id] = reason.strip()
             self._save(session_id, pipeline)
         return pipeline
 
@@ -897,7 +897,7 @@ class PipelineDomain:
                         pipeline.state, target, forced=bool(force), verdicts=verdicts
                     )
                     if landing is not None:
-                        pipeline.evidence.setdefault(LANDINGS_KEY, []).append(landing)
+                        _evidence_list(pipeline, LANDINGS_KEY).append(landing)
                 pipeline.state = target
                 if target in machine.terminal:
                     pipeline.finished = now
@@ -915,7 +915,7 @@ class PipelineDomain:
 
     def record_docs_read(self, session_id: str, path: str) -> None:
         def apply(pipeline: Pipeline) -> bool:
-            read = pipeline.evidence.setdefault("docs_read", [])
+            read = _evidence_list(pipeline, "docs_read")
             if path in read:
                 return False
             read.append(path)
@@ -948,8 +948,8 @@ class PipelineDomain:
         reading is never downgraded to a dispatch reading.
         """
         def apply(pipeline: Pipeline) -> bool:
-            ran = pipeline.evidence.setdefault("agents_run", [])
-            via = pipeline.evidence.setdefault("agents_run_how", {})
+            ran = _evidence_list(pipeline, "agents_run")
+            via = _evidence_mapping(pipeline, "agents_run_how")
             changed = False
             if agent_type not in ran:
                 ran.append(agent_type)
@@ -989,7 +989,7 @@ class PipelineDomain:
                     f"pipeline: the pipeline moved to {pipeline.state!r} after the verdicts "
                     f"were checked in {', '.join(moved)}; fix: submit them again"
                 )
-            pipeline.evidence.setdefault("verdicts", []).extend(dict(r) for r in records)
+            _evidence_list(pipeline, "verdicts").extend(dict(r) for r in records)
             self._save(session_id, pipeline)
         return len(records)
 
@@ -1026,7 +1026,8 @@ class PipelineDomain:
             nonlocal stamped
             stamped = 0
             modelled = False
-            for record in pipeline.evidence.get("verdicts") or ():
+            recorded = pipeline.evidence.get("verdicts")
+            for record in recorded if isinstance(recorded, list) else ():
                 if not isinstance(record, dict) or record.get("token") != token:
                     continue
                 if record.get("agent") is None:
@@ -1449,7 +1450,7 @@ class PipelineDomain:
         }
         with self._record_lock(session_id):
             pipeline = self.require(session_id)
-            pipeline.evidence.setdefault("test_runs", []).append(record)
+            _evidence_list(pipeline, "test_runs").append(record)
             self._save(session_id, pipeline)
         return record
 
@@ -1500,6 +1501,29 @@ class PipelineDomain:
             self.relpath(session_id),
             {"current": pipeline.to_dict(), "completed": completed},
         )
+
+
+def _evidence_list(pipeline: Pipeline, key: str) -> list:
+    """The list this evidence field holds, for a writer to add to.
+
+    A field of the wrong shape reads as empty and is replaced: it says nothing a
+    reader could use, and raising here would cost the write this caller came to
+    make. A hook swallows that failure and exits 0, so a recorded fact would
+    vanish with nothing said until a gate missed it (ADR-012, A7 increment 4).
+    """
+    return _evidence_field(pipeline, key, list)
+
+
+def _evidence_mapping(pipeline: Pipeline, key: str) -> dict:
+    """The mapping this evidence field holds, as :func:`_evidence_list` says."""
+    return _evidence_field(pipeline, key, dict)
+
+
+def _evidence_field(pipeline: Pipeline, key: str, shape: type) -> Any:
+    value = pipeline.evidence.get(key)
+    if not isinstance(value, shape):
+        value = pipeline.evidence[key] = shape()
+    return value
 
 
 def audit_line(evidence: Mapping[str, Any]) -> str | None:

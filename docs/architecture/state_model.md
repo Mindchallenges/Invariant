@@ -1507,6 +1507,27 @@ The hook's answer is the same in every case. A failure to open or take the lock
 is a `StateError` like the timeout, so the hook's existing `except InvariantError`
 absorbs it. The doctor probe's `InertStore` takes no lock and creates no lock file.
 
+### A malformed field reads as empty to a writer
+
+A writer that adds to an evidence field reads it first, and the field may hold the
+wrong shape. So `agents_run`, `docs_read`, `test_runs`, `verdicts`,
+`guidelines_landings`, `agents_run_how` and `acknowledged` go through
+`_evidence_list` or `_evidence_mapping`: anything but the right shape reads as
+empty and is replaced (ADR-012 A7 increment 4). The fact the caller came to record
+is what counts. A raise would lose it with the save, and a hook would still exit
+0, so a gate would answer differently at the landing with nothing said in between.
+
+- **`stamp_verdict_agent`** finds nothing to stamp in a malformed `verdicts` and
+  leaves it as it is.
+- **`record_audit`** records nothing on a malformed audit and leaves it as it is,
+  since no gate waits for that record.
+- **`record_coverage` and `run_coverage`** replace their fields whole without
+  reading them.
+- **Readers are another matter.** A rule that raises on a malformed field fails
+  loudly through `evaluate`. `apply_acknowledgements` has no such net, so it checks
+  the shape itself: an `acknowledged` that is not a mapping acknowledges nothing,
+  and the verdicts come back as they were.
+
 ### A proof is an outcome: `bugfix`'s `reproduced`
 
 ```mermaid
