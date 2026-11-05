@@ -42,6 +42,8 @@ adr/ADR-010-whole-suite-evidence-moves-to-a-scheduled-sweep
 adr/ADR-011-a-hook-may-record-into-the-project-its-path-names
 adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract
 adr/ADR-013-each-declared-ecosystem-runs-through-its-own-adapter
+adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository
+adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci
 ```
 
 ```{toctree}
