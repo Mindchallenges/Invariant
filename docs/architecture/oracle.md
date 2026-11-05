@@ -224,6 +224,14 @@ summary:
 | `match(selector)` / `remove(selector)` | Tries the selector as a key, then a root (relative or absolute), then a name. The first rung with a hit wins. A name shared by several entries is refused, and so is a selector that matches nothing. |
 | `prune(dry_run)` | Drops the entries whose `root` no longer has a manifest. The manifest is checked again under the lock. If nothing is stale, no lock is taken. |
 
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D10).** A store project has no
+`.claude/invariant.yaml` in its root, so the five checks that test
+`root / MANIFEST_RELPATH` for existence (`ProjectEntry.has_manifest`,
+`_canonical_root`, `oracle/scan` twice, `oracle/gates`) ask `Manifest.locate`
+instead; otherwise `prune` would drop a store project and `oracle list` would
+show it as an ALERT. The key, `Manifest.state_root`, is unchanged. Increment
+2 builds it.
+
 ### How a project gets in
 
 | Route | `via` | Failure handling |

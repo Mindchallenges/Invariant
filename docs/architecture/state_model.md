@@ -128,6 +128,20 @@ is the escape hatch for logic YAML cannot express (D5).
 Governs isolation and the push barrier. This is the domain with real
 cross-process concurrency — several sessions may run against one checkout.
 
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D5, D6).** In a store project a session
+record carries legs: its repo worktree and branch, plus the store's main
+checkout, where the docs are written under a lock taken per area, or per file
+outside every declared area. The store leg records each lock span (its lease,
+its unit, and the shas at which it was acquired and released), and the session
+gains a landing record. The store leg lands
+when the session releases its units, which is always before the repo's merge;
+a failed repo merge leaves the session half-landed, a recorded and resumable
+state, never rolled back (ruling 8). The first build is
+one repo per session plus its store; more repo legs are designed for and built
+later (ruling 6). The existing `worktree`, `branch` and `base` fields read the
+first repo leg, so records written before this change still load. Increment 4
+builds the legs and the lock, increment 5 the landing record and resume.
+
 ```mermaid
 stateDiagram-v2
     [*] --> registered
@@ -868,6 +882,16 @@ identifier alone, including calls that carry no path at all. Only step 3 may
 teach it. Learning from a weaker signal would bind the wrong pair permanently.
 Learning is reserved to a call that *wrote* — a read is evidence of where the
 reader was looking, not of who owns the worktree.
+
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D5).** A store has no worktree per
+session, so a store doc path names no session by itself. A read or edit of one
+is attributed by the ordinary order above (host binding, then the working
+directory) and then checked against the holder of the path's docs-lock unit;
+holding the lock never turns an ambiguous resolution into a proof (BUG_028).
+`docs_roots` includes the store's main checkout, and a store path reaches its
+repo through the store's `store.repos` and the user config. Memory under a
+store is outside the lock (ruling 20). This extends ADR-011 to a session's
+legs. Increment 4 builds it.
 
 **A resolution is not automatically an identification.** Steps 1–4 name the
 session from something the call itself carried; step 5 names the only session

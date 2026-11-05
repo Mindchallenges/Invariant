@@ -1,11 +1,14 @@
 # ADR-014 — A project's records can live in a store outside its repository
 
-- **Status:** Proposed. Twenty-two rulings were made by the user on
-  2026-11-05 and are recorded below as decided. Each decision gives the
-  design that carries out its ruling. Any choice beyond a ruling is marked
-  *recommended*. No question is open.
+- **Status:** Accepted (2026-11-05). Twenty-two rulings were made by the
+  user on 2026-11-05 and are recorded below as decided. Each decision gives
+  the design that carries out its ruling. Any choice beyond a ruling is
+  marked *recommended*. No question is open. Amended at acceptance by the
+  user's ruling the same day: the store example's `publish` key, which no
+  decision defined, is dropped (pushing is `sync.push_after_landing`, D7),
+  and D7's `pull_at_start` cites ruling 7.
 - **Date:** 2026-11-05
-- **Supersedes:** nothing. On acceptance it amends `docs/architecture/overview.md`
+- **Supersedes:** nothing. Amends `docs/architecture/overview.md`
   ("Where things live at rest"), `docs/architecture/manifest.md` ("Resolution
   order", "Declared stores are writable stores"), `docs/architecture/state_model.md`
   ("Attribution", the session record), `docs/architecture/oracle.md`
@@ -202,7 +205,6 @@ store:
   repos:                           # one or many (ruling 2)
     github.com/mindchallenges/invariant: {}   # an identity (D4); per-repo overrides inside
     local:inv-3fa91c0e: {name: scratch-notes}
-  publish: false                   # D7
 ```
 
 The default parent is `~/.invariant/stores/`, which `$INVARIANT_HOME` moves
@@ -566,7 +568,7 @@ fast-forward behaviour (run).
 
 ```yaml
 sync:                    # store level, overridable per user (D3 5a)
-  pull_at_start: true    # session start, resume and `docs lock` fetch first (ruling 18)
+  pull_at_start: true    # session start, resume and `docs lock` fetch first (ruling 7)
   push_after_landing: false
   offline: warn          # warn | stop: what a failed or timed-out fetch does
   diverged: stop         # stop: the only value in v1 (ruling 9: never auto-resolve)

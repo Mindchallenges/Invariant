@@ -1,13 +1,13 @@
 # ADR-015 — Documentation repositories get an adapter, commands derived from CI, and measured heavy suites
 
-- **Status:** Proposed. Seven rulings were made by the user on 2026-11-05
-  and are recorded below as decided. Each decision gives the design that
+- **Status:** Accepted (2026-11-05). Seven rulings were made by the user
+  on 2026-11-05 and are recorded below as decided. Each decision gives the design that
   carries out its ruling. Any choice beyond a ruling is marked
   *recommended*. No question is left open.
 - **Date:** 2026-11-05
 - **Supersedes:** nothing. Generalises ADR-010, whose sweep cadence becomes
   something a measurement can trigger as well as a declaration. Adds an
-  adapter beside ADR-013's, and a shipped lane. On acceptance it amends
+  adapter beside ADR-013's, and a shipped lane. Amends
   `docs/architecture/manifest.md` ("Adapters", "A sweep cadence", "Full
   schema") and `docs/architecture/cli.md` (`doctor`, a `commands` command
   group). It is the gates half of IDEA_040, filed as IDEA_041. Where the records live is

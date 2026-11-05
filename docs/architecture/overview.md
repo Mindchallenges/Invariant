@@ -2023,6 +2023,17 @@ watcher derived from them. The one
 thing of the oracle's inside a project is the attention sidecar,
 `<state root>/attention/`, which that project's own hooks write.
 
+**Accepted, not yet built: records in a store ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md)).** A project may
+place each record type (docs, backlog, guidelines, memory, reports, sweeps)
+in a store, a separate git repository at any path, `~/.invariant/stores/<name>/`
+by default, with its own `invariant.yaml` (D1, D2). Such a project's
+repository then carries nothing of invariant's, or only a minimal pointer,
+`.invariant.yaml`. The home gains `config.yaml`, the user level of the config
+(D3), which maps a repo's identity to its store, and `host/<host>/`, the
+user-level host wiring (D11). The state root does not move: runtime state stays
+in the repo's git common directory. Until increment 2 lands, every record is
+in-repo, as the tree above shows; in-repo stays the default afterwards.
+
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between
 concurrent sessions.

@@ -172,6 +172,27 @@ invariant doctor
     index current. One line per check, exit 1 if any fails. A row that
     warns passes: it prints `warn` and never sets the exit code.
 
+    Accepted, not yet built. ADR-014 D3 adds one row naming every value
+    resolved from the user level (`user:~/.invariant/config.yaml`), or saying
+    there is none. D4 adds a row for an identity whose origin no longer
+    matches its store entry, offering `store link --update`; D8 names an
+    active `privacy.store.scan` exception; D11 adds rows for the user-level
+    install (`permissions.additionalDirectories` and the install receipt).
+    Increment 2 builds the D3 and D4 rows, increment 3 the D11 rows and
+    increment 6 the D8 row.
+    ADR-015 D2 makes the command rows follow the lanes the project's sessions
+    can run: a command is required when a selectable lane carries a gate that
+    runs it, each row names that lane and gate, and `commands.build`, which no
+    gate runs, is reported rather than required. D1 shows `coverage: not
+    applicable (sphinx)` instead of a missing coverage command, and D5 names
+    the measured median, the budget and which side of it the project is on.
+    It also adds a `commands` command group (`commands derive`, with
+    `--accept`, `--update` and `--measure`, D3 to D5) and the rule
+    `commands.derivation_current`; this file gains their sections when they
+    are built. Increment 2 of ADR-015 builds the D1 and D2 rows, increment 3
+    `commands derive` and the rule, and increment 4 `--measure` and the D5
+    row.
+
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
     they were about to be blocked by and nothing about satisfying it; it now
@@ -928,6 +949,17 @@ invariant session teardown [--keep-worktree] [--keep-branch] [--force]
     the refusal asks for, and git's own calls run from there too — removing
     the worktree a later git call is standing in fails after the removal has
     already happened.
+
+    Accepted, not yet built (ADR-014 D6): in a store project the docs
+    land in the store when the session releases its docs-lock units (with a
+    remote and pull on, a fetch, then a same-file check that stops and shows
+    a conflict rather than resolving it), always before the repo's merge. `session merge` then runs
+    the gates over every leg's changed set and merges the repo leg as today.
+    A repo merge that fails leaves the session half-landed, recorded, and
+    `session merge` or `session resume` finishes it; there is no rollback.
+    Teardown removes the repo worktree and branch as today and releases
+    every unit the session still holds; there is no store worktree to
+    remove. Increment 5 builds it.
 invariant session list                All registered sessions on this machine,
                                       with how far each is through its plan.
                                       The fraction is what distinguishes two

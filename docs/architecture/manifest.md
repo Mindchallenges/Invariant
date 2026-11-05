@@ -245,6 +245,18 @@ level comes from the profile, warn in `loose` and `standard` and block in
 loads only on a build that registers it, so a project raises it after the
 build that ships the gate is installed.
 
+**Accepted, not yet built.** [ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) adds a `records` block, each key `repo`
+(the default, today's layout) or `store`, with `hooks` and `agents` as `repo`
+or `user` (D1). A store's `invariant.yaml` adds `store.repos`
+(D2), `store.docs_lock` (D5), `sync` (D7) and
+`privacy.store.scan` (D8), and the user or store level adds `store_naming`
+(D2).
+[ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) adds `commands.derived`, the pin of accepted CI-derived commands (D3),
+and `trigger`, `full_run_budget_seconds`, `measure_runs` and `return_margin`
+under `methodology.gates.schedule` (D5). Every new key defaults to today's
+behaviour. Each key lands with its decision's increment: ADR-014's 2 for D1
+to D4, 4 for D5, 5 for D7 and 6 for D8; ADR-015's 3 for D3 and 4 for D5.
+
 ### Agents: the library, the project's own, and overlays
 
 `agents.library` lists the shipped agents an install writes (ADR-012, the A6
@@ -450,6 +462,15 @@ never stops a change, and the manifest refuses `block` or `ask` (Validation,
 below). Under a scheduled floor the advisory verdict also names, for each
 touched file, the last sweep's figure and commit.
 
+**Accepted, not yet built ([ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) D5).** The cadence can also be triggered by
+a measurement. With `trigger: measured` (the default stays `declared`), the
+named gates are scheduled while the median of the last `measure_runs` full
+runs (five) exceeds `full_run_budget_seconds`, and return to per-change below
+`return_margin` (80%) of it. The per-change run must then cover the
+adapter's `related_selectors`, and a change to an adapter's `global_inputs`
+owes a full run. Full runs gain `duration_seconds` on their records.
+Increment 4 of ADR-015 builds it.
+
 ### Several ecosystems
 
 A project may declare more than one ecosystem, `ecosystems: [python, node]`
@@ -647,6 +668,15 @@ a project that already keeps hand-written prose at that path would find it
 exempt from isolation. Point the key somewhere else if so — the exemption
 follows the declaration, which is the whole point. `paths.sweeps` defaults to
 `docs/sweeps` on the same terms.
+
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D10).** The invariant holds for a store
+project, and a declared store resolves where its record lives. Under
+`records.<type>: store` the data records (backlog, memory, reports, sweeps) are
+written in the store's main checkout and are exempt from isolation; memory
+there is also outside the docs lock (ruling 20). Policy records are never
+exempt. `items.exempt: false` with `records.backlog: store` is refused in v1.
+Increment 2 builds `records`, and increment 4 the docs lock that memory stays
+outside.
 
 ### A declared path means the same thing however it is spelled
 
@@ -1456,6 +1486,18 @@ a different standard than the rest because of it: a rule id either resolves or
 is refused by name. See "An override either takes effect or says it did not"
 above.
 
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D3).** Layer 5 splits into three levels,
+later wins, each with a provenance label: 5a the user's defaults,
+`~/.invariant/config.yaml` `defaults:` (`user:~/.invariant/config.yaml`); 5b
+the store, `<store>/invariant.yaml` then its `store.repos.<identity>` block
+(`store:<name>`, `store:<name>#<identity>`); 5c the repo,
+`.claude/invariant.yaml` or the pointer `.invariant.yaml` (`repo:<file>`). The
+repo level is never required. An in-repo project gets 5a too, below its own
+settings (ruling 19); `config show` labels each such value and `doctor`
+lists them in one row. With no user defaults written, nothing resolves
+differently. Increment 2 builds it, with `Manifest.locate`, which replaces
+`find_root` and `load` (D2).
+
 `invariant config show` prints the fully resolved configuration with the
 provenance of each value, because "why is this rule blocking me" must be
 answerable without reading the library's source.
@@ -1566,6 +1608,16 @@ answers `None`. The two wrong answers are not symmetrical and an
 implementation must prefer the first: calling an inert file live costs a
 spurious block, which is visible and sends someone to look; calling a live
 file inert passes unmeasured code silently.
+
+**Accepted, not yet built ([ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) D1, D5).** A `sphinx` adapter (also
+selected by `docs`): strict `sphinx-build` commands with `-E -W -n`, a test
+of linkcheck plus, when `sphinx_needs` is configured, the needs builder, the
+hazards of a build without `-W` or `-E`, of narrowing `conf.py` settings and
+of a linkcheck network failure, and coverage declared not
+applicable with a reason, so `coverage.meets_floor` answers N/A by name rather
+than skipping silently. Adapters also gain `related_selectors(changed)` and
+`global_inputs()` for the measured cadence. Increment 2 of ADR-015 builds
+the adapter, increment 4 the two new adapter methods.
 
 ## Backends for work items
 
