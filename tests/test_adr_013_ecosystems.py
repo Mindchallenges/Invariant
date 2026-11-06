@@ -73,7 +73,7 @@ class TestResolution:
             commands={"test": "uv run pytest", "node": {"test_one": "npx vitest run {selector}"}},
         )
         assert m.get("commands.node.test_one") == "npx vitest run {selector}"
-        assert m.source_of("commands.node.test_one") == "manifest"
+        assert m.source_of("commands.node.test_one") == "repo:.claude/invariant.yaml"
         assert m.get("commands.node.test") == NODE["test"]
         assert m.get("commands.test") == "uv run pytest"
 

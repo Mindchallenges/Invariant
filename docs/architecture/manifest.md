@@ -15,6 +15,16 @@ project:
   ecosystems: [swift]          # selects adapters; the first is primary and
                                # owns the flat commands.* keys (ADR-013)
 
+records:                       # where each record type lives (ADR-014 D1):
+  docs: repo                   # repo (every default: today's layout exactly)
+  backlog: repo                # or store, whose path keys are then read
+  guidelines: repo             # against the store root. guidelines: store is
+  memory: repo                 # refused until increment 4 (D9). hooks and
+  reports: repo                # agents take repo or user; user is refused
+  sweeps: repo                 # until increment 3 (D11). See "Records and
+  hooks: repo                  # their locations" below
+  agents: repo
+
 paths:
   root: .                      # repo root, relative to the manifest's parent's parent
   state: .claude/invariant/state
@@ -245,17 +255,63 @@ level comes from the profile, warn in `loose` and `standard` and block in
 loads only on a build that registers it, so a project raises it after the
 build that ships the gate is installed.
 
-**Accepted, not yet built.** [ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) adds a `records` block, each key `repo`
-(the default, today's layout) or `store`, with `hooks` and `agents` as `repo`
-or `user` (D1). A store's `invariant.yaml` adds `store.repos`
-(D2), `store.docs_lock` (D5), `sync` (D7) and
-`privacy.store.scan` (D8), and the user or store level adds `store_naming`
-(D2).
-[ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) adds `commands.derived`, the pin of accepted CI-derived commands (D3),
+**Accepted, not yet built.** [ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) adds `commands.derived`, the pin of accepted CI-derived commands (D3),
 and `trigger`, `full_run_budget_seconds`, `measure_runs` and `return_margin`
 under `methodology.gates.schedule` (D5). Every new key defaults to today's
 behaviour. Each key lands with its decision's increment: ADR-014's 2 for D1
 to D4, 4 for D5, 5 for D7 and 6 for D8; ADR-015's 3 for D3 and 4 for D5.
+
+### Records and their locations
+
+**Built (ADR-014 increment 2, D1).** `records` says where each record type
+lives. Every key defaults to `repo`, which is today's layout exactly, so a
+project that writes nothing here resolves as it did before the block
+existed. Under `store`, a record's path keys are read against the store root
+rather than the project root:
+
+| Record | Its path keys |
+|---|---|
+| `docs` | `paths.docs` |
+| `backlog` | `items.path`, `items.closed_path` |
+| `guidelines` | `guidelines.ruleset`, `.baseline`, `.checklist`, the values of `agents.overlays`, and the policy files that follow it, `methodology.extra_machines` and `methodology.gates.coverage_baseline` |
+| `memory` | `paths.memory`, `paths.memory_index` |
+| `reports` | `paths.reports` |
+| `sweeps` | `paths.sweeps` |
+
+`RECORD_PATH_KEYS` in `core/manifest` is that table, and
+`store_record_paths` joins one record's keys onto a store root. A path under
+a `store` record is **store-relative**: an absolute path, or one with a `..`
+segment, is refused at load naming the key, because a store can be shared
+and an absolute path would carry one machine's home directory. The joined
+value is absolute, which `path_for` and every reader that joins onto the
+root already resolve; its provenance stays the level that set it. A record
+in the repo keeps the freedom it always had.
+
+Refused at load, each with its reason, rather than loaded to do nothing:
+
+- an unknown record type, and `manifest`, which is no record: where the
+  manifest lives is answered by the config levels (D3);
+- a value outside the record's locations (`repo` or `store`; `repo` or
+  `user` for `hooks` and `agents`);
+- `user` for `hooks` or `agents`, until D11 wires a host from outside the
+  repository (increment 3);
+- `store` for `guidelines`, until the gates read each record from its own
+  tree (D9, increment 4); otherwise a baseline left behind would make
+  `guidelines.baseline_only_shrinks` admit every entry;
+- a `store` record when the project has no store;
+- `items.exempt: false` with `records.backlog: store` (D10): a backlog in a
+  store is written in the store's main checkout, which no session branch
+  reviews.
+
+The store a `store` record is read against is the one `Manifest.locate`
+found for the project ("Finding the project", below). An in-repo project
+does no store lookup (D2: "exactly as today"), so a `store` record in its
+`.claude/invariant.yaml` is refused as having no store.
+
+**Accepted, not yet built.** A store's `invariant.yaml` adds
+`store.docs_lock` (D5), `sync` (D7) and `privacy.store.scan` (D8), each with
+its increment. Until then a `store` key other than `repos` is refused at load,
+naming it.
 
 ### Agents: the library, the project's own, and overlays
 
@@ -669,14 +725,20 @@ exempt from isolation. Point the key somewhere else if so — the exemption
 follows the declaration, which is the whole point. `paths.sweeps` defaults to
 `docs/sweeps` on the same terms.
 
-**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D10).** The invariant holds for a store
-project, and a declared store resolves where its record lives. Under
-`records.<type>: store` the data records (backlog, memory, reports, sweeps) are
-written in the store's main checkout and are exempt from isolation; memory
-there is also outside the docs lock (ruling 20). Policy records are never
-exempt. `items.exempt: false` with `records.backlog: store` is refused in v1.
-Increment 2 builds `records`, and increment 4 the docs lock that memory stays
-outside.
+**Built (ADR-014 increment 2, D10).** `items.exempt: false` with
+`records.backlog: store` is refused at load, with the reason.
+
+**Built (ADR-014 increment 2, D10).** A declared store resolves where its
+record lives: under `records.<type>: store` the data records' paths (backlog,
+memory, reports, sweeps) are joined onto the store's main checkout, so they
+are written there. A path there lies under none of the project's checkouts,
+which `_is_outside_project` in `core/rules` already answers as outside the
+project, so the isolation rules do not hold it (read, not yet run end to end).
+
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D10).** Memory under a store is outside the
+docs lock (ruling 20), which increment 4 builds. Policy records are never
+exempt. A whole session in a store project, start to merge, is proved by
+increment 2's repository proof, which the user runs on a named repository.
 
 ### A declared path means the same thing however it is spelled
 
@@ -1376,6 +1438,7 @@ only ever warns, and the engine holds that ruling at load rather than in prose.
 `baseline`, `checklist`, `instruction_files`, `injection` and `verdicts`). `ruleset`,
 `baseline` and `checklist` are each null or a non-empty path, and `instruction_files` is null or a
 non-empty list of them; a bare string is refused, as for every declared list.
+`records` is checked as "Records and their locations" above describes.
 `injection` is a mapping whose keys are `max_lines`, an integer of at least
 2 (the block's header and the line that counts what the cap left out), and
 `on_edit`, a boolean; any other key is refused by name. Where
@@ -1473,7 +1536,13 @@ For any value, later wins:
    only a key no adapter has set. Layer 3 never writes over layer 2, so the
    primary wins every key it names (ADR-013 D4)
 4. Enforcement profile (for rule levels only)
-5. Explicit manifest values
+5. The config levels, later wins (ADR-014 D3):
+   - 5a. the user's defaults, `defaults:` in `~/.invariant/config.yaml`,
+     labelled `user:~/.invariant/config.yaml` (built)
+   - 5b. the store, labelled `store:<name>` and `store:<name>#<identity>`
+     (built)
+   - 5c. the repo's own level, `.claude/invariant.yaml` (in-repo) or the
+     pointer `.invariant.yaml`, labelled `repo:<file>` (built)
 6. Environment overrides (`INVARIANT_*`), for one-off escapes
 
 Layer 3 used to merge every adapter's defaults flat, later wins, which
@@ -1486,17 +1555,136 @@ a different standard than the rest because of it: a rule id either resolves or
 is refused by name. See "An override either takes effect or says it did not"
 above.
 
-**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D3).** Layer 5 splits into three levels,
-later wins, each with a provenance label: 5a the user's defaults,
-`~/.invariant/config.yaml` `defaults:` (`user:~/.invariant/config.yaml`); 5b
-the store, `<store>/invariant.yaml` then its `store.repos.<identity>` block
-(`store:<name>`, `store:<name>#<identity>`); 5c the repo,
-`.claude/invariant.yaml` or the pointer `.invariant.yaml` (`repo:<file>`). The
-repo level is never required. An in-repo project gets 5a too, below its own
-settings (ruling 19); `config show` labels each such value and `doctor`
-lists them in one row. With no user defaults written, nothing resolves
-differently. Increment 2 builds it, with `Manifest.locate`, which replaces
-`find_root` and `load` (D2).
+### The user level (ADR-014 D3, 5a)
+
+**Built (increment 2).** `~/.invariant/config.yaml`, in the directory
+`$INVARIANT_HOME` moves (ADR-007), is the user level of the configuration.
+`core/home` reads it, and is the one resolution of that directory: the
+oracle's `oracle_home` asks it, so the oracle's index and the user config
+always sit side by side. Its shape:
+
+```yaml
+version: 1
+store_naming: repo        # repo | url (ruling 14); read and checked
+defaults:                 # level 5a: any manifest key, below a project's own
+  methodology: {gates: {coverage_min: 85}}
+repos:                    # identity -> store (D2); read and checked
+  github.com/acme/widgets: {store: ~/.invariant/stores/widgets}
+```
+
+Its `defaults` are merged as layer 5a, **below** the project's own manifest,
+for in-repo projects too (ruling 19), so a key the project sets always wins.
+A profile named there selects the profile unless the project names one. With
+no file, or none of these keys written, the level is empty and nothing
+resolves differently. Every value it supplies carries the label
+`user:<path>`, the home spelled `~` where it lies under the user's home
+directory, so `config show --provenance` names it; `doctor`'s `user defaults`
+row lists every one with its key, or says there is none
+(`Manifest.user_level_values`). A default a higher level overrides changed
+nothing, so it is in neither.
+
+The user level holds no project-specific keys except `repos:` (D3), so a
+project's policy is never set by one operator's home directory alone. Refused
+at load, naming the file: a key other than `version`, `store_naming`,
+`defaults` and `repos`; another version; `defaults.project` and
+`defaults.records`, which say what one project is and where its records live;
+a `repos` entry that is not a mapping naming a `store` path and nothing else;
+and a `store_naming` other than `repo` or `url`. A file that exists and cannot
+be read is refused too; a home that is no directory reads as no user level,
+because an unusable home must never change what a project resolves. A
+refusal of the merged configuration that a user default contributed to names
+the user level and the keys it set, since the project's own manifest never
+set them.
+
+`repos` is what `Manifest.locate` reads to find a repo's store, and
+`invariant store link` writes it. `store_naming` is read by `invariant store
+init` when it names a new store (ruling 14).
+
+### Finding the project: `Manifest.locate` (ADR-014 D2)
+
+**Built (increment 2).** `Manifest.locate(start)` is the only entry point; it
+replaced `find_root` and `load`. It walks up from `start` and asks two
+questions at each level, in this order:
+
+```mermaid
+graph TD
+    L["a level, from start upward"] --> M{".claude/invariant.yaml here?"}
+    M -- yes --> IR["an in-repo project, exactly as before:<br/>5a the user's defaults, 5c that file"]
+    M -- no --> G{"a git top level (.git here)?"}
+    G -- no --> U["the next level up"]
+    G -- yes --> P{"a pointer .invariant.yaml here,<br/>or does the identity have a store?"}
+    P -- neither --> U
+    P -- yes --> S["a store project, rooted here:<br/>5a user, 5b store and store#identity, 5c pointer"]
+    U --> L
+    U -- "past the filesystem root" --> N["nothing found: refused naming<br/>invariant init and invariant store link,<br/>or the defaults when not required"]
+```
+
+The nearest answer wins, so a linked repo nested inside an in-repo project
+finds its own store first, and a plain git repository nested in one is
+walked past as it always was. A repo names its store at the first of:
+
+1. its pointer's `store:`, a path, `~` expanded, relative to the repo root;
+2. the user level's `repos.<identity>.store`, relative to the user config's
+   directory, where the identity is the normalised origin, else the local ID
+   (D4);
+3. the user level's entry for the repo's local ID, when the repo now has an
+   origin that entry is not keyed on: a remote added after the link. The
+   lookup still answers, and `doctor`'s `repo identity` row says so and
+   offers `invariant store link --update`. Nothing re-keys by itself.
+
+A store that is named and absent, or that has no `invariant.yaml`, is refused
+naming both: cloning a store is explicit and arrives in increment 5. So is a
+pointer naming a remote. **A store must list the repo under `store.repos`**,
+by its identity, or by its local ID when the pointer names it; otherwise the
+lookup refuses, naming the store, the identity and the line to add, so a
+wrong link cannot make one project's gates read another project's records.
+
+The levels of a store project (D3), later wins:
+
+| Level | Source | Label |
+|---|---|---|
+| 5a | the user's `defaults` | `user:~/.invariant/config.yaml` |
+| 5b | the store's `invariant.yaml`, without its `store` block | `store:<name>` |
+| 5b | that file's `store.repos.<identity>` block | `store:<name>#<identity>` |
+| 5c | the pointer's `records`, when there is a pointer | `repo:.invariant.yaml` |
+
+`<name>` is the store's folder name, shown for reading only: a store is
+matched by identity, never by its name. The repo level is never required:
+a store project with no pointer resolves from 5a and 5b. The manifest's
+`path` is the pointer when there is one, else the store's `invariant.yaml`;
+its `root` is the repo's git top level, where commands run; its `store` says
+which store, how it was named, and the key it is listed under. The state
+root does not move: it is still the repo's git common directory.
+
+**The pointer is minimal by design.** It may hold `version`, `store` and
+`records`, and any other key is refused naming it, so a store project's
+policy lives in its store and is reviewed there. A pointer alone, with no
+store and no link, still makes a project, resolved from the user level and
+the library's defaults.
+
+**Refused in a store project until D9 is built (increment 4):
+`guidelines.baseline`.** The shrink gate reads the base branch's manifest at
+`.claude/invariant.yaml` in the repo; a store project has none there, and the
+gate would read "no baseline configured" and admit every entry. The ADR's
+own D9 evidence is this case, with the guidelines records left in the repo,
+so refusing `records.guidelines: store` alone did not keep the inert gate
+from shipping; refusing a baseline in any project whose manifest is not in
+its repository does.
+
+The store's own `invariant.yaml` may also not set `store_naming`: a store is
+named when `store init` creates it, before any store level exists, so only
+the user level's `store_naming` is read (choice g of the increment, for this
+pass).
+
+A refusal about a project the walk found names it: `ManifestError` carries
+`project_root` and `manifest_path`, which `doctor` prints and the CLI's
+cross-project lookup uses (ADR-011). Two questions are asked of `locate`
+rather than of a file's existence: `Manifest.is_project_root(path)`, which
+the oracle's five checks ask (ADR-014 D10; an in-repo manifest still answers
+by its existence alone, and a store project that does not load is still a
+project), and `set_by_project(key)`, whether the repo or store level set a
+value, which the oracle's index asks to decide whether a project named
+itself.
 
 `invariant config show` prints the fully resolved configuration with the
 provenance of each value, because "why is this rule blocking me" must be

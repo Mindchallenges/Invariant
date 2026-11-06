@@ -74,7 +74,7 @@ def _project(root: Path, name: str, raw_manifest: str | None = None) -> Path:
 
 
 def _live_session(project: Path, name: str, *, pipeline: bool = True):
-    manifest = Manifest.load(project)
+    manifest = Manifest.locate(project)
     sessions = SessionDomain(manifest)
     session = sessions.start(name)
     sessions.isolate(session.id, execute=True)
@@ -84,12 +84,12 @@ def _live_session(project: Path, name: str, *, pipeline: bool = True):
 
 
 def _evidence(project: Path, session_id: str) -> dict:
-    pipeline = PipelineDomain(Manifest.load(project)).current(session_id)
+    pipeline = PipelineDomain(Manifest.locate(project)).current(session_id)
     return dict(pipeline.evidence) if pipeline else {}
 
 
 def _session(project: Path, session_id: str):
-    return SessionDomain(Manifest.load(project)).get(session_id)
+    return SessionDomain(Manifest.locate(project)).get(session_id)
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ class TestPlacedAcrossRoots:
         self, world, monkeypatch, capsys
     ):
         home = _live_session(world["a"], "home")
-        SessionDomain(Manifest.load(world["a"])).adopt_host_session(home.id, HOST)
+        SessionDomain(Manifest.locate(world["a"])).adopt_host_session(home.id, HOST)
         doc = world["worktree"] / "docs" / "architecture" / "overview.md"
 
         _hook(monkeypatch, capsys, "post-tool-use", _tool("Read", doc))
@@ -248,7 +248,7 @@ class TestPlacedAcrossRoots:
         # The host is waiting in BOTH state roots; a finished tool call answers
         # the wait, and only the host's own project may see that write.
         stores = {
-            key: AttentionStore(JsonStore(Manifest.load(world[key]).state_root))
+            key: AttentionStore(JsonStore(Manifest.locate(world[key]).state_root))
             for key in ("a", "b")
         }
         for store in stores.values():
@@ -367,7 +367,7 @@ class TestUnplacedFailsLoudly:
         self, world, monkeypatch, capsys
     ):
         home = _live_session(world["a"], "home")
-        SessionDomain(Manifest.load(world["a"])).adopt_host_session(home.id, HOST)
+        SessionDomain(Manifest.locate(world["a"])).adopt_host_session(home.id, HOST)
 
         response = _hook(
             monkeypatch, capsys, "post-tool-use",
@@ -397,7 +397,7 @@ class TestUnplacedFailsLoudly:
         self, world, monkeypatch, capsys
     ):
         home = _live_session(world["a"], "home")
-        SessionDomain(Manifest.load(world["a"])).adopt_host_session(home.id, HOST)
+        SessionDomain(Manifest.locate(world["a"])).adopt_host_session(home.id, HOST)
 
         response = _hook(
             monkeypatch, capsys, "post-tool-use",
@@ -421,7 +421,7 @@ class TestUnplacedFailsLoudly:
         # worktree is deliberately left on disk: the state alone must be what
         # stops the dispatch from being placed there.
         gone = _live_session(world["b"], "gone", pipeline=False)
-        sessions = SessionDomain(Manifest.load(world["b"]))
+        sessions = SessionDomain(Manifest.locate(world["b"]))
         gone.state = "torn_down"
         sessions._save(gone)
         assert Path(gone.worktree).is_dir()
@@ -462,7 +462,7 @@ class TestUnplacedFailsLoudly:
 
     def test_an_unplaced_ordinary_read_is_silent(self, world, monkeypatch, capsys):
         home = _live_session(world["a"], "home")
-        SessionDomain(Manifest.load(world["a"])).adopt_host_session(home.id, HOST)
+        SessionDomain(Manifest.locate(world["a"])).adopt_host_session(home.id, HOST)
 
         response = _hook(
             monkeypatch, capsys, "post-tool-use", _tool("Read", world["b"] / "src.py")
@@ -485,7 +485,7 @@ class TestUnplacedFailsLoudly:
         self, world, monkeypatch, capsys
     ):
         home = _live_session(world["a"], "home")
-        SessionDomain(Manifest.load(world["a"])).adopt_host_session(home.id, HOST)
+        SessionDomain(Manifest.locate(world["a"])).adopt_host_session(home.id, HOST)
         payload = _tool("Edit", world["b"] / "src.py", old_string="1", new_string="2")
         payload["agent_type"] = "feature-architect"
 

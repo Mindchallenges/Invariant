@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import git
-from ..core.manifest import MANIFEST_RELPATH, Manifest
+from ..core.manifest import Manifest
 from ..core.rules import AgentCopy, Evaluated
 from ..core.store import InertStore
 from ..domains.pipeline import PipelineDomain
@@ -208,8 +208,8 @@ def evaluate_row(
     workdir = _workdir(row)
     if workdir is None:
         raise FileNotFoundError(f"the session's worktree is gone: {row.worktree}")
-    manifest_root = workdir if (workdir / MANIFEST_RELPATH).is_file() else Path(row.root)
-    manifest = Manifest.load(manifest_root)
+    manifest_root = workdir if Manifest.is_project_root(workdir) else Path(row.root)
+    manifest = Manifest.locate(manifest_root)
     store = InertStore(Path(row.project))
     with git.without_optional_locks():
         session = SessionDomain(manifest, store=store).get(row.session_id)

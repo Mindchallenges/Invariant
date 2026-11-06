@@ -76,7 +76,7 @@ def project(tmp_path, items: dict) -> Manifest:
     (root / MANIFEST_RELPATH).write_text(
         yaml.safe_dump({"version": 1, "items": items}), encoding="utf-8"
     )
-    return Manifest.load(root)
+    return Manifest.locate(root)
 
 
 # -- (b) placement on sphinx_needs ----------------------------------------

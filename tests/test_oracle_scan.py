@@ -95,7 +95,7 @@ def make_project(base: Path, name: str) -> Manifest:
     path.write_text(yaml.safe_dump({"version": 1, "project": {"name": name}}), "utf-8")
     git(root, "add", "-A")
     git(root, "commit", "-qm", "init")
-    manifest = Manifest.load(root.resolve())
+    manifest = Manifest.locate(root.resolve())
     ProjectIndex(oracle_home()).register(manifest, via="manual")
     return manifest
 

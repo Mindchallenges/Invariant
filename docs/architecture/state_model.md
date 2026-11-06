@@ -2327,6 +2327,12 @@ the machine — so it keeps a directory per USER:
 
 ```
 $INVARIANT_HOME, else ~/.invariant/
+  config.yaml           the user level of the config, when written (ADR-014
+                        D3): configuration, not state; manifest.md, "The user
+                        level"
+  linked-repos.txt      the linked identities, written by `store link` (D2)
+  stores/<name>/        stores `store init` created there: git repositories
+                        holding records, not state (D2)
   projects.json         the project index
   locks/projects.lock   advisory lock for its read-modify-write
   locks/alerts.lock     advisory lock for the ledger's read-modify-write

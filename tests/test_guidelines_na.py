@@ -358,7 +358,7 @@ def repo(tmp_path):
 
 def context(root, *, base="master", files=()) -> RuleContext:
     return RuleContext(
-        manifest=Manifest.load(root), cwd=root,
+        manifest=Manifest.locate(root), cwd=root,
         session={"id": "s", "base": base, "files": list(files)},
         pipeline={
             "methodology": "tdd", "state": "reviewing",

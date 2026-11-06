@@ -37,7 +37,7 @@ HOSTS_RULE = "layers.oracle-never-imports-hosts"
 
 def repo_context(files=None) -> RuleContext:
     session = None if files is None else {"files": list(files), "base": ""}
-    return RuleContext(manifest=Manifest.load(REPO), cwd=REPO, session=session)
+    return RuleContext(manifest=Manifest.locate(REPO), cwd=REPO, session=session)
 
 
 def verdict_of(rule_id: str, ctx: RuleContext):
@@ -52,7 +52,7 @@ def every_source_file() -> list[str]:
 
 class TestThisRepositorysRuleset:
     def test_the_manifest_names_it(self):
-        assert Manifest.load(REPO).get("guidelines.ruleset") == RULESET_REL
+        assert Manifest.locate(REPO).get("guidelines.ruleset") == RULESET_REL
 
     def test_it_passes_ruleset_valid(self):
         verdict = verdict_of("guidelines.ruleset_valid", repo_context())
@@ -89,7 +89,7 @@ class TestThisRepositorysRuleset:
 
     def test_no_baseline_is_configured(self):
         """No finding exists to record, so every finding is new (DN-1)."""
-        assert Manifest.load(REPO).get("guidelines.baseline") is None
+        assert Manifest.locate(REPO).get("guidelines.baseline") is None
 
 
 class TestTheTreeIsClean:

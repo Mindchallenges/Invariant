@@ -395,7 +395,7 @@ def git_project(root: Path, manifest: dict | None = None) -> Manifest:
     )
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
-    return Manifest.load(root)
+    return Manifest.locate(root)
 
 
 @pytest.fixture

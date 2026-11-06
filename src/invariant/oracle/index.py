@@ -38,7 +38,7 @@ from typing import Any
 
 from ..core import git
 from ..core.errors import StateError, UsageError
-from ..core.manifest import MANIFEST_RELPATH, Manifest
+from ..core.manifest import Manifest
 from ..core.store import JsonStore
 
 INDEX_FILE = "projects.json"
@@ -73,7 +73,7 @@ class ProjectEntry:
     @property
     def has_manifest(self) -> bool:
         """Whether the recorded root still carries a manifest."""
-        return bool(self.root) and (Path(self.root) / MANIFEST_RELPATH).is_file()
+        return bool(self.root) and Manifest.is_project_root(Path(self.root))
 
 
 class HomeStore(JsonStore):
@@ -136,7 +136,7 @@ def _canonical_root(root: Path) -> Path:
     except ValueError:
         return root
     candidate = (main / relative).resolve()
-    return candidate if (candidate / MANIFEST_RELPATH).is_file() else root
+    return candidate if Manifest.is_project_root(candidate) else root
 
 
 class ProjectIndex:
@@ -173,7 +173,7 @@ class ProjectIndex:
             return existing, False
 
         root = _canonical_root(manifest.root)
-        named = manifest.source_of("project.name") == "manifest"
+        named = manifest.set_by_project("project.name")
         name = str(manifest.get("project.name")) if named else root.name
         entry = ProjectEntry(key=key, root=str(root), name=name, via=via)
 

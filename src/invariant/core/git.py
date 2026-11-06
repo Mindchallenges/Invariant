@@ -700,7 +700,7 @@ def tree_paths(cwd: Path, ref: str, directory: str) -> list[str] | None:
 def commit_only(cwd: Path, paths: list[str], message: str) -> tuple[bool, str]:
     """Commit exactly ``paths`` and nothing else that may be staged. A WRITE.
 
-    The one write in this module, named as one (ADR-010 D9): the sweep commits
+    One of this module's writes, each named as one (ADR-010 D9): the sweep commits
     its own record and the items it filed. The paths are added first, because
     ``--only`` refuses a path git does not yet track; ``--only`` then commits
     those paths alone, leaving anything else in the index where it was. It
@@ -713,3 +713,26 @@ def commit_only(cwd: Path, paths: list[str], message: str) -> tuple[bool, str]:
         return False, err or out
     code, out, err = _run(["commit", "--only", "-m", message, "--", *paths], cwd)
     return code == 0, (out if code == 0 else (err or out))
+
+
+def set_local_config(cwd: Path, key: str, value: str) -> tuple[bool, str]:
+    """Set ``key`` in the repository's local git config. A WRITE.
+
+    A write, named as one (ADR-014 D4): ``store link``
+    records the repository's ``invariant.id`` here, which every linked
+    worktree reads, a move keeps and a clone does not copy. Returns ``(set,
+    git's own output)``.
+    """
+    code, out, err = _run(["config", "--local", key, value], cwd)
+    return code == 0, (out if code == 0 else (err or out or f"git exited {code}"))
+
+
+def init_repository(cwd: Path) -> tuple[bool, str]:
+    """Make ``cwd`` a new git repository. A WRITE.
+
+    Named as one (ADR-014 D2): ``store init`` creates a store, which is a git
+    repository. Nothing is added or committed. Returns ``(made, git's own
+    output)``.
+    """
+    code, out, err = _run(["init", "-q"], cwd)
+    return code == 0, (out if code == 0 else (err or out or f"git exited {code}"))

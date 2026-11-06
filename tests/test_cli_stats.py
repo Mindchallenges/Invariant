@@ -225,7 +225,7 @@ class TestTheReportStoreIsAWritableStore:
         from invariant.core.manifest import Manifest
         from invariant.core.rules import RuleContext, evaluate
 
-        manifest = Manifest.load(wired)
+        manifest = Manifest.locate(wired)
         ctx = RuleContext(
             manifest=manifest,
             cwd=wired,

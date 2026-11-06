@@ -647,7 +647,7 @@ def project(tmp_path):
 
 @pytest.fixture
 def manifest(project):
-    return Manifest.load(project)
+    return Manifest.locate(project)
 
 
 @pytest.fixture
@@ -655,6 +655,6 @@ def make_manifest(tmp_path):
     def build(body: dict, root: Path | None = None) -> Manifest:
         root = root or tmp_path
         write_manifest(root, body)
-        return Manifest.load(root)
+        return Manifest.locate(root)
 
     return build

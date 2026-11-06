@@ -768,7 +768,7 @@ def pipeline(state="reviewing", *, digest=DIGEST, runs=(), methodology="tdd", pi
 
 def context(root, *, base="master", files=(), **kw) -> RuleContext:
     return RuleContext(
-        manifest=Manifest.load(root), cwd=root,
+        manifest=Manifest.locate(root), cwd=root,
         session={"id": "s", "base": base, "files": list(files)},
         pipeline=kw.pop("pipeline", pipeline()), **kw,
     )
@@ -950,7 +950,7 @@ class TestPlan:
 
 
 def started(root: Path, state="reviewing"):
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     session = SessionDomain(manifest).start("verdicts")
     pipelines = PipelineDomain(manifest)
     pipelines.start(session.id, task="t", cwd=root)

@@ -79,7 +79,7 @@ def world(tmp_path):
     )
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "init")
-    manifest = Manifest.load(root.resolve())
+    manifest = Manifest.locate(root.resolve())
     entry, _ = ProjectIndex(oracle_home()).register(manifest, via="manual")
 
     # An orphan host whose pid is alive and is "claude"; its attention record

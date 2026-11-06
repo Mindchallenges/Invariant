@@ -389,12 +389,12 @@ class TestManifestKey:
             {"version": 1, "guidelines": {"baseline": "docs/guidelines/baseline.txt"}}
         )
         assert manifest.get("guidelines.baseline") == "docs/guidelines/baseline.txt"
-        assert manifest.source_of("guidelines.baseline") == "manifest"
+        assert manifest.source_of("guidelines.baseline") == "repo:.claude/invariant.yaml"
 
     def test_a_configured_path_is_kept_as_written(self, make_manifest):
         manifest = make_manifest({"version": 1, **CONFIGURED})
         assert manifest.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
-        assert manifest.source_of("guidelines.ruleset") == "manifest"
+        assert manifest.source_of("guidelines.ruleset") == "repo:.claude/invariant.yaml"
 
     @pytest.mark.parametrize(
         ("guidelines_value", "needle"),
@@ -442,7 +442,7 @@ class TestManifestKey:
             {"version": 1, "guidelines": {"checklist": "docs/guidelines/rules.md"}}
         )
         assert manifest.get("guidelines.checklist") == "docs/guidelines/rules.md"
-        assert manifest.source_of("guidelines.checklist") == "manifest"
+        assert manifest.source_of("guidelines.checklist") == "repo:.claude/invariant.yaml"
 
     def test_instruction_files_default_to_null_so_the_host_decides(self, make_manifest):
         manifest = make_manifest({"version": 1})
@@ -486,7 +486,7 @@ class TestManifestKey:
             {"version": 1, "guidelines": {"verdicts": {"note_max_chars": 1}}}
         )
         assert manifest.get("guidelines.verdicts.note_max_chars") == 1
-        assert manifest.source_of("guidelines.verdicts.note_max_chars") == "manifest"
+        assert manifest.source_of("guidelines.verdicts.note_max_chars") == "repo:.claude/invariant.yaml"
 
 
 # -- the generated checklist (A2 increment 3, DN-B) -----------------------------------

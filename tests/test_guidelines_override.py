@@ -221,7 +221,7 @@ class TestTheBaselineGateIgnoresAGuidelineGrant:
         )
         commit(repo)
         ctx = RuleContext(
-            manifest=Manifest.load(repo),
+            manifest=Manifest.locate(repo),
             cwd=repo,
             session={"files": [], "base": "master", "pending_overrides": [grant()]},
         )

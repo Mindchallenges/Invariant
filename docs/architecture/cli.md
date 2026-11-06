@@ -172,14 +172,20 @@ invariant doctor
     index current. One line per check, exit 1 if any fails. A row that
     warns passes: it prints `warn` and never sets the exit code.
 
-    Accepted, not yet built. ADR-014 D3 adds one row naming every value
-    resolved from the user level (`user:~/.invariant/config.yaml`), or saying
-    there is none. D4 adds a row for an identity whose origin no longer
-    matches its store entry, offering `store link --update`; D8 names an
-    active `privacy.store.scan` exception; D11 adds rows for the user-level
-    install (`permissions.additionalDirectories` and the install receipt).
-    Increment 2 builds the D3 and D4 rows, increment 3 the D11 rows and
-    increment 6 the D8 row.
+    `user defaults` (ADR-014 D3, ruling 19) names every value resolved
+    from the user level, `~/.invariant/config.yaml`, with its key and the
+    file, or says none does. It informs and never fails. A user level that
+    does not load fails `manifest valid`, naming the file.
+
+    `repo identity` (ADR-014 D4), in a store project only, names the
+    identity, the store and the level that named it. It warns when the
+    repository was linked by its local ID and has since gained an origin,
+    offering `invariant store link --update`.
+
+    Accepted, not yet built. ADR-014 D8 names an active
+    `privacy.store.scan` exception; D11 adds rows for the user-level install
+    (`permissions.additionalDirectories` and the install receipt). Increment
+    3 builds the D11 rows and increment 6 the D8 row.
     ADR-015 D2 makes the command rows follow the lanes the project's sessions
     can run: a command is required when a selectable lane carries a gate that
     runs it, each row names that lane and gate, and `commands.build`, which no
@@ -439,7 +445,47 @@ invariant agents install [--overwrite-local] [--dry-run]
     `would_skip`. That plan is what `agents.rendered_current` reads.
 
 invariant config show [--provenance]
-    Print resolved configuration and where each value came from.
+    Print resolved configuration and where each value came from: a label
+    per value, `default`, `adapter:<eco>`, `profile:<name>`, and the config
+    levels (ADR-014 D3): `user:<file>` for the user level's defaults,
+    `store:<name>` and `store:<name>#<identity>` for a store and its block
+    for this repository, `repo:<file>` for the repository's own level
+    (`repo:.claude/invariant.yaml`, or the pointer `repo:.invariant.yaml`),
+    and `env:<variable>`.
+
+invariant store init [PATH]
+    Create a store for the repository you stand in, and link it (ADR-014
+    D2). PATH defaults to ~/.invariant/stores/<name>, named by the user
+    level's store_naming (ruling 14): `repo`, the origin's last segment or
+    the directory name; `url`, the origin with slashes as underscores. Under
+    `repo`, a name another store or directory already holds falls back to
+    the `url` form (the local ID, `:` as `_`, with no remote), and the output
+    names both. The store is a new git repository holding invariant.yaml,
+    which names the project and lists the repository under store.repos. It
+    is left uncommitted, to be reviewed and committed in the store. Refused:
+    outside a git repository, in an in-repo project (moving records is
+    `store migrate`, increment 7), at a store already listing this
+    repository (link it instead), and at a PATH that is not empty.
+
+invariant store link [PATH] [--update]
+    Link the repository to the store at PATH from the user level: the
+    repos: entry in ~/.invariant/config.yaml, the repository's invariant.id
+    in its local git config (written even when it has a remote, D4), and
+    the linked-identity index ~/.invariant/linked-repos.txt, which a
+    user-level hook shim reads (D11). Nothing is written to the repository's
+    tracked files, and the other keys of the user config are kept. Refused,
+    writing nothing to the user level, when the store does not list the
+    repository under store.repos (the refusal names the line to add) or the
+    repository is already linked to another store. Linking again is a no-op.
+    --update re-keys a link made by local ID onto the origin added since,
+    once the store lists the origin; `doctor`'s `repo identity` row offers it.
+
+invariant store status [--quiet]
+    Exit 0 when the repository you stand in is linked to a store, naming the
+    identity and its source, the store, the level that named it and the
+    records it holds; exit 1 otherwise, saying why (an in-repo project, no
+    project, a refused link). --quiet prints nothing and only answers: the
+    guard a user-level agent runs first (D11).
 ```
 
 ### A managed file the operator has edited

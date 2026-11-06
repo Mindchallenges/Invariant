@@ -371,7 +371,7 @@ class TestTheCommand:
         from invariant.domains.pipeline import PipelineDomain
         from invariant.domains.session import SessionDomain
 
-        manifest = Manifest.load(project)
+        manifest = Manifest.locate(project)
         session = SessionDomain(manifest).current(project)
         pipelines = PipelineDomain(manifest)
         current = pipelines.current(session.id)

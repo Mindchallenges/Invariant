@@ -134,7 +134,7 @@ def tier_map(root, **mapping):
 
 
 def plan(root):
-    host = ClaudeCodeHost(root, manifest=Manifest.load(root))
+    host = ClaudeCodeHost(root, manifest=Manifest.locate(root))
     return {step.identity: step for step in host.plan_assets(only="agent")}
 
 
@@ -355,7 +355,7 @@ def moved(root, first=ONE, second=TWO):
 def verdict_of(root):
     from invariant.cli.main import host_agent_plan
 
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     context = RuleContext(manifest=manifest, cwd=root, host_agent_plan=host_agent_plan(manifest))
     (result,) = evaluate([RULE], context)
     return result.verdict
@@ -419,7 +419,7 @@ class TestItIsNotDrift:
 
     def test_the_row_alone_leaves_doctor_clean(self, project):
         moved(project)
-        host = ClaudeCodeHost(project, manifest=Manifest.load(project))
+        host = ClaudeCodeHost(project, manifest=Manifest.locate(project))
         rows = host.asset_checks(only="agent")
         assert all(ok for _, ok, _ in rows)
         assert cc.CHECK_AGENT_TIER_HINTS in host.warned_rows
@@ -442,14 +442,14 @@ class TestItIsNotDrift:
     def test_a_refused_plan_has_no_such_row(self, project):
         moved(project)
         configure(project, agents={"overlays": {DEEP: "docs/agents/none.yaml"}})
-        host = ClaudeCodeHost(project, manifest=Manifest.load(project))
+        host = ClaudeCodeHost(project, manifest=Manifest.locate(project))
         rows = {label: ok for label, ok, _ in host.asset_checks(only="agent")}
         assert rows[cc.CHECK_AGENTS_CURRENT] is False
         assert cc.CHECK_AGENT_TIER_HINTS not in rows
 
     def test_a_row_for_one_doctor_is_not_carried_into_the_next(self, project):
         moved(project)
-        host = ClaudeCodeHost(project, manifest=Manifest.load(project))
+        host = ClaudeCodeHost(project, manifest=Manifest.locate(project))
         host.asset_checks(only="agent")
         host.install_assets(only="agent")
         rows = {label: ok for label, ok, _ in host.asset_checks(only="agent")}
@@ -483,7 +483,7 @@ class TestAnInstallStillAppliesIt:
 
     def test_uninstall_removes_it_as_the_librarys_own(self, project):
         moved(project)
-        host = ClaudeCodeHost(project, manifest=Manifest.load(project))
+        host = ClaudeCodeHost(project, manifest=Manifest.locate(project))
         planned = host.plan_uninstall(remove_assets=True)
         assert target(project) in planned["assets"]
         assert f"agent:{DEEP}" not in planned["protected"]

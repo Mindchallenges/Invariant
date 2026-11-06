@@ -69,7 +69,7 @@ def target(root, name=NAME):
 
 
 def host_for(root):
-    return ClaudeCodeHost(root, manifest=Manifest.load(root))
+    return ClaudeCodeHost(root, manifest=Manifest.locate(root))
 
 
 def agent_files(root):

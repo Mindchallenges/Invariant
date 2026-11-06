@@ -219,6 +219,7 @@ class Context:
         probe: bool = False,
         crossed_from: Path | None = None,
         pipeline_lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+        manifest: Manifest | None = None,
     ) -> None:
         self.cwd = Path(cwd or Path.cwd())
         #: How long this context's pipeline writers wait for the record's lock.
@@ -231,7 +232,12 @@ class Context:
         #: the manifest from a cwd outside the project used to silently disable
         #: every gate. ``cwd`` stays honest for the rules that ask git about
         #: the directory the call actually runs in.
-        self.manifest = Manifest.load(manifest_start or self.cwd, required=required)
+        #: ``manifest`` is one already located from ``manifest_start``, which
+        #: the hook resolves once to decide where to start and hands down
+        #: rather than resolving the same project twice.
+        self.manifest = manifest or Manifest.locate(
+            manifest_start or self.cwd, required=required
+        )
         #: A probe reads the real state and writes none of it. Every domain
         #: this context builds shares this one store, so swapping it here
         #: covers every write a hook can reach (BUG_059).
@@ -550,16 +556,21 @@ class Context:
         """
         from ..core import git
 
-        start = Manifest.find_root(path)
+        try:
+            found = Manifest.locate(path, required=False)
+        except ManifestError as exc:
+            start = exc.project_root
+        else:
+            start = found.root if found.located else None
         if start is None:
             return None
         main = git.main_checkout(start)
-        project = main if main and Manifest.find_root(main) == main else start
+        project = main if main and Manifest.is_project_root(main) else start
         if project in seen:
             return seen[project]
         found: _Foreign | None
         try:
-            manifest = Manifest.load(project)
+            manifest = Manifest.locate(project)
             if manifest.state_root == self.manifest.state_root:
                 found = None
             else:
@@ -742,7 +753,7 @@ def _register_after_init(root: Path) -> dict:
 
     try:
         entry, added = ProjectIndex(oracle_home()).register(
-            Manifest.load(root), via="init"
+            Manifest.locate(root), via="init"
         )
     except InvariantError as exc:
         return {"error": str(exc)}
@@ -766,9 +777,8 @@ def cmd_doctor(args) -> int:
     try:
         ctx = Context(required=False)
     except ManifestError as exc:
-        path = Manifest.find_root(Path.cwd())
         checks = [
-            ("manifest present", True, str((path or Path.cwd()) / MANIFEST_RELPATH)),
+            ("manifest present", True, str(exc.manifest_path or Path.cwd() / MANIFEST_RELPATH)),
             ("manifest valid", False, str(exc)),
         ]
         return _report_checks(args, checks)
@@ -778,6 +788,17 @@ def cmd_doctor(args) -> int:
 
     if manifest_exists:
         checks.append(("manifest valid", True, f"version {ctx.manifest.get('version')}"))
+        # Every value the user level supplied (ADR-014 ruling 19). It sits
+        # below the project's own settings and applies to every project on
+        # this machine, so it is named here rather than discovered. A row
+        # that informs and never fails: a default is the operator's choice.
+        checks.append(("user defaults", True, user_defaults_summary(ctx.manifest)))
+        identity_row = store_identity_row(ctx.manifest)
+        if identity_row is not None:
+            label, ok, detail, warns = identity_row
+            checks.append((label, ok, detail))
+            if warns:
+                warned.add(label)
         state_ok = True
         try:
             ctx.store.ensure_root()
@@ -995,6 +1016,15 @@ def cmd_doctor(args) -> int:
         warned.add(label)
 
     return _report_checks(args, checks, warned)
+
+
+def user_defaults_summary(manifest: Manifest) -> str:
+    """`doctor`'s row for the user level: each value it set, or that none did."""
+    values = manifest.user_level_values()
+    if not values:
+        return "none: no value resolves from the user level"
+    label = values[0][2].removeprefix("user:")
+    return f"from {label}: " + "; ".join(f"{key} = {value!r}" for key, value, _ in values)
 
 
 def _real_host_environments() -> list[dict] | None:
@@ -1522,6 +1552,190 @@ def cmd_config_show(args) -> int:
     else:
         text = "\n".join(f"  {k} = {v!r}" for k, v, _ in rows)
     return emit(args, {"config": ctx.manifest.data, "provenance": ctx.manifest.provenance}, text)
+
+
+# -- store (ADR-014 D2, D4) ---------------------------------------------
+
+
+def _store_repo() -> Path:
+    """The main checkout of the repository the command runs in.
+
+    A store is linked to a repository's identity, which every worktree
+    shares, so the main checkout names it: its directory is the repo form of
+    a store's name when there is no remote (ruling 14).
+    """
+    from ..core import git
+
+    cwd = Path.cwd()
+    top = git.toplevel(cwd)
+    if top is None:
+        raise UsageError(
+            "not inside a git repository: a store is linked to a git "
+            "repository's identity"
+        )
+    main = git.main_checkout(cwd) or top
+    for root in {top, main}:
+        if (root / MANIFEST_RELPATH).is_file():
+            raise UsageError(
+                f"{root} is an in-repo project ({MANIFEST_RELPATH}). Moving its "
+                f"records to a store is 'invariant store migrate', ADR-014 "
+                f"increment 7, not built yet."
+            )
+    return main
+
+
+def _linked_lines(linked) -> list[str]:
+    from ..core.home import display_path, user_config_path
+    from ..core.stores import linked_index_path
+
+    identity = linked.identity
+    return [
+        f"linked {linked.key} ({identity.source}) -> {linked.store}",
+        f"  invariant.id {identity.local_id} in the repository's local git config",
+        f"  repos entry in {display_path(user_config_path())}",
+        f"  identity index {display_path(linked_index_path())}",
+    ]
+
+
+def cmd_store_init(args) -> int:
+    from ..core.stores import init_store
+
+    created = init_store(_store_repo(), Path(args.path) if args.path else None)
+    lines = [f"created store {created.store}"]
+    if created.note:
+        lines.append(f"  {created.note}")
+    lines += _linked_lines(created.linked)
+    lines.append(
+        "The store's invariant.yaml is not committed: review it and commit it "
+        "in the store."
+    )
+    return emit(
+        args,
+        {
+            "store": str(created.store),
+            "note": created.note,
+            "identity": created.linked.key,
+            "local_id": created.linked.identity.local_id,
+        },
+        "\n".join(lines),
+    )
+
+
+def cmd_store_link(args) -> int:
+    from ..core.stores import link_repo, update_link
+
+    repo = _store_repo()
+    if args.update:
+        linked = update_link(repo)
+        lines = [f"re-keyed the link onto the origin {linked.key} -> {linked.store}"]
+    elif not args.path:
+        raise UsageError("store link needs the store's path, or --update")
+    else:
+        linked = link_repo(repo, Path(args.path))
+        lines = _linked_lines(linked)
+        if not linked.added:
+            lines.insert(0, "already linked; the entry, ID and index are current")
+    return emit(
+        args,
+        {"store": str(linked.store), "identity": linked.key, "added": linked.added},
+        "\n".join(lines),
+    )
+
+
+def cmd_store_status(args) -> int:
+    """Is this a repository linked to a store? Exit 0 when it is, else 1.
+
+    ``--quiet`` prints nothing and only answers, for a guard to run first
+    (ADR-014 D11: a user-level agent stops unless this passes).
+    """
+    try:
+        manifest = Manifest.locate(Path.cwd(), required=False)
+    except ManifestError as exc:
+        reason = f"not linked: {exc}"
+        manifest = None
+    else:
+        reason = None
+        if not manifest.located:
+            reason = "not linked: no invariant project here"
+        elif manifest.store is None:
+            reason = (
+                "not linked: an in-repo project, whose records live in the repository"
+                if manifest.path.name == MANIFEST_RELPATH.name
+                and manifest.path.parent.name == MANIFEST_RELPATH.parent.name
+                else f"not linked: {manifest.path} names no store"
+            )
+    if reason is not None or manifest is None or manifest.store is None:
+        if not args.quiet:
+            if getattr(args, "json", False):
+                print(json.dumps({"linked": False, "reason": reason}, indent=2, sort_keys=True))
+            else:
+                print(reason)
+        return 1
+    if args.quiet:
+        return EXIT_OK
+    link = manifest.store
+    identity = link.identity
+    stored = sorted(k for k, v in manifest.data["records"].items() if v == "store")
+    lines = [
+        f"repository  {manifest.root}",
+        (
+            f"identity    {identity.key} ({identity.source})"
+            + (f", local ID {identity.local_id}" if identity.local_id else "")
+        ),
+        f"store       {link.name} at {link.root} (named by the {link.via} level)",
+        f"listed as   {link.key} under store.repos",
+        "records     "
+        + (", ".join(stored) + " in the store" if stored else "all in the repository"),
+    ]
+    if link.mismatch:
+        lines.append(
+            f"note        the origin {identity.origin} is not the linked key; "
+            f"run 'invariant store link --update'"
+        )
+    return emit(
+        args,
+        {
+            "linked": True,
+            "repository": str(manifest.root),
+            "identity": identity.key,
+            "source": identity.source,
+            "store": str(link.root),
+            "via": link.via,
+            "key": link.key,
+            "records": stored,
+            "mismatch": link.mismatch,
+        },
+        "\n".join(lines),
+    )
+
+
+def store_identity_row(manifest: Manifest) -> tuple[str, bool, str, bool] | None:
+    """`doctor`'s row for a store project's identity (ADR-014 D4), with
+    whether it warns; ``None`` for a project with no store."""
+    link = manifest.store
+    if link is None:
+        return None
+    identity = link.identity
+    if link.mismatch:
+        return (
+            "repo identity",
+            True,
+            (
+                f"the origin {identity.origin} is not linked; this repository is "
+                f"linked as {link.key}, so a remote was added after the link. Run "
+                f"'invariant store link --update' to key the link on the origin"
+            ),
+            True,
+        )
+    return (
+        "repo identity",
+        True,
+        (
+            f"{identity.key} ({identity.source}), store {link.name} at {link.root}, "
+            f"named by the {link.via} level"
+        ),
+        False,
+    )
 
 
 # -- session -----------------------------------------------------------
@@ -3796,7 +4010,7 @@ def cmd_oracle_projects_list(args) -> int:
 
 
 def cmd_oracle_projects_add(args) -> int:
-    manifest = Manifest.load(Path(args.path) if args.path else Path.cwd())
+    manifest = Manifest.locate(Path(args.path) if args.path else Path.cwd())
     entry, added = _project_index().register(manifest, via="manual")
     verb = "registered" if added else "already registered:"
     return emit(
@@ -4096,7 +4310,7 @@ def _start_prepare(index, selector: str, label: str | None, prompt: str | None, 
             f"carries a manifest; nothing was launched. `invariant oracle projects "
             f"prune` drops it"
         )
-    kind = Manifest.load(Path(entry.root)).get("host.kind")
+    kind = Manifest.locate(Path(entry.root)).get("host.kind")
     if kind != "claude_code":
         raise UsageError(
             f"oracle start-session starts a Claude Code session, and {entry.name}'s "
@@ -4929,14 +5143,24 @@ def cmd_hook(args) -> int:
     # no manifest and return an empty verdict — every gate silently off, with
     # evidence recording into whichever repository the cwd resolved to.
     manifest_start: Path | None = None
+    located: Manifest | None = None
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir and Manifest.find_root(Path(project_dir)):
-        manifest_start = Path(project_dir)
+    if project_dir:
+        try:
+            found = Manifest.locate(Path(project_dir), required=False)
+        except ManifestError:
+            # A project is there and does not load: resolving from it again
+            # below raises the same refusal, which the degraded answer names.
+            manifest_start = Path(project_dir)
+        else:
+            if found.located:
+                manifest_start, located = Path(project_dir), found
     try:
         ctx = Context(
             required=True,
             host_session_id=host_session_id,
             manifest_start=manifest_start,
+            manifest=located,
             probe=is_probe(body),
             pipeline_lock_timeout=HOOK_LOCK_SECONDS,
         )
@@ -5285,6 +5509,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_agents_install)
+
+    p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
+    q = p.add_parser("init", help="create a store for this repository and link it")
+    q.add_argument("path", nargs="?", help="where; default ~/.invariant/stores/<name>")
+    q.set_defaults(func=cmd_store_init)
+    q = p.add_parser("link", help="link this repository to an existing store")
+    q.add_argument("path", nargs="?", help="the store's path")
+    q.add_argument(
+        "--update", action="store_true",
+        help="re-key a link made by local ID onto the repository's origin",
+    )
+    q.set_defaults(func=cmd_store_link)
+    q = p.add_parser("status", help="is this repository linked to a store")
+    q.add_argument("--quiet", action="store_true", help="print nothing; exit 0 if linked")
+    q.set_defaults(func=cmd_store_status)
 
     p = sub.add_parser("config").add_subparsers(dest="sub", required=True)
     q = p.add_parser("show")

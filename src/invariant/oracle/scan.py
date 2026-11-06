@@ -72,7 +72,7 @@ from ..core import git
 from ..core.errors import InvariantError, ManifestError, StateError, UnknownRuleError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE
-from ..core.manifest import MANIFEST_RELPATH, Manifest
+from ..core.manifest import Manifest
 from ..core.privacy import PrivacyScanner
 from ..core.store import InertStore
 from ..domains.pipeline import PipelineDomain
@@ -743,7 +743,7 @@ class _ProjectReader:
         root = Path(entry.root)
         # Loaded from the recorded root only: walking upward from a root that
         # lost its manifest would read some enclosing project's instead.
-        if not (root / MANIFEST_RELPATH).is_file():
+        if not Manifest.is_project_root(root):
             raise _NoManifest(
                 f"no manifest at {root}; 'invariant oracle projects prune' drops it"
             )
@@ -751,7 +751,7 @@ class _ProjectReader:
         self.root = root
         self.now = now
         self.cache = cache
-        self.manifest = Manifest.load(root)
+        self.manifest = Manifest.locate(root)
         self.store = InertStore(Path(entry.key))
         self.sessions = SessionDomain(self.manifest, store=self.store)
         self.pipelines = PipelineDomain(self.manifest, store=self.store)
@@ -1265,9 +1265,9 @@ def replay_values(replay: Mapping[str, Any], names: Iterable[str],
         session_id, started, index = str(replay["session"]), replay["started"], replay["run"]
     except (KeyError, TypeError) as exc:
         raise StateError(f"the step names no recorded run to take its values from ({exc})") from None
-    if not (root / MANIFEST_RELPATH).is_file():
+    if not Manifest.is_project_root(root):
         raise StateError(f"no manifest at {root}; the recorded values cannot be read")
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     pipeline = PipelineDomain(manifest, store=InertStore(key)).current(session_id)
     if pipeline is None or pipeline.started != started:
         raise StateError(

@@ -86,11 +86,11 @@ def host_plan(root):
     """The plan callable the CLI hands the rule, for the project at ``root``."""
     from invariant.cli.main import host_agent_plan
 
-    return host_agent_plan(Manifest.load(root))
+    return host_agent_plan(Manifest.locate(root))
 
 
 def context(root, plan=None):
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     return RuleContext(manifest=manifest, cwd=root, host_agent_plan=plan)
 
 
@@ -112,7 +112,7 @@ def older(root, name=NAME, source_digest="0" * 16):
     """A copy an earlier release wrote and nobody touched: its body matches
     its own witness, not today's render, and its source digest is not
     today's, so the library is the input that moved."""
-    shipped = ClaudeCodeHost(root, manifest=Manifest.load(root))
+    shipped = ClaudeCodeHost(root, manifest=Manifest.locate(root))
     (step,) = [s for s in shipped.plan_assets(only="agent") if s.identity == name]
     text = step.text + "Older wording.\n"
     target(root, name).write_text(

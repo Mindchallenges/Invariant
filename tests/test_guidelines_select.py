@@ -347,7 +347,7 @@ class TestTouched:
 
     def session_domain(self, root: Path, files=()):
         return GuidelinesDomain(RuleContext(
-            manifest=Manifest.load(root), cwd=root,
+            manifest=Manifest.locate(root), cwd=root,
             session={"id": "s1", "files": list(files), "base": ""},
         ))
 

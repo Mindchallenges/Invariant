@@ -644,12 +644,12 @@ def repo(tmp_path):
 
 
 def clean_of(root: Path, *, base="master", files=(), **manifest_extra):
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     if manifest_extra:
         body = yaml.safe_load((root / MANIFEST_RELPATH).read_text(encoding="utf-8"))
         body.update(manifest_extra)
         (root / MANIFEST_RELPATH).write_text(yaml.safe_dump(body), encoding="utf-8")
-        manifest = Manifest.load(root)
+        manifest = Manifest.locate(root)
     ctx = RuleContext(
         manifest=manifest, cwd=root, session={"files": list(files), "base": base}
     )

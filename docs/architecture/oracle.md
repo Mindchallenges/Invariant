@@ -192,7 +192,9 @@ one that scans `core/`, `domains/` and `adapters/`.
 `oracle_home()` returns `$INVARIANT_HOME` when it is set and not empty, and
 `~/.invariant` otherwise. The value is resolved on every call and never cached.
 The function only names the directory: it does not create it and does not read
-it.
+it. It asks `core/home.invariant_home`, the one resolution of that directory,
+which the manifest also reads for the user level of the configuration
+(ADR-014 D3), so the index and `config.yaml` always share a home.
 
 The test suite sets `INVARIANT_HOME` to a fresh temporary directory for every
 test (`tests/conftest.py`). The variable is exported, so a hook shim that a
@@ -224,13 +226,17 @@ summary:
 | `match(selector)` / `remove(selector)` | Tries the selector as a key, then a root (relative or absolute), then a name. The first rung with a hit wins. A name shared by several entries is refused, and so is a selector that matches nothing. |
 | `prune(dry_run)` | Drops the entries whose `root` no longer has a manifest. The manifest is checked again under the lock. If nothing is stale, no lock is taken. |
 
-**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D10).** A store project has no
-`.claude/invariant.yaml` in its root, so the five checks that test
+**Built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md) D10, increment 2).** A store project has no
+`.claude/invariant.yaml` in its root, so the five checks that tested
 `root / MANIFEST_RELPATH` for existence (`ProjectEntry.has_manifest`,
-`_canonical_root`, `oracle/scan` twice, `oracle/gates`) ask `Manifest.locate`
-instead; otherwise `prune` would drop a store project and `oracle list` would
-show it as an ALERT. The key, `Manifest.state_root`, is unchanged. Increment
-2 builds it.
+`_canonical_root`, `oracle/scan` twice, `oracle/gates`) ask
+`Manifest.is_project_root`, which asks `Manifest.locate`; otherwise `prune`
+would drop a store project and `oracle list` would show it as an ALERT. An
+in-repo root still answers by the file's existence alone, and a project that
+is found and does not load is still a project, as a manifest that exists and
+does not parse always was. `register` names an entry after `project.name`
+when the project's own repo or store level sets it (`set_by_project`), else
+after its root. The key, `Manifest.state_root`, is unchanged.
 
 ### How a project gets in
 

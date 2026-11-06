@@ -37,7 +37,7 @@ def git_project(root: Path, manifest: dict | None = None) -> Manifest:
     )
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
-    return Manifest.load(root)
+    return Manifest.locate(root)
 
 
 @pytest.fixture
@@ -77,7 +77,7 @@ class TestSessionDomain:
         domain.isolate(session.id, execute=True)
 
         worktree = Path(domain.get(session.id).worktree)
-        from_worktree = Manifest.load(worktree)
+        from_worktree = Manifest.locate(worktree)
         assert from_worktree.state_root == m.state_root
         assert SessionDomain(from_worktree).get(session.id) is not None
 
@@ -521,7 +521,7 @@ class TestTheMethodologyIsPinnedToThePipeline:
         `start`, which is exactly why the wedge escaped the domain tests.
         """
         session = self.start_chore(m)
-        fresh = PipelineDomain(Manifest.load(m.root))
+        fresh = PipelineDomain(Manifest.locate(m.root))
         pipeline = fresh.current(session.id)
         assert pipeline.state == "doing"
         fresh.evaluate_gates(session.id, cwd=m.root)  # must not raise
@@ -530,7 +530,7 @@ class TestTheMethodologyIsPinnedToThePipeline:
 
     def test_machine_for_resolves_the_persisted_methodology(self, m):
         session = self.start_chore(m)
-        fresh = PipelineDomain(Manifest.load(m.root))
+        fresh = PipelineDomain(Manifest.locate(m.root))
         assert fresh.machine_for(fresh.current(session.id)).id == "chore"
 
     def test_the_override_does_not_rewrite_the_shared_manifest(self, m):
@@ -541,7 +541,7 @@ class TestTheMethodologyIsPinnedToThePipeline:
     def test_a_running_override_pipeline_still_refuses_a_second(self, m):
         session = self.start_chore(m)
         with pytest.raises(UsageError, match="already running"):
-            PipelineDomain(Manifest.load(m.root)).start(session.id)
+            PipelineDomain(Manifest.locate(m.root)).start(session.id)
 
     def test_editing_the_manifest_mid_pipeline_does_not_swap_the_gate_set(self, m):
         """AUD-03: one exempt manifest line must not silently retune the gates."""
@@ -554,7 +554,7 @@ class TestTheMethodologyIsPinnedToThePipeline:
         body.setdefault("methodology", {})["pipeline"] = "docs"
         path.write_text(yaml.safe_dump(body), encoding="utf-8")
 
-        fresh = PipelineDomain(Manifest.load(m.root))
+        fresh = PipelineDomain(Manifest.locate(m.root))
         pipeline = fresh.current(session.id)
         assert fresh.machine_for(pipeline).id == "tdd"
         verdicts = fresh.evaluate_gates(session.id, target="red", cwd=m.root)
@@ -1718,7 +1718,7 @@ class CoverageFixture:
             ),
             encoding="utf-8",
         )
-        fresh = Manifest.load(m.root)
+        fresh = Manifest.locate(m.root)
         sessions = SessionDomain(fresh)
         session = sessions.start("x")
         pipelines = PipelineDomain(fresh)
@@ -1858,7 +1858,7 @@ exit 0
             ),
             encoding="utf-8",
         )
-        fresh = Manifest.load(m.root)
+        fresh = Manifest.locate(m.root)
         session = SessionDomain(fresh).start("x")
         pipelines = PipelineDomain(fresh)
         pipelines.start(session.id, task="t")
@@ -1945,7 +1945,7 @@ exit 72
         (m.root / MANIFEST_RELPATH).write_text(
             yaml.safe_dump(chained), encoding="utf-8"
         )
-        fresh = Manifest.load(m.root)
+        fresh = Manifest.locate(m.root)
         with pytest.raises(UsageError, match="still runs the reporting tool"):
             PipelineDomain(fresh).run_coverage(session.id, cwd=m.root)
 
@@ -1961,7 +1961,7 @@ exit 72
         (m.root / MANIFEST_RELPATH).write_text(
             yaml.safe_dump(chained), encoding="utf-8"
         )
-        fresh = Manifest.load(m.root)
+        fresh = Manifest.locate(m.root)
         result = PipelineDomain(fresh).run_coverage(session.id, cwd=m.root)
         assert result["suite_passed"] is False
         assert result["files"] == 1

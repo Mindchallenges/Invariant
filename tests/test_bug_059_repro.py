@@ -77,7 +77,7 @@ def test_BUG_059_doctor_does_not_spend_the_callers_host_binding(
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
     main(["session", "start", "x"])
 
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     assert manifest.state_root == state_root.resolve()  # never a live root
     session = SessionDomain(manifest).by_host_session(HOST_ID)
     assert session is not None, "precondition: session start bound the host id"
@@ -89,7 +89,7 @@ def test_BUG_059_doctor_does_not_spend_the_callers_host_binding(
     main(["doctor"])
 
     # 4. Read it again.
-    after = SessionDomain(Manifest.load(root)).get(session.id)
+    after = SessionDomain(Manifest.locate(root)).get(session.id)
     assert after is not None
     assert after.host_ended is False, (
         "`invariant doctor` marked the caller's host binding spent: "

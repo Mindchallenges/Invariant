@@ -58,7 +58,7 @@ def manifest_with_unloadable_session_machine(tmp_path):
             "methodology": {"extra_machines": [str(broken)]},
         },
     )
-    return Manifest.load(tmp_path)
+    return Manifest.locate(tmp_path)
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def ctx_factory(repo):
     def build(cwd=None, session=None, pipeline=None, payload=None, extra=None):
         cwd = cwd or main
         return RuleContext(
-            manifest=Manifest.load(main),
+            manifest=Manifest.locate(main),
             cwd=Path(cwd),
             session=session,
             pipeline=pipeline,
@@ -2668,7 +2668,7 @@ class TestAWorktreeUnderAnExemptDirectoryStillEnforces:
 
         def build(payload=None, cwd=None):
             return RuleContext(
-                manifest=Manifest.load(main),
+                manifest=Manifest.locate(main),
                 cwd=Path(cwd or main),
                 session=None,
                 pipeline=None,
@@ -3947,7 +3947,7 @@ class TestClosingTheSessionIsGated:
              "methodology": {"pipeline": "bug"}},
         )
         ctx = RuleContext(
-            manifest=Manifest.load(tmp_path),
+            manifest=Manifest.locate(tmp_path),
             cwd=tmp_path,
             session={"state": "working", "branch": "session/x", "base": "master"},
             pipeline={"state": "committed"},
@@ -4065,7 +4065,7 @@ class TestClosingTheSessionIsGated:
                     },
                 )
                 ctx = RuleContext(
-                    manifest=Manifest.load(main),
+                    manifest=Manifest.locate(main),
                     cwd=main,
                     session=dict(session),
                     pipeline={"state": "committed"},
@@ -4091,7 +4091,7 @@ class TestClosingTheSessionIsGated:
             run(["git", "commit", "-q", "--allow-empty", "-m", "w"], wt)
             long_ago = time.time() - 90 * self.DAY
 
-            stale = SessionDomain(Manifest.load(main), clock=lambda: long_ago)
+            stale = SessionDomain(Manifest.locate(main), clock=lambda: long_ago)
             record = stale.start("spans-hosts")
             for title in ("wire the domain", "wire the rules", "wire the cli"):
                 stale.plan_add(record.id, title)
@@ -4101,16 +4101,16 @@ class TestClosingTheSessionIsGated:
 
             def verdict_now():
                 ctx = RuleContext(
-                    manifest=Manifest.load(main),
+                    manifest=Manifest.locate(main),
                     cwd=main,
-                    session=SessionDomain(Manifest.load(main)).get(record.id).to_dict(),
+                    session=SessionDomain(Manifest.locate(main)).get(record.id).to_dict(),
                     pipeline={"state": "committed"},
                 )
                 return only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
 
             assert not verdict_now().ok
 
-            SessionDomain(Manifest.load(main)).plan_done(record.id, 1)
+            SessionDomain(Manifest.locate(main)).plan_done(record.id, 1)
             after = verdict_now()
             assert after.ok and not after.skipped
             assert "1 of 3" in after.message
@@ -4262,7 +4262,7 @@ class TestTheMethodologyMustActuallyRun:
              "methodology": {"pipeline": "bug"}},
         )
         ctx = RuleContext(
-            manifest=Manifest.load(tmp_path),
+            manifest=Manifest.locate(tmp_path),
             cwd=tmp_path,
             session={"state": "working"},
             pipeline={"state": "red"},
@@ -6155,7 +6155,7 @@ class TestPathsWhereTheFloorIsAdvisory:
                 },
             },
         )
-        line = coverage_advisory_exception(Manifest.load(tmp_path))
+        line = coverage_advisory_exception(Manifest.locate(tmp_path))
         assert line is not None
         assert "ACTIVE EXCEPTION" in line
         assert "web/**" in line and "Sync/**" in line
@@ -6166,7 +6166,7 @@ class TestPathsWhereTheFloorIsAdvisory:
         from invariant.core.rules import coverage_advisory_exception
 
         write_manifest(tmp_path, {"version": 1})
-        assert coverage_advisory_exception(Manifest.load(tmp_path)) is None
+        assert coverage_advisory_exception(Manifest.locate(tmp_path)) is None
 
 
 class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:
@@ -6795,7 +6795,7 @@ class TestTheDeliverablesGate:
              "methodology": {"pipeline": "bug"}},
         )
         ctx = RuleContext(
-            manifest=Manifest.load(tmp_path),
+            manifest=Manifest.locate(tmp_path),
             cwd=tmp_path,
             session={"state": "reviewed", "plan": []},
         )
@@ -7025,7 +7025,7 @@ class TestADeclarationOutsideTheProjectExemptsNothing:
         from invariant.core.rules import is_exempt_path
 
         write_manifest(ctx_factory.main, {"version": 1, **body})
-        return is_exempt_path(Manifest.load(ctx_factory.main), ctx_factory.main, target)
+        return is_exempt_path(Manifest.locate(ctx_factory.main), ctx_factory.main, target)
 
     def test_an_absolute_exempt_glob_above_the_project(self, ctx_factory, tmp_path):
         outside = tmp_path / "unrelated" / "a.md"
@@ -7111,7 +7111,7 @@ class TestTheDocsRootIsFoundHoweverItIsSpelled:
 
         wt = ctx_factory.wt
         write_manifest(wt, {"version": 1, "paths": {"docs": written}})
-        return docs_roots(Manifest.load(wt), wt)
+        return docs_roots(Manifest.locate(wt), wt)
 
     @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
     def test_every_tree_is_a_docs_root(self, ctx_factory, template):
@@ -7492,7 +7492,7 @@ class TestSweepFresh:
         )
         from invariant.core.manifest import Manifest
 
-        manifest = Manifest.load(ctx_factory.main)
+        manifest = Manifest.locate(ctx_factory.main)
         assert manifest.rule_level("sweep.fresh") is Level.WARN
 
 

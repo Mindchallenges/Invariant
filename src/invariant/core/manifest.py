@@ -6,8 +6,11 @@ Values are resolved in layers, later winning:
   1. library defaults
   2. adapter defaults, primary ecosystem first
   3. the enforcement profile (rule levels only)
-  4. explicit manifest values
+  4. the config levels (ADR-014 D3): the user's defaults (5a), the store and
+     its block for this repo (5b), the repo's own manifest or pointer (5c)
   5. environment overrides
+
+``Manifest.locate`` finds the project and its levels (ADR-014 D2).
 
 Every resolved value remembers which layer produced it. "Why is this rule
 blocking me" has to be answerable without reading the library's source, and a
@@ -21,7 +24,8 @@ import fnmatch
 import os
 import posixpath
 import sys
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -31,7 +35,17 @@ import yaml
 
 from .agents import TIERS
 from .errors import ManifestError, UnknownRuleError
+from .home import UserConfig, load_user_config
+from .identity import repo_identity
 from .privacy import DEFAULT_PATTERNS, parse_allow
+from .stores import (
+    POINTER,
+    STORE_MANIFEST,
+    StoreLink,
+    find_store,
+    read_pointer,
+    store_levels,
+)
 
 MANIFEST_RELPATH = Path(".claude") / "invariant.yaml"
 
@@ -118,6 +132,22 @@ def _did_you_mean(rule_id: str) -> str:
 DEFAULTS: dict[str, Any] = {
     "version": 1,
     "project": {"name": "unnamed", "ecosystems": ["generic"]},
+    # Where each record type lives (ADR-014 D1): `repo`, today's layout
+    # exactly, or `store`, a separate git repository the project's level
+    # names, against whose root the record's path keys are then read.
+    # `hooks` and `agents` say where the host adapter wires itself, `repo` or
+    # `user` (D11). Every key defaults to `repo`, so a project that writes
+    # nothing here resolves exactly as before the block existed.
+    "records": {
+        "docs": "repo",
+        "backlog": "repo",
+        "guidelines": "repo",
+        "memory": "repo",
+        "reports": "repo",
+        "sweeps": "repo",
+        "hooks": "repo",
+        "agents": "repo",
+    },
     "paths": {
         # null means "derive it". State must be SHARED by every worktree of a
         # repository: a session created from the main checkout has to stay
@@ -405,6 +435,50 @@ _INJECTION_KEYS = ("max_lines", "on_edit")
 #: The `guidelines.verdicts` keys this build reads (A4 increment 1).
 _VERDICTS_KEYS = ("note_max_chars",)
 
+#: Each record type, and the locations it may take (ADR-014 D1).
+RECORD_LOCATIONS: dict[str, tuple[str, ...]] = {
+    "docs": ("repo", "store"),
+    "backlog": ("repo", "store"),
+    "guidelines": ("repo", "store"),
+    "memory": ("repo", "store"),
+    "reports": ("repo", "store"),
+    "sweeps": ("repo", "store"),
+    "hooks": ("repo", "user"),
+    "agents": ("repo", "user"),
+}
+
+#: The path keys each record type owns. Under `store` they are read against
+#: the store root (D1). `methodology.extra_machines` and
+#: `methodology.gates.coverage_baseline` follow `guidelines`, because they
+#: are policy files too; `agents.overlays` is a mapping whose values are the
+#: paths.
+RECORD_PATH_KEYS: dict[str, tuple[str, ...]] = {
+    "docs": ("paths.docs",),
+    "backlog": ("items.path", "items.closed_path"),
+    "guidelines": (
+        "guidelines.ruleset",
+        "guidelines.baseline",
+        "guidelines.checklist",
+        "agents.overlays",
+        "methodology.extra_machines",
+        "methodology.gates.coverage_baseline",
+    ),
+    "memory": ("paths.memory", "paths.memory_index"),
+    "reports": ("paths.reports",),
+    "sweeps": ("paths.sweeps",),
+}
+
+#: Records whose `store` location is refused until the increment that makes
+#: it safe is built, with that reason (ADR-014 D9, Increments).
+_STORE_NOT_YET: dict[str, str] = {
+    "guidelines": (
+        "the gates do not yet read a record from its own tree (ADR-014 D9, "
+        "increment 4): a ruleset or baseline in a store would leave "
+        "guidelines.baseline_only_shrinks finding no baseline at the base and "
+        "admitting every entry"
+    ),
+}
+
 
 @dataclass
 class Manifest:
@@ -414,39 +488,144 @@ class Manifest:
     path: Path
     data: dict[str, Any]
     provenance: dict[str, str] = field(default_factory=dict)
+    #: The root of the project's store, when it has one (ADR-014 D2). A
+    #: record under `store` reads its path keys against it.
+    store_root: Path | None = None
+    #: The store as the lookup found it, for a store project (ADR-014 D2).
+    store: StoreLink | None = None
+    #: False when ``locate`` found no project and resolved the defaults.
+    located: bool = True
     _discovery_cache: dict[str, str] = field(default_factory=dict, repr=False)
 
     # -- discovery -----------------------------------------------------
 
-    @staticmethod
-    def find_root(start: Path | None = None) -> Path | None:
-        """Walk upward for a directory containing the manifest."""
-        current = Path(start or Path.cwd()).resolve()
-        for candidate in [current, *current.parents]:
-            if (candidate / MANIFEST_RELPATH).is_file():
-                return candidate
-        return None
+    @classmethod
+    def locate(
+        cls,
+        start: Path | None = None,
+        *,
+        required: bool = True,
+        env: Mapping[str, str] | None = None,
+    ) -> Manifest:
+        """The project ``start`` lies in, resolved over every config level.
+
+        Walks up from ``start`` (ADR-014 D2). At each level an in-repo
+        manifest, ``.claude/invariant.yaml``, answers first, exactly as
+        before; otherwise a git top level whose identity has a store (its
+        pointer, then the user level's ``repos:``), or which carries a
+        pointer, is the project root. The nearest answer wins, so a repo
+        nested inside an in-repo project finds its own store first. A plain
+        git repository is walked past.
+
+        With nothing found, ``required`` refuses; otherwise the defaults are
+        resolved at ``start``, with ``located`` false. A refusal about a
+        project that was found names it (``ManifestError.project_root``).
+        """
+        begin = Path(start or Path.cwd()).resolve()
+        user = load_user_config(env)
+        below = [(user.label, user.defaults)] if user.defaults else []
+        for candidate in [begin, *begin.parents]:
+            in_repo = candidate / MANIFEST_RELPATH
+            if in_repo.is_file():
+                with _naming_the_project(candidate, in_repo):
+                    return cls._in_repo(candidate, in_repo, below, env)
+            if (candidate / ".git").exists():
+                with _naming_the_project(candidate, candidate / POINTER):
+                    found = cls._store_project(candidate, user, below, env)
+                if found is not None:
+                    return found
+        if required:
+            raise ManifestError(
+                "no .claude/invariant.yaml found in this directory or any "
+                "parent; run 'invariant init' to create one, or "
+                "'invariant store link <store>' to keep this repository's records "
+                "in a store"
+            )
+        return cls.from_raw(
+            {}, root=begin, path=begin / MANIFEST_RELPATH, env=env, below=below,
+            located=False,
+        )
 
     @classmethod
-    def load(cls, start: Path | None = None, *, required: bool = True) -> Manifest:
-        root = cls.find_root(start)
-        if root is None:
-            if required:
-                raise ManifestError(
-                    "no .claude/invariant.yaml found in this directory or any "
-                    "parent; run 'invariant init' to create one"
-                )
-            root = Path(start or Path.cwd()).resolve()
-            return cls.from_raw({}, root=root, path=root / MANIFEST_RELPATH)
-
-        path = root / MANIFEST_RELPATH
+    def _in_repo(
+        cls,
+        root: Path,
+        path: Path,
+        below: Sequence[tuple[str, Mapping[str, Any]]],
+        env: Mapping[str, str] | None,
+    ) -> Manifest:
         try:
             raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as exc:
             raise ManifestError(f"{MANIFEST_RELPATH} is not valid YAML: {exc}") from exc
         if not isinstance(raw, Mapping):
             raise ManifestError(f"{MANIFEST_RELPATH} must contain a mapping")
-        return cls.from_raw(dict(raw), root=root, path=path)
+        return cls.from_raw(dict(raw), root=root, path=path, env=env, below=below)
+
+    @classmethod
+    def _store_project(
+        cls,
+        top: Path,
+        user: UserConfig,
+        below: Sequence[tuple[str, Mapping[str, Any]]],
+        env: Mapping[str, str] | None,
+    ) -> Manifest | None:
+        """The project at the git top level ``top``, when it has a store or a
+        pointer; ``None`` for a plain repository."""
+        pointer = read_pointer(top)
+        link = find_store(top, repo_identity(top), pointer, user)
+        if link is None and pointer is None:
+            return None
+        levels = list(below)
+        path = pointer.path if pointer is not None else None
+        if link is not None:
+            store = store_levels(link)
+            link = store.link
+            levels.append((link.label, store.top))
+            if store.repo:
+                levels.append((link.repo_label, store.repo))
+            path = path or link.root / STORE_MANIFEST
+        manifest = cls.from_raw(
+            pointer.level if pointer is not None else {},
+            root=top,
+            path=path or top / POINTER,
+            env=env,
+            below=levels,
+            store=link,
+            label=f"repo:{POINTER}",
+        )
+        if manifest.get("guidelines.baseline") is not None:
+            # The shrink gate reads the base branch's manifest from the repo
+            # at .claude/invariant.yaml. A store project has none there, and
+            # the gate would read "no baseline configured" and admit every
+            # entry (ADR-014 D9, run in the spike). Refused until D9 reads
+            # each record's own tree.
+            raise ManifestError(
+                "guidelines.baseline is refused in a project whose manifest is not "
+                "in its repository, until the gates read each record from its own "
+                "tree (ADR-014 D9, increment 4): guidelines.baseline_only_shrinks "
+                "would find no manifest at the base and admit every entry."
+            )
+        return manifest
+
+    @classmethod
+    def is_project_root(cls, path: Path) -> bool:
+        """Is ``path`` the root of a project, in-repo or store?
+
+        An in-repo manifest answers by its existence alone, as it always did.
+        Otherwise ``locate`` is asked, and a project there that does not load
+        is still a project: its refusal is its own report.
+        """
+        path = Path(path)
+        if (path / MANIFEST_RELPATH).is_file():
+            return True
+        if not (path / ".git").exists():
+            return False
+        try:
+            found = cls.locate(path, required=False)
+        except ManifestError as exc:
+            return exc.project_root is not None and exc.project_root == path.resolve()
+        return found.located and found.root == path.resolve()
 
     # -- resolution ----------------------------------------------------
 
@@ -458,15 +637,41 @@ class Manifest:
         root: Path,
         path: Path,
         env: Mapping[str, str] | None = None,
+        below: Sequence[tuple[str, Mapping[str, Any]]] = (),
+        store_root: Path | None = None,
+        store: StoreLink | None = None,
+        label: str | None = None,
+        located: bool = True,
     ) -> Manifest:
+        """Resolve ``raw``, the repo's level, over the library's layers.
+
+        ``below`` are the config levels under ``raw``, lowest first, each
+        with its provenance label: the user's defaults and the store's levels
+        (ADR-014 D3, 5a and 5b). ``label`` is ``raw``'s own, ``repo:`` and
+        the file's path from the root unless given. ``store`` is the
+        project's store; ``store_root``, its root, against which a record
+        under `store` reads its path keys (D1).
+        """
         env = os.environ if env is None else env
+        if label is None:
+            try:
+                label = f"repo:{Path(path).relative_to(root).as_posix()}"
+            except ValueError:
+                label = f"repo:{Path(path).name}"
+        if store is not None and store_root is None:
+            store_root = store.root
+        levels = [*(level for _label, level in below), raw]
 
         data = copy.deepcopy(DEFAULTS)
         provenance: dict[str, str] = {}
         _record(provenance, data, "default")
 
         # Layer 2 — the primary adapter's defaults, flat `commands.*` included.
-        primary, *others = _ecosystems(raw)
+        # The ecosystems are the highest level's that names them: a store
+        # project names them in its store.
+        primary, *others = _ecosystems(
+            {"project": {"ecosystems": _highest(levels, "project", "ecosystems")}}
+        )
         _merge(data, _adapter_defaults(primary), provenance, f"adapter:{primary}")
 
         # Layer 3 — every further ecosystem, in listed order, without ever
@@ -482,9 +687,11 @@ class Manifest:
                 _merge(data, {"commands": {eco: commands}}, provenance, f"adapter:{eco}")
             _fill(data, adapter_defaults, provenance, f"adapter:{eco}")
 
-        # Layer 4 — the enforcement profile supplies rule levels only.
+        # Layer 4 — the enforcement profile supplies rule levels only. The
+        # name is the highest level's that sets one, so a user default picks
+        # the profile and the project's own choice still wins over it.
         profile_name = str(
-            _dig(raw, "enforcement", "profile") or data["enforcement"]["profile"]
+            _highest(levels, "enforcement", "profile") or data["enforcement"]["profile"]
         )
         profile_rules = _load_profile(profile_name)
         _merge(
@@ -494,15 +701,88 @@ class Manifest:
             f"profile:{profile_name}",
         )
 
-        # Layer 5 — explicit manifest values.
-        _merge(data, raw, provenance, "manifest")
+        # Layer 5 — the config levels, lowest first (ADR-014 D3): the user's
+        # defaults, the store and its block for this repo, then the repo's own.
+        for below_label, level in below:
+            _merge(data, level, provenance, below_label)
+        _merge(data, raw, provenance, label)
 
-        manifest = cls(root=Path(root), path=Path(path), data=data, provenance=provenance)
+        manifest = cls(
+            root=Path(root),
+            path=Path(path),
+            data=data,
+            provenance=provenance,
+            store_root=store_root,
+            store=store,
+            located=located,
+        )
 
         # Layer 6 — environment escapes.
         manifest._apply_env(env)
-        manifest.validate()
+        try:
+            manifest.validate()
+        except ManifestError as exc:
+            raise manifest._naming_lower_levels(exc, below) from exc
+        manifest._place_store_records()
         return manifest
+
+    def _naming_lower_levels(
+        self, exc: ManifestError, below: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> ManifestError:
+        """``exc``, naming the user-level values in the configuration it refused.
+
+        A default written in one operator's home is part of every project's
+        configuration on that machine, so a refusal it caused must say where
+        to look: the message would otherwise point at a manifest that never
+        set the key.
+        """
+        values = self.user_level_values()
+        if not values:
+            return exc
+        labels = sorted({label for label, _level in below})
+        keys = ", ".join(key for key, _value, _label in values)
+        message = (
+            f"{exc}\n  The user level ({', '.join(labels)}) supplies part of this "
+            f"configuration: {keys}."
+        )
+        if isinstance(exc, UnknownRuleError):
+            return UnknownRuleError(message, exc.rule_id)
+        return ManifestError(message)
+
+    def set_by_project(self, dotted: str) -> bool:
+        """Did one of the project's own levels, its repo or its store, set it?"""
+        return self.source_of(dotted).startswith(("repo:", "store:"))
+
+    def user_level_values(self) -> list[tuple[str, Any, str]]:
+        """Every resolved value the user level supplied, with its label.
+
+        What `doctor` lists in one row (ADR-014 ruling 19), so an operator's
+        home directory never changes a resolved value unannounced. A user
+        default a higher level overrides is not here: it changed nothing.
+        """
+        return [row for row in self.iter_provenance() if row[2].startswith("user:")]
+
+    def _place_store_records(self) -> None:
+        """Read every `store` record's path keys against the store (D1).
+
+        Validation has already refused a `store` record with no store root
+        and a store path that is absolute or climbs out. The joined value is
+        absolute, which ``path_for`` and every reader that joins onto the
+        root already resolve; its provenance stays the level that set it.
+        """
+        if self.store_root is None:
+            return
+        for record, location in self.data["records"].items():
+            if location != "store":
+                continue
+            for dotted, joined in store_record_paths(
+                self.data, record, self.store_root
+            ).items():
+                *parents, leaf = dotted.split(".")
+                node = self.data
+                for part in parents:
+                    node = node[part]
+                node[leaf] = joined
 
     def _apply_env(self, env: Mapping[str, str]) -> None:
         if profile := env.get("INVARIANT_PROFILE"):
@@ -599,6 +879,7 @@ class Manifest:
                     f"got {value!r}"
                 )
         self._validate_schedule(gates)
+        self._validate_records()
         self._validate_ecosystem_commands()
         self._validate_freshness_level()
         self._validate_guidelines()
@@ -619,6 +900,69 @@ class Manifest:
             find_machine_file(methodology, self)
         except ManifestError as exc:
             raise ManifestError(f"methodology.pipeline: {exc}") from exc
+
+    def _validate_records(self) -> None:
+        """Refuse a `records` block that would place a record nowhere (D1).
+
+        A location this build cannot honour yet is refused with the increment
+        that builds it rather than loading and doing nothing (BUG_050): `user`
+        wiring for hooks and agents (D11, increment 3), and the guidelines
+        records in a store (D9, increment 4).
+        """
+        records = self.data.get("records")
+        if not isinstance(records, Mapping):
+            raise ManifestError(
+                f"records must be a mapping of record type to its location, "
+                f"got {records!r}"
+            )
+        for record, location in records.items():
+            if record == "manifest":
+                raise ManifestError(
+                    "records.manifest: the manifest is not a record. Where it "
+                    "lives is answered by the config levels (ADR-014 D3): a "
+                    "project moves its manifest by having no repo level."
+                )
+            if record not in RECORD_LOCATIONS:
+                raise ManifestError(
+                    f"records names {record!r}, which is not a record type; "
+                    f"use one of {', '.join(RECORD_LOCATIONS)}"
+                )
+            allowed = RECORD_LOCATIONS[record]
+            if not isinstance(location, str) or location not in allowed:
+                raise ManifestError(
+                    f"records.{record} is {location!r}; use one of {', '.join(allowed)}"
+                )
+            if location == "user":
+                raise ManifestError(
+                    f"records.{record}: user is not built yet. Wiring the host "
+                    f"from outside the repository is ADR-014 D11, increment 3; "
+                    f"until then it would wire nothing, so the project would "
+                    f"run with no {record}."
+                )
+            if location == "store" and record in _STORE_NOT_YET:
+                raise ManifestError(
+                    f"records.{record}: store is refused in this build: "
+                    f"{_STORE_NOT_YET[record]}."
+                )
+        stored = [record for record, location in records.items() if location == "store"]
+        if stored and self.store_root is None:
+            raise ManifestError(
+                f"records.{stored[0]} is store, but this project has no store. "
+                f"A store is named by the repo's pointer or linked from the user "
+                f"level ('invariant store link'); an in-repo project keeps every "
+                f"record in its repo."
+            )
+        if records.get("backlog") == "store" and self.get("items.exempt") is False:
+            raise ManifestError(
+                "items.exempt: false with records.backlog: store is refused "
+                "(ADR-014 D10). A backlog in a store is written in the store's "
+                "main checkout, which no session branch reviews, so it can only "
+                "be exempt from isolation; set items.exempt: true, or keep the "
+                "backlog in the repo to review it with the code."
+            )
+        if self.store_root is not None:
+            for record in stored:
+                store_record_paths(self.data, record, self.store_root)
 
     def _validate_ecosystem_commands(self) -> None:
         """Refuse a per-ecosystem command block that would do nothing (ADR-013 D1).
@@ -1247,6 +1591,46 @@ def glob_matches(rel: str, canonical: str) -> bool:
     return fnmatch.fnmatch(rel, canonical) or fnmatch.fnmatch(rel, f"{canonical}/*")
 
 
+def store_record_paths(
+    data: Mapping[str, Any], record: str, store_root: Path
+) -> dict[str, Any]:
+    """``record``'s path keys in ``data``, joined onto ``store_root`` (D1).
+
+    Keyed by dotted key; a null value is left out. A list is joined entry by
+    entry and a mapping value by value. A path under a store is
+    store-relative: the store can be shared, so an absolute path would carry
+    one machine's home directory, and one climbing out with ``..`` would name
+    something outside the store. Either is refused, naming the key.
+    """
+    joined: dict[str, Any] = {}
+    for dotted in RECORD_PATH_KEYS.get(record, ()):
+        value = _dig(data, *dotted.split("."))
+        if value is None:
+            continue
+        if isinstance(value, Mapping):
+            joined[dotted] = {
+                name: _store_path(f"{dotted}.{name}", entry, record, store_root)
+                for name, entry in value.items()
+            }
+        elif isinstance(value, list):
+            joined[dotted] = [
+                _store_path(dotted, entry, record, store_root) for entry in value
+            ]
+        else:
+            joined[dotted] = _store_path(dotted, value, record, store_root)
+    return joined
+
+
+def _store_path(dotted: str, value: Any, record: str, store_root: Path) -> str:
+    text = str(value)
+    if posixpath.isabs(text) or Path(text).is_absolute() or ".." in Path(text).parts:
+        raise ManifestError(
+            f"{dotted} is {text!r}, but under records.{record}: store a path is "
+            f"store-relative: never absolute, and never climbing out with '..'."
+        )
+    return str(Path(store_root) / text)
+
+
 def _base_spellings(base: Path) -> list[str]:
     """A checkout's absolute spelling as written and as resolved.
 
@@ -1261,6 +1645,27 @@ def _base_spellings(base: Path) -> list[str]:
     if resolved not in spellings:
         spellings.append(resolved)
     return spellings
+
+
+@contextmanager
+def _naming_the_project(root: Path, path: Path) -> Iterator[None]:
+    """Name the project a refusal is about, when the lookup found one."""
+    try:
+        yield
+    except ManifestError as exc:
+        if exc.project_root is None:
+            exc.project_root = root
+            exc.manifest_path = path
+        raise
+
+
+def _highest(levels: Sequence[Mapping[str, Any]], *keys: str) -> Any:
+    """The value the highest level that sets ``keys`` gives, else ``None``."""
+    for level in reversed(levels):
+        value = _dig(level, *keys)
+        if value:
+            return value
+    return None
 
 
 def _ecosystems(raw: Mapping[str, Any]) -> list[str]:

@@ -627,7 +627,7 @@ class TestTheHintsAreThisProjects:
 
     def _ctx(self, root: Path) -> FakeCtx:
         ctx = fake_ctx()
-        ctx.manifest = Manifest.load(root)
+        ctx.manifest = Manifest.locate(root)
         return ctx
 
     @pytest.fixture

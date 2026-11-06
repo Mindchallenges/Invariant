@@ -7,6 +7,8 @@ those never share a code.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 class InvariantError(Exception):
     """Base for every error this library raises deliberately."""
@@ -42,9 +44,17 @@ class UsageError(InvariantError):
 
 
 class ManifestError(UsageError):
-    """The manifest is missing, unparseable, or invalid."""
+    """The manifest is missing, unparseable, or invalid.
+
+    ``project_root`` and ``manifest_path`` name the project the refusal is
+    about, when the lookup had found one (``Manifest.locate``): a caller that
+    reports on a project which does not load, ``doctor`` or the oracle, can
+    still say which.
+    """
 
     exit_code = 2
+    project_root: Path | None = None
+    manifest_path: Path | None = None
 
 
 class UnknownRuleError(ManifestError):

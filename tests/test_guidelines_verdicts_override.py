@@ -560,7 +560,7 @@ class TestTheAckRefusalNamesTheRoute:
         from invariant.core.manifest import Manifest
         from invariant.domains.pipeline import _override_routes
 
-        machine = load_pipeline_machine(Manifest.load(repo))
+        machine = load_pipeline_machine(Manifest.locate(repo))
         text = _override_routes(RULE, (), machine)
         assert "invariant override <guideline-id> --reason" in text
         assert "missing, stale or failing verdict" in text

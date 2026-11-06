@@ -6,7 +6,8 @@
   marked *recommended*. No question is open. Amended at acceptance by the
   user's ruling the same day: the store example's `publish` key, which no
   decision defined, is dropped (pushing is `sync.push_after_landing`, D7),
-  and D7's `pull_at_start` cites ruling 7.
+  and D7's `pull_at_start` cites ruling 7. A further amendment, ruled 2026-11-06,
+  widens D9's interim refusal to `guidelines.baseline` (D9).
 - **Date:** 2026-11-05
 - **Supersedes:** nothing. Amends `docs/architecture/overview.md`
   ("Where things live at rest"), `docs/architecture/manifest.md` ("Resolution
@@ -671,6 +672,14 @@ The decision:
   the base is a failure, never "no baseline configured".
 - Until this decision is built, the guidelines records are refused under
   `store`, so the inert gate above cannot ship (increment order below).
+- **Ruled 2026-11-06, found while building increment 2.** Refusing the
+  guidelines records under `store` is not enough on its own: a project whose
+  manifest is not in its repository (a store project, or one defined by a
+  pointer alone) with `records.guidelines: repo` and `guidelines.baseline`
+  set leaves the shrink gate's base reader with no `.claude/invariant.yaml`
+  at the merge base, so it admits every entry. Such a project is therefore
+  refused at load if it sets `guidelines.baseline`, naming increment 4,
+  which lifts this refusal with the guidelines one.
 
 ### D10 — Declared stores, exemptions and the oracle
 

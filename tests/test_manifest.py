@@ -19,7 +19,7 @@ def write_manifest(root, body: dict):
 @pytest.fixture
 def minimal(tmp_path):
     write_manifest(tmp_path, {"version": 1, "project": {"name": "demo"}})
-    return Manifest.load(tmp_path)
+    return Manifest.locate(tmp_path)
 
 
 class TestDiscovery:
@@ -30,14 +30,14 @@ class TestDiscovery:
         write_manifest(tmp_path, {"version": 1})
         deep = tmp_path / "a" / "b" / "c"
         deep.mkdir(parents=True)
-        assert Manifest.load(deep).root == tmp_path.resolve()
+        assert Manifest.locate(deep).root == tmp_path.resolve()
 
     def test_absent_manifest_names_the_init_command(self, tmp_path):
         with pytest.raises(ManifestError, match="invariant init"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_absent_manifest_is_tolerated_when_not_required(self, tmp_path):
-        m = Manifest.load(tmp_path, required=False)
+        m = Manifest.locate(tmp_path, required=False)
         assert m.get("project.name") == "unnamed"
 
     def test_invalid_yaml(self, tmp_path):
@@ -45,14 +45,14 @@ class TestDiscovery:
         path.parent.mkdir(parents=True)
         path.write_text("project: [unclosed\n", encoding="utf-8")
         with pytest.raises(ManifestError, match="not valid YAML"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_non_mapping_manifest(self, tmp_path):
         path = tmp_path / MANIFEST_RELPATH
         path.parent.mkdir(parents=True)
         path.write_text("- a\n- b\n", encoding="utf-8")
         with pytest.raises(ManifestError, match="must contain a mapping"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
 
 class TestLayering:
@@ -62,7 +62,7 @@ class TestLayering:
 
     def test_adapter_defaults_beat_library_defaults(self, tmp_path):
         write_manifest(tmp_path, {"project": {"ecosystems": ["python"]}})
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.get("commands.test") == "pytest"
         assert m.source_of("commands.test") == "adapter:python"
 
@@ -74,13 +74,13 @@ class TestLayering:
                 "commands": {"test": "make test"},
             },
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.get("commands.test") == "make test"
-        assert m.source_of("commands.test") == "manifest"
+        assert m.source_of("commands.test") == "repo:.claude/invariant.yaml"
 
     def test_first_ecosystem_is_primary_for_overlapping_keys(self, tmp_path):
         write_manifest(tmp_path, {"project": {"ecosystems": ["python", "node"]}})
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         # The primary wins every key it names; a further ecosystem's commands
         # live under their own key (ADR-013 D4). Later-wins here was BUG_097.
         assert m.source_of("commands.test") == "adapter:python"
@@ -88,7 +88,7 @@ class TestLayering:
 
     def test_swift_adapter_switches_the_doc_format(self, tmp_path):
         write_manifest(tmp_path, {"project": {"ecosystems": ["swift"]}})
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.get("docs.format") == "sphinx"
         assert m.get("docs.diagrams") == "plantuml"
 
@@ -103,18 +103,18 @@ class TestEnforcementResolution:
             tmp_path,
             {"enforcement": {"profile": "standard", "rules": {"privacy.clean": "warn"}}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.rule_level("privacy.clean") is Level.WARN
-        assert m.source_of("enforcement.rules.privacy.clean") == "manifest"
+        assert m.source_of("enforcement.rules.privacy.clean") == "repo:.claude/invariant.yaml"
 
     def test_strict_profile_blocks_more(self, tmp_path):
         write_manifest(tmp_path, {"enforcement": {"profile": "strict"}})
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.rule_level("coverage.meets_floor") is Level.BLOCK
 
     def test_loose_still_blocks_the_unrecoverable_two(self, tmp_path):
         write_manifest(tmp_path, {"enforcement": {"profile": "loose"}})
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.rule_level("privacy.clean") is Level.BLOCK
         assert m.rule_level("session.no_edit_in_main_checkout") is Level.BLOCK
         assert m.rule_level("coverage.meets_floor") is Level.OFF
@@ -122,7 +122,7 @@ class TestEnforcementResolution:
     def test_unknown_profile_lists_the_available_ones(self, tmp_path):
         write_manifest(tmp_path, {"enforcement": {"profile": "nonexistent"}})
         with pytest.raises(ManifestError, match="loose, standard, strict"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_unknown_rule_defaults_to_warn(self, minimal):
         assert minimal.rule_level("some.unregistered.rule") is Level.WARN
@@ -130,7 +130,7 @@ class TestEnforcementResolution:
     def test_invalid_level_is_rejected_with_the_valid_ones(self, tmp_path):
         write_manifest(tmp_path, {"enforcement": {"rules": {"privacy.clean": "shout"}}})
         with pytest.raises(ManifestError, match="block, ask, warn, off"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
 
 class TestEnvironmentOverrides:
@@ -171,17 +171,17 @@ class TestValidation:
     def test_future_version_is_refused(self, tmp_path):
         write_manifest(tmp_path, {"version": 99})
         with pytest.raises(ManifestError, match="understands version 1"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_unknown_item_backend(self, tmp_path):
         write_manifest(tmp_path, {"items": {"backend": "carrier-pigeon"}})
         with pytest.raises(ManifestError, match="unknown work-item backend"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_privacy_scope_must_be_a_list(self, tmp_path):
         write_manifest(tmp_path, {"privacy": {"scope": "docs"}})
         with pytest.raises(ManifestError, match="privacy.scope must be a list"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_coverage_advisory_paths_defaults_to_empty(self, minimal):
         """The key is known, so `config show --provenance` lists it."""
@@ -197,7 +197,7 @@ class TestValidation:
         whole tree would match. A mistyped relaxation is refused at load."""
         write_manifest(tmp_path, {"methodology": {"gates": {key: "web/**"}}})
         with pytest.raises(ManifestError, match=f"methodology.gates.{key}"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_a_glob_list_given_as_null_reads_as_empty(self, tmp_path):
         """A YAML `key:` with no value is null; every reader treats it as the
@@ -205,7 +205,7 @@ class TestValidation:
         write_manifest(
             tmp_path, {"methodology": {"gates": {"coverage_advisory_paths": None}}}
         )
-        assert not Manifest.load(tmp_path).get(
+        assert not Manifest.locate(tmp_path).get(
             "methodology.gates.coverage_advisory_paths"
         )
 
@@ -215,7 +215,7 @@ class TestValidation:
             {"methodology": {"gates": {"coverage_advisory_paths": [["web/**"]]}}},
         )
         with pytest.raises(ManifestError, match="coverage_advisory_paths"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_unknown_methodology_is_a_validation_error(self, tmp_path):
         """AUD-08: a mistyped `methodology.pipeline` used to surface only when
@@ -224,7 +224,7 @@ class TestValidation:
         error belongs, loudly, at load."""
         write_manifest(tmp_path, {"methodology": {"pipeline": "tdd-typo"}})
         with pytest.raises(ManifestError, match="methodology.pipeline"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_a_project_local_methodology_validates(self, tmp_path):
         (tmp_path / "machines").mkdir()
@@ -237,7 +237,7 @@ class TestValidation:
             tmp_path,
             {"methodology": {"pipeline": "local", "extra_machines": ["machines"]}},
         )
-        assert Manifest.load(tmp_path).get("methodology.pipeline") == "local"
+        assert Manifest.locate(tmp_path).get("methodology.pipeline") == "local"
 
 
 class TestCommandTemplates:
@@ -247,7 +247,7 @@ class TestCommandTemplates:
             {"commands": {"build": "build {ws} {scheme}"},
              "vars": {"ws": "App.xcworkspace", "scheme": "App"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.command_for("build") == "build App.xcworkspace App"
 
     def test_discovery_runs_a_command(self, tmp_path):
@@ -256,7 +256,7 @@ class TestCommandTemplates:
             {"commands": {"test": "run --id {device}"},
              "discover": {"device": "printf ABC123"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.command_for("test") == "run --id ABC123"
 
     def test_discovery_result_is_cached(self, tmp_path):
@@ -266,14 +266,14 @@ class TestCommandTemplates:
             {"commands": {"test": "{a} {a}"},
              "discover": {"a": f"echo x >> {counter}; printf V"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         m.command_for("test")
         m.command_for("test")
         assert counter.read_text().count("x") == 1
 
     def test_a_placeholder_with_no_source_points_at_discovery(self, tmp_path):
         write_manifest(tmp_path, {"commands": {"test": "run {mystery}"}})
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         with pytest.raises(ManifestError, match="Prefer a discover entry"):
             m.command_for("test")
 
@@ -282,7 +282,7 @@ class TestCommandTemplates:
             tmp_path,
             {"commands": {"test": "run {x}"}, "discover": {"x": "exit 3"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         with pytest.raises(ManifestError, match=r"exit 3\)"):
             m.command_for("test")
 
@@ -291,7 +291,7 @@ class TestCommandTemplates:
             tmp_path,
             {"commands": {"test": "run {x}"}, "discover": {"x": "true"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         with pytest.raises(ManifestError, match="produced nothing"):
             m.command_for("test")
 
@@ -304,7 +304,7 @@ class TestCommandTemplates:
              "vars": {"scheme": "App"},
              "discover": {"device": "printf SIM-A", "other": "printf O", "scheme": "printf S"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.discovered_in("test", bundle="/b") == {}
         m.command_for("test", bundle="/b")
         assert m.discovered_in("test", bundle="/b") == {"device": "SIM-A"}
@@ -318,7 +318,7 @@ class TestCommandTemplates:
              "vars": {"scheme": "App"},
              "discover": {"device": "printf SIM-A", "scheme": "printf S"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.discovers_for("test_one") == ["device"]
         assert m.discovers_for("lint") == []
 
@@ -331,7 +331,7 @@ class TestCommandTemplates:
             tmp_path,
             {"commands": {"test_one": "run {selector}"}, "vars": {"selector": "all"}},
         )
-        m = Manifest.load(tmp_path)
+        m = Manifest.locate(tmp_path)
         assert m.command_for("test_one", selector="OneTest") == "run OneTest"
 
 
@@ -475,7 +475,7 @@ class TestSweepFreshIsCappedAtWarn:
             {"methodology": {"gates": self.CADENCE}, "enforcement": {"rules": {"sweep.fresh": level}}},
         )
         with pytest.raises(ManifestError) as caught:
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
         text = str(caught.value)
         assert "sweep.fresh" in text
         assert level in text
@@ -486,7 +486,7 @@ class TestSweepFreshIsCappedAtWarn:
         nothing reads today would block the day a cadence is set."""
         write_manifest(tmp_path, {"enforcement": {"rules": {"sweep.fresh": "block"}}})
         with pytest.raises(ManifestError, match="sweep.fresh"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     @pytest.mark.parametrize("level", ["warn", "off"])
     def test_warn_and_off_load(self, tmp_path, level):
@@ -494,7 +494,7 @@ class TestSweepFreshIsCappedAtWarn:
             tmp_path,
             {"methodology": {"gates": self.CADENCE}, "enforcement": {"rules": {"sweep.fresh": level}}},
         )
-        assert Manifest.load(tmp_path).rule_level("sweep.fresh") is Level.parse(level)
+        assert Manifest.locate(tmp_path).rule_level("sweep.fresh") is Level.parse(level)
 
     @pytest.mark.parametrize("profile", ["loose", "standard", "strict"])
     def test_every_shipped_profile_loads_it_at_warn(self, tmp_path, profile):
@@ -503,7 +503,7 @@ class TestSweepFreshIsCappedAtWarn:
         raw = yaml.safe_load((DATA_DIR / "profiles" / f"{profile}.yaml").read_text())
         assert raw["rules"]["sweep.fresh"] == "warn"
         write_manifest(tmp_path, {"enforcement": {"profile": profile}})
-        assert Manifest.load(tmp_path).rule_level("sweep.fresh") is Level.WARN
+        assert Manifest.locate(tmp_path).rule_level("sweep.fresh") is Level.WARN
 
 
 
@@ -513,7 +513,7 @@ class TestTheAgentsKeys:
 
     def load(self, tmp_path, agents):
         write_manifest(tmp_path, {"agents": agents})
-        return Manifest.load(tmp_path)
+        return Manifest.locate(tmp_path)
 
     def refused(self, tmp_path, agents):
         with pytest.raises(ManifestError) as caught:
@@ -528,7 +528,7 @@ class TestTheAgentsKeys:
     def test_an_overlay_naming_a_library_agent_loads(self, tmp_path):
         m = self.load(tmp_path, {"overlays": {"feature-architect": "docs/agents/fa.yaml"}})
         assert m.get("agents.overlays") == {"feature-architect": "docs/agents/fa.yaml"}
-        assert m.source_of("agents.overlays.feature-architect") == "manifest"
+        assert m.source_of("agents.overlays.feature-architect") == "repo:.claude/invariant.yaml"
 
     def test_there_is_no_implicit_overlay_location(self, tmp_path):
         """docs/agents/<name>.yaml is the convention, never a default (ruling 6)."""
@@ -539,7 +539,7 @@ class TestTheAgentsKeys:
     def test_agents_is_a_mapping(self, tmp_path):
         write_manifest(tmp_path, {"agents": ["feature-architect"]})
         with pytest.raises(ManifestError, match="agents must be a mapping"):
-            Manifest.load(tmp_path)
+            Manifest.locate(tmp_path)
 
     def test_an_unknown_agents_key(self, tmp_path):
         text = self.refused(tmp_path, {"overlay": {}})
@@ -597,7 +597,7 @@ class TestTheTierOverride:
 
     def load(self, tmp_path, agents):
         write_manifest(tmp_path, {"agents": agents})
-        return Manifest.load(tmp_path)
+        return Manifest.locate(tmp_path)
 
     def refused(self, tmp_path, agents):
         with pytest.raises(ManifestError) as caught:
@@ -611,7 +611,7 @@ class TestTheTierOverride:
     def test_a_library_agent_may_take_each_tier(self, tmp_path, tier):
         m = self.load(tmp_path, {"tiers": {"compliance-reviewer": tier}})
         assert m.get("agents.tiers") == {"compliance-reviewer": tier}
-        assert m.source_of("agents.tiers.compliance-reviewer") == "manifest"
+        assert m.source_of("agents.tiers.compliance-reviewer") == "repo:.claude/invariant.yaml"
 
     @pytest.mark.parametrize("value", [["compliance-reviewer"], "deep", None, 3])
     def test_it_is_a_mapping(self, tmp_path, value):
@@ -655,7 +655,7 @@ class TestTheHostKeys:
 
     def load(self, tmp_path, host):
         write_manifest(tmp_path, {"host": host})
-        return Manifest.load(tmp_path)
+        return Manifest.locate(tmp_path)
 
     def refused(self, tmp_path, host):
         with pytest.raises(ManifestError) as caught:
@@ -692,7 +692,7 @@ class TestTheHostKeys:
         tier_map = {"light": "cheap-one", "standard": "any string: at all", "deep": " x "}
         m = self.load(tmp_path, {"tier_map": tier_map})
         assert m.get("host.tier_map") == tier_map
-        assert m.source_of("host.tier_map.light") == "manifest"
+        assert m.source_of("host.tier_map.light") == "repo:.claude/invariant.yaml"
 
     def test_a_partial_tier_map_loads(self, tmp_path):
         m = self.load(tmp_path, {"tier_map": {"deep": "big-one"}})

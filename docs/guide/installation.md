@@ -100,13 +100,24 @@ each other, and sessions in one repository all see the same registry.
 `invariant session list` lists the sessions of the repository you are
 standing in. The one thing shared across repositories is the binary.
 
-Accepted, not yet built (ADR-014): a project whose records must stay out of
-its repository, such as a documentation repository that must keep its
-content its own, will be able to keep them in a store, a separate git
-repository under `~/.invariant/stores/` by default, linked from the home side
-with `invariant store link`. The runtime state stays in the repository's git
-common directory, as above. Projects that run nothing new keep today's
-layout. Increment 2 of ADR-014 builds the store and `store link`.
+A project whose records must stay out of its repository, such as a
+documentation repository that must keep its content its own, can keep them
+in a store (ADR-014): a separate git repository, under `~/.invariant/stores/`
+by default, linked from the home side. From inside the repository:
+
+```bash
+invariant store init            # create a store for this repository, and link it
+invariant store link <path>     # or link one that already lists this repository
+invariant store status          # which store, and which records live there
+```
+
+The repository gains no tracked file: the link is in `~/.invariant/config.yaml`
+and the repository's identity in its local git config. The store's own
+`invariant.yaml` holds the project's configuration; review and commit it in
+the store. The runtime state stays in the repository's git common directory,
+as above. Projects that run nothing new keep today's layout. Wiring the host
+from outside the repository is ADR-014 increment 3, so until then a store
+project has no hooks of its own.
 
 ## The Session Oracle
 

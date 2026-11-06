@@ -98,7 +98,7 @@ def test_BUG_040_a_dispatch_from_a_host_rooted_elsewhere_reaches_the_named_pipel
     b = _project(tmp_path / "project-b", "track-project")
 
     # A live, isolated session in B with a pipeline running.
-    b_manifest = Manifest.load(b)
+    b_manifest = Manifest.locate(b)
     sessions = SessionDomain(b_manifest)
     session = sessions.start("track")
     sessions.isolate(session.id, execute=True)
@@ -106,7 +106,7 @@ def test_BUG_040_a_dispatch_from_a_host_rooted_elsewhere_reaches_the_named_pipel
     worktree = Path(sessions.get(session.id).worktree)
     assert worktree.is_dir(), "B's session worktree was not created"
     assert not (
-        PipelineDomain(Manifest.load(b)).current(session.id).evidence.get("agents_run")
+        PipelineDomain(Manifest.locate(b)).current(session.id).evidence.get("agents_run")
     ), "an agent was already recorded; nothing to prove"
 
     # The host session is rooted in A and standing there; the brief names B's
@@ -128,7 +128,7 @@ def test_BUG_040_a_dispatch_from_a_host_rooted_elsewhere_reaches_the_named_pipel
     assert main(["hook", "post-tool-use"]) == 0
     capsys.readouterr()
 
-    evidence = PipelineDomain(Manifest.load(b)).current(session.id).evidence
+    evidence = PipelineDomain(Manifest.locate(b)).current(session.id).evidence
     assert evidence.get("agents_run") == ["feature-architect"], (
         "B's pipeline recorded no agent for a dispatch whose brief named B's "
         f"worktree, made from a host rooted in A; evidence keys: {sorted(evidence)}"

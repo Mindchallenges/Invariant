@@ -481,7 +481,7 @@ class TestTheRealEvaluator:
 
     def test_the_project_worktree_manifest_is_the_one_read(self, gate_world, monkeypatch):
         seen = []
-        real = gates_module.Manifest.load
+        real = gates_module.Manifest.locate
 
         def spy(start=None, *args, **kwargs):
             seen.append(Path(start))
@@ -489,7 +489,7 @@ class TestTheRealEvaluator:
 
         [snapshot] = self.scan(gate_world)
         [row] = [r for r in snapshot.rows if r.session_id == "a-idle"]
-        monkeypatch.setattr(gates_module.Manifest, "load", spy)
+        monkeypatch.setattr(gates_module.Manifest, "locate", spy)
         evaluate_row(row)
         assert seen == [gate_world["worktree"]]
 

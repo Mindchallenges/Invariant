@@ -64,7 +64,7 @@ from invariant.core.manifest import Manifest
 from invariant.domains.pipeline import PipelineDomain
 
 root, session, ready, operation = sys.argv[1:]
-pipelines = PipelineDomain(Manifest.load(pathlib.Path(root)))
+pipelines = PipelineDomain(Manifest.locate(pathlib.Path(root)))
 pathlib.Path(ready).touch()
 if operation == "evidence":
     pipelines.record_docs_read(session, "docs/architecture/from-b.md")

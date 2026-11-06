@@ -98,7 +98,7 @@ def verdict_for(repo, measured: dict[str, float], *, per_path: bool):
         source.write_text(LIVE, encoding="utf-8")
         coverage[str(source)] = pct
     ctx = RuleContext(
-        manifest=Manifest.load(main),
+        manifest=Manifest.locate(main),
         cwd=main,
         session={
             "id": "s1",

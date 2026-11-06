@@ -270,7 +270,7 @@ def repo(tmp_path):
 
 def shrinks(root: Path, *, base="master", files=()):
     ctx = RuleContext(
-        manifest=Manifest.load(root), cwd=root, session={"files": list(files), "base": base}
+        manifest=Manifest.locate(root), cwd=root, session={"files": list(files), "base": base}
     )
     (result,) = evaluate_rules([RULE], ctx)
     return result.verdict

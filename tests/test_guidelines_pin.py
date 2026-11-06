@@ -56,7 +56,7 @@ def set_manifest(m: Manifest, edit) -> Manifest:
     body = yaml.safe_load(path.read_text(encoding="utf-8"))
     edit(body)
     path.write_text(yaml.safe_dump(body), encoding="utf-8")
-    return Manifest.load(m.root)
+    return Manifest.locate(m.root)
 
 
 def landing_entry(machine) -> tuple[str, ...]:
@@ -79,7 +79,7 @@ class TestWhatIsPinned:
 
     def test_the_pin_survives_a_reload(self, m):
         sid, pipeline = started(m)
-        fresh = PipelineDomain(Manifest.load(m.root)).current(sid)
+        fresh = PipelineDomain(Manifest.locate(m.root)).current(sid)
         assert fresh.ruleset == pipeline.ruleset
 
     def test_no_ruleset_pins_nothing(self, tmp_path):
@@ -186,7 +186,7 @@ class TestAChangeMidPipeline:
     def test_editing_the_ruleset_does_not_move_the_pin(self, m):
         sid, pipeline = started(m)
         write(m.root, RULESET_REL, RULESET.replace("title: Testing", "title: Tests"))
-        assert PipelineDomain(Manifest.load(m.root)).current(sid).ruleset == pipeline.ruleset
+        assert PipelineDomain(Manifest.locate(m.root)).current(sid).ruleset == pipeline.ruleset
 
     def test_clearing_the_manifest_key_does_not_drop_the_landing_gates(self, m):
         """AUD-03's shape: one exempt manifest line must not retune the gates."""

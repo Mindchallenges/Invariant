@@ -378,7 +378,7 @@ def pipeline(state="reviewing", *, verdicts_=(), runs=(), digest=DIGEST):
 
 def context(root, *, base="master", files=(), pipe=None) -> RuleContext:
     return RuleContext(
-        manifest=Manifest.load(root), cwd=root,
+        manifest=Manifest.locate(root), cwd=root,
         session={"id": "s", "base": base, "files": list(files)},
         pipeline=pipeline() if pipe is None else pipe,
     )
@@ -410,7 +410,7 @@ def every_pass(root, runs):
 class TestTheGate:
     def test_it_rides_the_landing_entry_with_a_ruleset(self, repo):
         assert RULE in GUIDELINES_GATES["landing"]["entry"]
-        machine = load_pipeline_machine(Manifest.load(repo))
+        machine = load_pipeline_machine(Manifest.locate(repo))
         (landing,) = machine.states_with_role("landing")
         assert RULE in machine.state(landing).entry_gates
 

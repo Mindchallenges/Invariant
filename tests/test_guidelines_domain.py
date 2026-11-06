@@ -746,7 +746,7 @@ def baseline_domain(root, *, baseline=BASELINE_REL, files=None, ruleset=RULESET_
         "guidelines": cfg, **extra,
     })
     session = None if files is None else {"files": list(files), "base": base}
-    return GuidelinesDomain(RuleContext(manifest=Manifest.load(root), cwd=root, session=session))
+    return GuidelinesDomain(RuleContext(manifest=Manifest.locate(root), cwd=root, session=session))
 
 
 class TestBaselineRecord:
@@ -1158,7 +1158,7 @@ def _review(root: Path) -> tuple[str, object]:
     from invariant.domains.pipeline import PipelineDomain
     from invariant.domains.session import SessionDomain
 
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     session = SessionDomain(manifest).current(root)
     pipelines = PipelineDomain(manifest)
     record = pipelines.current(session.id)
@@ -1172,7 +1172,7 @@ def _stored(root: Path) -> list:
     from invariant.domains.pipeline import PipelineDomain
     from invariant.domains.session import SessionDomain
 
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     session = SessionDomain(manifest).current(root)
     return PipelineDomain(manifest).current(session.id).evidence.get("verdicts", [])
 

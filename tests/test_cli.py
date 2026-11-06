@@ -387,7 +387,7 @@ class TestPipelineCommands:
         from invariant.core.manifest import Manifest
         from invariant.domains.pipeline import PipelineDomain
 
-        PipelineDomain(Manifest.load(project)).record_docs_read(session_id, str(doc))
+        PipelineDomain(Manifest.locate(project)).record_docs_read(session_id, str(doc))
         assert run("pipeline", "advance", "red") == 0
 
     def test_force_requires_a_reason(self, project, capsys, monkeypatch):
@@ -729,7 +729,7 @@ class TestHookAttribution:
         from invariant.core.manifest import Manifest
         from invariant.domains.session import SessionDomain
 
-        worktree = SessionDomain(Manifest.load(project)).get("0000bbbb").worktree
+        worktree = SessionDomain(Manifest.locate(project)).get("0000bbbb").worktree
         monkeypatch.setattr(
             "sys.stdin", _Stdin(self._payload("bb-2222-22220000bbbb",
                                               Path(worktree) / "app.py"))
@@ -1747,7 +1747,7 @@ def spend_the_binding(project, host_session_id):
     from invariant.core.store import JsonStore
     from invariant.domains.session import SessionDomain
 
-    manifest = Manifest.load(project)
+    manifest = Manifest.locate(project)
     return SessionDomain(manifest, JsonStore(manifest.state_root)).end_host_session(
         host_session_id
     )
@@ -2045,7 +2045,7 @@ class TestSessionStartWritesNothing(ParkedSessionHarness, GreetingHarness):
     def fingerprint(self, project):
         from invariant.core.manifest import Manifest
 
-        root = Manifest.load(project).state_root
+        root = Manifest.locate(project).state_root
         return {
             str(f.relative_to(root)): (f.stat().st_mtime_ns, f.stat().st_size)
             for f in sorted(root.rglob("*"))
@@ -2174,7 +2174,7 @@ def unowned_candidates(project, host_session_id):
     from invariant.core.store import JsonStore
     from invariant.domains.session import SessionDomain
 
-    manifest = Manifest.load(project)
+    manifest = Manifest.locate(project)
     domain = SessionDomain(manifest, JsonStore(manifest.state_root))
     return [
         s
@@ -2258,7 +2258,7 @@ class TestResumeBindsTheHostThatRanIt(ParkedSessionHarness, HostClaimHarness):
         captured = capsys.readouterr()
         self.claim(captured.out + captured.err)
 
-        manifest = Manifest.load(project)
+        manifest = Manifest.locate(project)
         domain = SessionDomain(manifest, JsonStore(manifest.state_root))
         after = domain.require(session["id"])
         assert after.resumed_count == 1
@@ -2281,7 +2281,7 @@ class TestResumeBindsTheHostThatRanIt(ParkedSessionHarness, HostClaimHarness):
         assert run("session", "resume", session["name"]) == 0
         captured = capsys.readouterr()
 
-        manifest = Manifest.load(project)
+        manifest = Manifest.locate(project)
         domain = SessionDomain(manifest, JsonStore(manifest.state_root))
         domain.adopt_host_session(*self.claim(captured.out + captured.err)[0])
 
@@ -2316,7 +2316,7 @@ class TestResumeBindsTheHostThatRanIt(ParkedSessionHarness, HostClaimHarness):
         assert run("session", "resume", session["name"]) == 0
         captured = capsys.readouterr()
 
-        manifest = Manifest.load(project)
+        manifest = Manifest.locate(project)
         domain = SessionDomain(manifest, JsonStore(manifest.state_root))
         domain.adopt_host_session(*self.claim(captured.out + captured.err)[0])
 
@@ -2863,7 +2863,7 @@ def state_snapshot(project):
     """Every file under the state root with its bytes."""
     from invariant.core.manifest import Manifest
 
-    root = Manifest.load(project).state_root
+    root = Manifest.locate(project).state_root
     return {
         str(p.relative_to(root)): p.read_bytes()
         for p in sorted(root.rglob("*"))
@@ -2928,7 +2928,7 @@ class TestTheHookProbeWritesNothing(EditHookHarness):
         from invariant.core.manifest import Manifest
         from invariant.domains.session import SessionDomain
 
-        return SessionDomain(Manifest.load(project)).get(sid)
+        return SessionDomain(Manifest.locate(project)).get(sid)
 
     def writers(self, worktree):
         """Probes that reach a write when nothing stops them."""

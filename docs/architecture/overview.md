@@ -62,6 +62,9 @@ graph TD
         CFIND["findings (ADR-012 D4, A3.3)"]
         CVERD["verdicts (ADR-012 D5, A4.1 to A4.7)"]
         CAGENTS["agents (ADR-012 D8, D9, A6.2, A6.3, A7.1)"]
+        CHOME["home (ADR-014 D3)"]
+        CIDENT["identity (ADR-014 D4)"]
+        CSTORES["stores (ADR-014 D2)"]
     end
 
     subgraph domains["domains/ — the seven state domains"]
@@ -226,6 +229,15 @@ graph TD
     SESSION --> GIT
     WORKITEM --> GIT
     MANIFEST --> GIT
+    MANIFEST -- "load_user_config: the user level, 5a" --> CHOME
+    OHOME -- "invariant_home: the one resolution of the home" --> CHOME
+    CIDENT -- "set_local_config: writes invariant.id" --> GIT
+    MANIFEST -- "locate: read_pointer, find_store, store_levels" --> CSTORES
+    MANIFEST -- "repo_identity" --> CIDENT
+    CSTORES -- "the user level, repos:; the home's stores/" --> CHOME
+    CSTORES -- "repo_identity, ensure the local ID" --> CIDENT
+    CSTORES -- "init_repository: a new store" --> GIT
+    CLI -- "store init, link, status" --> CSTORES
     CCTEL --> GIT
     MANIFEST -- DEFAULT_PATTERNS, parse_allow --> PRIVACY
     PRIVACY -. project_relative, glob_matches, imported at call time .-> MANIFEST
@@ -263,6 +275,23 @@ graph TD
     CVERD -- Guideline, Ruleset, digest_of, meets --> CGUIDE
     CVERD -- project_relative --> MANIFEST
 ```
+
+`MANIFEST --> CHOME` is the user level of the configuration (ADR-014 D3,
+increment 2): `core/home` reads `~/.invariant/config.yaml`, and the manifest
+merges its `defaults` below the project's own settings. `OHOME --> CHOME`
+keeps one resolution of the home directory: the oracle's `oracle_home` asks
+`core/home`, because nothing in `core/` may import the oracle and the
+manifest now needs the home too. `core/identity` (D4) is a repository's
+identity, read from the git common directory's config without a subprocess;
+its one write, `invariant.id`, goes through `core/git`. `MANIFEST -->
+CSTORES` is `Manifest.locate` (D2): at a git top level with no in-repo
+manifest it asks `core/stores` for the repo's pointer and its store, and
+for the store's levels, refused unless the store lists the repo. `CLI -->
+CSTORES` is `invariant store init`, `link` and `status`; the write a link
+makes, the user level's `repos:` and the linked-identity index, lives in
+`core/stores` beside the reads it must agree with. The oracle's existence
+checks ask `Manifest.is_project_root` (D10), over the arrows from `OINDEX`,
+`OSCAN` and `OGATES` to `MANIFEST` that already exist.
 
 `CC --> PLAN` and `CC --> RULES` are the host adapter reading `core/` directly,
 which the dependency rule below permits — arrows point down — and which the
@@ -1331,12 +1360,15 @@ the CLI would have traded a documentation edit for an architecture violation.
 |---|---|---|
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; the advisory lock a read-modify-write holds, as `locked` for the cross-session registry and as `lock` alone for a caller that may write nothing, which is how `domains/pipeline` guards each pipeline record (BUG_107); the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
-| `manifest` | Parsing and validating the project manifest; merging profile defaults with per-rule overrides; resolving adapter selection; refusing a key it does not read, under `agents`, `guidelines` and `host` alike; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands; interpret a `host.tier_map` value, or hold a list of model names |
+| `manifest` | Finding the project and its config levels (`Manifest.locate`, the only entry point, ADR-014 D2), and the questions asked of it (`is_project_root`, `set_by_project`); parsing and validating the project manifest; merging profile defaults with per-rule overrides, and the user level's defaults below the project's own (ADR-014 D3, ruling 19), naming them (`user_level_values`); the `records` block, its refusals, and reading a `store` record's path keys against the store root (`RECORD_PATH_KEYS`, `store_record_paths`, ADR-014 D1); resolving adapter selection; refusing a key it does not read, under `agents`, `guidelines` and `host` alike; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands; interpret a `host.tier_map` value, or hold a list of model names |
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set`; the library agents' currency (`agents_currency`, `AgentCopy`, ADR-012 A6.4), the one judgement `agents.rendered_current` and the host's `library agents current` row give, over a host install plan handed in as a callable (`RuleContext.host_agent_plan`) | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches; the structural excuses a match is judged by, each read from the match itself and the text right against it and never from the whole line (a row number, a duration word, an XML identifier, a scaled image name in the domain position, the portrait ratio as the whole of a quoted literal, the midnight bound); on the manifest's own path alone, a match exactly equal to a value its scoped entries declare (BUG_110); reading `privacy.allow` into plain values and path-scoped entries (`parse_allow`, `ScopedAllow`), and deciding whether an entry reaches a match at the path it was handed | Know which files matter: which paths are scanned is `privacy.scope`, decided by the caller, and a path reaches the scanner only to be compared with an allow entry |
-| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record`; every rename git detects from the merge base to the working tree (`renamed_files`), which a baseline entry follows (DN-7) — plus one write named as one, `commit_only`, the sweep's own commit of exactly the paths it wrote | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
+| `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record`; every rename git detects from the merge base to the working tree (`renamed_files`), which a baseline entry follows (DN-7) — plus three writes, each named as such: `commit_only`, the sweep's own commit of exactly the paths it wrote; `set_local_config`, one key of the local git config (`invariant.id`, ADR-014 D4); and `init_repository`, a new store (ADR-014 D2) | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
+| `home` | The user's home for invariant, `$INVARIANT_HOME` else `~/.invariant` (`invariant_home`, which the oracle's `oracle_home` asks); the user level of the configuration, `config.yaml` (`load_user_config`, `UserConfig`): its `defaults`, its `repos` map and its `store_naming`, each shape refused naming the file; a path spelled for a provenance label (`display_path`) (ADR-014 D3) | Merge a level into a configuration (`manifest` does); write the file; resolve a store |
+| `stores` | Stores (ADR-014 D2): the pointer (`read_pointer`, which refuses a policy key), which store a repo names (`find_store`: the pointer, then the user level by identity, then by local ID, `StoreLink`), the store's levels (`store_levels`, `read_store_manifest`), refused unless `store.repos` lists the repo; naming under ruling 14 with its collision fallback (`plan_store_path`); and the link's writes, the user level's `repos:` entry, `invariant.id` and the linked-identity index (`link_repo`, `update_link`, `init_store`) | Merge levels into a configuration (`manifest` does); clone, pull or push a store; know a host |
+| `identity` | A repository's identity (ADR-014 D4): normalising an origin URL (`normalise_origin`, the host lowercased, the path too on GitHub, GitLab and Bitbucket), the git common directory read from `.git` and `commondir` (`common_dir_of`), a git config file parsed (`read_git_config`), and the identity itself (`repo_identity`, `Identity`), all without a subprocess; a fresh local ID (`new_local_id`) and its write (`write_local_id`, through `core/git`) | Follow a config `include`, or apply `insteadOf`; decide which store an identity uses |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
 | `conformance` | The conformance scenario model (`Scenario`, `Step`, `Expected`) and where the shipped scenarios live (`data/conformance/`). Loading a scenario and refusing it whole: an unknown key, an unknown step kind, a known answer that names an unregistered rule (a refusal may also name a verdict predicate, `core/verdicts.PREDICATES`), or a `verdicts` expectation on a step that does not show the verdicts or naming an answer that is not a standing. Reducing a replay's `--json` documents to an `Outcome` (a status per rule per destination; the rules, and a refused verdict submission's predicates, each refusal named; and each judgement guideline's answer per step that showed the verdicts). Comparing an outcome with a known answer, or with another replay's outcome, and rendering the divergence (ADR-012 D11) | Evaluate a rule or a verdict, or run anything. The replay that drives the CLI is `cli/conformance`'s. Read prose |
@@ -1999,6 +2031,12 @@ per repository:
 
 ```
 ~/.invariant/               $INVARIANT_HOME overrides it (ADR-007)
+  config.yaml               the user level of the config, when written:
+                            defaults, repos, store_naming (ADR-014 D3)
+  linked-repos.txt          every linked identity and local ID, one per
+                            line, for a user-level hook shim (ADR-014 D11)
+  stores/<name>/            a store, a git repository, when created by
+                            `store init` without a path (ADR-014 D2)
   projects.json             the oracle's project index; one entry per state root
   locks/projects.lock       advisory lock for the index's read-modify-write
   locks/alerts.lock         advisory lock for the alert ledger
@@ -2023,16 +2061,24 @@ watcher derived from them. The one
 thing of the oracle's inside a project is the attention sidecar,
 `<state root>/attention/`, which that project's own hooks write.
 
-**Accepted, not yet built: records in a store ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md)).** A project may
-place each record type (docs, backlog, guidelines, memory, reports, sweeps)
-in a store, a separate git repository at any path, `~/.invariant/stores/<name>/`
-by default, with its own `invariant.yaml` (D1, D2). Such a project's
-repository then carries nothing of invariant's, or only a minimal pointer,
-`.invariant.yaml`. The home gains `config.yaml`, the user level of the config
-(D3), which maps a repo's identity to its store, and `host/<host>/`, the
-user-level host wiring (D11). The state root does not move: runtime state stays
-in the repo's git common directory. Until increment 2 lands, every record is
-in-repo, as the tree above shows; in-repo stays the default afterwards.
+**Built (ADR-014 increment 2): records in a store.** A project may place
+each record type (docs, backlog, memory, reports, sweeps; guidelines from
+increment 4) in a store, a separate git repository at any path,
+`~/.invariant/stores/<name>/` by default, with its own `invariant.yaml`
+(D1, D2). Such a project's repository carries nothing of invariant's, or only
+a minimal pointer, `.invariant.yaml`; its git directory carries the identity
+ID and the runtime state, neither tracked. The home holds `config.yaml`, the
+user level of the configuration, when written: its `defaults` apply below
+every project's own settings, in-repo projects included, and are named by
+`config show` and `doctor`; its `repos` map takes a repo's identity to its
+store. `invariant store init` and `store link` write it, with the index
+`linked-repos.txt` beside it. The state root does not move: runtime state
+stays in the repo's git common directory. In-repo stays the default, and an
+in-repo project resolves as before. `core/home` resolves the home for the
+manifest and the oracle alike.
+
+**Accepted, not yet built ([ADR-014](../adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository.md)).** The home gains `host/<host>/`, the
+user-level host wiring (D11, increment 3).
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between

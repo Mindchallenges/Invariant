@@ -720,7 +720,7 @@ class TestReadIsAttributedByItsPath:
 
         worktree = cwd or world["worktree"]
         rule_ctx = RuleContext(
-            manifest=Manifest.load(worktree),
+            manifest=Manifest.locate(worktree),
             cwd=worktree,
             session={"id": world["owner"]},
             pipeline=world["pipelines"].current(world["owner"]).to_dict(),
@@ -1108,7 +1108,7 @@ class TestBUG028TheAgentThatCreatedThePipelineIsInIt:
         results = evaluate(
             ["agents.design_agent_ran"],
             RuleContext(
-                manifest=Manifest.load(root),
+                manifest=Manifest.locate(root),
                 cwd=root,
                 session={"id": session_id},
                 pipeline=ctx.pipelines.current(session_id).to_dict(),

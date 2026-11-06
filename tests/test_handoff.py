@@ -150,7 +150,7 @@ def last_json(capsys) -> dict:
 
 
 def domain(root: Path, clock=None) -> SessionDomain:
-    manifest = Manifest.load(root)
+    manifest = Manifest.locate(root)
     kwargs = {"clock": clock} if clock else {}
     return SessionDomain(manifest, JsonStore(manifest.state_root), **kwargs)
 

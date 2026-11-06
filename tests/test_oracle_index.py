@@ -135,7 +135,7 @@ class TestRegistration:
         assert not home.exists()
 
     def test_register_records_the_state_root_as_the_key(self, index, home, repo):
-        manifest = Manifest.load(repo)
+        manifest = Manifest.locate(repo)
         entry, added = index.register(manifest, via="manual")
         assert added is True
         assert entry.key == str(manifest.state_root)
@@ -147,14 +147,14 @@ class TestRegistration:
         assert document["projects"] == [entry.to_dict()]
 
     def test_an_entry_stores_no_clock_time(self, index, home, repo):
-        index.register(Manifest.load(repo), via="init")
+        index.register(Manifest.locate(repo), via="init")
         (row,) = stored(home)["projects"]
         assert set(row) == {"key", "root", "name", "via"}
 
     def test_two_worktrees_collapse_to_one_entry(self, index, repo, worktree):
-        first, added_first = index.register(Manifest.load(repo), via="init")
+        first, added_first = index.register(Manifest.locate(repo), via="init")
         second, added_second = index.register(
-            Manifest.load(worktree), via="session-start"
+            Manifest.locate(worktree), via="session-start"
         )
         assert (added_first, added_second) == (True, False)
         assert second == first
@@ -163,15 +163,15 @@ class TestRegistration:
     def test_a_worktree_registering_first_records_the_main_checkout(
         self, index, repo, worktree
     ):
-        entry, _ = index.register(Manifest.load(worktree), via="session-start")
+        entry, _ = index.register(Manifest.locate(worktree), via="session-start")
         assert entry.root == str(repo)
         assert entry.via == "session-start"
 
     def test_several_manifests_sharing_one_git_dir_collapse(self, index, repo):
         sub = repo / "packages" / "lib"
         write_manifest(sub, "lib")
-        index.register(Manifest.load(repo), via="init")
-        _, added = index.register(Manifest.load(sub), via="init")
+        index.register(Manifest.locate(repo), via="init")
+        _, added = index.register(Manifest.locate(sub), via="init")
         assert added is False
         assert [e.name for e in index.list()] == ["demo"]
 
@@ -184,13 +184,13 @@ class TestRegistration:
         git(repo, "commit", "-qm", "sub")
         wt = tmp_path / "wt2"
         git(repo, "worktree", "add", "-q", "-b", "side2", str(wt))
-        entry, _ = index.register(Manifest.load(wt / "packages" / "lib"), via="manual")
+        entry, _ = index.register(Manifest.locate(wt / "packages" / "lib"), via="manual")
         assert entry.root == str(sub)
 
     def test_a_project_outside_git_keys_on_its_own_state_root(self, index, tmp_path):
         root = tmp_path / "plain"
         write_manifest(root, "plain")
-        entry, _ = index.register(Manifest.load(root), via="manual")
+        entry, _ = index.register(Manifest.locate(root), via="manual")
         assert entry.key == str(root.resolve() / ".claude" / "invariant" / "state")
         assert entry.root == str(root.resolve())
 
@@ -198,18 +198,18 @@ class TestRegistration:
         self, index, repo, monkeypatch
     ):
         """The SessionStart path reads first; a known project takes no lock."""
-        index.register(Manifest.load(repo), via="init")
+        index.register(Manifest.locate(repo), via="init")
 
         def refuse(*_a, **_k):
             raise AssertionError("the lock was taken for a known project")
 
         monkeypatch.setattr(index._store, "locked", refuse)
-        _, added = index.register(Manifest.load(repo), via="session-start")
+        _, added = index.register(Manifest.locate(repo), via="session-start")
         assert added is False
 
     def test_a_race_lost_inside_the_lock_adds_nothing(self, index, home, repo):
         """Two hosts both read 'missing'; the second to lock finds it present."""
-        manifest = Manifest.load(repo)
+        manifest = Manifest.locate(repo)
         other = ProjectIndex(home)
         real_read = index._read_entries
         calls = {"n": 0}
@@ -229,17 +229,17 @@ class TestRegistration:
 
     def test_an_unknown_route_is_refused(self, index, repo):
         with pytest.raises(UsageError):
-            index.register(Manifest.load(repo), via="cron")
+            index.register(Manifest.locate(repo), via="cron")
 
     def test_a_manifest_without_a_name_uses_the_directory(self, index, tmp_path):
         root = tmp_path / "nameless"
         (root / MANIFEST_RELPATH).parent.mkdir(parents=True)
         (root / MANIFEST_RELPATH).write_text("version: 1\n", encoding="utf-8")
-        entry, _ = index.register(Manifest.load(root), via="manual")
+        entry, _ = index.register(Manifest.locate(root), via="manual")
         assert entry.name == "nameless"
 
     def test_get_finds_by_key(self, index, repo):
-        entry, _ = index.register(Manifest.load(repo), via="init")
+        entry, _ = index.register(Manifest.locate(repo), via="init")
         assert index.get(entry.key) == entry
         assert index.get("/nowhere") is None
 
@@ -260,7 +260,7 @@ class TestTheDocument:
             ),
             encoding="utf-8",
         )
-        index.register(Manifest.load(repo), via="init")
+        index.register(Manifest.locate(repo), via="init")
         document = stored(home)
         assert document["later"] == {"x": 1}
         assert document["projects"][0]["extra"] is True
@@ -272,7 +272,7 @@ class TestTheDocument:
         with pytest.raises(StateError, match="version 2"):
             index.list()
         with pytest.raises(StateError):
-            index.register(Manifest.load(repo), via="init")
+            index.register(Manifest.locate(repo), via="init")
         assert (home / INDEX_FILE).read_text(encoding="utf-8") == body
 
     def test_malformed_json_is_a_state_error(self, index, home):
@@ -292,7 +292,7 @@ class TestTheDocument:
             index.list()
 
     def test_the_home_holds_only_the_index_and_its_lock(self, index, home, repo):
-        index.register(Manifest.load(repo), via="init")
+        index.register(Manifest.locate(repo), via="init")
         assert sorted(p.name for p in home.iterdir()) == sorted([INDEX_FILE, "locks"])
 
 
@@ -301,8 +301,8 @@ class TestRemoveAndPrune:
     def two(self, index, repo, tmp_path):
         other = tmp_path / "other"
         write_manifest(other, "other")
-        a, _ = index.register(Manifest.load(repo), via="init")
-        b, _ = index.register(Manifest.load(other), via="manual")
+        a, _ = index.register(Manifest.locate(repo), via="init")
+        b, _ = index.register(Manifest.locate(other), via="manual")
         return a, b
 
     def test_remove_by_key(self, index, two):
@@ -338,7 +338,7 @@ class TestRemoveAndPrune:
         a, _ = two
         twin = tmp_path / "twin"
         write_manifest(twin, "demo")
-        c, _ = index.register(Manifest.load(twin), via="manual")
+        c, _ = index.register(Manifest.locate(twin), via="manual")
         with pytest.raises(UsageError) as caught:
             index.remove("demo")
         assert a.key in str(caught.value) and c.key in str(caught.value)

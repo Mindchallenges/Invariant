@@ -21,14 +21,18 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ..core.errors import StateError
+from ..core.home import HOME_ENV, invariant_home
 
-#: Overrides the home directory. The test suite sets it for every test so that
-#: nothing reaches the real one; an operator can set it to keep the oracle's
-#: state somewhere else.
-HOME_ENV = "INVARIANT_HOME"
-
-#: The directory name under the user's home when nothing overrides it.
-DEFAULT_DIRNAME = ".invariant"
+# HOME_ENV is named here too: the CLI's oracle commands report it by name.
+__all__ = [
+    "HOME_ENV",
+    "PRIVATE_DIR_MODE",
+    "PRIVATE_FILE_MODE",
+    "append_private",
+    "oracle_home",
+    "private_dir",
+    "write_private",
+]
 
 #: A private directory: its owner alone may list or enter it.
 PRIVATE_DIR_MODE = 0o700
@@ -39,14 +43,12 @@ PRIVATE_FILE_MODE = 0o600
 def oracle_home(env: Mapping[str, str] | None = None) -> Path:
     """``$INVARIANT_HOME`` when set and non-empty, else ``~/.invariant``.
 
-    Resolved on every call rather than cached, so a process that changes the
-    variable — a test, chiefly — is answered with the value it set.
+    The one resolution is ``core.home.invariant_home``, which the manifest
+    also reads for the user level of the config (ADR-014 D3); the oracle's
+    home and the user config's are therefore the same directory by
+    construction.
     """
-    env = os.environ if env is None else env
-    configured = env.get(HOME_ENV)
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / DEFAULT_DIRNAME
+    return invariant_home(env)
 
 
 def private_dir(path: Path) -> Path:

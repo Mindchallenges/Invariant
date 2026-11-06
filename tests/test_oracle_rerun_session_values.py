@@ -84,7 +84,7 @@ def _project(base: Path, seen: Path, privacy: dict | None = None) -> Manifest:
     }), "utf-8")
     git(root, "add", "-A")
     git(root, "commit", "-qm", "init")
-    manifest = Manifest.load(root.resolve())
+    manifest = Manifest.locate(root.resolve())
     ProjectIndex(oracle_home()).register(manifest, via="manual")
     return manifest
 

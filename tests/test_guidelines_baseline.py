@@ -522,7 +522,7 @@ class TestRecordingOverARepository:
         assert entry_line(PRINT, "app/m.py", stamp("print(x)"), 1).split() in [
             line.split() for line in text.splitlines()
         ]
-        ctx = RuleContext(manifest=Manifest.load(root), cwd=root,
+        ctx = RuleContext(manifest=Manifest.locate(root), cwd=root,
                           session={"files": ["app/m.py"], "base": ""})
         verdict = clean_of(ctx)
         assert verdict.ok
