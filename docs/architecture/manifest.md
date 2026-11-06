@@ -1673,8 +1673,7 @@ its repository does.
 
 The store's own `invariant.yaml` may also not set `store_naming`: a store is
 named when `store init` creates it, before any store level exists, so only
-the user level's `store_naming` is read (choice g of the increment, for this
-pass).
+the user level's `store_naming` is read (ruled 2026-11-06, ADR-014 D2).
 
 A refusal about a project the walk found names it: `ManifestError` carries
 `project_root` and `manifest_path`, which `doctor` prints and the CLI's

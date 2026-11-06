@@ -7,7 +7,9 @@
   user's ruling the same day: the store example's `publish` key, which no
   decision defined, is dropped (pushing is `sync.push_after_landing`, D7),
   and D7's `pull_at_start` cites ruling 7. A further amendment, ruled 2026-11-06,
-  widens D9's interim refusal to `guidelines.baseline` (D9).
+  widens D9's interim refusal to `guidelines.baseline` (D9), and reads
+  `store_naming` from the user level only (D2): a store's own setting has
+  nothing to read it, since the store does not exist when its name is chosen.
 - **Date:** 2026-11-05
 - **Supersedes:** nothing. Amends `docs/architecture/overview.md`
   ("Where things live at rest"), `docs/architecture/manifest.md` ("Resolution
@@ -213,7 +215,7 @@ The default parent is `~/.invariant/stores/`, which `$INVARIANT_HOME` moves
 ruling 14:
 
 ```yaml
-store_naming: repo        # repo (default) | url; at user or store level (D3)
+store_naming: repo        # repo (default) | url; user level (D3; ruled 2026-11-06)
 ```
 
 - `repo`: the repo name, the last segment of the normalised origin (D4), or
