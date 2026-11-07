@@ -23,8 +23,9 @@ from pathlib import Path
 from ..core import plan as plan_reader
 from ..core.agents import AgentSource
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
-from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Manifest
+from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Level, Manifest
 from ..core.rules import (
+    DOCTOR_ROW_RULES,
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
     all_rules,
@@ -827,6 +828,17 @@ def cmd_doctor(args) -> int:
             )
         )
 
+        # The docs assessment (ADR-016 D3), asked of its rule directly as the
+        # guidelines rows are. Its level decides the row: `warn`, every
+        # profile's, prints gaps as a warning; `block` fails the row; `off`
+        # removes it. The row above is unchanged.
+        docs_row = docs_assessment_row(ctx.manifest, ctx.rule_context())
+        if docs_row is not None:
+            label, ok, detail, warns = docs_row
+            checks.append((label, ok, detail))
+            if warns:
+                warned.add(label)
+
         for name in ("build", "test"):
             configured = ctx.manifest.get(f"commands.{name}")
             checks.append(
@@ -1016,6 +1028,33 @@ def cmd_doctor(args) -> int:
         warned.add(label)
 
     return _report_checks(args, checks, warned)
+
+
+def docs_assessment_row(
+    manifest: Manifest, rule_ctx
+) -> tuple[str, bool, str, bool] | None:
+    """`doctor`'s `docs assessment` row: (label, ok, detail, warns), or ``None``
+    when `docs.assessment` is off (ADR-016 D3)."""
+    (rule_id,) = DOCTOR_ROW_RULES
+    level = manifest.rule_level(rule_id)
+    if level is Level.OFF:
+        return None
+    verdict = get_rule(rule_id).fn(rule_ctx)
+    gapped = not verdict.ok and not verdict.skipped
+    fails = gapped and level in (Level.BLOCK, Level.ASK)
+    detail = verdict.message + (f": {verdict.detail}" if gapped else "")
+    if gapped:
+        detail += "".join(f"; try: {fix}" for fix in verdict.fixes)
+    return ("docs assessment", not fails, detail, gapped and not fails)
+
+
+def cmd_docs_assess(args) -> int:
+    """The architecture docs assessment (ADR-016 D3). Read-only; exit 0
+    whatever the gaps, 2 on a configuration that does not load."""
+    from ..domains.docs import assess
+
+    assessment = assess(Context().manifest)
+    return emit(args, assessment.to_dict(), assessment.render())
 
 
 def user_defaults_summary(manifest: Manifest) -> str:
@@ -5509,6 +5548,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_agents_install)
+
+    p = sub.add_parser("docs").add_subparsers(dest="sub", required=True)
+    q = p.add_parser(
+        "assess", help="report the architecture docs' gaps by check (read-only)"
+    )
+    q.set_defaults(func=cmd_docs_assess)
 
     p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
     q = p.add_parser("init", help="create a store for this repository and link it")

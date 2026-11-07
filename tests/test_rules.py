@@ -7,6 +7,7 @@ import pytest
 
 from invariant.core.manifest import Level
 from invariant.core.rules import (
+    DOCTOR_ROW_RULES,
     NORMALISED_PAYLOAD_KEYS,
     RuleContext,
     Verdict,
@@ -162,8 +163,10 @@ class TestRegistry:
         """A graded rule that nothing ever evaluates reports a level it has no
         way to apply.
 
-        Three routes reach a rule: an event binding, a gate naming it in some
-        machine, or an injection (by role, or beside a scheduled gate by id). A rule with neither is dead code wearing an enforcement
+        Four routes reach a rule: an event binding, a gate naming it in some
+        machine, an injection (by role, or beside a scheduled gate by id), or
+        a doctor row whose level decides the row (``DOCTOR_ROW_RULES``,
+        ADR-016 D3). A rule with none is dead code wearing an enforcement
         level — `invariant rules list` shows it as `block`, the profiles argue
         about it, and it never once runs. That reads as a control being
         present, which is the failure mode this library exists to remove.
@@ -193,6 +196,7 @@ class TestRegistry:
             for gate in gates
         }
         reachable.add(FRESHNESS_GATE)
+        reachable |= DOCTOR_ROW_RULES
         for machine_id in shipped_ids():
             for state in load_machine(machine_id).states.values():
                 reachable.update(state.entry_gates)

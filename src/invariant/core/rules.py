@@ -1681,6 +1681,42 @@ def _agents_rendered_current(ctx: RuleContext) -> Verdict:
 # -- docs rules --------------------------------------------------------
 
 
+#: Rules no machine names and nothing injects, reached instead through a
+#: `doctor` row whose level the rule's own decides: `warn` warns, `block`
+#: fails the row, `off` removes it (ADR-016 D3). The fourth route a graded
+#: rule may be reached by.
+DOCTOR_ROW_RULES = frozenset({"docs.assessment"})
+
+
+@rule(
+    "docs.assessment",
+    summary="The architecture docs have every required section, name every "
+    "source area, and link only to files that exist.",
+    events=(),
+)
+def _docs_assessment(ctx: RuleContext) -> Verdict:
+    """ADR-016 D3: the assessment's gaps, for `doctor`'s `docs assessment` row.
+
+    Never injected into a pipeline: `doctor` asks it directly, as it asks the
+    guidelines rules, and `invariant check` can. The assessment is the docs
+    domain's, read here at call time as the memory rules read theirs.
+    """
+    from ..domains.docs import assess  # local: avoids a cycle
+
+    assessment = assess(ctx.manifest)
+    if not assessment.checks:
+        return Verdict.na("every check is off (docs.assess.checks: [])")
+    if not assessment.gaps:
+        return Verdict.clean(
+            f"no gaps in {assessment.location} ({', '.join(assessment.checks)})"
+        )
+    return Verdict.fail(
+        assessment.summary(),
+        detail=assessment.row_detail(),
+        fixes=("invariant docs assess",),
+    )
+
+
 @rule(
     "docs.read_architecture",
     summary="The architecture docs were read before designing the change.",

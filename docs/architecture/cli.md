@@ -215,18 +215,21 @@ invariant doctor
     `commands derive` and the rule, and increment 4 `--measure` and the D5
     row.
 
-    Accepted, not yet built (ADR-016 D3, D7, D8). A `docs assessment` row
-    asks the new rule `docs.assessment` directly and lists the gaps by
-    check: required sections found in no doc, source areas no doc names,
-    and relative links whose target file is missing. It warns in every
-    profile, so gaps never make `doctor` exit 1; `block` makes the row fail
-    and `off` removes it. The architecture-docs row is unchanged. D8 adds a
-    `docs adoption` row (warn) naming every original file changed, added or
-    removed since a copy-mode adoption. ADR-016 also adds a `docs` command
-    group: `docs assess` (D3, with `--plan` from D5) and `docs adopt` (D7);
-    this file gains its section when it is built. Increment 1 of ADR-016
-    builds the row and `docs assess`, increment 2 `--plan`, and increment 4
-    `docs adopt` and the D8 row.
+    `docs assessment` (ADR-016 D3, increment 1) asks the rule
+    `docs.assessment` directly, as the guidelines rows do, and lists the
+    gaps by check: required sections found in no doc, source areas no doc
+    names, and relative links whose target file is missing (see `invariant
+    docs assess` below). Its level is the rule's under `enforcement.rules`:
+    `warn` in every profile, so gaps print `warn` and never make `doctor`
+    exit 1; `block` (or `ask`) makes the row fail; `off` removes it. With
+    every check off it says so and passes. The architecture-docs row above
+    it is unchanged.
+
+    Accepted, not yet built (ADR-016 D7, D8). D8 adds a `docs adoption` row
+    (warn) naming every original file changed, added or removed since a
+    copy-mode adoption, and the `docs` group gains `docs assess --plan` (D5)
+    and `docs adopt` (D7). Increment 2 of ADR-016 builds `--plan`, and
+    increment 4 `docs adopt` and the D8 row.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -515,6 +518,33 @@ invariant store status [--quiet]
     records it holds; exit 1 otherwise, saying why (an in-repo project, no
     project, a refused link). --quiet prints nothing and only answers: the
     guard a user-level agent runs first (D11).
+
+invariant docs assess [--json]
+    Print the assessment of the architecture docs (ADR-016 D1 to D3,
+    increment 1): every gap by check, a line `<check>: off` for each check
+    `docs.assess.checks` leaves out, then a one-line summary and the input
+    digest. Read-only. Exit 0 whatever the gaps; 2 on a configuration it
+    cannot load. The docs are read at the resolved `paths.docs`, joined onto
+    the store root under `records.docs: store`. `domains/docs` owns the
+    assessment:
+      sections  each heading of `docs.assess.sections` found in no doc,
+                compared after whitespace normalisation and case folding,
+                counted once across the docs
+      areas     each source area no doc names as a whole word; the areas
+                come from the adapter's `source_areas` hook, from globs or
+                from a declared list (`docs.assess.areas`), less `exclude`.
+                An adapter that cannot tell is a gap naming the ecosystem
+      links     each relative link whose target does not exist, by file and
+                line. Anchors and queries are stripped; external URLs and
+                root-absolute paths are never checked
+    Headings and links are read through `core/docformat`'s reader for
+    `docs.format`. Markdown has one; any other format makes `sections` and
+    `links` report "not assessable: no reader for <format>", never a pass,
+    and `areas` reads every file's text. Files are read in sorted order and
+    the digest covers every input (the settings, each doc's bytes, the
+    areas, each link target checked), so two runs over an unchanged tree
+    print byte-identical output. Anything under a dot-named directory of the
+    docs is held out. `--json` carries the same, the gaps under `checks`.
 ```
 
 ### A managed file the operator has edited

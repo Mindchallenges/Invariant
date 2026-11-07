@@ -65,9 +65,10 @@ graph TD
         CHOME["home (ADR-014 D3)"]
         CIDENT["identity (ADR-014 D4)"]
         CSTORES["stores (ADR-014 D2)"]
+        CDOCFMT["docformat (ADR-016 D1)"]
     end
 
-    subgraph domains["domains/ — the seven state domains"]
+    subgraph domains["domains/ — the eight state domains"]
         SESSION[session]
         PIPELINE[pipeline]
         WORKITEM[workitem]
@@ -75,6 +76,7 @@ graph TD
         STATSDOMAIN[stats]
         SWEEPD["sweep (ADR-010)"]
         GDOM["guidelines (ADR-012 D12)"]
+        DOCSD["docs (ADR-016 D1, D2)"]
     end
 
     subgraph adapters["adapters/ — ecosystem knowledge"]
@@ -274,6 +276,12 @@ graph TD
     CVERD -- NaAnswer --> CFIND
     CVERD -- Guideline, Ruleset, digest_of, meets --> CGUIDE
     CVERD -- project_relative --> MANIFEST
+    CLI -- "docs assess" --> DOCSD
+    RULES -. "docs.assessment, imported at call time" .-> DOCSD
+    DOCSD -- "headings, links: the reader for docs.format" --> CDOCFMT
+    DOCSD -- "docs.assess, path_for, project_relative, glob_matches" --> MANIFEST
+    DOCSD -- source_areas --> adapters
+    DOCSD -- tracked_files --> GIT
 ```
 
 `MANIFEST --> CHOME` is the user level of the configuration (ADR-014 D3,
@@ -394,6 +402,24 @@ CCLAUNCH`. It adds no import weight to the hook path, since `claude_code` alread
 reached the reader through `claude_code_launch`. `core/rules.RuleContext` removes
 `evidence.audit` when it is built, so no rule can see the record, whoever builds
 the context.
+
+`DOCSD` is `domains/docs`, the assessment of the architecture docs (ADR-016
+D1 to D3, increment 1). It is not an FSM, like `stats`: `assess` reads the
+docs at the resolved `paths.docs` and returns their gaps by check
+(`sections`, `areas`, `links`) with a digest of every input, and writes
+nothing. `DOCSD --> CDOCFMT` is how it reads a doc: `core/docformat` holds
+one reader per `docs.format` (markdown in increment 1), pure, answering
+headings and links with their lines; a format with no reader is "not
+assessable", never a pass. `DOCSD --> adapters` is the `source_areas` hook
+(D2), which takes the tracked files as a parameter because an adapter asks
+git nothing, so `DOCSD --> GIT` is `tracked_files`. `CLI --> DOCSD` is
+`invariant docs assess`. `doctor`'s `docs assessment` row asks the rule
+`docs.assessment` directly, and the rule asks the domain: `RULES -.->
+DOCSD` points up, against the dependency rule below, and is drawn dotted
+because the import is made at call time inside the rule, exactly as the
+memory rules have long imported `domains/memorystore`. ADR-016 draws this
+arrow (`RULES --> DOCS`). No machine names the rule, so nothing in a
+pipeline reaches the domain.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1360,7 +1386,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 |---|---|---|
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; the advisory lock a read-modify-write holds, as `locked` for the cross-session registry and as `lock` alone for a caller that may write nothing, which is how `domains/pipeline` guards each pipeline record (BUG_107); the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
-| `manifest` | Finding the project and its config levels (`Manifest.locate`, the only entry point, ADR-014 D2), and the questions asked of it (`is_project_root`, `set_by_project`); parsing and validating the project manifest; merging profile defaults with per-rule overrides, and the user level's defaults below the project's own (ADR-014 D3, ruling 19), naming them (`user_level_values`); the `records` block, its refusals, and reading a `store` record's path keys against the store root (`RECORD_PATH_KEYS`, `store_record_paths`, ADR-014 D1); resolving adapter selection; refusing a key it does not read, under `agents`, `guidelines` and `host` alike; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands; interpret a `host.tier_map` value, or hold a list of model names |
+| `manifest` | Finding the project and its config levels (`Manifest.locate`, the only entry point, ADR-014 D2), and the questions asked of it (`is_project_root`, `set_by_project`); parsing and validating the project manifest; merging profile defaults with per-rule overrides, and the user level's defaults below the project's own (ADR-014 D3, ruling 19), naming them (`user_level_values`); the `docs.assess` keys and their refusals (ADR-016 D9); the `records` block, its refusals, and reading a `store` record's path keys against the store root (`RECORD_PATH_KEYS`, `store_record_paths`, ADR-014 D1); resolving adapter selection; refusing a key it does not read, under `agents`, `guidelines` and `host` alike; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands; interpret a `host.tier_map` value, or hold a list of model names |
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set`; the library agents' currency (`agents_currency`, `AgentCopy`, ADR-012 A6.4), the one judgement `agents.rendered_current` and the host's `library agents current` row give, over a host install plan handed in as a callable (`RuleContext.host_agent_plan`) | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
@@ -1376,6 +1402,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames; a judgement rule's mechanical N/A conditions (`na_answer`, `NaAnswer`, A4 increment 2), `no_added_match` and `no_executable_change` over the rule's files, read through `core/guidelines`' `meets` (A4's DN-3) | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, the acting agent the host stamps, and `token`, the submission's, each written only when set and both dropped by `resubmitted`, A4 increment 8); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused; each refused line as a `Refusal` naming its predicate, entry and rule apart from the prose, and `PREDICATES`, every name a refusal gives (A4 increment 7); for `guidelines.verdicts_complete` (A4 increment 3), the owed rules (`owed`, over `not_owed`, the one reading of why a rule is or is not owed), a record read back as a submission (`resubmitted`) and each owed rule's `Standing` (`standings`: current, missing, stale, or answered by the engine's N/A, a pass or fail on it set aside); for `guidelines verdicts show` (A4 increment 4), the recorded verdicts on rules no longer owed (`unowed`) | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
+| `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded | Read a file; decide what a gap is (`domains/docs` does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 
 ### `domains/`
@@ -1446,6 +1473,13 @@ advance it. They are the only place where "what a session is" is encoded.
   outside the project (`SelectionRefused`).
 - **`memorystore`** — validation, dedup, and index regeneration over the
   memory directory. Not an FSM; a set of invariants plus repair operations.
+- **`docs`** — the architecture docs assessment (ADR-016 D1, D2, increment
+  1). Not an FSM. `assess(manifest)` returns an `Assessment`: the gaps by
+  check (`Gap`), the source areas (`Area`) from the adapter's
+  `source_areas`, from globs or from a declared list less `exclude`, the
+  documents read in sorted order, and a digest of every input; rendered as
+  text or as JSON. Read-only: it writes nothing, and a check set off is
+  absent and says so.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for
   the same reason `memorystore` is not: there is no lifecycle to advance, but
   there is a store with invariants over it and operations that repair them.
@@ -1497,6 +1531,17 @@ goes to ONE ecosystem: the primary for a whole-suite run, or the ecosystem
 whose adapter claims a scoped run's selectors (`owns_selector`). That
 ecosystem's command runs it and that adapter reads it. The flat `commands.*`
 are the primary's, and each further ecosystem has its own block (ADR-013).
+
+`source_areas(root, tracked)` (ADR-016 D2) names a project's source areas,
+the directories an architecture doc should name, for the docs assessment.
+The base answer is the directories one level below each `measured_scope`
+root holding a file `source_files` accepts; with no scope, the top-level
+directories holding such a file among `tracked`, the tracked files the
+caller hands in. Python overrides it with the subpackages of each top
+package (the measured roots that are packages, else the packages under
+`src/` and the root), falling back to the base. A directory whose name
+starts with a dot is never an area, and `None` means "cannot tell", which
+the assessment reports as a gap.
 
 "How to read a coverage number" is the layer's quietest duty and the one whose
 failures travel furthest, because everything downstream of it behaves correctly

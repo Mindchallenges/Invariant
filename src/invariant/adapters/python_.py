@@ -197,6 +197,34 @@ class PythonAdapter(Adapter):
             resolved.append(candidate)
         return resolved
 
+    def source_areas(
+        self, root: Path, tracked: Sequence[Path] | None = None
+    ) -> list[Path] | None:
+        """The subpackages of each top package (ADR-016 D2).
+
+        The top packages are the measured scope's roots that are packages,
+        else the packages directly under ``src/`` and the project root. A
+        subpackage is a directory holding ``__init__.py``, so package data
+        and caches are not areas. With none found, the base answer.
+        """
+        scope = self.measured_scope(root) or []
+        tops = [base for base in scope if (base / "__init__.py").is_file()]
+        if not tops:
+            tops = [
+                child
+                for base in (root / "src", root)
+                if base.is_dir()
+                for child in sorted(base.iterdir())
+                if (child / "__init__.py").is_file()
+            ]
+        areas = [
+            child
+            for top in tops
+            for child in sorted(top.iterdir())
+            if (child / "__init__.py").is_file()
+        ]
+        return areas or super().source_areas(root, tracked)
+
     def is_test_file(self, path: Path) -> bool | None:
         """pytest's own discovery conventions, and nothing looser.
 

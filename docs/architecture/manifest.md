@@ -261,15 +261,40 @@ under `methodology.gates.schedule` (D5). Every new key defaults to today's
 behaviour. Each key lands with its decision's increment: ADR-014's 2 for D1
 to D4, 4 for D5, 5 for D7 and 6 for D8; ADR-015's 3 for D3 and 4 for D5.
 
-**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9).** `docs` gains `assess`
-(`checks`, `sections`, and `areas` with `from`, `globs`, `declared` and
-`exclude`), `onboarding` (`off`, `incremental` or `all_at_once`) and `adopt`
-(`mode` and `source`), and `enforcement.rules` gains `docs.assessment` and
-`docs.area_documented`, both `warn` by default (`strict` blocks the second).
-Every default is today's behaviour. An unknown key, check, `from` or mode is
-refused at load, naming it. Increment 1 builds the `assess` keys and
-`docs.assessment`, 2 `docs.onboarding`, 3 `docs.area_documented`, and 4 the
-`adopt` keys.
+**Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9, increment 1).** `docs.assess` configures the
+docs assessment (`invariant docs assess`, cli.md), and `enforcement.rules`
+gains `docs.assessment`, `warn` in every profile:
+
+```yaml
+docs:
+  assess:
+    checks: [sections, areas, links]   # any subset; [] turns the assessment off
+    sections:                    # required headings, found in any doc
+      - Layers
+      - Component responsibilities
+      - Compliance checklist
+    areas:
+      from: adapter              # adapter | globs | declared
+      globs: []                  # from: globs; each directory a glob matches
+      declared: []               # from: declared; [{path, name}], name optional
+      exclude: []                # globs held out of every source
+```
+
+The defaults are the starter `overview.md`'s shape, and they change nothing
+but `doctor`'s informational `docs assessment` row. `Manifest` refuses at
+load, naming it, an unknown key under `docs.assess` or `docs.assess.areas`,
+an unknown or repeated check, a `from` outside the three, a glob that climbs
+out of the project, and a declared entry with no project-relative `path`,
+another key, or a `name` that is not one line. These are source areas,
+directories of the project's code, not ADR-014 D5's lock areas, which are
+patterns over the docs.
+
+**Accepted, not yet built (ADR-016 D9).** `docs` gains `onboarding` (`off`,
+`incremental` or `all_at_once`) and `adopt` (`mode` and `source`), and
+`enforcement.rules` gains `docs.area_documented`, `warn` by default
+(`strict` blocks it). Every default is today's behaviour. An unknown
+onboarding or adopt mode is refused at load, naming it. Increment 2 builds
+`docs.onboarding`, 3 `docs.area_documented`, and 4 the `adopt` keys.
 
 ### Records and their locations
 
@@ -1574,12 +1599,17 @@ a different standard than the rest because of it: a rule id either resolves or
 is refused by name. See "An override either takes effect or says it did not"
 above.
 
-**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9).** Every new `docs.assess`,
-`docs.onboarding` and `docs.adopt` key resolves through layer 5's levels,
-user `defaults:` (5a), the store (5b) and an in-repo project's manifest
-(5c), with its provenance label in `config show`. The pointer keeps refusing
-them, and `docs.adopt.source` is refused at the user level (ruling 11). Each
-key lands with its increment (see "Full schema").
+**Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9, increment 1).** Every `docs.assess` key resolves
+through layer 5's levels, user `defaults:` (5a), the store (5b) and an
+in-repo project's manifest (5c), with its provenance label in `config show`,
+like any other key. A list is replaced whole by the level above, never
+merged. The pointer keeps refusing them, since it holds only `version`,
+`store` and `records` (ruling 11).
+
+**Accepted, not yet built (ADR-016 D9).** The `docs.onboarding` and
+`docs.adopt` keys resolve the same way, and `docs.adopt.source` is refused
+at the user level (ruling 11). Each lands with its increment (see "Full
+schema").
 
 ### The user level (ADR-014 D3, 5a)
 

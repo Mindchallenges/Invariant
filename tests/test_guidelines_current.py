@@ -340,7 +340,11 @@ class TestTheCommands:
         run("--json", "doctor")
         rows = self.doctor_rows(capsys)
         assert rows["guidelines generated"]["warn"] is False
-        assert all(r["warn"] is False for r in rows.values())
+        # The docs assessment row (ADR-016 D3) reports this fixture's
+        # one-heading overview as gaps; it is the docs', not the guidelines'.
+        assert all(
+            r["warn"] is False for k, r in rows.items() if k != "docs assessment"
+        )
 
     def test_doctor_warns_the_row_on_a_refusal_the_ruleset_row_fails(self, project, capsys):
         """A ruleset that does not load fails its own row; this row only warns."""

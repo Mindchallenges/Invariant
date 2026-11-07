@@ -432,6 +432,43 @@ class Adapter:
         """
         return None
 
+    def source_areas(
+        self, root: Path, tracked: Sequence[Path] | None = None
+    ) -> list[Path] | None:
+        """The project's source areas, each a directory an architecture doc
+        should name (ADR-016 D2).
+
+        The base answer is the directories one level below each
+        :meth:`measured_scope` root that hold a file :meth:`source_files`
+        accepts. With no scope, it is the top-level directories holding such
+        a file among ``tracked``, the project-relative files git tracks,
+        which the caller hands in because an adapter asks git nothing. A
+        directory whose name starts with a dot is never an area.
+
+        Returns absolute directories, sorted, or ``None`` for "cannot tell",
+        which the assessment reports as a gap rather than passing empty.
+        """
+        scope = self.measured_scope(root)
+        if scope is not None:
+            return [
+                child
+                for base in scope
+                for child in sorted(base.iterdir() if base.is_dir() else ())
+                if child.is_dir()
+                and not child.name.startswith(".")
+                and self.source_files(
+                    sorted(p for p in child.rglob("*") if p.is_file())
+                )
+            ]
+        if tracked is None:
+            return None
+        tops = {
+            path.parts[0]
+            for path in self.source_files([Path(p) for p in tracked])
+            if len(path.parts) > 1 and not path.parts[0].startswith(".")
+        }
+        return [root / name for name in sorted(tops)]
+
     def is_test_file(self, path: Path) -> bool | None:
         """Is this file part of the test suite rather than the code under test?
 

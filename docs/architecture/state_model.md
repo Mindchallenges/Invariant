@@ -1437,11 +1437,19 @@ Details that are load-bearing rather than incidental:
   whose `host.kind` has no adapter, where the rule would be N/A, never lists
   it. A pinned or overridden methodology keeps it.
 
-**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D3, D6).** Two rules join the docs
-gates. `docs.assessment` reports the assessment's gaps (required sections,
-unnamed source areas, relative links to missing files) as `doctor`'s `docs
-assessment` row and is never injected into a pipeline (increment 1). The
-new rule `docs.area_documented` is armed only by `docs.onboarding:
+**Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D3, increment 1).** `docs.assessment` reports the
+assessment's gaps (required sections, unnamed source areas, relative links
+to missing files) as `doctor`'s `docs assessment` row. It fails on any gap,
+listing them by check in its detail with `invariant docs assess` as the fix,
+and is N/A when `docs.assess.checks` is empty. It warns in every profile and
+no machine names it, so `core/machines` never injects it into a pipeline:
+`doctor` and `invariant check docs.assessment` are its only callers.
+`core/rules.DOCTOR_ROW_RULES` names it as a rule reached through a doctor
+row whose level the rule's decides, the fourth route by which a graded rule
+counts as reachable beside an event, a machine gate and an injection.
+
+**Accepted, not yet built (ADR-016 D6).** The rule `docs.area_documented`
+joins the docs gates. It is armed only by `docs.onboarding:
 incremental`, otherwise N/A saying so, and rides the landing state's entry
 set beside `docs.updated`. It maps each file of `core/rules._changed_set` to
 its source area and asks the live assessment of the session's tree whether

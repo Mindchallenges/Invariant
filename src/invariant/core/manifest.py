@@ -202,6 +202,14 @@ DEFAULTS: dict[str, Any] = {
         "diagrams": "mermaid",
         "index": None,
         "require_diagram_update": True,
+        # The architecture docs assessment (ADR-016 D1, D2, D9). Read-only:
+        # it feeds `docs assess` and the `docs.assessment` doctor row, and no
+        # gate. The defaults are the starter overview.md's shape.
+        "assess": {
+            "checks": ["sections", "areas", "links"],
+            "sections": ["Layers", "Component responsibilities", "Compliance checklist"],
+            "areas": {"from": "adapter", "globs": [], "declared": [], "exclude": []},
+        },
     },
     "methodology": {
         "pipeline": "tdd",
@@ -434,6 +442,14 @@ _GUIDELINES_PATH_KEYS = ("ruleset", "baseline", "checklist")
 _INJECTION_KEYS = ("max_lines", "on_edit")
 #: The `guidelines.verdicts` keys this build reads (A4 increment 1).
 _VERDICTS_KEYS = ("note_max_chars",)
+
+#: The `docs.assess` keys this build reads (ADR-016 D9), its checks, the
+#: `areas` keys and where areas may come from (D1, D2).
+_ASSESS_KEYS = ("checks", "sections", "areas")
+ASSESS_CHECKS = ("sections", "areas", "links")
+_AREAS_KEYS = ("from", "globs", "declared", "exclude")
+AREA_SOURCES = ("adapter", "globs", "declared")
+_DECLARED_AREA_KEYS = ("path", "name")
 
 #: Each record type, and the locations it may take (ADR-014 D1).
 RECORD_LOCATIONS: dict[str, tuple[str, ...]] = {
@@ -883,6 +899,7 @@ class Manifest:
         self._validate_ecosystem_commands()
         self._validate_freshness_level()
         self._validate_guidelines()
+        self._validate_docs_assess()
         self._validate_agents()
         self._validate_host()
         backend = self.data["items"]["backend"]
@@ -1193,6 +1210,78 @@ class Manifest:
                 f"guidelines.verdicts.note_max_chars must be a positive integer, "
                 f"got {note_cap!r}"
             )
+
+    def _validate_docs_assess(self) -> None:
+        """Refuse a `docs.assess` key, check, `from` or entry this build does
+        not read (ADR-016 D9), naming it.
+
+        `checks` is a list of distinct check names, `[]` turning the
+        assessment off; `sections` a list of headings; `areas.from` one of
+        the three sources; `globs` and `exclude` lists of project-relative
+        globs; `declared` a list of `{path, name}`, `name` optional.
+        """
+        section = self.get("docs.assess")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"docs.assess must be a mapping, got {section!r}")
+        _refuse_unknown("docs.assess", section, _ASSESS_KEYS)
+        checks = section.get("checks")
+        if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
+            raise ManifestError(
+                f"docs.assess.checks must be a list of checks, got {checks!r}"
+            )
+        for check in checks:
+            if check not in ASSESS_CHECKS:
+                raise ManifestError(
+                    f"docs.assess.checks names {check!r}, which is not a check; "
+                    f"the checks are {', '.join(ASSESS_CHECKS)}."
+                )
+        if len(set(checks)) != len(checks):
+            repeated = sorted({c for c in checks if checks.count(c) > 1})
+            raise ManifestError(
+                f"docs.assess.checks names {', '.join(repeated)} more than once"
+            )
+        sections = section.get("sections")
+        if not isinstance(sections, list) or not all(_is_path(h) for h in sections):
+            raise ManifestError(
+                f"docs.assess.sections must be a list of headings, got {sections!r}"
+            )
+        areas = section.get("areas")
+        if not isinstance(areas, Mapping):
+            raise ManifestError(f"docs.assess.areas must be a mapping, got {areas!r}")
+        _refuse_unknown("docs.assess.areas", areas, _AREAS_KEYS)
+        source = areas.get("from")
+        if source not in AREA_SOURCES:
+            raise ManifestError(
+                f"docs.assess.areas.from is {source!r}; it is one of "
+                f"{', '.join(AREA_SOURCES)}."
+            )
+        for key in ("globs", "exclude"):
+            value = areas.get(key)
+            if not isinstance(value, list) or not all(
+                project_relative(entry) for entry in value
+            ):
+                raise ManifestError(
+                    f"docs.assess.areas.{key} must be a list of project-relative "
+                    f"globs, got {value!r}"
+                )
+        declared = areas.get("declared")
+        if not isinstance(declared, list):
+            raise ManifestError(
+                f"docs.assess.areas.declared must be a list of {{path, name}}, "
+                f"got {declared!r}"
+            )
+        for entry in declared:
+            if not isinstance(entry, Mapping) or not project_relative(entry.get("path")):
+                raise ManifestError(
+                    f"docs.assess.areas.declared entry {entry!r} must be a mapping "
+                    f"with a project-relative path"
+                )
+            _refuse_unknown("docs.assess.areas.declared entry", entry, _DECLARED_AREA_KEYS)
+            if "name" in entry and not _is_one_line(entry["name"]):
+                raise ManifestError(
+                    f"docs.assess.areas.declared entry {entry!r}: name must be "
+                    f"one line of text"
+                )
 
     def _validate_agents(self) -> None:
         """Refuse an `agents` key that would load and do nothing (ADR-012 D13).
@@ -1790,6 +1879,16 @@ def _flatten(node: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, A
             yield from _flatten(value, f"{dotted}.")
         else:
             yield dotted, value
+
+
+def _refuse_unknown(where: str, mapping: Mapping[str, Any], known: Sequence[str]) -> None:
+    """Refuse a key of ``mapping`` that is not in ``known``, naming it."""
+    for key in mapping:
+        if key not in known:
+            raise ManifestError(
+                f"{where}.{key} is not a key this build reads; it reads "
+                f"{', '.join(where + '.' + k for k in known)}."
+            )
 
 
 def _is_path(value: Any) -> bool:

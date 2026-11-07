@@ -36,6 +36,10 @@ rules:
   agents.rendered_current: warn
 
   docs.read_architecture: block
+  # The architecture docs assessment, doctor's `docs assessment` row (ADR-016
+  # D3). Warns in every profile, so gaps never make doctor exit 1; it is
+  # never injected into a pipeline.
+  docs.assessment: warn
   docs.updated: block
   docs.diagrams_current: block
 
