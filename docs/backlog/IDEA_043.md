@@ -59,7 +59,7 @@ Scope is invariant's architecture docs, the ones `paths.docs` names and the docs
 
 **Why now / why this tier:** every new adopter meets this on day one, and today the first experience is either silence (directory exists) or a starter template with no sense of what is missing. It also feeds the store adoption IDEA_040 and IDEA_041 are building. High value. Effort L: interactive init offers, a new assessment shared by three entry points, two adoption modes, and an incremental obligation wired into the docs gates. Tier 2 rather than 1 because of the size, and because it leans on ADR-014's store.
 
-**Related:** IDEA_040 (home store; `records.docs`), IDEA_041 (docs repositories; in-place docs may be Sphinx), ADR-014 (records in a store, D5 docs lock), IDEA_004 (uninstall, the other end of adoption), BUG_002 and BUG_064 (gates inapplicable to docs-only changes), cli.md ("Setup": `init`, `doctor`), manifest.md, overview.md ("Where things live at rest").
+**Related:** [ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) (the design, Proposed), IDEA_040 (home store; `records.docs`), IDEA_041 (docs repositories; in-place docs may be Sphinx), ADR-014 (records in a store, D5 docs lock), IDEA_004 (uninstall, the other end of adoption), BUG_002 and BUG_064 (gates inapplicable to docs-only changes), cli.md ("Setup": `init`, `doctor`), manifest.md, overview.md ("Where things live at rest").
 
 **Design rulings (user, 2026-11-07, interview rounds 1 and 2 before the ADR):**
 
