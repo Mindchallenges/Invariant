@@ -60,3 +60,18 @@ Scope is invariant's architecture docs, the ones `paths.docs` names and the docs
 **Why now / why this tier:** every new adopter meets this on day one, and today the first experience is either silence (directory exists) or a starter template with no sense of what is missing. It also feeds the store adoption IDEA_040 and IDEA_041 are building. High value. Effort L: interactive init offers, a new assessment shared by three entry points, two adoption modes, and an incremental obligation wired into the docs gates. Tier 2 rather than 1 because of the size, and because it leans on ADR-014's store.
 
 **Related:** IDEA_040 (home store; `records.docs`), IDEA_041 (docs repositories; in-place docs may be Sphinx), ADR-014 (records in a store, D5 docs lock), IDEA_004 (uninstall, the other end of adoption), BUG_002 and BUG_064 (gates inapplicable to docs-only changes), cli.md ("Setup": `init`, `doctor`), manifest.md, overview.md ("Where things live at rest").
+
+**Design rulings (user, 2026-11-07, interview rounds 1 and 2 before the ADR):**
+
+1. **Incremental path.** A session touching a source area with no architecture doc owes that area's doc through a new rule. It warns under `standard`, and config or the `strict` profile can raise it to block. A session is never unmergeable by default.
+2. **Comprehensive, deterministically.** Three checks: required sections, every source area named, links resolve. Each check, the section list, and how areas are derived (the adapter's source roots, globs, or a declared list) are settings. The defaults are the starter `overview.md`'s shape.
+3. **Copy drift.** At copy time, record the original's hashes. `doctor` and `docs assess` report originals changed since then, naming the files. Never re-sync unless the user re-runs the adoption.
+4. **All at once.** `init` records a deliverable plan with one line per undocumented area. Each area is written and reviewed through the `docs` lane, so the cost stays visible and the work is resumable.
+5. **Formats.** Section and link reading go through a per-format reader: markdown now, and rST (Sphinx) alongside ADR-015's sphinx adapter. Any other format is refused for in-place mode with a reason; copy mode still works for it.
+6. **Config levels.** Every new key resolves at the user, store and repo levels, with provenance (ADR-014 D3).
+7. **Increments.**
+   1. The assessment, `invariant docs assess` and the doctor row, all read-only.
+   2. `init`'s reuse-or-relocate and onboarding offers, with repo and store locations (the store through ADR-014's `store init` / `link`).
+   3. The incremental rule.
+   4. In-place and copy adoption, with drift reporting.
+8. **Next step.** Draft the ADR from these rulings. Usage was nearly exhausted on 2026-11-07, so it was not drafted then.
