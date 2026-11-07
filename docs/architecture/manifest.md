@@ -261,6 +261,16 @@ under `methodology.gates.schedule` (D5). Every new key defaults to today's
 behaviour. Each key lands with its decision's increment: ADR-014's 2 for D1
 to D4, 4 for D5, 5 for D7 and 6 for D8; ADR-015's 3 for D3 and 4 for D5.
 
+**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9).** `docs` gains `assess`
+(`checks`, `sections`, and `areas` with `from`, `globs`, `declared` and
+`exclude`), `onboarding` (`off`, `incremental` or `all_at_once`) and `adopt`
+(`mode` and `source`), and `enforcement.rules` gains `docs.assessment` and
+`docs.area_documented`, both `warn` by default (`strict` blocks the second).
+Every default is today's behaviour. An unknown key, check, `from` or mode is
+refused at load, naming it. Increment 1 builds the `assess` keys and
+`docs.assessment`, 2 `docs.onboarding`, 3 `docs.area_documented`, and 4 the
+`adopt` keys.
+
 ### Records and their locations
 
 **Built (ADR-014 increment 2, D1).** `records` says where each record type
@@ -312,6 +322,15 @@ does no store lookup (D2: "exactly as today"), so a `store` record in its
 `store.docs_lock` (D5), `sync` (D7) and `privacy.store.scan` (D8), each with
 its increment. Until then a `store` key other than `repos` is refused at load,
 naming it.
+
+**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D4, D7).** `init`'s relocate offer
+writes another repo `paths.docs`, or `records.docs: store` with a
+store-relative `paths.docs` (increment 2). `docs adopt --mode in_place`
+points `paths.docs` (and `records.docs`) at a source under the repo root or
+the project's store root, because a path key cannot be absolute; `--mode
+copy` copies into the resolved docs location, repo or store (increment 4).
+Docs invariant creates go wherever `paths.docs` / `records.docs` resolves;
+there is no separate setting.
 
 ### Agents: the library, the project's own, and overlays
 
@@ -1554,6 +1573,13 @@ Layers 5 and 6 are where the operator exercises authority, and they are held to
 a different standard than the rest because of it: a rule id either resolves or
 is refused by name. See "An override either takes effect or says it did not"
 above.
+
+**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9).** Every new `docs.assess`,
+`docs.onboarding` and `docs.adopt` key resolves through layer 5's levels,
+user `defaults:` (5a), the store (5b) and an in-repo project's manifest
+(5c), with its provenance label in `config show`. The pointer keeps refusing
+them, and `docs.adopt.source` is refused at the user level (ruling 11). Each
+key lands with its increment (see "Full schema").
 
 ### The user level (ADR-014 D3, 5a)
 

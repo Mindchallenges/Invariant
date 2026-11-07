@@ -1437,6 +1437,20 @@ Details that are load-bearing rather than incidental:
   whose `host.kind` has no adapter, where the rule would be N/A, never lists
   it. A pinned or overridden methodology keeps it.
 
+**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D3, D6).** Two rules join the docs
+gates. `docs.assessment` reports the assessment's gaps (required sections,
+unnamed source areas, relative links to missing files) as `doctor`'s `docs
+assessment` row and is never injected into a pipeline (increment 1). The
+new rule `docs.area_documented` is armed only by `docs.onboarding:
+incremental`, otherwise N/A saying so, and rides the landing state's entry
+set beside `docs.updated`. It maps each file of `core/rules._changed_set` to
+its source area and asks the live assessment of the session's tree whether
+that area is named; an unnamed, touched area is owed, and the verdict names
+it and the doc to write. No gap list is recorded. It warns in `loose` and
+`standard` and blocks in `strict`; a docs-lane session changes no source and
+is N/A; with `records.docs: store` it reads the store's docs, per leg as
+ADR-014 D9 decides. Increment 3 builds it.
+
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —
 no implementation means no test could have failed first, no code means nothing

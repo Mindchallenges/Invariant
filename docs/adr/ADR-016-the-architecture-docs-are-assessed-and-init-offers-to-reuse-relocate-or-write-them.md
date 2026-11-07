@@ -1,11 +1,11 @@
 # ADR-016 — The architecture docs are assessed, and init offers to reuse, relocate or write them
 
-- **Status:** Proposed. Eleven rulings were made by the user on 2026-11-06 and
+- **Status:** Accepted (2026-11-07). Eleven rulings were made by the user on 2026-11-06 and
   2026-11-07 (IDEA_043, "Design rulings") and are recorded below as decided.
   Each decision gives the design that carries out its ruling. Any choice
   beyond a ruling is marked *recommended*. No question is open.
 - **Date:** 2026-11-07
-- **Supersedes:** nothing. Amends, at acceptance, `docs/architecture/cli.md`
+- **Supersedes:** nothing. Amends `docs/architecture/cli.md`
   (`init`, `doctor`, a new `docs` command group),
   `docs/architecture/manifest.md` ("Full schema", "Records and their
   locations", "Resolution order") and `docs/architecture/state_model.md`

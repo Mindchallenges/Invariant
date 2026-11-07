@@ -113,6 +113,22 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     that flag rewrites the manifest, not the docs. `--dry-run` lists the write
     when it would happen. Written once; no command rewrites it afterwards.
 
+    Accepted, not yet built (ADR-016 D4, D5). Interactive init, where
+    `paths.docs` exists (empty included), lists what is there and offers to
+    reuse it, to point `paths.docs` at another repo path, or to use a store
+    (ADR-014 `store init` or `store link`, then `records.docs:
+    store`); the existing directory is never touched. It then runs the docs
+    assessment on the chosen location and, where there are gaps, offers all
+    at once (a deliverable plan with one line per undocumented area, each
+    landed through the `docs` lane), incremental (`docs.onboarding:
+    incremental`) or not now (nothing written). When the base already
+    carries the manifest, init starts a parked `docs`-lane session and
+    records the plan; otherwise it records nothing and says to commit its
+    files, then run `invariant docs assess --plan`. Non-interactive init
+    (`--dry-run`, `--json`, no terminal) writes today's files, prompts for
+    nothing and prints the assessment, under `--json` as a
+    `docs_assessment` field. Increment 2 of ADR-016 builds it.
+
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is
     REPORTED and never fails the command — the project is initialised by then
@@ -198,6 +214,19 @@ invariant doctor
     are built. Increment 2 of ADR-015 builds the D1 and D2 rows, increment 3
     `commands derive` and the rule, and increment 4 `--measure` and the D5
     row.
+
+    Accepted, not yet built (ADR-016 D3, D7, D8). A `docs assessment` row
+    asks the new rule `docs.assessment` directly and lists the gaps by
+    check: required sections found in no doc, source areas no doc names,
+    and relative links whose target file is missing. It warns in every
+    profile, so gaps never make `doctor` exit 1; `block` makes the row fail
+    and `off` removes it. The architecture-docs row is unchanged. D8 adds a
+    `docs adoption` row (warn) naming every original file changed, added or
+    removed since a copy-mode adoption. ADR-016 also adds a `docs` command
+    group: `docs assess` (D3, with `--plan` from D5) and `docs adopt` (D7);
+    this file gains its section when it is built. Increment 1 of ADR-016
+    builds the row and `docs assess`, increment 2 `--plan`, and increment 4
+    `docs adopt` and the D8 row.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
