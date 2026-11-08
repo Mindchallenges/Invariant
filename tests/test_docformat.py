@@ -10,6 +10,7 @@ from invariant.core.docformat import (
     Heading,
     Link,
     MarkdownReader,
+    detect_format,
     normalise_heading,
     reader_for,
 )
@@ -86,3 +87,24 @@ class TestMarkdownLinks:
 
     def test_an_empty_target_is_dropped(self):
         assert self.read("[a]()\n") == []
+
+
+class TestDetectFormat:
+    """ADR-016 D7: `docs adopt` sets `docs.format` from the source's files."""
+
+    def test_markdown_files_are_markdown(self):
+        assert detect_format(["a.md", "b/c.markdown", "pic.png", "d.png", "e.png"]) == "markdown"
+
+    def test_restructured_text_is_sphinx(self):
+        assert detect_format(["index.rst", "conf.py", "api.rst", "readme.md"]) == "sphinx"
+
+    def test_the_most_common_document_format_wins_and_ties_sort_by_name(self):
+        assert detect_format(["a.adoc", "b.adoc", "c.md"]) == "asciidoc"
+        assert detect_format(["a.txt", "b.md"]) == "markdown"
+
+    def test_with_no_known_document_the_commonest_suffix_names_it(self):
+        assert detect_format(["a.docx", "b.docx", "c.png"]) == "docx"
+
+    def test_with_no_suffix_at_all_it_is_unknown(self):
+        assert detect_format(["README", "LICENSE"]) == "unknown"
+        assert detect_format([]) == "unknown"

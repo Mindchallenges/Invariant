@@ -598,3 +598,52 @@ def write_store_settings(
     body["store"] = block
     _write_atomic(path, yaml.safe_dump(dict(body), sort_keys=False))
     return StoreWrite(path=path, written=True)
+
+
+def _reads_as(text: str, expected: Mapping[str, Any]) -> bool:
+    try:
+        return yaml.safe_load(text) == expected
+    except yaml.YAMLError:
+        return False
+
+
+def write_repo_settings(path: Path, settings: Mapping[str, Any]) -> StoreWrite:
+    """Merge ``settings`` into a repository's own manifest at ``path`` (D3, 5c).
+
+    The same rule as :func:`write_store_settings`: a file holding no comment
+    is rewritten whole, merged. One holding a comment is never rewritten,
+    since that would drop it; instead, when none of the top-level keys
+    ``settings`` sets is in the file, the settings are appended as a block of
+    their own, which leaves every byte already there as it was. The appended
+    text is parsed back first and written only when it reads as exactly the
+    merged settings. Otherwise nothing is written, and the result carries the
+    block to add by hand and why (ADR-016 D7, `docs adopt`).
+    """
+    path = Path(path)
+    raw = _read_yaml(path, "the manifest") or {}
+    if not isinstance(raw, Mapping):
+        raise ManifestError(f"{path} must contain a mapping")
+    merged = _merged(raw, settings)
+    if not holds_comments(path):
+        _write_atomic(path, yaml.safe_dump(merged, sort_keys=False))
+        return StoreWrite(path=path, written=True)
+    block = yaml.safe_dump(dict(settings), sort_keys=False)
+    text = path.read_text(encoding="utf-8")
+    appended = text + ("" if not text or text.endswith("\n") else "\n") + "\n" + block
+    shared = sorted(set(settings) & set(raw))
+    if not shared and _reads_as(appended, merged):
+        _write_atomic(path, appended)
+        return StoreWrite(path=path, written=True)
+    why = (
+        f"already sets {', '.join(shared)}" if shared
+        else "would not read back as the merged settings with a block appended"
+    )
+    return StoreWrite(
+        path=path,
+        written=False,
+        by_hand=block,
+        reason=(
+            f"{path} holds comments, which a rewrite would drop, and {why}, so "
+            f"nothing was written to it"
+        ),
+    )

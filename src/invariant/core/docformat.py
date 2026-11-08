@@ -5,7 +5,8 @@ The docs assessment reads headings and links through a reader chosen by
 Markdown is the reader built here: ATX and setext headings, inline and
 reference links. A format with no reader answers ``None`` from
 :func:`reader_for`, and the assessment reports it "not assessable", never a
-pass.
+pass. :func:`detect_format` names the format a set of files is written in,
+for `docs adopt` (D7).
 
 Pure: every reader takes text and returns what it found, with 1-based line
 numbers, in the order it appears. Nothing here touches the file system.
@@ -14,7 +15,10 @@ numbers, in the order it appears. Nothing here touches the file system.
 from __future__ import annotations
 
 import re
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Protocol
 
 
@@ -125,3 +129,41 @@ READERS: dict[str, Reader] = {"markdown": MarkdownReader()}
 def reader_for(fmt: str) -> Reader | None:
     """The reader for ``fmt``, or ``None`` when this build has none."""
     return READERS.get(fmt)
+
+
+#: The format a document file's suffix names, for :func:`detect_format`.
+#: reStructuredText is ``sphinx``, the format that selects its reader (D1).
+DOCUMENT_SUFFIXES: dict[str, str] = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".rst": "sphinx",
+    ".adoc": "asciidoc",
+    ".asciidoc": "asciidoc",
+    ".org": "org",
+    ".tex": "latex",
+    ".txt": "text",
+    ".html": "html",
+    ".htm": "html",
+}
+
+
+def detect_format(names: Iterable[str]) -> str:
+    """The ``docs.format`` a set of files is written in (ADR-016 D7).
+
+    The format most of the document files carry, a tie going to the name
+    that sorts first, so the answer never depends on the order the files
+    were listed. Files that are no document (images, a ``conf.py``) are not
+    counted. With no document file, the commonest suffix, without its dot,
+    names the format, and with no suffix at all it is ``unknown``: either
+    way a format with no reader, which the caller reports.
+    """
+    suffixes = [PurePosixPath(name).suffix.lower() for name in names]
+    documents = Counter(DOCUMENT_SUFFIXES[s] for s in suffixes if s in DOCUMENT_SUFFIXES)
+    if documents:
+        return _commonest(documents)
+    others = Counter(s[1:] for s in suffixes if s)
+    return _commonest(others) if others else "unknown"
+
+
+def _commonest(counts: Counter[str]) -> str:
+    return min(counts, key=lambda name: (-counts[name], name))

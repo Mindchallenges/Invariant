@@ -218,11 +218,9 @@ class TestOnboardingKey:
             self.load(tmp_path, {"colour": "blue"})
         assert "docs.colour" in str(exc.value)
 
-    def test_adopt_is_refused_until_its_increment(self, tmp_path):
-        with pytest.raises(ManifestError) as exc:
-            self.load(tmp_path, {"adopt": {"mode": "copy"}})
-        assert "docs.adopt" in str(exc.value)
-        assert "increment 4" in str(exc.value)
+    def test_adopt_is_read_since_increment_4(self, tmp_path):
+        docs = {"adopt": {"mode": "copy", "source": "handbook"}}
+        assert self.load(tmp_path, docs).get("docs.adopt.mode") == "copy"
 
     def test_every_key_a_project_sets_today_still_loads(self, tmp_path):
         docs = {

@@ -969,6 +969,7 @@ def _register_after_init(root: Path) -> dict:
 
 
 def cmd_doctor(args) -> int:
+    from ..domains.docs import adoption_drift
     from ..hosts.claude_code import ClaudeCodeHost
 
     checks: list[tuple[str, bool, str]] = []
@@ -1045,6 +1046,14 @@ def cmd_doctor(args) -> int:
             checks.append((label, ok, detail))
             if warns:
                 warned.add(label)
+        # Copy-mode drift (ADR-016 D8, ruling 3): a row only for a project
+        # that adopted by copy, and one that warns and never fails, since a
+        # moved original is the user's to re-copy or not.
+        drift = adoption_drift(ctx.manifest)
+        if drift is not None:
+            checks.append(("docs adoption", True, drift.detail()))
+            if not drift.clean:
+                warned.add("docs adoption")
 
         for name in ("build", "test"):
             configured = ctx.manifest.get(f"commands.{name}")
@@ -1263,13 +1272,21 @@ def cmd_docs_assess(args) -> int:
     `docs`-lane session with one deliverable per undocumented area, refused
     until the base carries the manifest.
     """
-    from ..domains.docs import assess
+    from ..domains.docs import adoption_drift, assess
     from . import onboarding
 
     ctx = Context()
     assessment = assess(ctx.manifest)
+    payload = assessment.to_dict()
+    text = assessment.render()
+    # Copy-mode drift under its own heading (D3, D8): absent, in text and in
+    # JSON, for a project that adopted nothing.
+    drift = adoption_drift(ctx.manifest)
+    if drift is not None:
+        payload["adoption"] = drift.to_dict()
+        text += "\n\n" + drift.render()
     if not args.plan:
-        return emit(args, assessment.to_dict(), assessment.render())
+        return emit(args, payload, text)
     if not onboarding.carries_manifest(ctx.manifest):
         raise UsageError(
             f"the base does not carry the manifest: {MANIFEST_RELPATH} is not "
@@ -1277,13 +1294,118 @@ def cmd_docs_assess(args) -> int:
             f"init's files, then run 'invariant docs assess --plan' again."
         )
     session = onboarding.record_plan(ctx, assessment)
-    payload = assessment.to_dict()
     payload["plan"] = onboarding.plan_payload(session)
+    return emit(args, payload, "\n".join([text, "", *onboarding.plan_lines(session)]))
+
+
+def cmd_docs_adopt(args) -> int:
+    """Adopt existing documentation in place or by copy (ADR-016 D7, D8).
+
+    Plans first (`domains/docs.plan_adoption`), so a refusal writes nothing.
+    By copy, the files and the receipt are written into the docs location;
+    then, either way, the settings go to the project's own level: the
+    in-repo manifest, or this repository's block in its store. A file that
+    holds comments a rewrite would drop gets the block printed to add by hand.
+    `--dry-run` says what it would write and writes nothing.
+    """
+    from ..domains.docs import RECEIPT, copy_adoption, plan_adoption
+
+    ctx = Context()
+    manifest = ctx.manifest
+    adoption = plan_adoption(
+        manifest, args.source, args.mode, cwd=ctx.cwd, force=args.force
+    )
+    _refuse_a_higher_level(manifest, adoption.setting_lines())
+    lines: list[str] = []
+    if adoption.mode == "copy":
+        lines.append(
+            f"copy {len(adoption.files)} file(s) from {adoption.source} to "
+            f"{adoption.location}; the original is never written"
+        )
+        if adoption.overwrites:
+            lines.append(f"overwrite, as --force asks: {', '.join(adoption.overwrites)}")
+        if adoption.kept:
+            lines.append(
+                "keep, though the original no longer has them: "
+                + ", ".join(adoption.kept)
+            )
+        lines.append(f"write the receipt {adoption.location / RECEIPT}")
+    settings = ", ".join(adoption.setting_lines())
+    notes = []
+    if not adoption.assessable:
+        notes.append(
+            f"{adoption.format} has no reader in this build: the sections and links "
+            f"checks report not assessable (ADR-016 ruling 10); the areas check "
+            f"still reads every file."
+        )
+    payload = {**adoption.to_dict(), "dry_run": args.dry_run}
+    if args.dry_run:
+        lines.append(f"write {settings} to {_adoption_target(manifest)}")
+        payload.update(written=None, settings_by_hand=None)
+        return emit(
+            args,
+            payload,
+            "\n".join(["would:", *(f"  - {line}" for line in lines), *notes]),
+        )
+    if adoption.mode == "copy":
+        copy_adoption(adoption)
+    result = _write_adoption_settings(manifest, adoption.settings)
+    by_hand = None
+    if result.written:
+        lines.append(f"write {settings} to {result.path}")
+    else:
+        by_hand = {"path": str(result.path), "reason": result.reason, "yaml": result.by_hand}
+        lines.append(f"not written, to add by hand: {settings} (see below)")
+        notes += [
+            f"The settings were not written: {result.reason}.",
+            f"Add these by hand to {result.path}:",
+            "",
+            str(result.by_hand).rstrip("\n"),
+        ]
+    payload.update(written=str(result.path) if result.written else None,
+                   settings_by_hand=by_hand)
     return emit(
         args,
         payload,
-        "\n".join([assessment.render(), "", *onboarding.plan_lines(session)]),
+        "\n".join(["adopted:", *(f"  - {line}" for line in lines), *notes]),
     )
+
+
+def _adoption_target(manifest: Manifest) -> Path:
+    """The file `docs adopt` writes its settings to: the project's own level."""
+    from ..core.stores import STORE_MANIFEST
+
+    if manifest.store is not None:
+        return manifest.store.root / STORE_MANIFEST
+    return manifest.path
+
+
+def _write_adoption_settings(manifest: Manifest, settings: dict):
+    """Write ``settings`` at the project's own level: this repository's block
+    in its store, or the in-repo manifest."""
+    from ..core.stores import write_repo_settings, write_store_settings
+
+    if manifest.store is not None:
+        return write_store_settings(manifest.store.root, manifest.store.key, repo=settings)
+    return write_repo_settings(manifest.path, settings)
+
+
+def _refuse_a_higher_level(manifest: Manifest, setting_lines: list[str]) -> None:
+    """In a store project the pointer is read above the store's block for
+    this repository, so a key it sets would silently win over what `docs
+    adopt` writes there. Refused, naming the key, before anything is written."""
+    if manifest.store is None:
+        return
+    for line in setting_lines:
+        key = line.split(":", 1)[0]
+        label = manifest.source_of(key)
+        if label.startswith("repo:"):
+            raise UsageError(
+                f"{key} is set by {label.removeprefix('repo:')}, which is read above "
+                f"the store's block for this repository, so what docs adopt "
+                f"writes there would not take effect. Remove it from that file "
+                f"first."
+            )
 
 
 def user_defaults_summary(manifest: Manifest) -> str:
@@ -5790,6 +5912,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="record a parked docs-lane session planning one deliverable per gap",
     )
     q.set_defaults(func=cmd_docs_assess)
+    q = p.add_parser(
+        "adopt",
+        help="adopt existing documentation as the architecture docs, in place or by copy",
+    )
+    q.add_argument("source", help="the directory holding the documentation")
+    q.add_argument(
+        "--mode",
+        required=True,
+        choices=("in_place", "copy"),
+        help="in_place points paths.docs at it; copy copies it into the docs location",
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="re-copy over a copy edited since the receipt, or over files no copy wrote",
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_docs_adopt)
 
     p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
     q = p.add_parser("init", help="create a store for this repository and link it")

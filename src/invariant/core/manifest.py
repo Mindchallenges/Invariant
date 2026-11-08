@@ -215,6 +215,11 @@ DEFAULTS: dict[str, Any] = {
         # `all_at_once` is provenance for the plan `docs assess --plan`
         # records. `off` is today's behaviour.
         "onboarding": "off",
+        # Adopting existing documentation (ADR-016 D7, D8): `in_place` points
+        # `paths.docs` at the source, `copy` copied it into the docs location
+        # and records drift against a receipt. Written by `docs adopt`; null
+        # is today's behaviour.
+        "adopt": {"mode": None, "source": None},
     },
     "methodology": {
         "pipeline": "tdd",
@@ -452,8 +457,13 @@ _VERDICTS_KEYS = ("note_max_chars",)
 #: `areas` keys and where areas may come from (D1, D2).
 _ASSESS_KEYS = ("checks", "sections", "areas")
 #: The `docs` keys this build reads, and the onboarding modes (ADR-016 D9).
-_DOCS_KEYS = ("format", "diagrams", "index", "require_diagram_update", "assess", "onboarding")
+_DOCS_KEYS = (
+    "format", "diagrams", "index", "require_diagram_update", "assess", "onboarding", "adopt",
+)
 ONBOARDING_MODES = ("off", "incremental", "all_at_once")
+#: The `docs.adopt` keys and modes (ADR-016 D7, D9); null is no adoption.
+_ADOPT_KEYS = ("mode", "source")
+ADOPT_MODES = ("in_place", "copy")
 ASSESS_CHECKS = ("sections", "areas", "links")
 _AREAS_KEYS = ("from", "globs", "declared", "exclude")
 AREA_SOURCES = ("adapter", "globs", "declared")
@@ -909,6 +919,7 @@ class Manifest:
         self._validate_guidelines()
         self._validate_docs()
         self._validate_docs_assess()
+        self._validate_docs_adopt()
         self._validate_agents()
         self._validate_host()
         backend = self.data["items"]["backend"]
@@ -1231,12 +1242,6 @@ class Manifest:
         section = self.data.get("docs")
         if not isinstance(section, Mapping):
             raise ManifestError(f"docs must be a mapping, got {section!r}")
-        if "adopt" in section:
-            raise ManifestError(
-                "docs.adopt is not built yet: adopting existing documentation in "
-                "place or by copy is ADR-016 D7, increment 4. Until then it would "
-                "load and adopt nothing."
-            )
         _refuse_unknown("docs", section, _DOCS_KEYS)
         mode = section.get("onboarding")
         if mode is False:
@@ -1245,6 +1250,73 @@ class Manifest:
             raise ManifestError(
                 f"docs.onboarding is {mode!r}; it is one of "
                 f"{', '.join(ONBOARDING_MODES)}."
+            )
+
+    def _validate_docs_adopt(self) -> None:
+        """Refuse a `docs.adopt` block that would load and adopt nothing, or
+        something other than it says (ADR-016 D7, D9, ruling 11), naming it.
+
+        A mode is null, `in_place` or `copy`, and a source goes with a mode,
+        each without the other refused. The source is one line, relative to
+        the root `records.docs` names (the repo's or the store's) without a
+        `..` climbing out; under `copy` it may instead be absolute, a source
+        outside both roots recorded as given (D8). Under `in_place` it is
+        `paths.docs` itself, since that is what the mode points, and
+        `docs.adopt.source` is refused at the user level: where one project's
+        documentation lives is never a default for every project.
+        """
+        adopt = self.get("docs.adopt")
+        if not isinstance(adopt, Mapping):
+            raise ManifestError(f"docs.adopt must be a mapping, got {adopt!r}")
+        _refuse_unknown("docs.adopt", adopt, _ADOPT_KEYS)
+        mode, source = adopt.get("mode"), adopt.get("source")
+        if mode is not None and (not isinstance(mode, str) or mode not in ADOPT_MODES):
+            raise ManifestError(
+                f"docs.adopt.mode is {mode!r}; it is null or one of "
+                f"{', '.join(ADOPT_MODES)}."
+            )
+        if source is not None and self.source_of("docs.adopt.source").startswith("user:"):
+            raise ManifestError(
+                f"docs.adopt.source is set at the user level "
+                f"({self.source_of('docs.adopt.source').removeprefix('user:')}); "
+                f"where one project's documentation lives belongs in its own level "
+                f"(its store or its repo), never in every project's defaults "
+                f"(ADR-016 ruling 11)."
+            )
+        if mode is None and source is None:
+            return
+        if mode is None:
+            raise ManifestError(
+                f"docs.adopt.source is {source!r} but docs.adopt.mode is null: a "
+                f"source with no mode adopts nothing. Set docs.adopt.mode to "
+                f"{' or '.join(ADOPT_MODES)}, or run 'invariant docs adopt'."
+            )
+        if not _is_one_line(source):
+            raise ManifestError(
+                f"docs.adopt.source must be one line naming the adopted "
+                f"documentation, required with docs.adopt.mode {mode}; got {source!r}"
+            )
+        if posixpath.isabs(source.strip()):
+            if mode == "in_place":
+                raise ManifestError(
+                    f"docs.adopt.source is {source!r}, an absolute path, and "
+                    f"in_place adopts through paths.docs, a path key that cannot "
+                    f"be absolute (ADR-014 D1): spell it relative to the repo "
+                    f"root, or to the store root under records.docs: store."
+                )
+            return
+        spelled = project_relative(source)
+        if spelled is None or spelled == ".":
+            raise ManifestError(
+                f"docs.adopt.source is {source!r}, which climbs out of the root "
+                f"it is read against; spell it relative to that root."
+            )
+        if mode == "in_place" and project_relative(self.get("paths.docs")) != spelled:
+            raise ManifestError(
+                f"docs.adopt.mode is in_place with docs.adopt.source {source!r}, "
+                f"but paths.docs is {self.get('paths.docs')!r}: in place, "
+                f"paths.docs is the source. Run 'invariant docs adopt {spelled} "
+                f"--mode in_place' to point both."
             )
 
     def _validate_docs_assess(self) -> None:

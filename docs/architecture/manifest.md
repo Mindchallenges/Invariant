@@ -303,9 +303,8 @@ provenance for the plan `docs assess --plan` records and arms nothing.
 YAML reads an unquoted `off` as false, so false reads as `off`; any other
 value is refused at load, naming the key and the three modes. Every key
 under `docs` is now checked: one this build does not read (`format`,
-`diagrams`, `index`, `require_diagram_update`, `assess`, `onboarding`) is
-refused naming it, and `docs.adopt` is refused naming increment 4, since it
-would load and adopt nothing.
+`diagrams`, `index`, `require_diagram_update`, `assess`, `onboarding`,
+`adopt`) is refused naming it.
 
 **Built (ADR-016 D9, increment 3).** `enforcement.rules` gains
 `docs.area_documented`: `warn` in `loose` and `standard`, `block` in
@@ -314,9 +313,28 @@ injected at the landing only under `docs.onboarding: incremental`, so a
 project that sets neither key lands exactly as before (state_model.md, the
 docs gates).
 
-**Accepted, not yet built (ADR-016 D9).** `docs` gains `adopt` (`mode` and
-`source`). Every default is today's behaviour. An unknown adopt mode is
-refused at load, naming it. Increment 4 builds the `adopt` keys.
+**Built (ADR-016 D9, increment 4).** `docs.adopt` records an adoption of
+existing documentation, written by `invariant docs adopt` (cli.md):
+
+```yaml
+docs:
+  adopt:
+    mode: null                   # null | in_place | copy
+    source: null                 # required with a mode
+```
+
+Null, the default, adopts nothing, and a project setting neither key
+behaves exactly as before. Refused at load, naming it: an unknown key under
+`docs.adopt`, a mode outside the two, a mode with no source and a source
+with no mode (each would load and adopt nothing), and a source that is not
+one line. The source is relative to the root `records.docs` names, the
+repo's or the store's, and a `..` climbing out of it is refused. Under
+`copy` it may instead be absolute: a source outside both roots is recorded
+as given (D8). Under `in_place` an absolute source is refused, because
+`paths.docs` is pointed at it and a path key cannot be absolute (ADR-014
+D1), and the source must be `paths.docs` itself, spelled either way, or the
+mode would say one location while the docs resolve to another. `docs adopt`
+also writes `docs.format`, the format it detected in the source.
 
 ### Records and their locations
 
@@ -382,12 +400,14 @@ Because the paragraph above refuses a `store` record in an in-repo
 manifest, the store choice makes a store project and writes no
 `.claude/invariant.yaml`.
 
-**Accepted, not yet built (ADR-016 D7).** `docs adopt --mode in_place`
-points `paths.docs` (and `records.docs`) at a source under the repo root or
-the project's store root, because a path key cannot be absolute; `--mode
-copy` copies into the resolved docs location, repo or store (increment 4).
-Docs invariant creates go wherever `paths.docs` / `records.docs` resolves;
-there is no separate setting.
+**Built (ADR-016 D7, increment 4).** `docs adopt --mode in_place`
+points `paths.docs` at a source under the repo root or the project's store
+root, because a path key cannot be absolute; in a store project it writes
+`records.docs` too, naming the root the source lies under. `--mode copy`
+copies into the resolved docs location, repo or store, and writes the
+receipt there. Both write this repository's own level: the in-repo
+manifest, or its block in the store. Docs invariant creates go wherever
+`paths.docs` / `records.docs` resolves; there is no separate setting.
 
 ### Agents: the library, the project's own, and overlays
 
@@ -1642,9 +1662,12 @@ merged. The pointer keeps refusing them, since it holds only `version`,
 way: user `defaults:`, the store and an in-repo manifest, each with its
 label, and the pointer refuses it.
 
-**Accepted, not yet built (ADR-016 D9).** The `docs.adopt` keys resolve
-the same way, and `docs.adopt.source` is refused at the user level (ruling
-11). They land with increment 4 (see "Full schema").
+**Built (ADR-016 D9, increment 4).** The `docs.adopt` keys resolve the
+same way, each with its label, and the pointer refuses them.
+`docs.adopt.source` is refused at the user level, naming the file (ruling
+11): where one project's documentation lives is never every project's
+default. `docs.adopt.mode` is accepted there, and then each project names
+its own source.
 
 ### The user level (ADR-014 D3, 5a)
 

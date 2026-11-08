@@ -34,7 +34,7 @@ from ..core.stores import (
     link_repo,
     write_store_settings,
 )
-from ..domains.docs import Assessment, plan_deliverables
+from ..domains.docs import Assessment, plan_deliverables, setting_lines
 from ..domains.session import Session
 from .prompts import Prompter
 
@@ -89,7 +89,7 @@ class StorePlacement:
     def write(self, repo: Mapping[str, Any]) -> str:
         """Write ``repo`` into this repository's block, or hold it with the
         rest when the file is held; the action line either way."""
-        settings = ", ".join(_flat(repo))
+        settings = ", ".join(setting_lines(repo))
         if self.held is None:
             result = write_store_settings(self.root, self.key, repo=repo)
             if result.written:
@@ -111,17 +111,6 @@ class StorePlacement:
             "reason": self.held.reason,
             "yaml": by_hand_block(self.key, None, self.held_repo),
         }
-
-
-def _flat(settings: Mapping[str, Any], prefix: str = "") -> list[str]:
-    """``settings`` as ``dotted.key: value`` phrases."""
-    out: list[str] = []
-    for key, value in settings.items():
-        if isinstance(value, Mapping):
-            out += _flat(value, f"{prefix}{key}.")
-        else:
-            out.append(f"{prefix}{key}: {value}")
-    return out
 
 
 def _merge(base: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:

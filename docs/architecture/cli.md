@@ -286,11 +286,13 @@ invariant doctor
     every check off it says so and passes. The architecture-docs row above
     it is unchanged.
 
-    Accepted, not yet built (ADR-016 D7, D8). D8 adds a `docs adoption` row
-    (warn) naming every original file changed, added or removed since a
-    copy-mode adoption, and the `docs` group gains `docs adopt` (D7).
-    Increment 4 of ADR-016 builds both. `docs assess --plan` (D5) is built,
-    below.
+    `docs adoption` (ADR-016 D8, ruling 3, increment 4) is present only
+    under `docs.adopt.mode: copy`. It reads the receipt the copy wrote and
+    names every original file changed, added or removed since, or says the
+    original is unchanged. It warns and never fails, and it also warns
+    on a missing or unreadable receipt and on an original not reachable on
+    this machine. Nothing re-syncs: its fix is re-running `docs adopt`
+    (below). A project that adopted nothing has no such row.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -605,7 +607,13 @@ invariant docs assess [--json]
     the digest covers every input (the settings, each doc's bytes, the
     areas, each link target checked), so two runs over an unchanged tree
     print byte-identical output. Anything under a dot-named directory of the
-    docs is held out. `--json` carries the same, the gaps under `checks`.
+    docs is held out, and so is any dot-named file, the adoption receipt
+    among them. `--json` carries the same, the gaps under `checks`.
+    Under `docs.adopt.mode: copy` an `adoption drift` heading follows the
+    digest, naming each original file changed, added or removed since the
+    copy (`domains/docs.adoption_drift`, the `doctor` row's own read), and
+    `--json` adds it as `adoption`. Without that mode neither appears, so
+    the output is what it was before increment 4.
 
 invariant docs assess --plan [--json]
     Record the all-at-once plan (ADR-016 D5, ruling 9, increment 2): a
@@ -626,6 +634,59 @@ invariant docs assess --plan [--json]
     guard, naming it. No gap a doc can close records nothing and says so.
     `--json` adds `plan`: `{"session", "id", "deliverables"}`, or null.
     `init`'s all-at-once choice runs the same code.
+
+invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json]
+    Adopt existing documentation as the architecture docs (ADR-016 D7, D8,
+    increment 4). The mode is configuration, not a flag of each later run:
+    the command writes `docs.adopt.mode` and `docs.adopt.source`, at the
+    project's own level (the in-repo manifest, or this repository's block in
+    its store, as `init`'s store choice writes it). `<source>` is a
+    directory, read against the working directory when relative; dot-named
+    files under it are held out, and one holding no other file is refused.
+    `docs.format` is set from the source's detected format
+    (`core/docformat.detect_format`: the format most of its document files
+    carry, `.rst` read as `sphinx`).
+      in_place  `paths.docs` points at the source, and under a store
+                `records.docs` names the root it lies under (`repo` or
+                `store`). The source must lie under the repo root or the
+                store root, below the root itself, because a path key cannot
+                be absolute (ADR-014 D1); outside both it is refused,
+                offering copy. A format with no reader is refused naming it
+                and offering copy (ruling 5). Nothing is copied, so the
+                docs-first gate reads, and agents update, the original.
+      copy      every file is copied into the resolved docs location (repo,
+                or store under `records.docs: store`), and the original is
+                never written. Any format copies; one with no reader is
+                said at copy time to make the `sections` and `links` checks
+                report not assessable (ruling 10). The receipt
+                `<docs location>/.invariant-adoption.yaml` records the
+                source, the time, and per file the SHA-256 of the original
+                and of the copy. The source is spelled relative to the root
+                `records.docs` names when it lies under it, else as given,
+                absolute. Running it again re-copies, but is refused, naming
+                the files, when it would write over a copy edited since the
+                receipt or over a file no earlier copy wrote, unless
+                `--force`. A copy whose original is gone is kept and named.
+                The source and the docs location may not lie one inside the
+                other.
+    Refused, exit 2, before anything is written: a mode outside the two, a
+    receipt that cannot be read, and in a store project a key the pointer
+    sets, because the pointer is read above the store's block and would
+    silently win. A file holding comments a rewrite would drop is not
+    rewritten: in the in-repo manifest the settings are appended as a block
+    of their own when the file sets none of their top-level keys and the
+    result reads back as the merge (`core/stores.write_repo_settings`);
+    otherwise, there and in a store file, nothing is written to it, and the
+    block to add by hand is printed and carried under `--json` as
+    `settings_by_hand` (`{"path", "reason", "yaml"}`). `--dry-run` says what
+    it would write and writes nothing. `--json` carries the plan: `mode`,
+    `source`, `location`, `format`, `assessable`, `files`, `overwrites`,
+    `kept`, `settings`, `written` and `dry_run`.
+
+    The rST reader is not built (ADR-015 increment 2 has not landed), so a
+    Sphinx tree is adopted by copy today and refused in place, naming
+    `sphinx`. With `records.docs: store` an adopted source is store docs like
+    any other, so ADR-014 D5's docs lock covers it once that lock is built.
 ```
 
 ### A managed file the operator has edited
