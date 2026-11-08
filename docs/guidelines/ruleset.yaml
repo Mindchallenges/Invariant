@@ -5,6 +5,8 @@ version: 1
 sections:
   - id: layers
     title: Layering
+  - id: conduct
+    title: Agent conduct
 rules:
   - id: layers.only-the-cli-imports-the-oracle
     section: layers
@@ -56,3 +58,37 @@ rules:
     links:
       - docs/architecture/overview.md
       - docs/adr/ADR-007-a-machine-wide-read-only-oracle.md
+  - id: conduct.interview-when-input-is-needed
+    section: conduct
+    title: Interview the user when their input is needed
+    statement: >
+      When a decision is genuinely the user's, and neither the request, the
+      code, the architecture docs, the design system nor a sensible default
+      settles it, interview the user: a focused round of questions with
+      concrete options, repeated until the answer is clear. Do not guess the
+      answer, and do not stop with a vague hand-back in place of the
+      questions. A decision that can be inferred is made and stated, not
+      asked.
+    severity: warn
+    phases: [always]
+    applies_to:
+      - CLAUDE.md
+      - .claude/agents/*.md
+      - src/invariant/data/agents/*.md
+      - src/invariant/data/skills/**
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: asking-unchanged
+          claim: The change does not alter when or how an agent asks the user for input.
+    rationale: >
+      To fix a finding, make the agent's instructions name the interview
+      round (an INTERVIEW block, or a multiple-choice question where the host
+      offers one) at the point where it would otherwise guess or bail. The
+      user asked for this on 2026-11-08; the backlog-curator's INTERVIEW
+      relay and feature-architect's STOP reports are the existing shapes.
+    links:
+      - .claude/agents/backlog-curator.md
+      - .claude/agents/feature-architect.md

@@ -2467,7 +2467,7 @@ built. They bind every A5 increment.
 | D8 | Where the renderers live | Pure renderers live in `core/guidelines`; the host only wraps them. `render_advisory` moves down beside them in A5.3. |
 | D9 | Subagents | They wait for A6, getting only the edit layer until then. |
 | D10 | Verdict standings in the turn index | None. |
-| D11 | A `CLAUDE.md` block in this repository | None yet; revisit when an always rule is added. |
+| D11 | A `CLAUDE.md` block in this repository | None yet; revisit when an always rule is added. Revisited 2026-11-08: the first always rule, `conduct.interview-when-input-is-needed`, brought the block, and `CLAUDE.md` now holds the managed `guidelines/index` block alone. |
 | D12 | Always rules at the turn | The turn index always lists always rules by id and title, and `doctor` and `generated_current` say when always rules exist but no instruction file carries the block. |
 
 A5 is built in four increments, recorded on its session's plan: selection
@@ -2705,7 +2705,8 @@ to D3, D7, ruling 8 and the A5 rulings D11 and D12.
   load). The row, `guidelines always layer`, warns and never sets the exit
   code, as the drift row does. `--json` marks it `"ok": true, "warn": true`.
 - *D11.* This repository gets no `CLAUDE.md`. Its ruleset has no always
-  rules, so neither the row nor the note appears here.
+  rules, so neither the row nor the note appears here. (Later: the first
+  always rule brought the block, as D11's ledger row records.)
 - *Tests.* `tests/test_guidelines_always_layer.py`: the note with one and
   with several always rules, beside the absent-block detail, none with the
   block inserted, with a hand-edited block, with no always rules, or with a

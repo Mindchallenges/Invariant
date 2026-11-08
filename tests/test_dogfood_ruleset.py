@@ -14,6 +14,11 @@ scans:
 
 The fifth, "only the dashboard module imports Textual", is about a
 third-party package, which is outside the kind (DN-A2).
+
+The ruleset's first `always` rule came later (2026-11-08):
+`conduct.interview-when-input-is-needed`, a warn-severity judgement rule over
+the agent and instruction files, carried by the `guidelines/index` block in
+`CLAUDE.md` (ADR-012, the A5 ruling D11 revisited).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ LAYERS = ("core", "domains", "adapters", "hosts")
 
 ORACLE_RULE = "layers.only-the-cli-imports-the-oracle"
 HOSTS_RULE = "layers.oracle-never-imports-hosts"
+CONDUCT_RULE = "conduct.interview-when-input-is-needed"
 
 
 def repo_context(files=None) -> RuleContext:
@@ -58,11 +64,17 @@ class TestThisRepositorysRuleset:
         verdict = verdict_of("guidelines.ruleset_valid", repo_context())
         assert verdict.ok and not verdict.skipped, verdict.message
 
-    def test_it_holds_exactly_the_two_layering_rules(self):
+    def test_it_holds_the_two_layering_rules_and_the_conduct_rule(self):
         ruleset, failure = load_ruleset(repo_context())
         assert failure is None
-        assert [rule.id for rule in ruleset.rules] == [ORACLE_RULE, HOSTS_RULE]
-        for rule in ruleset.rules:
+        ids = [rule.id for rule in ruleset.rules]
+        assert ids == [ORACLE_RULE, HOSTS_RULE, CONDUCT_RULE]
+
+    def test_the_layering_rules_are_blocking_import_boundaries(self):
+        ruleset, _ = load_ruleset(repo_context())
+        layering = [rule for rule in ruleset.rules if rule.section == "layers"]
+        assert [rule.id for rule in layering] == [ORACLE_RULE, HOSTS_RULE]
+        for rule in layering:
             assert rule.severity == "blocker"
             assert (rule.check.kind, rule.check.engine) == ("boundary", "imports")
             assert not rule.check.only
@@ -81,10 +93,31 @@ class TestThisRepositorysRuleset:
         assert list(rule.applies_to) == ["src/invariant/oracle/*.py"]
         assert list(rule.check.forbid) == ["src/invariant/hosts/*"]
 
-    def test_no_glob_uses_a_double_star(self):
+    def test_the_conduct_rule_is_an_always_warn_judgement_over_instruction_files(self):
+        ruleset, _ = load_ruleset(repo_context())
+        rule = ruleset.by_id(CONDUCT_RULE)
+        assert (rule.section, rule.severity, rule.phases) == ("conduct", "warn", ("always",))
+        check = rule.check
+        assert (check.kind, check.evidence, check.verdict_scope) == ("judgement", "citation", "diff")
+        assert [na.id for na in rule.check.not_applicable_when] == ["asking-unchanged"]
+        assert "CLAUDE.md" in rule.applies_to
+        assert ".claude/agents/*.md" in rule.applies_to
+        assert not any(glob.endswith(".py") for glob in rule.applies_to)
+
+    def test_the_instruction_file_carries_the_always_rule(self):
+        """An always rule with no `guidelines/index` block is the A5.4 gap."""
+        verdict = verdict_of("guidelines.generated_current", repo_context())
+        assert verdict.ok and not verdict.skipped, verdict.message
+        text = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "<!-- invariant:begin guidelines/index" in text
+        assert f"`{CONDUCT_RULE}` (always)" in text
+
+    def test_no_boundary_glob_uses_a_double_star(self):
         """`**/` needs a directory, so it would miss each layer's top-level modules."""
         ruleset, _ = load_ruleset(repo_context())
         for rule in ruleset.rules:
+            if rule.check.kind != "boundary":
+                continue
             assert not any("**" in glob for glob in (*rule.applies_to, *rule.check.forbid))
 
     def test_no_baseline_is_configured(self):
