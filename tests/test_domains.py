@@ -99,7 +99,7 @@ class TestSessionDomain:
         domain = SessionDomain(m)
         domain.start("one")
         domain.start("two")
-        with pytest.raises(UsageError, match="INVARIANT_SESSION_ID"):
+        with pytest.raises(UsageError, match="--id <id>"):
             domain.current(cwd=m.root)
 
     def test_torn_down_sessions_are_not_current(self, m):
@@ -843,7 +843,7 @@ class TestHostSessionAttribution:
 
     def test_cwd_alone_is_ambiguous_with_three_sessions(self, m):
         domain, _ = self.three_sessions(m)
-        with pytest.raises(UsageError, match="INVARIANT_SESSION_ID"):
+        with pytest.raises(UsageError, match="--id <id>"):
             domain.current(cwd=m.root)
 
     def test_the_host_identifier_resolves_it(self, m):

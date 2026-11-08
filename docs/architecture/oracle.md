@@ -811,9 +811,9 @@ table that holds wins.
 | orphan host, `unmanaged` and every close guard holds | run | `invariant oracle close-host …`, as above | project root |
 | orphan host, alive, `leftover` or `unmanaged`, a close guard failing | info | none: "not closeable from here: <the guard>", with `reason` naming it (BUG_099) | — |
 | orphan host, otherwise | info | none: start or resume a session from that host | — |
-| failed tests, a scoped run on record | run | `invariant pipeline test --selector S …`, each selector of the session's newest scoped run, with `INVARIANT_SESSION_ID` and `INVARIANT_<KEY>` for each value that run's discovery resolved (BUG_093) | worktree, else root |
+| failed tests, a scoped run on record | run | `invariant pipeline test --id <session> --selector S …`, each selector of the session's newest scoped run, with `INVARIANT_<KEY>` in `env` for each value that run's discovery resolved (BUG_093) | worktree, else root |
 | failed tests, no scoped run on record, or one older than the record of discovered values while the project's `test_one` needs discovery | info | none: run its tests from the session's own window. The oracle never runs the whole suite (ADR-010) | — |
-| `gate_blocked` | run | `invariant pipeline gates`, with `INVARIANT_SESSION_ID` | worktree, else root |
+| `gate_blocked` | run | `invariant pipeline gates --id <session>` | worktree, else root |
 | `stuck` | run | `invariant context --id <session>` | worktree, else root |
 | `finished`, reviewed | run | `invariant session merge --id <session>` | project root (the merge runs from the main checkout) |
 | `finished`, ready | run | `invariant session review --id <session>` | worktree, else root |
@@ -863,20 +863,24 @@ themselves are unchanged. A row carries one step; offering Close beside
 Attach waits for the panel's second action ([oracle-panel.md](oracle-panel.md),
 "As built in increment 6").
 
-`pipeline gates` and `pipeline test` take no `--id`, so the session is pinned
-through `INVARIANT_SESSION_ID`, the explicit route session resolution already
-honours.
+Every step that acts on a session names it with `--id` in its `argv`
+(IDEA_042); none carries the session in `env`. Until IDEA_042 `pipeline gates`
+and `pipeline test` took no `--id`, and those two steps pinned the session
+through `INVARIANT_SESSION_ID` in `env`. A step's `env` now carries only the
+discovery values below, and the runner still drops the dashboard's own
+`INVARIANT_SESSION_ID` from the child, which also keeps an ambient variable
+from contradicting the step's `--id` (a contradiction the CLI refuses).
 
 **A re-run is the session's own** (BUG_093). A project whose discovery reads
 a value the session's own shell exported (Heap's `INVARIANT_DESTINATION_ID`,
 which refuses to guess with several simulators booted) used to fail the
 phone's re-run with exit 2, and with a value found it would have run the whole
 suite. Each test run now records what its discovery resolved (state_model.md,
-"Domain: pipeline"), and the step replays the session's newest scoped run: its
+"Domain: pipeline"), and the step replays the session's newest scoped run: the session as `--id`, its
 selectors as `--selector`, and each recorded value in `env` as
 `INVARIANT_<KEY>`. That variable is an input to the project's own discovery
 script, which still decides; core honours no `INVARIANT_<NAME>` override, so
-a script that ignores it resolves as it always did. The `pipeline test` CLI is
+a script that ignores it resolves as it always did. BUG_093 left the `pipeline test` CLI
 unchanged. A value the project's privacy patterns flag is carried masked,
 listed in `masked`, and `replay` names the run its real value is read from:
 `{project, root, session, started, run}`. With nothing to replay the step is
@@ -894,7 +898,7 @@ sequenceDiagram
     P->>P: command_for, then discovered_in: record {destination_id: value}
     S->>P: read the record (inert store)
     S->>S: last_scoped: selectors, env masked where flagged, run, started
-    R->>R: argv pipeline test --selector S, env INVARIANT_SESSION_ID and INVARIANT_DESTINATION_ID (masked), replay
+    R->>R: argv pipeline test --id <session> --selector S, env INVARIANT_DESTINATION_ID (masked), replay
     A->>A: confirm shows the masked value, command_of keeps it with masked and replay
     A->>S: perform: replay_values(replay): the one run, its value masks as shown
     A->>A: the child's environment gets the real value, nothing else does

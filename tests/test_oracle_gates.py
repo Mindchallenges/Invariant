@@ -470,7 +470,7 @@ class TestTheRealEvaluator:
         document = assess(snapshots, now, gates=reports)
         [row] = [r for r in document["projects"][0]["rows"] if r["session_id"] == "a-idle"]
         advice = row["recommendation"]
-        assert advice["argv"] == ["invariant", "pipeline", "gates"]
+        assert advice["argv"] == ["invariant", "pipeline", "gates", "--id", "a-idle"]
         assert "test.all_pass" in advice["detail"]
         assert row["gates"]["owed"][0]["rule_id"] == "test.all_pass"
         assert [s["kind"] for s in row["signals"] if s["alert"]] == ["gate_blocked"]

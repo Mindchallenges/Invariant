@@ -20,9 +20,10 @@ wants, and a quieter row may carry a ``next owed:`` hint. The answer never
 changes which signals a row raises — an evaluated gate is a forecast, and only
 a refusal somebody met is an alert (ADR-007 D8).
 
-Where a command cannot name its session with ``--id`` (``pipeline gates``,
-``pipeline test``), the recommendation carries ``INVARIANT_SESSION_ID`` in
-``env`` instead, the explicit route session resolution already honours.
+Every step that acts on a session names it with ``--id`` in its ``argv``,
+which every session-resolving command takes (IDEA_042). The session is never
+carried in ``env``: ``actions`` drops the dashboard's own variable from the
+child, and a variable naming another session beside ``--id`` is refused.
 
 **A re-run is the session's own** (BUG_093). Failing tests are re-run with
 the selectors of the session's newest scoped run and, in ``env``, each value
@@ -51,7 +52,6 @@ from .scan import (
     ROW_HOST,
     ROW_SESSION,
     ROW_WORKTREE,
-    SESSION_ENV,
     UNVERIFIED_CWD,
     UNVERIFIED_NEWER,
     UNVERIFIED_OTHER,
@@ -329,14 +329,13 @@ def _for_orphan(row: Row, cause: str = "") -> Recommendation:
 def _for_session(row: Row, has) -> Recommendation | None:
     sid = row.session_id or ""
     here = row.worktree if row.worktree and not row.stranded else row.root
-    pinned = {SESSION_ENV: sid}
 
     if has(ERROR, "tests"):
-        return _rerun(row, here, pinned)
+        return _rerun(row, here, sid)
     if has(GATE_BLOCKED):
         return Recommendation(
             "see which gates refused, and what clears them",
-            (CLI, "pipeline", "gates"), here, RUN, pinned,
+            (CLI, "pipeline", "gates", "--id", sid), here, RUN,
         )
     if has(STUCK):
         return Recommendation(
@@ -378,7 +377,7 @@ def _for_session(row: Row, has) -> Recommendation | None:
     return None
 
 
-def _rerun(row: Row, here: str, pinned: dict[str, str]) -> Recommendation:
+def _rerun(row: Row, here: str, sid: str) -> Recommendation:
     """Re-run the session's own scoped tests with its own values, or say why not."""
     scoped = row.pipeline.last_scoped if row.pipeline else None
     if not scoped:
@@ -393,7 +392,7 @@ def _rerun(row: Row, here: str, pinned: dict[str, str]) -> Recommendation:
             "predates the record of the values its discovery found",
             reason=RERUN_UNRECORDED,
         )
-    argv: tuple[str, ...] = (CLI, "pipeline", "test")
+    argv: tuple[str, ...] = (CLI, "pipeline", "test", "--id", sid)
     for selector in scoped.get("selectors") or ():
         argv += ("--selector", selector)
     masked = tuple(scoped.get("masked") or ())
@@ -403,7 +402,7 @@ def _rerun(row: Row, here: str, pinned: dict[str, str]) -> Recommendation:
     } if masked else None
     return Recommendation(
         "re-run the session's own scoped tests, with the values its own run found",
-        argv, here, RUN, {**(scoped.get("env") or {}), **pinned},
+        argv, here, RUN, dict(scoped.get("env") or {}),
         masked=masked, replay=replay,
     )
 

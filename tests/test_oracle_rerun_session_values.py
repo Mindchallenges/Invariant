@@ -193,7 +193,7 @@ def test_BUG_093_phone_rerun_replays_the_last_scoped_selector(tmp_path, monkeypa
 
     step = step_for(_phone_row())
     assert step is not None
-    assert step.argv == ("invariant", "pipeline", "test", "--selector", SELECTOR)
+    assert step.argv == ("invariant", "pipeline", "test", "--id", "s-own", "--selector", SELECTOR)
     oracle_env = {k: v for k, v in os.environ.items() if k != "INVARIANT_DESTINATION_ID"}
     Actions(_in_process(monkeypatch), lambda: oracle_env, lambda env: env).perform(step)
 

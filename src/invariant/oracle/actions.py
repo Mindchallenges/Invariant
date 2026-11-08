@@ -9,7 +9,7 @@ on the step's kind:
 * ``run`` — the injected runner starts the command as a subprocess: no
   shell, no stdin, the host markers stripped from the environment and the
   dashboard's own ``INVARIANT_SESSION_ID`` dropped, so the command names its
-  session only through the step's own ``env``. :func:`run_subprocess` is the
+  session only through the step's own ``--id``. :func:`run_subprocess` is the
   real runner; the CLI reaches it through ``_oracle_runner``, which the suite
   replaces with :class:`RecordingRunner`;
 * ``terminal`` — the injected launcher opens a new host session (the CLI's,

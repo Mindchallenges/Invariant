@@ -273,8 +273,7 @@ class TestCards:
 
     def test_a_runnable_step_gets_its_button_only_when_the_page_acts(self):
         row = session("t", signals=[sig("error", "tests")], pipeline=pipeline(failed=52),
-                      recommendation=step(("invariant", "pipeline", "test"),
-                                          env={"INVARIANT_SESSION_ID": "s1"}))
+                      recommendation=step(("invariant", "pipeline", "test", "--id", "s1")))
         card = cards(panel.view(doc(row), acting=True), "problems")[0]
         assert card["button"] == {"text": "Re-run tests…"} and card["tap"] is False
         assert cards(panel.view(doc(row)), "problems")[0]["button"] is None
@@ -329,7 +328,8 @@ class TestWording:
 
     def test_every_step_the_recommender_names_has_words(self):
         argvs = [
-            ("invariant", "pipeline", "test"), ("invariant", "pipeline", "gates"),
+            ("invariant", "pipeline", "test", "--id", "s"),
+            ("invariant", "pipeline", "gates", "--id", "s"),
             ("invariant", "context", "--id", "s"), ("invariant", "session", "review", "--id", "s"),
             ("invariant", "session", "merge", "--id", "s"),
             ("invariant", "session", "teardown", "--id", "s"),
@@ -405,8 +405,7 @@ class TestDetail:
             hosts=[host(pid=None, alive=None, attention={
                 "turn": "ended", "turn_since": iso(NOW - 3 * 3600),
                 "degraded": {"event": "Stop", "error": "boom", "since": iso(NOW - 600)}})],
-            recommendation=step(("invariant", "pipeline", "test"),
-                                env={"INVARIANT_SESSION_ID": "4b7b00c1"}),
+            recommendation=step(("invariant", "pipeline", "test", "--id", "4b7b00c1")),
             plan_touched=NOW - 7200, **extra)
 
     def test_the_header_what_is_going_on_and_the_step(self):
@@ -423,7 +422,7 @@ class TestDetail:
                         "and with its own settings, and records the result. Nothing is "
                         "changed or deleted.",
             "button": {"text": "Re-run tests…"},
-            "copy": "INVARIANT_SESSION_ID=4b7b00c1 invariant pipeline test",
+            "copy": "invariant pipeline test --id 4b7b00c1",
         }
 
     def test_chips_carry_their_age_where_the_fact_has_a_time(self):
@@ -562,19 +561,19 @@ class TestLeftovers:
 class TestConfirmWords:
     def test_a_safe_step(self):
         row = session("4b7b00c1")
-        words = panel.confirm_words(row, "Heap", ("invariant", "pipeline", "test"), "run",
-                                    "/r/.claude/worktrees/p-wt-s1",
-                                    {"INVARIANT_SESSION_ID": "4b7b00c1"}, launch=None)
+        words = panel.confirm_words(row, "Heap",
+                                    ("invariant", "pipeline", "test", "--id", "4b7b00c1"),
+                                    "run", "/r/.claude/worktrees/p-wt-s1", {}, launch=None)
         assert words == {
             "title": "Re-run the tests?",
             "sentence": "Runs the tests this session last ran in Heap, in its own folder "
                         "and with its own settings, and records the result. Nothing is "
                         "changed or deleted.",
             "button": "Run tests",
-            "command": "INVARIANT_SESSION_ID=4b7b00c1 invariant pipeline test",
+            "command": "invariant pipeline test --id 4b7b00c1",
             "place": "In Heap › session folder 4b7b00c1",
             "cwd": "/r/.claude/worktrees/p-wt-s1",
-            "env": ["INVARIANT_SESSION_ID=4b7b00c1"],
+            "env": [],
             "launch": None,
             "destructive": False,
             "deletes_heading": "This deletes",

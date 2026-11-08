@@ -3823,7 +3823,7 @@ class TestAmbiguityAdviceIsHonestAboutHooks:
             [Session(id="aaa", name="one"), Session(id="bbb", name="two")]
         )
         assert "--id" in text
-        assert "never gets there" in text
+        assert "does not reach\n   a HOOK" in text
         assert "host session bound to it" in text
 
 

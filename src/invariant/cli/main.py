@@ -207,6 +207,38 @@ def _is_within(path: Path, root: Path) -> bool:
     return resolved == root or root in resolved.parents
 
 
+#: The variable that names a session when no ``--id`` does: a fallback for
+#: scripts that export it, never the form the engine recommends (IDEA_042).
+SESSION_ENV = "INVARIANT_SESSION_ID"
+
+#: The help of the one ``--id`` every session-resolving command inherits. The
+#: parser-walk test finds the shared flag by it, and it says "session" because
+#: ``--id`` and ``--rule ID`` elsewhere name items and rules.
+SESSION_ID_HELP = (
+    f"session id; without it, {SESSION_ENV}, then the working directory, "
+    "names the session"
+)
+
+
+def explicit_session_id(given: str | None) -> str | None:
+    """``--id``, after refusing a variable that names a different session.
+
+    The argument outranks the variable, and the variable alone keeps working
+    as before. Both given and disagreeing is a caller holding two answers to
+    one question; picking either silently would act on a session somebody did
+    not mean, so neither is picked.
+    """
+    exported = os.environ.get(SESSION_ENV)
+    if given and exported and given != exported:
+        raise UsageError(
+            f"--id {given} and {SESSION_ENV} ({exported}) name different "
+            f"sessions; nothing was done.\n"
+            f"  Name one: keep --id {given} and unset {SESSION_ENV}, or drop "
+            f"--id."
+        )
+    return given
+
+
 class Context:
     """Everything a command needs, assembled once."""
 
@@ -246,7 +278,10 @@ class Context:
         #: An explicit --id, carried rather than exported. Writing it into
         #: os.environ would work and would also outlive the command, silently
         #: re-answering the same question for everything that ran afterwards.
-        self.session_id = session_id
+        #: It outranks INVARIANT_SESSION_ID, which stays the fallback; the two
+        #: naming different sessions is refused here, before any domain is
+        #: built, so the refusal records nothing (IDEA_042).
+        self.session_id = explicit_session_id(session_id)
         #: The agent host's session identifier, from the hook payload. The one
         #: attribution signal that survives the host resetting cwd between
         #: calls — without it, concurrent sessions are indistinguishable from
@@ -351,7 +386,7 @@ class Context:
         if session is None:
             raise UsageError(
                 "no session is active here. Start one with 'invariant session "
-                "start <task-name>', or set INVARIANT_SESSION_ID."
+                "start <task-name>', or name one with --id <id>."
             )
         return session
 
@@ -469,7 +504,7 @@ class Context:
         only knows projects a host has been rooted in (ADR-011 D2). A path in
         no invariant project is ungoverned and changes nothing.
         """
-        if self.session_id or os.environ.get("INVARIANT_SESSION_ID"):
+        if self.session_id or os.environ.get(SESSION_ENV):
             # Step 1 outranks every path, and it names a session in the
             # project that reads it (ADR-011 D6).
             return self
@@ -776,7 +811,7 @@ def cmd_doctor(args) -> int:
     # path instead of a diagnosis. Enumerating problems is this command's whole
     # job; being stopped by the first one is the opposite of it (BUG_050).
     try:
-        ctx = Context(required=False)
+        ctx = Context(required=False, session_id=args.id)
     except ManifestError as exc:
         checks = [
             ("manifest present", True, str(exc.manifest_path or Path.cwd() / MANIFEST_RELPATH)),
@@ -1820,8 +1855,8 @@ def cmd_session_start(args) -> int:
 
 
 def cmd_session_isolate(args) -> int:
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     plan = ctx.sessions.isolate(session.id, execute=args.execute)
     if args.execute:
         return emit(args, plan, f"isolated into {plan['worktree']} on {plan['branch']}")
@@ -1829,11 +1864,8 @@ def cmd_session_isolate(args) -> int:
 
 
 def cmd_session_status(args) -> int:
-    ctx = Context()
-    session = (
-        ctx.sessions.require(args.id) if getattr(args, "id", None)
-        else ctx.current_session()
-    )
+    ctx = Context(session_id=args.id)
+    session = ctx.current_session()
     if session is None:
         return emit(args, {"session": None}, "no session is active in this directory")
     pipeline = ctx.pipelines.current(session.id)
@@ -1902,8 +1934,8 @@ def cmd_override(args) -> int:
     environment a running host will re-read. The grant has to exist before the
     call and be found by it (BUG_049).
     """
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
 
     if args.clear:
         updated = ctx.sessions.clear_override(session.id, args.rule)
@@ -1955,8 +1987,8 @@ def cmd_standdown(args) -> int:
     the same want: one is "let this call through", the other is "stop asking
     for the next while".
     """
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
 
     if args.clear:
         updated = ctx.sessions.stand_up(session.id)
@@ -1996,8 +2028,8 @@ def cmd_standdown(args) -> int:
 
 
 def cmd_session_transition(args) -> int:
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     try:
         updated = ctx.sessions.transition(
             session.id, args.state, reason=args.reason, force=args.force, cwd=ctx.cwd
@@ -2015,11 +2047,8 @@ def cmd_session_transition(args) -> int:
 
 
 def cmd_session_files(args) -> int:
-    ctx = Context()
-    session = (
-        ctx.sessions.require(args.id) if getattr(args, "id", None)
-        else ctx.require_session()
-    )
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     if args.action == "remove":
         before = len(session.files)
         updated = ctx.sessions.remove_files(session.id, args.paths)
@@ -2056,7 +2085,7 @@ def cmd_session_list(args) -> int:
 
 
 def cmd_session_adopt(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     session_id = args.id
     if not session_id:
         current = ctx.current_session(strict=False)
@@ -2425,7 +2454,7 @@ def cmd_session_handoff(args) -> int:
         )
 
     ctx = Context(session_id=args.id)
-    explicit = args.id or os.environ.get("INVARIANT_SESSION_ID")
+    explicit = args.id or os.environ.get(SESSION_ENV)
     if explicit:
         session = ctx.sessions.require(explicit)
     else:
@@ -2588,11 +2617,8 @@ def cmd_session_plan(args) -> int:
     the numbering it just changed, and two output shapes for one subcommand is
     two things for a consumer to parse.
     """
-    ctx = Context()
-    session = (
-        ctx.sessions.require(args.id) if getattr(args, "id", None)
-        else ctx.require_session()
-    )
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     action = args.plan_action
     if action == "add":
         session = ctx.sessions.plan_add(session.id, args.title)
@@ -2689,8 +2715,8 @@ def cmd_session_sync(args) -> int:
 
     from ..core import git
 
-    ctx = Context()
-    session = ctx.sessions.require(args.id) if args.id else ctx.require_session()
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
 
     if not session.branch:
         raise UsageError(
@@ -2816,8 +2842,8 @@ def cmd_session_review(args) -> int:
     command used to carry its own copy of the gate list, which is exactly how
     the generic path came to have none (AUD-05).
     """
-    ctx = Context()
-    session = ctx.sessions.require(args.id) if args.id else ctx.require_session()
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
 
     machine = ctx.sessions.machine
     if not machine.can(session.state, "reviewed"):
@@ -2851,8 +2877,8 @@ def cmd_session_merge(args) -> int:
 
     from ..core import git
 
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     if not session.branch:
         raise UsageError(f"session {session.id} has no branch to merge")
 
@@ -2940,8 +2966,8 @@ def cmd_session_merge(args) -> int:
 def cmd_session_push(args) -> int:
     import subprocess
 
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
 
     # `pushed`'s entry gates, read from the machine. `session.push_enabled`
     # used to be duplicated here as a hardcoded `if`, so the policy lived
@@ -2979,8 +3005,8 @@ def cmd_session_push(args) -> int:
 
 
 def cmd_session_teardown(args) -> int:
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     updated = ctx.sessions.teardown(
         session.id,
         remove_worktree=not args.keep_worktree,
@@ -3005,7 +3031,7 @@ def cmd_session_teardown(args) -> int:
 
 
 def cmd_pipeline_start(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     session = ctx.require_session()
     pipeline = ctx.pipelines.start(
         session.id,
@@ -3034,8 +3060,8 @@ def cmd_pipeline_start(args) -> int:
 
 
 def cmd_pipeline_ack(args) -> int:
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     pipeline = ctx.pipelines.acknowledge(session.id, args.rule, args.reason)
     return emit(
         args,
@@ -3093,8 +3119,8 @@ def _ask_before_a_full_run(ctx, session, kind: str) -> None:
 
 
 def cmd_pipeline_coverage(args) -> int:
-    ctx = Context()
-    session = ctx.require_session() if not args.id else ctx.sessions.require(args.id)
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
     selectors = [s for s in (args.selector or []) if s]
     if not selectors:
         _ask_before_a_full_run(ctx, session, "coverage")
@@ -3113,7 +3139,7 @@ def cmd_pipeline_coverage(args) -> int:
 
 
 def cmd_pipeline_status(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     session = ctx.require_session()
     pipeline = ctx.pipelines.current(session.id)
     if pipeline is None:
@@ -3138,7 +3164,7 @@ def cmd_pipeline_status(args) -> int:
 
 
 def cmd_pipeline_gates(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     session = ctx.require_session()
     if args.state:
         verdicts = ctx.pipelines.evaluate_gates(
@@ -3180,7 +3206,7 @@ def cmd_pipeline_gates(args) -> int:
 
 
 def cmd_pipeline_advance(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     session = ctx.require_session()
     try:
         pipeline, verdicts = ctx.pipelines.advance(
@@ -3263,7 +3289,7 @@ def _family_gate(rc, guideline_id: str) -> str:
 
 
 def cmd_pipeline_test(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     session = ctx.require_session()
     if not [s for s in (args.selector or []) if s]:
         _ask_before_a_full_run(ctx, session, "test")
@@ -3681,7 +3707,7 @@ def _block_line(block, verb: str, overwrite_local: bool) -> str:
 
 
 def cmd_guidelines_render(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     result = _guidelines_domain(ctx).render(
         dry_run=args.dry_run,
         insert=tuple(args.insert or ()),
@@ -3719,7 +3745,7 @@ def cmd_guidelines_show(args) -> int:
             "--files and --touched select within a phase, and no phase was named",
             "add --phase design or --phase review",
         )
-    shown = _guidelines_domain(Context()).show()
+    shown = _guidelines_domain(Context(session_id=args.id)).show()
     text = shown.text.rstrip("\n") if shown.text is not None else (
         "no guidelines ruleset configured; nothing to show"
     )
@@ -3728,7 +3754,7 @@ def cmd_guidelines_show(args) -> int:
 
 def _guidelines_show_phase(args) -> int:
     """`guidelines show --phase`: the selected rules' full text (ADR-012 D7, A5.1)."""
-    shown = _guidelines_domain(Context()).select(
+    shown = _guidelines_domain(Context(session_id=args.id)).select(
         args.phase, files=tuple(args.files or ()), touched=args.touched
     )
     text = shown.text.rstrip("\n") if shown.text is not None else (
@@ -3753,7 +3779,7 @@ _BASELINE_STATUS = {
 
 def cmd_guidelines_baseline(args) -> int:
     mode = "record" if args.record else "prune"
-    result = _guidelines_domain(Context()).baseline(
+    result = _guidelines_domain(Context(session_id=args.id)).baseline(
         mode=mode, rules=tuple(args.rule or ()), dry_run=args.dry_run
     )
     if result.status == "no-ruleset":
@@ -3829,7 +3855,7 @@ def _submit_verdicts(args, submission) -> int:
     """
     from ..domains.guidelines import GuidelinesDomain
 
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     with _refusal_as_json(args):
         result = GuidelinesDomain(ctx.rule_context(), pipelines=ctx.pipelines).submit_verdicts(
             submission
@@ -3900,7 +3926,7 @@ def cmd_guidelines_verdicts_show(args) -> int:
     """
     from ..core.rules import Evaluated, standings_verdict
 
-    rc = Context().rule_context()
+    rc = Context(session_id=args.id).rule_context()
     read = _guidelines_domain_over(rc).verdict_standings()
     gate = Evaluated(VERDICTS_RULE, rc.manifest.rule_level(VERDICTS_RULE),
                      standings_verdict(read))
@@ -3956,7 +3982,7 @@ def cmd_rules_list(args) -> int:
 
 
 def cmd_check(args) -> int:
-    ctx = Context()
+    ctx = Context(session_id=args.id)
     rule_ids = args.rules or [spec.id for spec in all_rules()]
     verdicts = evaluate(rule_ids, ctx.rule_context())
     verbose = getattr(args, "verbose", False)
@@ -5432,7 +5458,7 @@ def cmd_context(args) -> int:
     # --id is not a convenience here. Every ambiguity message tells the caller
     # to pass it, and 'context' is the first command they reach for after
     # reading one; without it the advice is a dead end.
-    ctx = Context(session_id=getattr(args, "id", None))
+    ctx = Context(session_id=args.id)
     from ..hosts.claude_code import build_context
 
     text = build_context(ctx)
@@ -5465,6 +5491,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Deterministic, scripted state for agent workflows.",
         parents=[common],
     )
+    # One `--id` for every command that resolves a session, inherited rather
+    # than declared per command, so the spelling and the help cannot drift and
+    # the parser-walk test can tell the shared flag from an item's or a new
+    # session's id. Per subcommand, not global: `invariant <command> --id <id>`
+    # is the form every message already gives, and `Bash(invariant:*)` covers
+    # it where a `INVARIANT_SESSION_ID` prefix is not (IDEA_042).
+    session_arg = argparse.ArgumentParser(add_help=False)
+    session_arg.add_argument("--id", help=SESSION_ID_HELP)
     # Deliberately NO set_defaults(json=False) here. `parents=` copies action
     # objects by reference, and set_defaults reaches into every action with a
     # matching dest — so setting a default on the root would overwrite SUPPRESS
@@ -5496,7 +5530,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_init)
 
-    sub.add_parser("doctor", help="check the installation").set_defaults(func=cmd_doctor)
+    sub.add_parser(
+        "doctor", help="check the installation", parents=[session_arg]
+    ).set_defaults(func=cmd_doctor)
 
     p = sub.add_parser(
         "uninstall", help="remove the shims and settings entries init installed"
@@ -5580,7 +5616,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = session.add_parser("start")
     q.add_argument("name")
-    q.add_argument("--id")
+    q.add_argument("--id", help="the id to register the new session under")
     q.add_argument(
         "--base",
         help="the branch to cut the worktree from and merge back into; "
@@ -5597,38 +5633,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_session_start)
 
-    q = session.add_parser("isolate")
-    q.add_argument("--id")
+    q = session.add_parser("isolate", parents=[session_arg])
     q.add_argument("--execute", action="store_true")
     q.set_defaults(func=cmd_session_isolate)
 
     # --id everywhere it can mean something. Every ambiguity message tells the
     # caller to pass it, and a subcommand that then rejects it makes the advice
     # a dead end.
-    q = session.add_parser("status")
-    q.add_argument("--id")
+    q = session.add_parser("status", parents=[session_arg])
     q.set_defaults(func=cmd_session_status)
     session.add_parser("list").set_defaults(func=cmd_session_list)
 
-    q = session.add_parser("transition")
+    q = session.add_parser("transition", parents=[session_arg])
     q.add_argument("state")
-    q.add_argument("--id")
     q.add_argument("--reason")
     q.add_argument("--force", action="store_true")
     q.set_defaults(func=cmd_session_transition)
 
-    q = session.add_parser("files")
+    q = session.add_parser("files", parents=[session_arg])
     # `remove` exists because `add` can record a path that cannot be opened,
     # and a declared set with no way back blocks the review boundary on an
     # entry nobody can delete.
     q.add_argument("action", choices=["add", "remove"])
     q.add_argument("paths", nargs="+")
-    q.add_argument("--id")
     q.set_defaults(func=cmd_session_files)
 
-    q = session.add_parser("adopt", help="bind a host session id to a session")
+    q = session.add_parser(
+        "adopt", help="bind a host session id to a session", parents=[session_arg]
+    )
     q.add_argument("host_session_id")
-    q.add_argument("--id")
     q.add_argument("--force", action="store_true", help="rebind deliberately")
     q.set_defaults(func=cmd_session_adopt)
 
@@ -5640,7 +5673,7 @@ def build_parser() -> argparse.ArgumentParser:
     # subcommand that required a name alongside it would make that advice a
     # dead end.
     q.add_argument("name", nargs="?", help="a name, a bare task slug, or an id")
-    q.add_argument("--id")
+    q.add_argument("--id", help="the session to resume, by id")
     q.add_argument(
         "--force",
         action="store_true",
@@ -5661,6 +5694,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(CLAUDE_PID) is sent SIGTERM after a short delay unless --keep-open. "
             "--dismiss instead retires the latest fresh note without acting on it."
         ),
+        parents=[session_arg],
     )
     q.add_argument(
         "--note",
@@ -5684,7 +5718,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="launch the successor but leave this Claude Code session running; "
         "by default it is sent SIGTERM shortly after a successful launch",
     )
-    q.add_argument("--id", help="the session handing off, when the directory cannot say")
     q.set_defaults(func=cmd_session_handoff)
 
     # Nested subparsers rather than `files`' flat `action` + positional: `add`
@@ -5695,11 +5728,12 @@ def build_parser() -> argparse.ArgumentParser:
         "plan", help="the deliverable set this session owes"
     ).add_subparsers(dest="plan_action", required=True)
 
-    q = plan.add_parser("add", help="record a deliverable this session owes")
+    q = plan.add_parser(
+        "add", help="record a deliverable this session owes", parents=[session_arg]
+    )
     # ONE positional, deliberately. `plan add wire the toolbar` unquoted is then
     # a usage error rather than a deliverable called "wire".
     q.add_argument("title")
-    q.add_argument("--id")
     q.set_defaults(func=cmd_session_plan)
 
     for action, help_text in (
@@ -5707,19 +5741,18 @@ def build_parser() -> argparse.ArgumentParser:
         ("reopen", "undo a done — the way back from ticking the wrong number"),
         ("remove", "drop a deliverable; its number is retired, never reissued"),
     ):
-        q = plan.add_parser(action, help=help_text)
+        q = plan.add_parser(action, help=help_text, parents=[session_arg])
         q.add_argument("n", type=int)
-        q.add_argument("--id")
         q.set_defaults(func=cmd_session_plan)
 
-    q = plan.add_parser("show", help="the plan, and what is next on it")
-    q.add_argument("--id")
+    q = plan.add_parser(
+        "show", help="the plan, and what is next on it", parents=[session_arg]
+    )
     q.set_defaults(func=cmd_session_plan)
 
     q = session.add_parser(
-        "sync", help="rebase this session's branch onto its base"
+        "sync", help="rebase this session's branch onto its base", parents=[session_arg]
     )
-    q.add_argument("--id")
     q.set_defaults(func=cmd_session_sync)
 
     q = session.add_parser(
@@ -5728,14 +5761,14 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_session_reap)
 
-    q = session.add_parser("review", help="evaluate the review gates and advance")
-    q.add_argument("--id")
+    q = session.add_parser(
+        "review", help="evaluate the review gates and advance", parents=[session_arg]
+    )
     q.add_argument("--force", action="store_true")
     q.add_argument("--reason")
     q.set_defaults(func=cmd_session_review)
 
-    q = session.add_parser("merge")
-    q.add_argument("--id")
+    q = session.add_parser("merge", parents=[session_arg])
     q.add_argument(
         "--force",
         action="store_true",
@@ -5743,14 +5776,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_session_merge)
 
-    q = session.add_parser("push")
-    q.add_argument("--id")
+    q = session.add_parser("push", parents=[session_arg])
     q.add_argument("--remote", default="origin")
     q.add_argument("--force", action="store_true")
     q.set_defaults(func=cmd_session_push)
 
-    q = session.add_parser("teardown")
-    q.add_argument("--id")
+    q = session.add_parser("teardown", parents=[session_arg])
     q.add_argument("--keep-worktree", action="store_true")
     q.add_argument("--keep-branch", action="store_true")
     q.add_argument(
@@ -5764,40 +5795,44 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline = sub.add_parser("pipeline").add_subparsers(dest="sub", required=True)
 
     q = pipeline.add_parser(
-        "ack", help="record a deliberate decision to proceed against an advisory gate"
+        "ack", help="record a deliberate decision to proceed against an advisory gate",
+        parents=[session_arg],
     )
     q.add_argument("rule")
     q.add_argument("--reason", required=True)
-    q.add_argument("--id")
     q.set_defaults(func=cmd_pipeline_ack)
 
     q = pipeline.add_parser(
-        "coverage", help="run the configured coverage command and record it"
+        "coverage", help="run the configured coverage command and record it",
+        parents=[session_arg],
     )
-    q.add_argument("--id")
     # Repeatable, as on `pipeline test`, and for the same reason (BUG_031).
     # Runs commands.coverage_one: a scoped figure, recorded as scoped (ADR-010).
     q.add_argument("--selector", action="append")
     q.set_defaults(func=cmd_pipeline_coverage)
 
-    q = pipeline.add_parser("start")
+    q = pipeline.add_parser("start", parents=[session_arg])
     q.add_argument("--methodology")
     q.add_argument("--task")
     q.set_defaults(func=cmd_pipeline_start)
 
-    pipeline.add_parser("status").set_defaults(func=cmd_pipeline_status)
+    pipeline.add_parser("status", parents=[session_arg]).set_defaults(
+        func=cmd_pipeline_status
+    )
 
-    q = pipeline.add_parser("gates")
+    q = pipeline.add_parser("gates", parents=[session_arg])
     q.add_argument("--state")
     q.set_defaults(func=cmd_pipeline_gates)
 
-    q = pipeline.add_parser("advance")
+    q = pipeline.add_parser("advance", parents=[session_arg])
     q.add_argument("state")
     q.add_argument("--force", action="store_true")
     q.add_argument("--reason")
     q.set_defaults(func=cmd_pipeline_advance)
 
-    q = pipeline.add_parser("test", help="run the configured suite and record it")
+    q = pipeline.add_parser(
+        "test", help="run the configured suite and record it", parents=[session_arg]
+    )
     q.add_argument("--phase")
     # Repeatable. Declared without `action="append"`, argparse's documented
     # behaviour for a repeated single-value option applied — the last
@@ -5926,6 +5961,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = guide.add_parser(
         "render",
         help="write the human checklist from the ruleset, in docs.format",
+        parents=[session_arg],
     )
     q.add_argument(
         "--dry-run",
@@ -5946,7 +5982,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_guidelines_render)
     q = guide.add_parser(
-        "show", help="print the full checklist text from the ruleset, writing nothing"
+        "show", help="print the full checklist text from the ruleset, writing nothing",
+        parents=[session_arg],
     )
     q.add_argument(
         "--phase",
@@ -5970,6 +6007,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = guide.add_parser(
         "baseline",
         help="record or prune the ratchet baseline of pattern and boundary findings",
+        parents=[session_arg],
     )
     mode = q.add_mutually_exclusive_group(required=True)
     mode.add_argument(
@@ -5997,6 +6035,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = guide.add_parser(
         "verdict",
         help="submit one cited verdict on a judgement guideline (ADR-012 D5)",
+        parents=[session_arg],
     )
     q.add_argument("rule", help="the judgement guideline's id")
     q.add_argument("--status", required=True, choices=("pass", "fail", "na"))
@@ -6026,6 +6065,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = verdicts.add_parser(
         "submit",
         help="submit a JSON list of verdicts; one invalid entry refuses the whole file",
+        parents=[session_arg],
     )
     q.add_argument("file", help="a JSON file holding a list of verdict objects")
     q.set_defaults(func=cmd_guidelines_verdicts_submit)
@@ -6033,6 +6073,7 @@ def build_parser() -> argparse.ArgumentParser:
         "show",
         help="show how each judgement guideline the change owes a verdict stands, "
         "as guidelines.verdicts_complete sees it; writes nothing",
+        parents=[session_arg],
     )
     q.set_defaults(func=cmd_guidelines_verdicts_show)
 
@@ -6040,7 +6081,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)
     q.add_parser("list").set_defaults(func=cmd_rules_list)
 
-    q = sub.add_parser("check")
+    q = sub.add_parser("check", parents=[session_arg])
     q.add_argument("rules", nargs="*")
     q.set_defaults(func=cmd_check)
 
@@ -6203,6 +6244,7 @@ def build_parser() -> argparse.ArgumentParser:
         "override",
         help="pass a rule that fires at a hook, or one guideline at the next "
         "advance, once, with the decision recorded",
+        parents=[session_arg],
     )
     q.add_argument("rule", help="a rule id, or a guideline id from the ruleset")
     q.add_argument("--reason", help="required unless --clear")
@@ -6211,12 +6253,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="how many calls it covers; a guideline grant covers one",
     )
     q.add_argument("--clear", action="store_true", help="withdraw an unspent grant")
-    q.add_argument("--id")
     q.set_defaults(func=cmd_override)
 
     q = sub.add_parser(
         "standdown",
         help="hold every gate for an interval, reversibly, with the hold recorded",
+        parents=[session_arg],
     )
     q.add_argument("--reason", help="required unless --clear")
     q.add_argument(
@@ -6231,11 +6273,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="fold a held-out rule in; repeatable (privacy.clean is the only one)",
     )
     q.add_argument("--clear", action="store_true", help="lift it now")
-    q.add_argument("--id")
     q.set_defaults(func=cmd_standdown)
 
-    q = sub.add_parser("context")
-    q.add_argument("--id", help="the session to report on, when the directory cannot say")
+    q = sub.add_parser("context", parents=[session_arg])
     q.set_defaults(func=cmd_context)
 
     return parser

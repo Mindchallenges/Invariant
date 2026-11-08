@@ -697,7 +697,7 @@ indexes sessions in flight, and teardown removed this one from it.
 
 Which session a handoff belongs to, most reliable first:
 
-1. An explicit `--id` or `INVARIANT_SESSION_ID`.
+1. An explicit `--id`, else `INVARIANT_SESSION_ID`.
 2. A session the call PROVES — any attribution route except `origin`.
 3. Otherwise the most recently moved session registered at or above the
    working directory, in ANY state, preferring one bound to this host now or
@@ -850,7 +850,9 @@ that ran after the thing it was guarding.
 
 Which session a tool call belongs to, most reliable first:
 
-1. An explicit `INVARIANT_SESSION_ID` / `--id`.
+1. An explicit `--id`, else `INVARIANT_SESSION_ID`. The argument outranks the
+   variable, and the two naming different sessions is refused before
+   anything is recorded (IDEA_042).
 2. The host's session identifier, when the caller supplies one.
 3. The session whose worktree contains **the file the call names** — the
    destination of a write, or the path a read was aimed at.
@@ -2175,7 +2177,9 @@ worktree resolves identically, and git already ignores it, so nothing has to be
 excluded by hand. `paths.state` overrides this for a project outside git or one
 that wants state somewhere specific.
 
-**Finding the current session.** An explicit `INVARIANT_SESSION_ID` wins.
+**Finding the current session.** An explicit `--id` wins, then
+`INVARIANT_SESSION_ID`; the two naming different sessions is refused
+(IDEA_042, cli.md "Conventions").
 Otherwise the session whose worktree contains the working directory does, with
 the deepest match winning so a nested worktree beats its parent. Failing that,
 a session is matched by where it was registered — without which a session that

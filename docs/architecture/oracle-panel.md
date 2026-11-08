@@ -477,8 +477,8 @@ these (ADR-009 D3).
 
 | Recommended command | Card button | Confirm title | Confirm sentence | Run button |
 |---|---|---|---|---|
-| `pipeline test --selector …` (the session's last scoped run, BUG_093) | Re-run tests… | Re-run the tests? | Runs the tests this session last ran in <project>, in its own folder and with its own settings, and records the result. Nothing is changed or deleted. | Run tests |
-| `pipeline gates` | Show blockers… | Show what is blocking it? | Lists the checks this session still owes and what clears each. Nothing is changed. | Show blockers |
+| `pipeline test --id … --selector …` (the session's last scoped run, BUG_093) | Re-run tests… | Re-run the tests? | Runs the tests this session last ran in <project>, in its own folder and with its own settings, and records the result. Nothing is changed or deleted. | Run tests |
+| `pipeline gates --id` | Show blockers… | Show what is blocking it? | Lists the checks this session still owes and what clears each. Nothing is changed. | Show blockers |
 | `context --id` | Show its instructions… | Show what the session is being told? | Prints the session's current instructions. Nothing is changed. | Show |
 | `session review --id` | Review… | Run the review checks? | Runs the review checks and marks the session reviewed if they pass. Nothing is merged. | Run review |
 | `session merge --id` | Merge… | Merge this session? | Merges the session's branch from the main checkout. Its folder and branch stay until clean-up. | Merge |
@@ -558,7 +558,7 @@ differ:
 | "Close…" and "Remove…" pills 36 px, sheet Copy 32 px | visible size kept, hit area 44 px | ADR-009 D12 |
 | Result "Why": "Heap could not choose a simulator: 4 are running…" | a cause only when invariant wrote it, else "Failed, exit N" and the last meaningful line | The mockup's sentence names a cause the output does not state (ADR-009 D9) |
 | Destructive command `invariant session teardown --id … --force` | no `--force`; run from the main checkout | `--force` overrides a refusal the oracle must keep (ADR-009 D7) |
-| "Abandon session" | a pinned `invariant session transition abandoned`, or a new subcommand, decided in increment 7 | `session transition` takes no `--id` |
+| "Abandon session" | a pinned `invariant session transition abandoned --id <session>`, or a new subcommand, decided in increment 7 | `session transition` took no `--id` when this was written; it takes one now, as every session-resolving command does (IDEA_042) |
 | A "Forget" button on a gone host | no button; gone rows age out after 24 h | IDEA_025 puts any action on a gone row out of scope. Forgetting a record is an open question |
 | No Idle group drawn | an Idle group after Working, compact cards, no tile | The user's order is needs you, problems, working, idle |
 | No success sheet drawn | the result sheet with a tick | Derived from screen 5 |
@@ -631,7 +631,7 @@ decided what this page left open:
 
 | Question | As built |
 |---|---|
-| What runs | `invariant pipeline test` with each selector of the session's newest scoped run, in its folder, with `INVARIANT_SESSION_ID` and `INVARIANT_<KEY>` for each value that run's discovery resolved. Never the whole suite |
+| What runs | `invariant pipeline test --id <session>` with each selector of the session's newest scoped run, in its folder, with `INVARIANT_<KEY>` for each value that run's discovery resolved. The session rides in the argv, never in the environment (IDEA_042), so the Copy line starts with `invariant` unless a discovery value leads it. Never the whole suite |
 | A value the privacy patterns flag | Shown masked everywhere the panel shows it: the confirm's "Exact folder and environment", the Command line and Copy, and the detail's Copy. The real value reaches only the command's own environment, when it runs, read from the one run that was confirmed |
 | The Copy line with a masked value | A shell comment, "# Not runnable as shown, <names> masked: <line>": pasted, it runs nothing, since the line shown is not the command that runs |
 | A value nothing flags | Shown as before, `NAME=value` |

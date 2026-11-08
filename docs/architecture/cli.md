@@ -7,6 +7,26 @@ Nothing reaches the engine another way.
 ## Conventions
 
 - Every command accepts `--json` and prints a machine-readable result.
+- **Every command that resolves a session takes it as `--id <id>`** (IDEA_042).
+  One flag, inherited from one shared parent parser, so the synopses below
+  leave it out. "Resolves a session" is decided by the code path, not the
+  name: the `session` and `pipeline` subcommands that act on one session,
+  `check`, `context`, `doctor`, `override`, `standdown`, and every
+  `guidelines` subcommand, since each reads the session's worktree as the
+  tree in hand. `session start --id` (the id a new session registers under)
+  and `session resume --id` (the session to pick up) are their own flags; the
+  `hook` command takes none, because a hook is identified by its payload.
+  `--id` outranks `INVARIANT_SESSION_ID`, which stays a silent working
+  fallback for scripts that export it, and the variable outranks the host
+  binding and the working directory as before (state_model.md,
+  "Attribution"). Both given and naming different sessions is REFUSED with
+  exit 2, naming both, before anything is read or recorded. No message,
+  oracle step or shipped agent text offers the variable as a command line to
+  copy: a Claude Code permission rule matches a command by its prefix, and
+  `Bash(invariant:*)` covers `invariant <command> --id <id>` where a line
+  starting with an assignment raises a prompt on every call. A test walks the
+  parser and fails when a command whose code path resolves a session lacks
+  the shared flag.
 - Exit codes: `0` clean, `1` a gate failed or a transition is illegal, `2`
   usage error, `3` state store problem. A gate failure and a crash are never
   the same code, because a shim must be able to tell them apart.

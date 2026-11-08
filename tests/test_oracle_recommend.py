@@ -65,13 +65,14 @@ CASES = [
     ),
     pytest.param(
         session_row(pipeline=failing()),
-        rec.RUN, ("invariant", "pipeline", "test", "--selector", "tests/test_x.py::test_a"),
-        WT, {"INVARIANT_SESSION_ID": "s1"},
+        rec.RUN, ("invariant", "pipeline", "test", "--id", "s1",
+                  "--selector", "tests/test_x.py::test_a"),
+        WT, {},
         id="failed-tests",
     ),
     pytest.param(
         session_row(hosts=[host(attention(turn="ended", blocked={"rules": ["a"]}))]),
-        rec.RUN, ("invariant", "pipeline", "gates"), WT, {"INVARIANT_SESSION_ID": "s1"},
+        rec.RUN, ("invariant", "pipeline", "gates", "--id", "s1"), WT, {},
         id="gate-blocked",
     ),
     pytest.param(
@@ -227,7 +228,7 @@ class TestRerun:
 
     def test_every_selector_of_the_last_scoped_run_is_replayed(self):
         advice = advise(session_row(pipeline=failing(selectors=["a.py::t", "b.py::u"])))
-        assert advice.argv == ("invariant", "pipeline", "test",
+        assert advice.argv == ("invariant", "pipeline", "test", "--id", "s1",
                                "--selector", "a.py::t", "--selector", "b.py::u")
         parsed = build_parser().parse_args(list(advice.argv[1:]))
         assert parsed.selector == ["a.py::t", "b.py::u"]
@@ -244,13 +245,14 @@ class TestRerun:
     def test_a_run_older_than_the_record_replays_when_nothing_is_discovered(self):
         advice = advise(session_row(pipeline=failing(recorded=False, needs_discovery=False)))
         assert advice.kind == rec.RUN
-        assert advice.env == {"INVARIANT_SESSION_ID": "s1"}
+        assert advice.env == {}
+        assert advice.argv[3:5] == ("--id", "s1")
 
-    def test_the_recorded_values_ride_in_env_beside_the_session_pin(self):
+    def test_the_recorded_values_ride_in_env_and_the_session_in_argv(self):
         advice = advise(session_row(pipeline=failing(
             needs_discovery=True, env={"INVARIANT_DESTINATION_ID": "SIM-A"})))
-        assert advice.env == {"INVARIANT_DESTINATION_ID": "SIM-A",
-                              "INVARIANT_SESSION_ID": "s1"}
+        assert advice.env == {"INVARIANT_DESTINATION_ID": "SIM-A"}
+        assert advice.argv[3:5] == ("--id", "s1")
         assert advice.masked == () and advice.replay is None
 
     def test_a_masked_value_names_the_run_its_real_value_is_read_from(self):
@@ -309,7 +311,7 @@ def gated(row: Row, report: GateReport | None) -> Recommendation | None:
 class TestGateDetail:
     def test_a_refused_row_names_every_gate_owed_and_what_it_wants(self):
         advice = gated(blocked_row(), GateReport("green", (ALL_PASS, COVERAGE)))
-        assert advice.argv == ("invariant", "pipeline", "gates")
+        assert advice.argv == ("invariant", "pipeline", "gates", "--id", "s1")
         assert advice.detail == (
             "owed: test.all_pass (block, to refactor, reviewing): 2 failed; "
             "coverage.meets_floor (warn, to committed)"

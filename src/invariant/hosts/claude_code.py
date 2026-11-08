@@ -2063,8 +2063,8 @@ _UNPROVEN_DISPATCH = (
     "is a guess, not an identification). Evidence is never written on a guess, "
     "because a pipeline that receives another session's agent clears its gate "
     "on work that never happened.\n"
-    "  try: run the dispatch from inside the session's worktree, name that "
-    "worktree in the brief, or set INVARIANT_SESSION_ID"
+    "  try: run the dispatch from inside the session's worktree, or name that "
+    "worktree in the brief"
 )
 
 _UNRECORDED_DOCS_READ = (
