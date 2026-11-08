@@ -174,7 +174,8 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
       2. The assessment (`invariant docs assess`) runs on the chosen
          location and prints its gaps.
       3. Where there are gaps, init offers `not_now` (the default: writes
-         nothing), `incremental` (writes `docs.onboarding: incremental`)
+         nothing), `incremental` (writes `docs.onboarding: incremental`,
+         which injects `docs.area_documented` at every landing)
          or `all_at_once` (writes `docs.onboarding: all_at_once`, then the
          plan of ruling 9). When the base already carries the manifest, a
          store project or a re-run whose `.claude/invariant.yaml` is

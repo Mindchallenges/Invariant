@@ -17,6 +17,11 @@ Deterministic by construction (ruling B): files are read in sorted order, and
 the result carries a digest of every input, so two runs over an unchanged tree
 print byte-identical output. Read-only: it writes nothing anywhere.
 
+The incremental rule, ``docs.area_documented`` (D6), asks the same
+assessment which touched areas no doc names: :func:`owning_area` places a
+changed file in its area, and :meth:`Assessment.unnamed` and
+:meth:`Assessment.doc_for` answer the rest.
+
 Headings and links are read through ``core/docformat``'s reader for
 ``docs.format``. A format with no reader makes ``sections`` and ``links``
 report "not assessable", never pass; ``areas`` still reads every file's text.
@@ -74,6 +79,25 @@ class Assessment:
 
     def by_check(self, check: str) -> list[Gap]:
         return [gap for gap in self.gaps if gap.check == check]
+
+    def unnamed(self) -> frozenset[str]:
+        """The path of each area no doc names."""
+        paths = {area.path for area in self.areas}
+        return frozenset(
+            gap.subject for gap in self.by_check("areas") if gap.subject in paths
+        )
+
+    def underivable(self) -> list[Gap]:
+        """Each ``areas`` gap that is not an area: an ecosystem whose areas
+        cannot be derived."""
+        paths = {area.path for area in self.areas}
+        return [gap for gap in self.by_check("areas") if gap.subject not in paths]
+
+    def doc_for(self, area: Area) -> str:
+        """The doc an unnamed ``area`` could be written in, in this format."""
+        reader = reader_for(self.format)
+        suffix = reader.suffixes[0] if reader is not None else ".md"
+        return f"{self.location}/{area.name}{suffix}"
 
     def summary(self) -> str:
         counts = ", ".join(f"{c} {len(self.by_check(c))}" for c in self.checks)
@@ -322,6 +346,15 @@ def _unique(areas) -> list[Area]:
     return list(seen.values())
 
 
+def owning_area(areas: Sequence[Area], path: str) -> Area | None:
+    """The area ``path`` (project-relative) lies in: the most specific one
+    when areas nest, ``None`` when it lies in none (ADR-016 D6)."""
+    inside = [
+        area for area in areas if path == area.path or path.startswith(area.path + "/")
+    ]
+    return max(inside, key=lambda area: len(area.path), default=None)
+
+
 def plan_deliverables(assessment: Assessment) -> list[str]:
     """The all-at-once plan for ``assessment``'s gaps (ADR-016 D5, ruling 4).
 
@@ -339,10 +372,10 @@ def plan_deliverables(assessment: Assessment) -> list[str]:
     ]
     if missing:
         lines.append("Write the missing sections: " + ", ".join(missing))
-    areas = {area.path for area in assessment.areas}
+    unnamed = assessment.unnamed()
     lines.extend(
         f"Document {gap.subject}"
         for gap in assessment.by_check("areas")
-        if gap.subject in areas
+        if gap.subject in unnamed
     )
     return lines

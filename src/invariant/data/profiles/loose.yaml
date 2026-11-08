@@ -40,6 +40,10 @@ rules:
   docs.assessment: warn
   docs.updated: warn
   docs.diagrams_current: "off"
+  # The incremental docs path (ADR-016 D6): each touched source area no
+  # architecture doc names is owed. Injected at the landing only under
+  # docs.onboarding: incremental. Warns in loose and standard, blocks in strict.
+  docs.area_documented: warn
 
   test.new_test_fails: warn
   test.all_pass: warn

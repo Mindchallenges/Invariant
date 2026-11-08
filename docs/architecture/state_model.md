@@ -1459,16 +1459,50 @@ no machine names it, so `core/machines` never injects it into a pipeline:
 row whose level the rule's decides, the fourth route by which a graded rule
 counts as reachable beside an event, a machine gate and an injection.
 
-**Accepted, not yet built (ADR-016 D6).** The rule `docs.area_documented`
-joins the docs gates. It is armed only by `docs.onboarding:
-incremental`, otherwise N/A saying so, and rides the landing state's entry
-set beside `docs.updated`. It maps each file of `core/rules._changed_set` to
-its source area and asks the live assessment of the session's tree whether
-that area is named; an unnamed, touched area is owed, and the verdict names
-it and the doc to write. No gap list is recorded. It warns in `loose` and
-`standard` and blocks in `strict`; a docs-lane session changes no source and
-is N/A; with `records.docs: store` it reads the store's docs, per leg as
-ADR-014 D9 decides. Increment 3 builds it.
+**Built (ADR-016 D6, increment 3).** `docs.area_documented` is the
+incremental onboarding path's landing obligation. `core/machines` adds it to
+the `landing` state's entry set, beside `docs.updated`
+(`DOCS_ONBOARDING_GATES`), only when `docs.onboarding` is `incremental`, for
+the reason `sweep.fresh` is injected only under a cadence: under any other
+mode the rule is N/A, and a project that chose nothing lands exactly as
+before. The mode is read from the manifest as it stands, never pinned at
+`start`. Asked directly (`invariant check docs.area_documented`) under
+another mode, the rule is N/A and names the mode.
+
+Armed, it reads `core/rules._changed_set` and keeps the files `docs.updated`
+calls source: outside the docs, not prose, not `non_source`, not test code an
+adapter claims. Each is mapped to the most specific source area holding it
+(`domains/docs.owning_area`, over the areas `assess` derives: `areas.from`
+and `exclude` honoured), and the live assessment of the session's tree (its
+worktree, else the checkout in hand) says whether that area is named. Each
+unnamed, touched area is owed: the verdict names its path and the doc to
+write (`<docs location>/<area name>` in the format's suffix) and offers
+naming it in an existing doc instead. An area already named is never asked,
+and a doc written in the same change settles it. No gap list is recorded:
+the deterministic assessment is the record.
+
+It is N/A in a `docs`-lane pipeline (declared, as `docs.diagrams_current`
+reads it), when no source changed, when nothing changed, and when
+`docs.assess.checks` leaves out `areas`. A file in no area is not asked. An
+unestablished changed set fails as it does for `docs.updated`, and so do
+areas that cannot be derived when a touched file is left unplaced, because
+an unanswerable question is not a negative answer. With `records.docs:
+store` it reads the store's docs, as the assessment does; reading each leg
+from its own tree is ADR-014 increment 4. It warns in `loose` and
+`standard` and blocks in `strict` (ruling 1); `enforcement.rules` sets it
+per project.
+
+```mermaid
+graph LR
+    LAND["landing entry (docs.onboarding: incremental)"] --> RULE["docs.area_documented"]
+    RULE --> CS["_changed_set: source files"]
+    RULE --> ASSESS["domains/docs.assess on the session's tree"]
+    CS --> OWN["owning_area: file to source area"]
+    ASSESS --> OWN
+    OWN --> V{"area named?"}
+    V -- "yes" --> OK["not asked"]
+    V -- "no" --> OWED["owed: area and doc to write"]
+```
 
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —

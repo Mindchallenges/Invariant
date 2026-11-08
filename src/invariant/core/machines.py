@@ -6,7 +6,8 @@ shipped one, so forking a methodology never means forking the library.
 
 The docs-first gates are injected here rather than written into every
 methodology file, and so is ``sweep.fresh`` beside each gate a sweep cadence
-schedules, and the ``guidelines.*`` landing gates on the landing state of a project
+schedules, ``docs.area_documented`` beside the update gate on a project onboarding
+its docs incrementally, and the ``guidelines.*`` landing gates on the landing state of a project
 with a guidelines ruleset (``guidelines.baseline_only_shrinks`` only when it keeps a
 baseline too), and ``agents.rendered_current`` there when the caller holds a host
 adapter's agent install plan. ADR-001 D12 makes docs-first core policy, so a methodology
@@ -55,6 +56,19 @@ LANDING_ROLE = "landing"
 DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
     "design": {"exit": ["docs.read_architecture"]},
     "landing": {"entry": ["docs.updated", "docs.diagrams_current"]},
+}
+
+#: Attached to the landing state's ENTRY beside the update gate, and only on a
+#: project whose ``docs.onboarding`` is ``incremental`` (ADR-016 D6). The rule
+#: is the incremental path's: each source area the change touches that no
+#: architecture doc names is owed. Conditional for the reason ``sweep.fresh``
+#: is: under any other mode the rule is N/A, and ``pipeline gates`` never lists
+#: a rule that cannot apply, so a project that chose nothing lands exactly as
+#: before. Read from the manifest as it stands, never pinned: the mode is the
+#: project's standing choice, not a property of one pipeline. It warns in
+#: ``loose`` and ``standard`` and blocks in ``strict`` (ruling 1).
+DOCS_ONBOARDING_GATES: dict[str, dict[str, list[str]]] = {
+    "landing": {"entry": ["docs.area_documented"]},
 }
 
 #: Attached the same way — and BOTH hang off the landing state, including the
@@ -233,6 +247,8 @@ def load_pipeline_machine(
         )
     _require_a_landing_state(machine)
     machine = machine.inject_gates(DOCS_FIRST_GATES)
+    if manifest is not None and manifest.get("docs.onboarding") == "incremental":
+        machine = machine.inject_gates(DOCS_ONBOARDING_GATES)
     for required_role, by_role in AGENT_ROLE_GATES.items():
         if machine.states_with_role(required_role):
             machine = machine.inject_gates(by_role)

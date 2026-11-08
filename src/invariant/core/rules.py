@@ -1823,6 +1823,115 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
 
 
 @rule(
+    "docs.area_documented",
+    summary="Each source area the change touches is named in an architecture doc.",
+    events=(),
+)
+def _docs_area_documented(ctx: RuleContext) -> Verdict:
+    """ADR-016 D6: the incremental path's landing obligation.
+
+    Armed only by ``docs.onboarding: incremental``. Each source file of the
+    changed set is mapped to its source area, and the live assessment of the
+    session's tree says whether that area is named. An unnamed, touched area
+    is owed; an area already named is never asked. No gap list is recorded:
+    the assessment is deterministic, so it is the record, and it cannot go
+    stale when a doc is written outside a session.
+
+    "Source" is ``docs.updated``'s reading: outside the docs, not prose, not
+    declared ``non_source``, not test code an adapter claims. With
+    ``records.docs: store`` the store's docs are read, as the assessment
+    reads them; per-leg reading is ADR-014 increment 4.
+    """
+    from ..domains.docs import assess, owning_area  # local: avoids a cycle
+
+    mode = ctx.manifest.get("docs.onboarding")
+    if mode != "incremental":
+        return Verdict.na(
+            f"docs.onboarding is {mode}; only incremental arms this rule"
+        )
+    if (ctx.pipeline or {}).get("methodology") == "docs":
+        return Verdict.na("documentation pipeline — it changes no source")
+    if "areas" not in (ctx.manifest.get("docs.assess.checks") or []):
+        return Verdict.na(
+            "the areas check is off (docs.assess.checks), so no area can be asked about"
+        )
+
+    touched = _changed_set(ctx)
+    if not touched.paths:
+        if not touched.answerable:
+            return _unestablished_changed_set(touched)
+        return Verdict.na("nothing changed")
+    root = _repo_root(ctx)
+    docs_root = _docs_root(ctx)
+    outside_docs = {
+        _relative_to_any(p, _coverage_roots(ctx))
+        for p in touched.paths
+        if not _is_within(root / p, docs_root)
+    }
+    source, _ = _excluded_as_declared_non_source(
+        ctx, {p for p in outside_docs if not _is_prose(p)}
+    )
+    source, _ = _excluded_as_test_code(ctx, source)
+    if not source:
+        return Verdict.na("no source changed, so no area is touched")
+
+    # The SESSION's tree: a doc written in this change names its area here,
+    # while the main checkout has not seen it yet. A store's docs resolve to
+    # the store whatever the root, since their path is absolute by then.
+    tree = _session_tree(ctx)
+    manifest = ctx.manifest
+    if tree.resolve() != manifest.root.resolve():
+        manifest = replace(manifest, root=tree.resolve())
+    assessment = assess(manifest)
+
+    owners = {path: owning_area(assessment.areas, path) for path in sorted(source)}
+    unmapped = [path for path, area in owners.items() if area is None]
+    underivable = assessment.underivable()
+    if underivable and unmapped:
+        return Verdict.fail(
+            "the source areas cannot be derived, so the touched files cannot "
+            "be placed",
+            detail="; ".join(gap.render() for gap in underivable)
+            + f". Not placed: {', '.join(unmapped)}.",
+            fixes=(
+                "set docs.assess.areas.from to globs or declared",
+                "invariant docs assess",
+            ),
+        )
+    touched_areas = {area.path: area for area in owners.values() if area is not None}
+    if not touched_areas:
+        return Verdict.clean(
+            f"no touched source file lies in a source area ({len(source)} file(s))"
+        )
+    unnamed = assessment.unnamed()
+    owed = [touched_areas[path] for path in sorted(touched_areas) if path in unnamed]
+    if not owed:
+        return Verdict.clean(
+            f"{len(touched_areas)} touched source area(s), each named: "
+            + ", ".join(sorted(touched_areas))
+        )
+    return Verdict.fail(
+        f"{len(owed)} touched source area(s) named in no architecture doc: "
+        + ", ".join(area.path for area in owed),
+        detail="; ".join(
+            f"{area.path}: {area.name} is named in no doc under "
+            f"{assessment.location}; write {assessment.doc_for(area)}"
+            for area in owed
+        )
+        + ". docs.onboarding: incremental says each area is documented the "
+        "first time a change touches it.",
+        fixes=(
+            *(
+                f"document {area.name} in {assessment.doc_for(area)}, or name it "
+                f"in an existing doc under {assessment.location}"
+                for area in owed
+            ),
+            "invariant docs assess",
+        ),
+    )
+
+
+@rule(
     "docs.diagrams_current",
     summary="A doc whose structure changed has its diagram updated too.",
     events=(),
@@ -2009,6 +2118,15 @@ def guidelines_tree(ctx: RuleContext) -> Path:
     in. One answer for the ruleset gate and for `guidelines render`, so the
     command never writes a checklist into a different tree from the one whose
     ruleset it read.
+    """
+    return _session_tree(ctx)
+
+
+def _session_tree(ctx: RuleContext) -> Path:
+    """The session's worktree when it has one, else the checkout in hand.
+
+    What a rule reading the change's own files reads: from the main checkout
+    (``session merge``) the work lives in the session's worktree.
     """
     return _session_worktree(ctx) or _repo_root(ctx)
 

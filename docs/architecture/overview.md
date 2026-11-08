@@ -279,7 +279,7 @@ graph TD
     CVERD -- Guideline, Ruleset, digest_of, meets --> CGUIDE
     CVERD -- project_relative --> MANIFEST
     CLI -- "docs assess" --> DOCSD
-    RULES -. "docs.assessment, imported at call time" .-> DOCSD
+    RULES -. "docs.assessment, docs.area_documented, imported at call time" .-> DOCSD
     DOCSD -- "headings, links: the reader for docs.format" --> CDOCFMT
     DOCSD -- "docs.assess, path_for, project_relative, glob_matches" --> MANIFEST
     DOCSD -- source_areas --> adapters
@@ -428,8 +428,11 @@ git nothing, so `DOCSD --> GIT` is `tracked_files`. `CLI --> DOCSD` is
 DOCSD` points up, against the dependency rule below, and is drawn dotted
 because the import is made at call time inside the rule, exactly as the
 memory rules have long imported `domains/memorystore`. ADR-016 draws this
-arrow (`RULES --> DOCS`). No machine names the rule, so nothing in a
-pipeline reaches the domain.
+arrow (`RULES --> DOCS`). No machine names that rule. The one pipeline
+route into the domain is `docs.area_documented` (ADR-016 D6, increment 3),
+injected at the landing only under `docs.onboarding: incremental`: it asks
+the domain for the assessment of the session's tree and for the area each
+touched source file lies in, through the same dotted arrow.
 
 `CONBOARD` is `cli/onboarding` (ADR-016 D4, D5, increment 2): `init`'s
 docs offers and the all-at-once plan, in the CLI layer because it joins
@@ -1508,6 +1511,10 @@ advance it. They are the only place where "what a session is" is encoded.
   absent and says so. `plan_deliverables(assessment)` (increment 2) is the
   all-at-once plan's lines: a missing-sections line first, then `Document
   <area>` per unnamed area; recording them is `cli/onboarding`'s.
+  `owning_area(areas, path)` (increment 3) places a project-relative file in
+  the most specific area holding it, and `Assessment.unnamed()` and
+  `doc_for(area)` say which areas no doc names and where one could be
+  written; `docs.area_documented` reads all three.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for
   the same reason `memorystore` is not: there is no lifecycle to advance, but
   there is a store with invariants over it and operations that repair them.

@@ -298,7 +298,7 @@ docs:
 ```
 
 `off`, the default, is today's behaviour. `incremental` arms
-`docs.area_documented` once increment 3 builds it; `all_at_once` is
+`docs.area_documented` (increment 3, below); `all_at_once` is
 provenance for the plan `docs assess --plan` records and arms nothing.
 YAML reads an unquoted `off` as false, so false reads as `off`; any other
 value is refused at load, naming the key and the three modes. Every key
@@ -307,11 +307,16 @@ under `docs` is now checked: one this build does not read (`format`,
 refused naming it, and `docs.adopt` is refused naming increment 4, since it
 would load and adopt nothing.
 
+**Built (ADR-016 D9, increment 3).** `enforcement.rules` gains
+`docs.area_documented`: `warn` in `loose` and `standard`, `block` in
+`strict`, and any level a project sets there wins over its profile. It is
+injected at the landing only under `docs.onboarding: incremental`, so a
+project that sets neither key lands exactly as before (state_model.md, the
+docs gates).
+
 **Accepted, not yet built (ADR-016 D9).** `docs` gains `adopt` (`mode` and
-`source`), and `enforcement.rules` gains `docs.area_documented`, `warn` by
-default (`strict` blocks it). Every default is today's behaviour. An
-unknown adopt mode is refused at load, naming it. Increment 3 builds
-`docs.area_documented`, and 4 the `adopt` keys.
+`source`). Every default is today's behaviour. An unknown adopt mode is
+refused at load, naming it. Increment 4 builds the `adopt` keys.
 
 ### Records and their locations
 

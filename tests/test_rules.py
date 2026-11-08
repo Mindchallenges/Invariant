@@ -176,6 +176,7 @@ class TestRegistry:
             AGENT_ROLE_GATES,
             BASELINE_GATES,
             DOCS_FIRST_GATES,
+            DOCS_ONBOARDING_GATES,
             FRESHNESS_GATE,
             GUIDELINES_GATES,
             load_machine,
@@ -186,6 +187,7 @@ class TestRegistry:
             gate
             for injected in (
                 DOCS_FIRST_GATES,
+                DOCS_ONBOARDING_GATES,
                 *AGENT_ROLE_GATES.values(),
                 GUIDELINES_GATES,
                 BASELINE_GATES,
