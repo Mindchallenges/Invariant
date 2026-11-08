@@ -201,8 +201,12 @@ def _documents(docs_root: Path, reader: Reader | None) -> list[tuple[str, Path]]
     return sorted(found)
 
 
+#: The subject of a check that has no reader for the format.
+_NOT_ASSESSABLE = "not assessable"
+
+
 def _not_assessable(check: str, fmt: str) -> Gap:
-    return Gap(check, "not assessable", f"no reader for {fmt}")
+    return Gap(check, _NOT_ASSESSABLE, f"no reader for {fmt}")
 
 
 def _sections(
@@ -316,3 +320,29 @@ def _unique(areas) -> list[Area]:
     for area in areas:
         seen.setdefault(area.path, area)
     return list(seen.values())
+
+
+def plan_deliverables(assessment: Assessment) -> list[str]:
+    """The all-at-once plan for ``assessment``'s gaps (ADR-016 D5, ruling 4).
+
+    First, when the ``sections`` check has gaps, one ``Write the missing
+    sections: <list>`` line; then one ``Document <area>`` line per area no
+    doc names, in the assessment's order. A gap no document can close, a
+    check that is not assessable or areas that cannot be derived, is not
+    planned: it is a configuration to fix, not a doc to write. A broken link
+    is not planned either; it is an edit to a doc that exists.
+    """
+    lines: list[str] = []
+    missing = [
+        gap.subject for gap in assessment.by_check("sections")
+        if gap.subject != _NOT_ASSESSABLE
+    ]
+    if missing:
+        lines.append("Write the missing sections: " + ", ".join(missing))
+    areas = {area.path for area in assessment.areas}
+    lines.extend(
+        f"Document {gap.subject}"
+        for gap in assessment.by_check("areas")
+        if gap.subject in areas
+    )
+    return lines

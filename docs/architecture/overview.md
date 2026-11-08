@@ -21,6 +21,8 @@ graph TD
     subgraph cli["cli/ — entrypoint"]
         CLI[invariant CLI]
         CREPLAY["conformance replay"]
+        CONBOARD["onboarding: init's docs offers, the plan (ADR-016 D4, D5)"]
+        CPROMPTS["prompts (ADR-016 D4)"]
     end
 
     subgraph oracle["oracle/ — machine-wide view (ADR-007)"]
@@ -282,6 +284,14 @@ graph TD
     DOCSD -- "docs.assess, path_for, project_relative, glob_matches" --> MANIFEST
     DOCSD -- source_areas --> adapters
     DOCSD -- tracked_files --> GIT
+    CLI -- "init's offers, docs assess --plan" --> CONBOARD
+    CLI -- "_init_prompter: a terminal, or nobody" --> CPROMPTS
+    CONBOARD -- "say, choose, ask" --> CPROMPTS
+    CONBOARD -- "plan_deliverables" --> DOCSD
+    CONBOARD -- "init_store, link_repo, write_store_settings" --> CSTORES
+    CONBOARD -- "start parked, plan_add" --> SESSION
+    CONBOARD -- "start the docs pipeline" --> PIPELINE
+    CONBOARD -- "exists_at: does the base carry the manifest" --> GIT
 ```
 
 `MANIFEST --> CHOME` is the user level of the configuration (ADR-014 D3,
@@ -420,6 +430,20 @@ because the import is made at call time inside the rule, exactly as the
 memory rules have long imported `domains/memorystore`. ADR-016 draws this
 arrow (`RULES --> DOCS`). No machine names the rule, so nothing in a
 pipeline reaches the domain.
+
+`CONBOARD` is `cli/onboarding` (ADR-016 D4, D5, increment 2): `init`'s
+docs offers and the all-at-once plan, in the CLI layer because it joins
+three domains and a store write, as `cli/conformance` sits there to drive
+the CLI. It asks every question through `CPROMPTS`, `cli/prompts`, whose
+`Prompter` protocol the suite answers from a script; `cli/main`'s
+`_init_prompter` is the one place a `TerminalPrompter` is made, and only
+when `prompts.interactive` allows (no `--dry-run`, no `--json`, a terminal
+on both sides). The store choice reaches `core/stores` (`init_store` or
+`link_repo`, then `write_store_settings` into the repository's block), the
+plan reaches `domains/docs.plan_deliverables` for its lines and the session
+and pipeline domains, through the CLI's context, for a session started
+parked with a `docs` pipeline. `CONBOARD --> GIT` asks whether the base
+carries the manifest (ruling 9).
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1393,7 +1417,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches; the structural excuses a match is judged by, each read from the match itself and the text right against it and never from the whole line (a row number, a duration word, an XML identifier, a scaled image name in the domain position, the portrait ratio as the whole of a quoted literal, the midnight bound); on the manifest's own path alone, a match exactly equal to a value its scoped entries declare (BUG_110); reading `privacy.allow` into plain values and path-scoped entries (`parse_allow`, `ScopedAllow`), and deciding whether an entry reaches a match at the path it was handed | Know which files matter: which paths are scanned is `privacy.scope`, decided by the caller, and a path reaches the scanner only to be compared with an allow entry |
 | `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record`; every rename git detects from the merge base to the working tree (`renamed_files`), which a baseline entry follows (DN-7) — plus three writes, each named as such: `commit_only`, the sweep's own commit of exactly the paths it wrote; `set_local_config`, one key of the local git config (`invariant.id`, ADR-014 D4); and `init_repository`, a new store (ADR-014 D2) | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
 | `home` | The user's home for invariant, `$INVARIANT_HOME` else `~/.invariant` (`invariant_home`, which the oracle's `oracle_home` asks); the user level of the configuration, `config.yaml` (`load_user_config`, `UserConfig`): its `defaults`, its `repos` map and its `store_naming`, each shape refused naming the file; a path spelled for a provenance label (`display_path`) (ADR-014 D3) | Merge a level into a configuration (`manifest` does); write the file; resolve a store |
-| `stores` | Stores (ADR-014 D2): the pointer (`read_pointer`, which refuses a policy key), which store a repo names (`find_store`: the pointer, then the user level by identity, then by local ID, `StoreLink`), the store's levels (`store_levels`, `read_store_manifest`), refused unless `store.repos` lists the repo; naming under ruling 14 with its collision fallback (`plan_store_path`); and the link's writes, the user level's `repos:` entry, `invariant.id` and the linked-identity index (`link_repo`, `update_link`, `init_store`) | Merge levels into a configuration (`manifest` does); clone, pull or push a store; know a host |
+| `stores` | Stores (ADR-014 D2): the pointer (`read_pointer`, which refuses a policy key), which store a repo names (`find_store`: the pointer, then the user level by identity, then by local ID, `StoreLink`), the store's levels (`store_levels`, `read_store_manifest`), refused unless `store.repos` lists the repo; naming under ruling 14 with its collision fallback (`plan_store_path`); and the link's writes, the user level's `repos:` entry, `invariant.id` and the linked-identity index (`link_repo`, `update_link`, `init_store`); merging settings into a store's own level or one repository's block (`write_store_settings`, ADR-016 D4), refused for a repository the store does not list, and never rewriting a file that holds a comment: it answers the block to add by hand instead (`StoreWrite`, `by_hand_block`) | Merge levels into a configuration (`manifest` does); clone, pull or push a store; know a host |
 | `identity` | A repository's identity (ADR-014 D4): normalising an origin URL (`normalise_origin`, the host lowercased, the path too on GitHub, GitLab and Bitbucket), the git common directory read from `.git` and `commondir` (`common_dir_of`), a git config file parsed (`read_git_config`), and the identity itself (`repo_identity`, `Identity`), all without a subprocess; a fresh local ID (`new_local_id`) and its write (`write_local_id`, through `core/git`) | Follow a config `include`, or apply `insteadOf`; decide which store an identity uses |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
@@ -1413,7 +1437,9 @@ advance it. They are the only place where "what a session is" is encoded.
 - **`session`** — identity, isolation, the push barrier, teardown, and the
   handoff note a session leaves for the next host session. Multiple
   sessions coexist on one machine, so this is the only domain with genuine
-  cross-process concurrency, mediated by the locked registry.
+  cross-process concurrency, mediated by the locked registry. A session can
+  be started parked (`start(parked=True)`, ADR-016 ruling 9): no host bound,
+  a fresh identifier, recorded as put down so `resume` picks it up.
 - **`pipeline`** — one task's progress through the configured methodology.
   Scoped to a session; a session runs pipelines in sequence. Its evidence
   holds the judgement verdicts too (`record_verdicts`, append-only, refusing
@@ -1479,7 +1505,9 @@ advance it. They are the only place where "what a session is" is encoded.
   `source_areas`, from globs or from a declared list less `exclude`, the
   documents read in sorted order, and a digest of every input; rendered as
   text or as JSON. Read-only: it writes nothing, and a check set off is
-  absent and says so.
+  absent and says so. `plan_deliverables(assessment)` (increment 2) is the
+  all-at-once plan's lines: a missing-sections line first, then `Document
+  <area>` per unnamed area; recording them is `cli/onboarding`'s.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for
   the same reason `memorystore` is not: there is no lifecycle to advance, but
   there is a store with invariants over it and operations that repair them.

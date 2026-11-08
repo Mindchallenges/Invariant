@@ -210,6 +210,11 @@ DEFAULTS: dict[str, Any] = {
             "sections": ["Layers", "Component responsibilities", "Compliance checklist"],
             "areas": {"from": "adapter", "globs": [], "declared": [], "exclude": []},
         },
+        # How the gaps are to be closed, chosen at `init` (ADR-016 D4, D9):
+        # `incremental` arms `docs.area_documented` (increment 3) and
+        # `all_at_once` is provenance for the plan `docs assess --plan`
+        # records. `off` is today's behaviour.
+        "onboarding": "off",
     },
     "methodology": {
         "pipeline": "tdd",
@@ -446,6 +451,9 @@ _VERDICTS_KEYS = ("note_max_chars",)
 #: The `docs.assess` keys this build reads (ADR-016 D9), its checks, the
 #: `areas` keys and where areas may come from (D1, D2).
 _ASSESS_KEYS = ("checks", "sections", "areas")
+#: The `docs` keys this build reads, and the onboarding modes (ADR-016 D9).
+_DOCS_KEYS = ("format", "diagrams", "index", "require_diagram_update", "assess", "onboarding")
+ONBOARDING_MODES = ("off", "incremental", "all_at_once")
 ASSESS_CHECKS = ("sections", "areas", "links")
 _AREAS_KEYS = ("from", "globs", "declared", "exclude")
 AREA_SOURCES = ("adapter", "globs", "declared")
@@ -899,6 +907,7 @@ class Manifest:
         self._validate_ecosystem_commands()
         self._validate_freshness_level()
         self._validate_guidelines()
+        self._validate_docs()
         self._validate_docs_assess()
         self._validate_agents()
         self._validate_host()
@@ -1209,6 +1218,33 @@ class Manifest:
             raise ManifestError(
                 f"guidelines.verdicts.note_max_chars must be a positive integer, "
                 f"got {note_cap!r}"
+            )
+
+    def _validate_docs(self) -> None:
+        """Refuse a `docs` key this build does not read, and an onboarding
+        mode outside the three (ADR-016 D9), naming it.
+
+        YAML reads an unquoted `off` as false, and `onboarding: off` is how
+        the ADR spells the default, so false is read as `off` rather than
+        refused; true names no mode and is refused.
+        """
+        section = self.data.get("docs")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"docs must be a mapping, got {section!r}")
+        if "adopt" in section:
+            raise ManifestError(
+                "docs.adopt is not built yet: adopting existing documentation in "
+                "place or by copy is ADR-016 D7, increment 4. Until then it would "
+                "load and adopt nothing."
+            )
+        _refuse_unknown("docs", section, _DOCS_KEYS)
+        mode = section.get("onboarding")
+        if mode is False:
+            section["onboarding"] = mode = "off"
+        if not isinstance(mode, str) or mode not in ONBOARDING_MODES:
+            raise ManifestError(
+                f"docs.onboarding is {mode!r}; it is one of "
+                f"{', '.join(ONBOARDING_MODES)}."
             )
 
     def _validate_docs_assess(self) -> None:

@@ -133,21 +133,61 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     that flag rewrites the manifest, not the docs. `--dry-run` lists the write
     when it would happen. Written once; no command rewrites it afterwards.
 
-    Accepted, not yet built (ADR-016 D4, D5). Interactive init, where
-    `paths.docs` exists (empty included), lists what is there and offers to
-    reuse it, to point `paths.docs` at another repo path, or to use a store
-    (ADR-014 `store init` or `store link`, then `records.docs:
-    store`); the existing directory is never touched. It then runs the docs
-    assessment on the chosen location and, where there are gaps, offers all
-    at once (a deliverable plan with one line per undocumented area, each
-    landed through the `docs` lane), incremental (`docs.onboarding:
-    incremental`) or not now (nothing written). When the base already
-    carries the manifest, init starts a parked `docs`-lane session and
-    records the plan; otherwise it records nothing and says to commit its
-    files, then run `invariant docs assess --plan`. Non-interactive init
-    (`--dry-run`, `--json`, no terminal) writes today's files, prompts for
-    nothing and prints the assessment, under `--json` as a
-    `docs_assessment` field. Increment 2 of ADR-016 builds it.
+    Built (ADR-016 D4, D5, increment 2): the docs offers. Interactive
+    init, and only interactive init, asks; `cli/onboarding` holds the
+    offers and `cli/prompts` asks them. Interactive means no `--dry-run`, no
+    `--json`, and a terminal on both standard input and output
+    (`prompts.interactive`); the seam `_init_prompter` answers a
+    `TerminalPrompter`, or `None` for a run that may not ask, and the suite
+    replaces it with a scripted prompter rather than faking a terminal.
+    End of input answers each question's default.
+
+      1. Where `paths.docs` exists (empty included), init names what is
+         there and offers `reuse` (the default: today's result, nothing
+         written), `path` (another repo-relative directory, written as
+         `paths.docs` in `.claude/invariant.yaml`) or `store`. The store
+         choice runs ADR-014's `store init` (no path, or a path holding no
+         store) or `store link` (a path holding one), then writes
+         `records.docs: store` and a store-relative `paths.docs` into the
+         store's `store.repos.<identity>` block. An in-repo manifest
+         cannot carry a `store` record (manifest.md, "Records and their
+         locations"), so this choice writes NO `.claude/invariant.yaml`:
+         the project becomes a store project. A store it created gets
+         init's `project` and `enforcement.profile` at its own level; a
+         store it linked keeps its own policy, and only this repository's
+         block changes. The store file is rewritten whole and left
+         uncommitted for review in the store, unless it holds a comment
+         (a `#` opening a line or after whitespace): a rewrite would drop
+         it, so init writes nothing to that file, prints the exact YAML
+         block to add by hand (the keys under `store.repos.<identity>`,
+         and any top-level ones), says why, and carries on; `--json`
+         carries the same as `store_settings_by_hand` (`{"path",
+         "reason", "yaml"}`, null when everything was written). A store
+         init itself created holds no comment, so it is always written.
+         Until the block is added, the project resolves as the store's
+         file says, so the assessment reads the docs that file names. The store
+         is not offered, and the offer says why, outside a git repository,
+         below its top level, or in an in-repo project (`store migrate`,
+         ADR-014 increment 7). A path that climbs out with `..` or is
+         absolute is asked again. The existing directory is never written;
+         the starter goes to the chosen location when it is absent.
+      2. The assessment (`invariant docs assess`) runs on the chosen
+         location and prints its gaps.
+      3. Where there are gaps, init offers `not_now` (the default: writes
+         nothing), `incremental` (writes `docs.onboarding: incremental`)
+         or `all_at_once` (writes `docs.onboarding: all_at_once`, then the
+         plan of ruling 9). When the base already carries the manifest, a
+         store project or a re-run whose `.claude/invariant.yaml` is
+         committed at HEAD, init records the plan as `docs assess --plan`
+         does; otherwise it records nothing and says to commit its files,
+         then run `invariant docs assess --plan`. init still never commits.
+
+    Non-interactive init (ruling H) writes exactly the files it always did
+    and asks nothing. It prints the assessment after its report, and under
+    `--json` carries it as `docs_assessment`, the `docs assess --json`
+    document (`{"error"}` when it could not run: reported, never a failed
+    init). `--dry-run` assesses the manifest it would write over the tree as
+    it stands.
 
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is
@@ -247,9 +287,9 @@ invariant doctor
 
     Accepted, not yet built (ADR-016 D7, D8). D8 adds a `docs adoption` row
     (warn) naming every original file changed, added or removed since a
-    copy-mode adoption, and the `docs` group gains `docs assess --plan` (D5)
-    and `docs adopt` (D7). Increment 2 of ADR-016 builds `--plan`, and
-    increment 4 `docs adopt` and the D8 row.
+    copy-mode adoption, and the `docs` group gains `docs adopt` (D7).
+    Increment 4 of ADR-016 builds both. `docs assess --plan` (D5) is built,
+    below.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -565,6 +605,26 @@ invariant docs assess [--json]
     areas, each link target checked), so two runs over an unchanged tree
     print byte-identical output. Anything under a dot-named directory of the
     docs is held out. `--json` carries the same, the gaps under `checks`.
+
+invariant docs assess --plan [--json]
+    Record the all-at-once plan (ADR-016 D5, ruling 9, increment 2): a
+    parked `docs`-lane session, `document-architecture-<id>`, whose plan
+    holds first one `Write the missing sections: <list>` line when the
+    `sections` check has gaps, then one `Document <area>` line per area no
+    doc names (`domains/docs.plan_deliverables`). A gap no doc can close
+    (a check with no reader, areas that cannot be derived) and a broken
+    link are not planned. The session binds no host and is registered as put
+    down (`SessionDomain.start(parked=True)`), so `doctor`'s parked row and
+    the greeting offer it and `session resume` picks it up; its `docs`
+    pipeline starts in `drafting`, and each deliverable is written and
+    reviewed through that lane. The output never prints `session <id> (`,
+    the binding sequence, so the command that records the plan is not bound
+    to it. Refused, exit 2, until the base carries the manifest: in an
+    in-repo project, `.claude/invariant.yaml` committed at HEAD. A second
+    run while the plan is parked is refused by `session start`'s fork
+    guard, naming it. No gap a doc can close records nothing and says so.
+    `--json` adds `plan`: `{"session", "id", "deliverables"}`, or null.
+    `init`'s all-at-once choice runs the same code.
 ```
 
 ### A managed file the operator has edited

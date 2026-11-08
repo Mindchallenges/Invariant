@@ -506,3 +506,95 @@ def init_store(
     }
     (target / STORE_MANIFEST).write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
     return Created(store=target, note=note, linked=link_repo(top, target, env))
+
+
+def _merged(base: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, Mapping) and isinstance(out.get(key), Mapping):
+            out[key] = _merged(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+@dataclass(frozen=True)
+class StoreWrite:
+    """What :func:`write_store_settings` did with the store's file."""
+
+    path: Path
+    #: False when the file holds a comment and nothing was written.
+    written: bool
+    #: The YAML to merge in by hand when nothing was written, else ``None``.
+    by_hand: str | None = None
+    #: Why nothing was written; empty when it was.
+    reason: str = ""
+
+
+#: A YAML comment: a ``#`` opening a line, or after whitespace. A ``#`` inside
+#: a quoted value can read as one too, which errs towards not writing.
+_COMMENT = re.compile(r"(?:^|\s)#")
+
+
+def holds_comments(path: Path) -> bool:
+    """Does the YAML file at ``path`` carry a comment a rewrite would drop?"""
+    return any(
+        _COMMENT.search(line)
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+    )
+
+
+def by_hand_block(
+    key: str, top: Mapping[str, Any] | None, repo: Mapping[str, Any] | None
+) -> str:
+    """The settings to merge into a store's file by hand: ``top`` at its own
+    level, ``repo`` under ``store.repos.<key>``, as one YAML document."""
+    body: dict[str, Any] = dict(top or {})
+    body["store"] = {"repos": {key: dict(repo or {})}}
+    return yaml.safe_dump(body, sort_keys=False)
+
+
+def write_store_settings(
+    root: Path,
+    key: str,
+    *,
+    top: Mapping[str, Any] | None = None,
+    repo: Mapping[str, Any] | None = None,
+) -> StoreWrite:
+    """Merge settings into the store at ``root`` (D3, 5b): ``top`` into the
+    store's own level, ``repo`` into its ``store.repos.<key>`` block.
+
+    The settings `init` chose for one repository go in that repository's
+    block, so a store serving several is not changed for the others
+    (ADR-016 D4). Refused, writing nothing, when the store does not list
+    ``key``. The file is rewritten whole, which would drop its comments, so a
+    file holding any comment is never written: the result carries the block
+    to add by hand, and why. A rewritten file is left uncommitted, for the
+    operator to review in the store.
+    """
+    path = Path(root) / STORE_MANIFEST
+    _top, repos = read_store_manifest(root)
+    if key not in repos:
+        raise ManifestError(
+            f"the store {root} does not list {key} under store.repos, so nothing "
+            f"is written for it"
+        )
+    if holds_comments(path):
+        return StoreWrite(
+            path=path,
+            written=False,
+            by_hand=by_hand_block(key, top, repo),
+            reason=(
+                f"{path} holds comments, and rewriting it would drop them, so "
+                f"nothing was written to it"
+            ),
+        )
+    raw = _read_yaml(path, "the store config") or {}
+    body = _merged(raw, top or {})
+    block = dict(body.get("store") or {})
+    listed = dict(block.get("repos") or {})
+    listed[key] = _merged(repos[key], repo or {})
+    block["repos"] = listed
+    body["store"] = block
+    _write_atomic(path, yaml.safe_dump(dict(body), sort_keys=False))
+    return StoreWrite(path=path, written=True)

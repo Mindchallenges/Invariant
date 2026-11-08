@@ -678,9 +678,93 @@ class Context:
 # -- init / doctor / config -------------------------------------------
 
 
+def _init_prompter(args):
+    """Who answers `init`'s offers: a terminal, or nobody (ADR-016 ruling H).
+
+    A seam, like ``_doctor_host_environments``: the suite replaces it to
+    drive the interactive path with a scripted prompter, so no test fakes a
+    terminal. ``None`` is a run that may not ask, and does what `init` did
+    before the offers existed.
+    """
+    from . import prompts
+
+    return prompts.TerminalPrompter() if prompts.interactive(args) else None
+
+
+def _init_body(name: str, ecosystems: list[str], profile: str, docs: str | None) -> str:
+    """The in-repo manifest `init` writes: today's text, plus `paths.docs`
+    where another repo path was chosen (ADR-016 D4.1)."""
+    lines = [
+        "version: 1",
+        "",
+        "project:",
+        f"  name: {name}",
+        f"  ecosystems: [{', '.join(ecosystems)}]",
+        "",
+        "enforcement:",
+        f"  profile: {profile}",
+        "",
+    ]
+    if docs is not None:
+        lines += ["paths:", f"  docs: {docs}", ""]
+    lines += [
+        "# Everything else has a default. 'invariant config show --provenance'",
+        "# prints the resolved configuration and where each value came from.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _store_refusal(root: Path) -> str | None:
+    """Why `init` cannot offer a store at ``root``, or ``None`` when it can."""
+    from ..core import git
+
+    try:
+        _store_repo(root)
+    except UsageError as exc:
+        return str(exc)
+    if git.toplevel(root) != root:
+        return (
+            f"{root} is not the top level of its git repository, and a store is "
+            f"linked from there"
+        )
+    return None
+
+
+def _init_assessment(root: Path, manifest_path: Path, body: str, written: bool):
+    """The docs assessment `init` reports (ADR-016 D4.2): ``(assessment,
+    payload)``, the assessment ``None`` when it could not run.
+
+    Reported, never raised: the project is initialised by the time a written
+    run asks, and an assessment that cannot run is not a failed `init`. A dry
+    run assesses the manifest it would write, over the tree as it stands.
+    """
+    import yaml
+
+    from ..core.home import load_user_config
+    from ..domains import docs
+
+    try:
+        if written:
+            manifest = Manifest.locate(root)
+        else:
+            user = load_user_config()
+            manifest = Manifest.from_raw(
+                yaml.safe_load(body) or {},
+                root=root,
+                path=manifest_path,
+                below=[(user.label, user.defaults)] if user.defaults else [],
+            )
+        assessment = docs.assess(manifest)
+    except InvariantError as exc:
+        return None, {"error": str(exc)}
+    return assessment, assessment.to_dict()
+
+
 def cmd_init(args) -> int:
     from ..adapters import detect
     from ..hosts.claude_code import ClaudeCodeHost
+    from . import onboarding
 
     root = Path(args.root or Path.cwd()).resolve()
     manifest_path = root / ".claude" / "invariant.yaml"
@@ -692,24 +776,38 @@ def cmd_init(args) -> int:
         )
 
     ecosystems = [args.ecosystem] if args.ecosystem else detect(root)
-    body = "\n".join(
-        [
-            "version: 1",
-            "",
-            "project:",
-            f"  name: {args.name or root.name}",
-            f"  ecosystems: [{', '.join(ecosystems)}]",
-            "",
-            "enforcement:",
-            f"  profile: {args.profile}",
-            "",
-            "# Everything else has a default. 'invariant config show --provenance'",
-            "# prints the resolved configuration and where each value came from.",
-            "",
-        ]
+    name = args.name or root.name
+
+    # Where the docs go (ADR-016 D4.1). Only an interactive run is offered
+    # anything, and only where `paths.docs` exists: an absent directory gets
+    # the starter as it always has. The existing directory is never written.
+    prompter = _init_prompter(args)
+    choice = onboarding.DocsChoice("reuse", DEFAULTS["paths"]["docs"])
+    if prompter is not None and (root / choice.docs).exists():
+        choice = onboarding.offer_location(
+            prompter, root, choice.docs, _store_refusal(root)
+        )
+    body = _init_body(
+        name, ecosystems, args.profile, choice.docs if choice.kind == "path" else None
     )
 
-    actions = [f"write {manifest_path.relative_to(root)}"]
+    # A store is created or linked first: it is the step most likely to be
+    # refused, and nothing else has been written when it is.
+    store = None
+    if choice.kind == "store":
+        store = onboarding.place_in_store(
+            _store_repo(root),
+            choice,
+            {
+                "project": {"name": name, "ecosystems": ecosystems},
+                "enforcement": {"profile": args.profile},
+            },
+        )
+        actions = list(store.lines)
+        docs_dir = store.root / choice.docs
+    else:
+        actions = [f"write {manifest_path.relative_to(root)}"]
+        docs_dir = root / choice.docs
     host = ClaudeCodeHost(root)
     actions.extend(host.plan_install())
     actions.append("add the state root to .gitignore")
@@ -720,23 +818,27 @@ def cmd_init(args) -> int:
     # `pipeline advance` blocks on `docs.read_architecture` against an empty
     # path. A directory that exists — even empty — is the project's, and
     # `--force` does not change that: it rewrites the manifest, not the docs.
-    docs_dir = root / DEFAULTS["paths"]["docs"]
     scaffold = docs_dir / "overview.md" if not docs_dir.exists() else None
     if scaffold is not None:
         actions.append(
-            f"write {scaffold.relative_to(root)} (a starter architecture doc; "
+            f"write {_spelled_under(root, scaffold)} (a starter architecture doc; "
             f"the docs-first gate reads this directory)"
         )
 
     if args.dry_run:
+        assessment, report = _init_assessment(root, manifest_path, body, written=False)
         return emit(
             args,
-            {"actions": actions},
-            "would:\n" + "\n".join(f"  - {a}" for a in actions),
+            {"actions": actions, "docs_assessment": report},
+            "would:\n"
+            + "\n".join(f"  - {a}" for a in actions)
+            + "\n\n"
+            + _assessment_text(assessment, report),
         )
 
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(body, encoding="utf-8")
+    if store is None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(body, encoding="utf-8")
     host.install()
 
     gitignore = root / ".gitignore"
@@ -752,7 +854,7 @@ def cmd_init(args) -> int:
         scaffold.parent.mkdir(parents=True, exist_ok=True)
         scaffold.write_text(
             ARCHITECTURE_SCAFFOLD.read_text(encoding="utf-8").replace(
-                "{project}", args.name or root.name
+                "{project}", name
             ),
             encoding="utf-8",
         )
@@ -765,16 +867,86 @@ def cmd_init(args) -> int:
         if "error" in registration
         else ""
     )
+
+    assessment, report = _init_assessment(root, manifest_path, body, written=True)
+    if prompter is not None and assessment is not None and assessment.gaps:
+        after = _init_onboarding(
+            prompter, root, manifest_path, store, assessment, actions
+        )
+    else:
+        after = [_assessment_text(assessment, report)]
+    # A store file holding comments is never rewritten (it would lose them):
+    # what init would have written is printed to add by hand, and init
+    # carries on.
+    by_hand = store.by_hand() if store is not None else None
+    if by_hand is not None:
+        after.append("\n".join(onboarding.by_hand_lines(by_hand)))
+    payload = {
+        "actions": actions,
+        "ecosystems": ecosystems,
+        "oracle": registration,
+        "docs_assessment": report,
+        "store_settings_by_hand": by_hand,
+    }
     return emit(
         args,
-        {"actions": actions, "ecosystems": ecosystems, "oracle": registration},
+        payload,
         "initialised:\n"
         + "\n".join(f"  - {a}" for a in actions)
-        + "\n\nCommit these before starting a session. A session works in a "
-        "linked\nworktree, and a worktree checks out a commit — an uncommitted "
-        "manifest\nis invisible from inside one."
-        + note,
+        + (
+            "\n\nCommit these before starting a session. A session works in a "
+            "linked\nworktree, and a worktree checks out a commit — an uncommitted "
+            "manifest\nis invisible from inside one."
+            if store is None
+            else "\n\nCommit the repository's files before starting a session, "
+            "and the store's\ninvariant.yaml in the store: the manifest lives "
+            "there, not in the repository."
+        )
+        + note
+        + "".join(f"\n\n{text}" for text in after if text),
     )
+
+
+def _spelled_under(root: Path, path: Path) -> str:
+    """``path`` relative to ``root`` when it lies there, else in full."""
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _assessment_text(assessment, report: dict) -> str:
+    if assessment is None:
+        return f"docs assessment not run: {report['error']}"
+    return assessment.render()
+
+
+def _init_onboarding(prompter, root, manifest_path, store, assessment, actions) -> list[str]:
+    """ADR-016 D4.2-3 and ruling 9: the onboarding offer, the key it writes,
+    and the plan where the base already carries the manifest. Returns what
+    the report adds; ``actions`` gains what was written."""
+    from . import onboarding
+
+    mode = onboarding.offer_onboarding(prompter, assessment)
+    if mode == "not_now":
+        return ["Not now: nothing written. 'invariant docs assess' shows the gaps again."]
+    if store is not None:
+        actions.append(store.write({"docs": {"onboarding": mode}}))
+    else:
+        with manifest_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"\ndocs:\n  onboarding: {mode}\n")
+        actions.append(f"write docs.onboarding: {mode} to {MANIFEST_RELPATH}")
+    if mode != "all_at_once":
+        return []
+    # Reported, never raised: the project is initialised by now, and a plan
+    # refused (one already parked here, say) is not a failed `init`.
+    try:
+        ctx = Context(cwd=root)
+        if not onboarding.carries_manifest(ctx.manifest):
+            return [f"All at once: {onboarding.DEFERRED_PLAN}."]
+        return onboarding.plan_lines(onboarding.record_plan(ctx, assessment))
+    except InvariantError as exc:
+        return [f"All at once: the plan was not recorded: {exc}"]
 
 
 def _register_after_init(root: Path) -> dict:
@@ -1085,11 +1257,33 @@ def docs_assessment_row(
 
 def cmd_docs_assess(args) -> int:
     """The architecture docs assessment (ADR-016 D3). Read-only; exit 0
-    whatever the gaps, 2 on a configuration that does not load."""
-    from ..domains.docs import assess
+    whatever the gaps, 2 on a configuration that does not load.
 
-    assessment = assess(Context().manifest)
-    return emit(args, assessment.to_dict(), assessment.render())
+    ``--plan`` records the all-at-once plan (D5, ruling 9): a parked
+    `docs`-lane session with one deliverable per undocumented area, refused
+    until the base carries the manifest.
+    """
+    from ..domains.docs import assess
+    from . import onboarding
+
+    ctx = Context()
+    assessment = assess(ctx.manifest)
+    if not args.plan:
+        return emit(args, assessment.to_dict(), assessment.render())
+    if not onboarding.carries_manifest(ctx.manifest):
+        raise UsageError(
+            f"the base does not carry the manifest: {MANIFEST_RELPATH} is not "
+            f"committed, and a session's worktree checks out a commit. Commit "
+            f"init's files, then run 'invariant docs assess --plan' again."
+        )
+    session = onboarding.record_plan(ctx, assessment)
+    payload = assessment.to_dict()
+    payload["plan"] = onboarding.plan_payload(session)
+    return emit(
+        args,
+        payload,
+        "\n".join([assessment.render(), "", *onboarding.plan_lines(session)]),
+    )
 
 
 def user_defaults_summary(manifest: Manifest) -> str:
@@ -1631,8 +1825,9 @@ def cmd_config_show(args) -> int:
 # -- store (ADR-014 D2, D4) ---------------------------------------------
 
 
-def _store_repo() -> Path:
-    """The main checkout of the repository the command runs in.
+def _store_repo(start: Path | None = None) -> Path:
+    """The main checkout of the repository ``start`` (the working directory
+    by default) lies in.
 
     A store is linked to a repository's identity, which every worktree
     shares, so the main checkout names it: its directory is the repo form of
@@ -1640,7 +1835,7 @@ def _store_repo() -> Path:
     """
     from ..core import git
 
-    cwd = Path.cwd()
+    cwd = Path(start or Path.cwd())
     top = git.toplevel(cwd)
     if top is None:
         raise UsageError(
@@ -5588,6 +5783,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("docs").add_subparsers(dest="sub", required=True)
     q = p.add_parser(
         "assess", help="report the architecture docs' gaps by check (read-only)"
+    )
+    q.add_argument(
+        "--plan",
+        action="store_true",
+        help="record a parked docs-lane session planning one deliverable per gap",
     )
     q.set_defaults(func=cmd_docs_assess)
 

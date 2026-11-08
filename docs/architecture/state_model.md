@@ -611,6 +611,15 @@ reason the write clears `host_ended`: `by_host_session` filters on it, so a
 session picked up with the flag still set resolves to nobody for every
 subsequent hook in its new host.
 
+**A session can be put down at birth.** `start(parked=True)` registers a
+session for a later host rather than for the caller (ADR-016 ruling 9): it
+binds no host whatever the environment names, takes a fresh identifier
+rather than `INVARIANT_SESSION_ID`, and is saved with `host_ended` set, so
+it is in `resumable()` from the start and `session resume` binds it like any
+other. `invariant docs assess --plan` records the all-at-once docs plan on
+one; the command that records a plan is not the host that will do it, and
+its output never prints the binding sequence `session <id> (`.
+
 **Resumption is never automatic.** A host session that finds a resumable
 session has not thereby claimed it. Picking up unfinished work brings a pipeline
 state, a declared file set and a branch along with it, so it is a decision

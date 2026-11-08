@@ -289,12 +289,29 @@ another key, or a `name` that is not one line. These are source areas,
 directories of the project's code, not ADR-014 D5's lock areas, which are
 patterns over the docs.
 
-**Accepted, not yet built (ADR-016 D9).** `docs` gains `onboarding` (`off`,
-`incremental` or `all_at_once`) and `adopt` (`mode` and `source`), and
-`enforcement.rules` gains `docs.area_documented`, `warn` by default
-(`strict` blocks it). Every default is today's behaviour. An unknown
-onboarding or adopt mode is refused at load, naming it. Increment 2 builds
-`docs.onboarding`, 3 `docs.area_documented`, and 4 the `adopt` keys.
+**Built (ADR-016 D9, increment 2).** `docs.onboarding` records how the
+gaps are to be closed, chosen by `init`'s offer (cli.md):
+
+```yaml
+docs:
+  onboarding: off                # off | incremental | all_at_once
+```
+
+`off`, the default, is today's behaviour. `incremental` arms
+`docs.area_documented` once increment 3 builds it; `all_at_once` is
+provenance for the plan `docs assess --plan` records and arms nothing.
+YAML reads an unquoted `off` as false, so false reads as `off`; any other
+value is refused at load, naming the key and the three modes. Every key
+under `docs` is now checked: one this build does not read (`format`,
+`diagrams`, `index`, `require_diagram_update`, `assess`, `onboarding`) is
+refused naming it, and `docs.adopt` is refused naming increment 4, since it
+would load and adopt nothing.
+
+**Accepted, not yet built (ADR-016 D9).** `docs` gains `adopt` (`mode` and
+`source`), and `enforcement.rules` gains `docs.area_documented`, `warn` by
+default (`strict` blocks it). Every default is today's behaviour. An
+unknown adopt mode is refused at load, naming it. Increment 3 builds
+`docs.area_documented`, and 4 the `adopt` keys.
 
 ### Records and their locations
 
@@ -348,9 +365,19 @@ does no store lookup (D2: "exactly as today"), so a `store` record in its
 its increment. Until then a `store` key other than `repos` is refused at load,
 naming it.
 
-**Accepted, not yet built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D4, D7).** `init`'s relocate offer
-writes another repo `paths.docs`, or `records.docs: store` with a
-store-relative `paths.docs` (increment 2). `docs adopt --mode in_place`
+**Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D4, increment 2).** `init`'s relocate offer
+writes another repo `paths.docs` into `.claude/invariant.yaml`, or, for a
+store, `records.docs: store` with a store-relative `paths.docs` into the
+store's `store.repos.<identity>` block (`core/stores.write_store_settings`).
+A store file holding any comment is never rewritten, since the rewrite would
+drop it: `write_store_settings` writes nothing and answers the YAML block to
+merge in by hand, which `init` prints (and carries under `--json` as
+`store_settings_by_hand`) before carrying on.
+Because the paragraph above refuses a `store` record in an in-repo
+manifest, the store choice makes a store project and writes no
+`.claude/invariant.yaml`.
+
+**Accepted, not yet built (ADR-016 D7).** `docs adopt --mode in_place`
 points `paths.docs` (and `records.docs`) at a source under the repo root or
 the project's store root, because a path key cannot be absolute; `--mode
 copy` copies into the resolved docs location, repo or store (increment 4).
@@ -1606,10 +1633,13 @@ like any other key. A list is replaced whole by the level above, never
 merged. The pointer keeps refusing them, since it holds only `version`,
 `store` and `records` (ruling 11).
 
-**Accepted, not yet built (ADR-016 D9).** The `docs.onboarding` and
-`docs.adopt` keys resolve the same way, and `docs.adopt.source` is refused
-at the user level (ruling 11). Each lands with its increment (see "Full
-schema").
+**Built (ADR-016 D9, increment 2).** `docs.onboarding` resolves the same
+way: user `defaults:`, the store and an in-repo manifest, each with its
+label, and the pointer refuses it.
+
+**Accepted, not yet built (ADR-016 D9).** The `docs.adopt` keys resolve
+the same way, and `docs.adopt.source` is refused at the user level (ruling
+11). They land with increment 4 (see "Full schema").
 
 ### The user level (ADR-014 D3, 5a)
 

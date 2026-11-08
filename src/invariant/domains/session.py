@@ -876,8 +876,26 @@ class SessionDomain:
         base: str | None = None,
         host_session_id: str | None = None,
         force: bool = False,
+        parked: bool = False,
     ) -> Session:
-        host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        """Register a session.
+
+        ``parked`` registers one for a later host to pick up rather than for
+        the caller: no host is bound, whatever the environment says, its
+        identifier is fresh rather than the caller's, and it is recorded as
+        put down, so :meth:`resumable` offers it and ``session resume`` binds
+        it. The plan `docs assess --plan` records sits on one (ADR-016
+        ruling 9); the command that records it is not the one that does the
+        work.
+        """
+        if parked:
+            host_session_id = None
+            if session_id is None:
+                session_id = uuid.uuid4().hex[:8]
+                while self.get(session_id) is not None:
+                    session_id = uuid.uuid4().hex[:8]
+        else:
+            host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
         slug = _slug(name)
 
         # Checked before the identifier is settled, so the refusal explains the
@@ -970,6 +988,7 @@ class SessionDomain:
             heartbeat=self.clock(),
             usage_at_start=baseline,
             usage_at_start_host=baseline_host,
+            host_ended=parked,
         )
         self._save(session)
         self._register(session)
