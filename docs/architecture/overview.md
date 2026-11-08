@@ -1940,6 +1940,26 @@ under the hidden worktrees directory stays attributed. That is evidence-honest
 rather than a second defect — the alternative is admitting a name no evidence
 supports, which is how BUG_015 happened.
 
+## Compliance checklist
+
+This project's canonical checklist is the engine's guidelines ruleset,
+[`docs/guidelines/ruleset.yaml`](../guidelines/ruleset.yaml), which the
+manifest names as `guidelines.ruleset`. `invariant guidelines render` writes
+it out as [`docs/guidelines/checklist.md`](../guidelines/checklist.md); that
+file is generated, so a rule changes in the ruleset and is never copied here.
+
+Reviewers take the rules from the engine rather than from this page.
+`invariant guidelines show --phase review --touched` prints the rules a
+change's files bring into play, `invariant check guidelines.mechanical_clean`
+evaluates the pattern, boundary and cochange rules over the change, and
+`invariant guidelines verdicts show` lists the judgement rules still owed a
+verdict, each submitted with `invariant guidelines verdict`.
+
+Only a project with no ruleset reviews against a checklist written in its
+architecture docs: there, `compliance-reviewer` and `feature-architect` mark
+that checklist's rules by hand. This section deliberately holds no rules of
+its own, so with the ruleset configured nothing here is reviewed beside it.
+
 ## The two flows that matter
 
 ### Enforcing a transition
