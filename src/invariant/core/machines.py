@@ -190,6 +190,26 @@ def shipped_ids() -> list[str]:
     return sorted(p.stem for p in MACHINE_DIR.glob("*.yaml"))
 
 
+def pipeline_ids(manifest=None) -> list[str]:
+    """Every lane a project may name in `methodology.pipeline`, sorted: the
+    shipped machines and `methodology.extra_machines` of kind ``pipeline``.
+
+    Ids are file stems, as ``find_machine_file`` finds them, so a project
+    machine shadowing a shipped one is listed once. An extra path that does
+    not exist offers nothing.
+    """
+    files = [*MACHINE_DIR.glob("*.yaml")]
+    if manifest is not None:
+        for candidate in manifest.get("methodology.extra_machines") or []:
+            path = (manifest.root / candidate).resolve()
+            if path.is_file():
+                files.append(path)
+            elif path.is_dir():
+                files.extend(path.glob("*.yaml"))
+    ids = {path.stem for path in files if Machine.load(path).kind == "pipeline"}
+    return sorted(ids)
+
+
 def find_machine_file(machine_id: str, manifest=None) -> Path:
     if manifest is not None:
         for candidate in manifest.get("methodology.extra_machines") or []:

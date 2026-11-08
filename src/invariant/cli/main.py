@@ -731,34 +731,63 @@ def _store_refusal(root: Path) -> str | None:
     return None
 
 
-def _init_assessment(root: Path, manifest_path: Path, body: str, written: bool):
-    """The docs assessment `init` reports (ADR-016 D4.2): ``(assessment,
-    payload)``, the assessment ``None`` when it could not run.
-
-    Reported, never raised: the project is initialised by the time a written
-    run asks, and an assessment that cannot run is not a failed `init`. A dry
-    run assesses the manifest it would write, over the tree as it stands.
-    """
+def _init_resolved(root: Path, manifest_path: Path, body: str, written: bool):
+    """The configuration `init` reports on: the project as written, or for a
+    dry run the manifest it would write over the tree as it stands, with the
+    user level below. A refusal is returned, not raised: the project is
+    initialised by the time a written run asks."""
     import yaml
 
     from ..core.home import load_user_config
-    from ..domains import docs
 
     try:
         if written:
-            manifest = Manifest.locate(root)
-        else:
-            user = load_user_config()
-            manifest = Manifest.from_raw(
-                yaml.safe_load(body) or {},
-                root=root,
-                path=manifest_path,
-                below=[(user.label, user.defaults)] if user.defaults else [],
-            )
-        assessment = docs.assess(manifest)
+            return Manifest.locate(root)
+        user = load_user_config()
+        return Manifest.from_raw(
+            yaml.safe_load(body) or {},
+            root=root,
+            path=manifest_path,
+            below=[(user.label, user.defaults)] if user.defaults else [],
+        )
+    except InvariantError as exc:
+        return exc
+
+
+def _init_assessment(resolved):
+    """The docs assessment `init` reports (ADR-016 D4.2): ``(assessment,
+    payload)``, the assessment ``None`` when it could not run.
+
+    Reported, never raised: an assessment that cannot run is not a failed
+    `init`.
+    """
+    from ..domains import docs
+
+    if isinstance(resolved, InvariantError):
+        return None, {"error": str(resolved)}
+    try:
+        assessment = docs.assess(resolved)
     except InvariantError as exc:
         return None, {"error": str(exc)}
     return assessment, assessment.to_dict()
+
+
+def _init_configuration(resolved) -> tuple[str, list | dict]:
+    """What a non-interactive `init` adds after its report (ADR-017 D9):
+    ``(text, payload)``, each core question's resolved value and provenance,
+    the payload `{"error"}` when it could not be resolved. Reported, never
+    raised, as the assessment is."""
+    from ..core import questionnaire
+
+    error = resolved if isinstance(resolved, InvariantError) else None
+    if error is None:
+        try:
+            rows = questionnaire.core_report(questionnaire.load_catalogue(), resolved)
+        except InvariantError as exc:
+            error = exc
+        else:
+            return questionnaire.render_report(rows), [row.report_dict() for row in rows]
+    return f"configuration not resolved: {error}", {"error": str(error)}
 
 
 def cmd_init(args) -> int:
@@ -826,15 +855,19 @@ def cmd_init(args) -> int:
         )
 
     if args.dry_run:
-        assessment, report = _init_assessment(root, manifest_path, body, written=False)
-        return emit(
-            args,
-            {"actions": actions, "docs_assessment": report},
+        resolved = _init_resolved(root, manifest_path, body, written=False)
+        assessment, report = _init_assessment(resolved)
+        payload = {"actions": actions, "docs_assessment": report}
+        text = (
             "would:\n"
             + "\n".join(f"  - {a}" for a in actions)
             + "\n\n"
-            + _assessment_text(assessment, report),
+            + _assessment_text(assessment, report)
         )
+        if prompter is None:
+            listed, payload["configuration"] = _init_configuration(resolved)
+            text += f"\n\n{listed}"
+        return emit(args, payload, text)
 
     if store is None:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -868,7 +901,8 @@ def cmd_init(args) -> int:
         else ""
     )
 
-    assessment, report = _init_assessment(root, manifest_path, body, written=True)
+    resolved = _init_resolved(root, manifest_path, body, written=True)
+    assessment, report = _init_assessment(resolved)
     if prompter is not None and assessment is not None and assessment.gaps:
         after = _init_onboarding(
             prompter, root, manifest_path, store, assessment, actions
@@ -888,6 +922,12 @@ def cmd_init(args) -> int:
         "docs_assessment": report,
         "store_settings_by_hand": by_hand,
     }
+    # Each core question's resolved value and where it came from (ADR-017
+    # D9), after everything else. Only where nothing was asked: an
+    # interactive run showed the docs offers instead.
+    if prompter is None:
+        listed, payload["configuration"] = _init_configuration(resolved)
+        after.append(listed)
     return emit(
         args,
         payload,

@@ -190,7 +190,39 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     init). `--dry-run` assesses the manifest it would write over the tree as
     it stands.
 
-    Accepted, not yet built (ADR-017). `init` asks the configuration as a
+    Built (ADR-017, increment 1): the configuration report. A
+    non-interactive `init` (no prompter: `--dry-run`, `--json`, or no
+    terminal) writes exactly the files it wrote before, byte for byte, and
+    after everything else it reports, the assessment included, lists each
+    core question's resolved value and provenance, then the line naming
+    `invariant configure`:
+
+      configuration (core questions):
+        project.ecosystems              [python]           repo:.claude/invariant.yaml
+        commands.test                   pytest             adapter:python
+        commands.test_one               pytest {selector}  adapter:python
+        enforcement.profile             standard           repo:.claude/invariant.yaml
+        methodology.pipeline            tdd                default
+        methodology.gates.coverage_min  85                 user:~/.invariant/config.yaml
+        paths.docs                      docs/architecture  default
+        docs.onboarding                 off                default
+      run 'invariant configure' to change them
+
+    The rows are the core sections of `core/questionnaire`'s catalogue
+    (ADR-017 D1), the commands narrowed to `test` and `test_one`, the
+    primary's and then each further ecosystem's (`commands.<eco>.test`).
+    Each value and label is the one `config show --provenance` prints for
+    that key, read from the same resolved manifest; that is why
+    `project.ecosystems` reads `repo:` here, where an interactive run's
+    pre-fill (D10, increment 2) would read `detected`. `--dry-run` lists what
+    the manifest it would write resolves to. Under `--json` the same is the
+    `configuration` field, a list of `{"id", "key", "value", "provenance"}`,
+    the id being the question's (`docs:location` for `paths.docs`,
+    `commands:test` for `commands.test`), or `{"error"}` when it could not be
+    resolved: reported, never a failed init. An interactive run lists
+    nothing. `invariant configure` itself is increment 3 (below).
+
+    Accepted, not yet built (ADR-017, increments 2 to 4). `init` asks the configuration as a
     questionnaire whose catalogue is data (`data/questionnaire/catalogue.yaml`,
     `core/questionnaire`, driven by `cli/configure` through the same
     `Prompter`). First the target level: `user`, `store`, `store-repo` (this
@@ -214,12 +246,11 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     instead of asking them. `--profile` loses its parser default: given, it is
     an answer; absent, a non-interactive `init` writes `profile: standard` as
     today. Non-interactive `init` without those flags writes today's files
-    byte for byte and adds, after its report, each core question's resolved
-    value and provenance and "run invariant configure to change them"; under
-    `--json`, a `configuration` field. `init` never rewrites an existing
-    manifest for this; that is `invariant configure` (below). Increment 1 of
-    ADR-017 builds the non-interactive report, 2 the interactive core, 3 the
-    scripted flags, and 4 the advanced step and the catalogue at the levels.
+    byte for byte and adds the report above. `init` never rewrites an
+    existing manifest for this; that is `invariant configure` (below).
+    Increment 1 of ADR-017 built the non-interactive report, 2 builds the
+    interactive core, 3 the scripted flags, and 4 the advanced step and the
+    catalogue at the levels.
 
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is

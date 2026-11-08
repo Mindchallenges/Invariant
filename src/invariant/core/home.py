@@ -53,7 +53,7 @@ _TOP_KEYS = ("version", "store_naming", "defaults", "repos")
 
 #: Blocks no user default may set: they say what one project IS, and where
 #: its records live, which only that project's own levels may say.
-_PROJECT_SPECIFIC = ("project", "records")
+PROJECT_SPECIFIC = ("project", "records")
 
 #: The keys an entry under ``repos`` may hold.
 _REPO_ENTRY_KEYS = ("store",)
@@ -150,7 +150,7 @@ def _defaults(raw: Mapping[str, Any], where: str) -> dict[str, Any]:
     defaults = raw.get("defaults") or {}
     if not isinstance(defaults, Mapping):
         raise ManifestError(f"the user config {where}: defaults must be a mapping")
-    for key in _PROJECT_SPECIFIC:
+    for key in PROJECT_SPECIFIC:
         if key in defaults:
             raise ManifestError(
                 f"the user config {where} sets defaults.{key}, which is "

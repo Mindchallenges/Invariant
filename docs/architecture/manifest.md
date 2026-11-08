@@ -1705,6 +1705,19 @@ writers keep. `questionnaire` resolves at user `defaults:`, the store and an
 in-repo manifest like any key, a list replaced whole; the pointer refuses
 it. Increment 2 builds the writes, 4 the `questionnaire` key.
 
+**Built (ADR-017 D2, increment 1): the reading half.** A resolved
+`Manifest` keeps its config levels as read, `Manifest.levels`, lowest
+first, each with the provenance label its values carry (`user:`,
+`store:<name>`, `store:<name>#<identity>`, `repo:<file>`), so what one level
+itself sets can be told from what resolves. `core/questionnaire` reads it
+for a question's current value at its target level, and reads the levels a
+key may be held at off the rules above: the user level refuses `project`,
+`records` (`core/home.PROJECT_SPECIFIC`) and `docs.adopt.source`; in a
+store project the repo level is the pointer, holding only
+`version`, `store` and `records` (`core/stores.POINTER_KEYS`), and the
+store's own level and its block for the repository hold the rest. Nothing is
+written, and no resolved value changes.
+
 ### The user level (ADR-014 D3, 5a)
 
 **Built (increment 2).** `~/.invariant/config.yaml`, in the directory

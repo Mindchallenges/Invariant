@@ -529,6 +529,11 @@ class Manifest:
     store: StoreLink | None = None
     #: False when ``locate`` found no project and resolved the defaults.
     located: bool = True
+    #: The config levels as read, lowest first, each with its provenance
+    #: label (ADR-014 D3): the user's defaults, the store's levels, then the
+    #: repo's own. What a level itself sets, as against what resolves, is
+    #: read here (ADR-017 D2, a question's current value at its target).
+    levels: tuple[tuple[str, dict[str, Any]], ...] = ()
     _discovery_cache: dict[str, str] = field(default_factory=dict, repr=False)
 
     # -- discovery -----------------------------------------------------
@@ -749,6 +754,10 @@ class Manifest:
             store_root=store_root,
             store=store,
             located=located,
+            levels=tuple(
+                (level_label, copy.deepcopy(dict(level)))
+                for level_label, level in [*below, (label, raw)]
+            ),
         )
 
         # Layer 6 — environment escapes.
@@ -1899,13 +1908,18 @@ def _adapter_defaults(ecosystem: str) -> dict[str, Any]:
     return defaults_for(ecosystem)
 
 
+def profile_names() -> list[str]:
+    """The shipped enforcement profiles, sorted: the names `enforcement.profile`
+    may take."""
+    return sorted(p.stem for p in (DATA_DIR / "profiles").glob("*.yaml"))
+
+
 def _load_profile(name: str) -> dict[str, str]:
     path = DATA_DIR / "profiles" / f"{name}.yaml"
     if not path.is_file():
-        available = sorted(p.stem for p in (DATA_DIR / "profiles").glob("*.yaml"))
         raise ManifestError(
             f"unknown enforcement profile {name!r}; available: "
-            + (", ".join(available) or "(none installed)")
+            + (", ".join(profile_names()) or "(none installed)")
         )
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

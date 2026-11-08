@@ -68,6 +68,7 @@ graph TD
         CIDENT["identity (ADR-014 D4)"]
         CSTORES["stores (ADR-014 D2)"]
         CDOCFMT["docformat (ADR-016 D1)"]
+        CQUEST["questionnaire (ADR-017 D1, D2)"]
     end
 
     subgraph domains["domains/ — the eight state domains"]
@@ -94,6 +95,7 @@ graph TD
         AGENTS["agents/*.md (host-neutral sources)"]
         SCAFFOLD[scaffold/*.md]
         CONFDATA["conformance/*/"]
+        QCAT["questionnaire/catalogue.yaml"]
     end
 
     CC --> CLI
@@ -292,6 +294,13 @@ graph TD
     CONBOARD -- "start parked, plan_add" --> SESSION
     CONBOARD -- "start the docs pipeline" --> PIPELINE
     CONBOARD -- "exists_at: does the base carry the manifest" --> GIT
+    CLI -- "init's configuration report: load_catalogue, core_report, render_report" --> CQUEST
+    CQUEST --> QCAT
+    CQUEST -- "levels, get, source_of, profile_names, DEFAULTS, RECORD_LOCATIONS" --> MANIFEST
+    CQUEST -- "PROJECT_SPECIFIC: what the user level refuses" --> CHOME
+    CQUEST -- "POINTER_KEYS: what a pointer holds" --> CSTORES
+    CQUEST -- "PATTERNS: privacy_patterns choices" --> PRIVACY
+    CQUEST -- "available: ecosystems choices" --> adapters
 ```
 
 `MANIFEST --> CHOME` is the user level of the configuration (ADR-014 D3,
@@ -458,18 +467,38 @@ and pipeline domains, through the CLI's context, for a session started
 parked with a `docs` pipeline. `CONBOARD --> GIT` asks whether the base
 carries the manifest (ruling 9).
 
-**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md)).** Two components join.
-`core/questionnaire` owns the questionnaire's catalogue (the shipped
-`data/questionnaire/catalogue.yaml` with the levels' `questionnaire`
-settings applied), each question's default, provenance and allowed levels,
-the check of an answer through `core/manifest`'s validation and the command
-shape, and the write plan by level; it reads `core/manifest`,
-`core/machines`, `core/home` and the adapters, and prompts for and writes
-nothing. `cli/configure` drives a run for `init` and `invariant configure`:
-it asks through `CPROMPTS`, calls `CONBOARD` for the docs step and the store
-placement, and applies the plan through `core/stores` and `core/home`'s
-writers. Increment 1 of ADR-017 builds `core/questionnaire`'s reading half,
-2 `cli/configure` and the writes; this diagram gains both then.
+**Built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md), increment 1).** `CQUEST` is
+`core/questionnaire`'s reading half (D1, D2). `CQUEST --> QCAT` is the
+shipped catalogue, `data/questionnaire/catalogue.yaml`: sections of
+questions, each over one manifest key, and the three steps the engine asks by
+code (`commands`, `docs`, `store`), checked as it loads (`load_catalogue`).
+`resolve` answers each question with its default, the value the
+configuration resolves to now, and that value's provenance label, both read
+from the `Manifest` exactly as `config show --provenance` reads them, so the
+two cannot disagree (`CQUEST --> MANIFEST`). It also gives the question's
+current value at the target level, read from `Manifest.levels`, the config
+levels as read, lowest first, each with its label; the levels allowed to
+hold its key, read off the rules the levels enforce at load (`CQUEST -->
+CHOME` for what the user level refuses, `CQUEST --> CSTORES` for what a
+pointer holds); and its choices, from the shipped profiles
+(`manifest.profile_names`), the pipeline machines
+(`core/machines.pipeline_ids`, the shipped machines and
+`methodology.extra_machines` of kind `pipeline`; `core/machines` is not drawn
+here, as for its other readers), the adapters, the privacy patterns and the
+record locations. It prompts for nothing and writes nothing. `CLI -->
+CQUEST` is the one caller in increment 1: after a non-interactive `init`,
+its report lists each core question's resolved value and provenance
+(`core_report`, `render_report`) and, under `--json`, carries them as
+`configuration` (cli.md, `init`).
+
+**Accepted, not yet built (ADR-017, increments 2 to 4).** `core/questionnaire`
+gains the check of an answer through `core/manifest`'s validation and the
+command shape (D6), the write plan by level (D4, D5) and the catalogue with
+the levels' `questionnaire` settings applied (D11). `cli/configure` joins and
+drives a run for `init` and `invariant configure`: it asks through
+`CPROMPTS`, calls `CONBOARD` for the docs step and the store placement, and
+applies the plan through `core/stores` and `core/home`'s writers. This
+diagram gains it, and its arrows, in increment 2.
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1454,6 +1483,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
 | `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
+| `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9) | Prompt for anything; write any level; run a command; import above `core` |
 
 ### `domains/`
 
