@@ -44,6 +44,8 @@ adr/ADR-012-the-guidelines-domain-and-the-model-agnostic-contract
 adr/ADR-013-each-declared-ecosystem-runs-through-its-own-adapter
 adr/ADR-014-a-project-s-records-can-live-in-a-store-outside-its-repository
 adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci
+adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them
+adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again
 ```
 
 ```{toctree}

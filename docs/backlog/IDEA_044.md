@@ -20,4 +20,4 @@ area: cli/main, core/manifest, hosts
 
 **Open questions for the design interview:** which questions are asked by default and which are behind an advanced step; whether the questionnaire can be re-run later (for example `invariant configure`) to change answers; host-neutral rendering (terminal prompts first); and validation, where every answer goes through the same manifest validation as a hand-written value, refused at entry with the reason.
 
-**Related:** IDEA_043 (its docs offers become one step of this questionnaire), IDEA_040 / ADR-014 (levels, `store init`), IDEA_041 / ADR-015 (commands derived from CI could pre-fill answers), IDEA_042.
+**Related:** [ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) (the design, Accepted 2026-11-08; the rulings of the interview and of acceptance are recorded there), IDEA_043 (its docs offers become one step of this questionnaire), IDEA_040 / ADR-014 (levels, `store init`), IDEA_041 / ADR-015 (commands derived from CI could pre-fill answers), IDEA_042.

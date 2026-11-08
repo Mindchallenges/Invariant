@@ -261,6 +261,16 @@ under `methodology.gates.schedule` (D5). Every new key defaults to today's
 behaviour. Each key lands with its decision's increment: ADR-014's 2 for D1
 to D4, 4 for D5, 5 for D7 and 6 for D8; ADR-015's 3 for D3 and 4 for D5.
 
+**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D11, increment 4).** A top-level
+`questionnaire` block changes the catalogue `init` and `invariant configure`
+ask: `core` and `advanced`, lists of section ids in order (the defaults are
+`[ecosystems, profile, lane, coverage, docs]` and `[agents, guidelines,
+records, privacy, session]`); `sections`, a new section or a shipped one's
+question list replaced whole; and `questions`, a new plain question over any
+manifest key (its id is its key) or a shipped one's prompt and choices. A
+step (`docs`, `store`, `commands`) may be moved, never defined (ruling 11).
+Every default is the shipped catalogue, which changes no resolved value.
+
 **Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9, increment 1).** `docs.assess` configures the
 docs assessment (`invariant docs assess`, cli.md), and `enforcement.rules`
 gains `docs.assessment`, `warn` in every profile:
@@ -1578,6 +1588,18 @@ of text: empty, not a string, or holding a line break, a trailing one included,
 is refused. What a value says is never checked. `kind` is not judged at load:
 the commands that need an adapter refuse a kind with none, by name.
 
+**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D6, D11).** Every answer the
+questionnaire takes is validated by this same `validate`, as the
+configuration it would produce, so a typed value and a hand-written one meet
+one rule. A shape a question checks that load does not yet (a coverage floor
+outside 0 to 100) is added here in the increment that asks it (2). Command
+shape is the exception: it is not refused at load (ruling 13); `doctor`'s
+`command shape` row warns instead. `questionnaire` is refused, naming the
+entry, for a section id the catalogue and `sections` do not hold, a section
+in both `core` and `advanced`, a question over a key the manifest does not
+have, an unknown kind, a step defined or redefined, and `choices` on a kind
+that takes none (increment 4).
+
 ### An override either takes effect or says it did not
 
 The rule ids in `enforcement.rules` are checked against the registry, and a key
@@ -1668,6 +1690,20 @@ same way, each with its label, and the pointer refuses them.
 11): where one project's documentation lives is never every project's
 default. `docs.adopt.mode` is accepted there, and then each project names
 its own source.
+
+**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D4, D5, D11).** The questionnaire
+writes at layer 5's levels: `user` (`defaults:`), `store` (the store's own
+level), `store-repo` (its `store.repos.<identity>` block) and `repo`. An
+answer is written only when it differs from what the levels below its target
+resolve, so defaults keep flowing upward; an answer equal to that inherited
+value removes the key from a level that set it (ruling 12). An answer its
+target may not hold (`project` and `records` at the user level, a policy key
+at the pointer) goes to the nearest level that may, searching towards the
+project's own level first. The user level gains a writer,
+`core/home.write_user_defaults`, with the comment rule the store and repo
+writers keep. `questionnaire` resolves at user `defaults:`, the store and an
+in-repo manifest like any key, a list replaced whole; the pointer refuses
+it. Increment 2 builds the writes, 4 the `questionnaire` key.
 
 ### The user level (ADR-014 D3, 5a)
 

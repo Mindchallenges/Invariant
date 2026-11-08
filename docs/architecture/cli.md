@@ -190,6 +190,37 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     init). `--dry-run` assesses the manifest it would write over the tree as
     it stands.
 
+    Accepted, not yet built (ADR-017). `init` asks the configuration as a
+    questionnaire whose catalogue is data (`data/questionnaire/catalogue.yaml`,
+    `core/questionnaire`, driven by `cli/configure` through the same
+    `Prompter`). First the target level: `user`, `store`, `store-repo` (this
+    repository's block) or `repo`, default `repo` (`store-repo` in a store
+    project). Then the core sections, each value shown with its default and
+    provenance: ecosystems and commands, profile, lane
+    (`methodology.pipeline`), coverage floor, and the docs step, which is
+    ADR-016 D4's offers above, unchanged in order and meaning. Then one
+    question, "configure advanced settings?", default no, which opens agents,
+    guidelines, records and store, privacy and session, and a review where any
+    answer can be moved to another level. An answer its level may not hold
+    goes to the nearest level that may, saying so. Only answers that differ
+    from what the levels below resolve are written, all in one phase after the
+    last answer, a store created or linked first; an answer equal to the
+    inherited value at a level that sets it removes the key there. Every
+    answer is validated as the configuration it produces and asked again with
+    the manifest's reason; commands are checked for shape only, never run.
+    Scripted: `--set <id>=<value>`, `--answers <file.yaml>`, `--yes` and
+    `--level`, each answer validated the same way and refused with exit 2
+    before anything is written; `--questions [--json]` prints the questions
+    instead of asking them. `--profile` loses its parser default: given, it is
+    an answer; absent, a non-interactive `init` writes `profile: standard` as
+    today. Non-interactive `init` without those flags writes today's files
+    byte for byte and adds, after its report, each core question's resolved
+    value and provenance and "run invariant configure to change them"; under
+    `--json`, a `configuration` field. `init` never rewrites an existing
+    manifest for this; that is `invariant configure` (below). Increment 1 of
+    ADR-017 builds the non-interactive report, 2 the interactive core, 3 the
+    scripted flags, and 4 the advanced step and the catalogue at the levels.
+
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is
     REPORTED and never fails the command — the project is initialised by then
@@ -293,6 +324,13 @@ invariant doctor
     on a missing or unreadable receipt and on an original not reachable on
     this machine. Nothing re-syncs: its fix is re-running `docs adopt`
     (below). A project that adopted nothing has no such row.
+
+    Accepted, not yet built (ADR-017 ruling 13, increment 2). A `command
+    shape` row warns, and never fails, naming each configured command that
+    is not one non-empty line or lacks a placeholder its command requires
+    (`{selector}` for `test_one` and `coverage_one`), with its key. It reads
+    the questionnaire's own check, so a typed and a hand-written command are
+    judged alike; a misshapen command still loads.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -547,6 +585,28 @@ invariant config show [--provenance]
     for this repository, `repo:<file>` for the repository's own level
     (`repo:.claude/invariant.yaml`, or the pointer `repo:.invariant.yaml`),
     and `env:<variable>`.
+
+invariant configure [section...] [--level user|store|store-repo|repo]
+                    [--set <id>=<value>]... [--answers <file.yaml>] [--yes]
+                    [--questions] [--dry-run] [--json]
+    Accepted, not yet built (ADR-017 D7, D8, increment 3; the advanced
+    sections with increment 4). Ask `init`'s questionnaire again on an
+    initialised project, whole or by section, each default the value the
+    project resolves to now with its provenance. Writes only changed answers,
+    at their levels, through the level writers and their comment rule: a file
+    holding a comment is not rewritten and the YAML to add by hand is
+    printed, except that the comment `init` itself writes does not count
+    (ruling 9); `--json` carries held files as `settings_by_hand`. It writes
+    configuration only and never commits; a change to `agents.library` or
+    `guidelines.*` names `invariant agents install` or `invariant guidelines
+    render` rather than running them. It writes the manifest of the tree it
+    stands in. `--questions --json` prints every question with its id, key,
+    kind, choices, default, provenance, current value, allowed levels and
+    required placeholders, for an agent or the oracle page to render and
+    answer through `--answers`. Refused, exit 2: outside a project (naming
+    `invariant init`), a section the catalogue does not hold (naming those it
+    does), and any scripted answer that does not validate, with nothing
+    written.
 
 invariant store init [PATH]
     Create a store for the repository you stand in, and link it (ADR-014

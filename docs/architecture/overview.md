@@ -458,6 +458,19 @@ and pipeline domains, through the CLI's context, for a session started
 parked with a `docs` pipeline. `CONBOARD --> GIT` asks whether the base
 carries the manifest (ruling 9).
 
+**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md)).** Two components join.
+`core/questionnaire` owns the questionnaire's catalogue (the shipped
+`data/questionnaire/catalogue.yaml` with the levels' `questionnaire`
+settings applied), each question's default, provenance and allowed levels,
+the check of an answer through `core/manifest`'s validation and the command
+shape, and the write plan by level; it reads `core/manifest`,
+`core/machines`, `core/home` and the adapters, and prompts for and writes
+nothing. `cli/configure` drives a run for `init` and `invariant configure`:
+it asks through `CPROMPTS`, calls `CONBOARD` for the docs step and the store
+placement, and applies the plan through `core/stores` and `core/home`'s
+writers. Increment 1 of ADR-017 builds `core/questionnaire`'s reading half,
+2 `cli/configure` and the writes; this diagram gains both then.
+
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
 come from the CLI alone: **nothing in `core/`, `domains/`, `adapters/` or
