@@ -1,7 +1,8 @@
 """ADR-016 increment 4: adopting existing documentation, in place or by copy.
 
 D7: `invariant docs adopt <source> --mode in_place|copy [--dry-run]` writes
-the configuration. In place points `paths.docs` (and `records.docs`) at the
+the configuration. Markdown is adopted by copy only, into a migrating project
+(ADR-018 D11), so the in-place proofs adopt a Sphinx tree. In place points `paths.docs` (and `records.docs`) at the
 source, which must lie under the repo root or the store root, and sets
 `docs.format` from the detected format, refusing one with no reader (ruling
 5). Copy copies into the resolved docs location and never writes the
@@ -43,6 +44,22 @@ DOC = (
     "## Compliance checklist\n\n- none\n"
 )
 NOW = datetime(2026, 11, 8, 12, 0, 0, tzinfo=timezone.utc)
+#: DOC in rST: Markdown is adopted by copy only (ADR-018 D11), so in place
+#: adopts a Sphinx tree.
+RST_DOC = (
+    "Toy\n===\n\nLayers\n------\n\nThe alpha package does things.\n\n"
+    "Component responsibilities\n--------------------------\n\nalpha owns the work.\n\n"
+    "Compliance checklist\n--------------------\n\n- none\n"
+)
+
+
+def rst_handbook(root: Path, name: str = "guide") -> Path:
+    """A Sphinx-format handbook to adopt in place, two documents deep."""
+    guide = root / name
+    (guide / "deep").mkdir(parents=True)
+    (guide / "overview.rst").write_text(RST_DOC, encoding="utf-8")
+    (guide / "deep" / "notes.rst").write_text("Notes\n=====\n", encoding="utf-8")
+    return guide
 
 
 def git(root: Path, *argv: str) -> str:
@@ -505,27 +522,28 @@ class TestCopy:
 
 class TestInPlace:
     def test_in_place_points_the_gate_and_agents_at_the_original(self, toy, capsys):
-        before = tree(toy / "handbook")
-        code, out = run(capsys, "docs", "adopt", "handbook", "--mode", "in_place")
+        rst_handbook(toy)
+        before = tree(toy / "guide")
+        code, out = run(capsys, "docs", "adopt", "guide", "--mode", "in_place")
         assert code == 0, out
-        assert tree(toy / "handbook") == before
-        assert not (toy / "handbook" / RECEIPT).exists()
+        assert tree(toy / "guide") == before
+        assert not (toy / "guide" / RECEIPT).exists()
         written = read_manifest(toy)
-        assert written["paths"] == {"docs": "handbook"}
-        assert written["docs"]["adopt"] == {"mode": "in_place", "source": "handbook"}
-        assert written["docs"]["format"] == "markdown"
+        assert written["paths"] == {"docs": "guide"}
+        assert written["docs"]["adopt"] == {"mode": "in_place", "source": "guide"}
+        assert written["docs"]["format"] == "sphinx"
         assert "records" not in written
         m = Manifest.locate(toy)
-        assert m.path_for("docs") == (toy / "handbook").resolve()
-        pipeline = {"evidence": {"docs_read": [str(toy / "handbook" / "overview.md")]}}
+        assert m.path_for("docs") == (toy / "guide").resolve()
+        pipeline = {"evidence": {"docs_read": [str(toy / "guide" / "overview.rst")]}}
         verdict = get_rule("docs.read_architecture").fn(
             RuleContext(manifest=m, cwd=toy, pipeline=pipeline)
         )
         assert verdict.ok
         # An agent updating "the architecture docs" writes where paths.docs
         # resolves, which is now the original.
-        (m.path_for("docs") / "services.md").write_text("# Services\n", encoding="utf-8")
-        assert (toy / "handbook" / "services.md").is_file()
+        (m.path_for("docs") / "services.rst").write_text("Services\n========\n", encoding="utf-8")
+        assert (toy / "guide" / "services.rst").is_file()
         assert assess(Manifest.locate(toy)).documents == 3
         assert adoption_drift(m) is None
         assert "docs adoption" not in doctor_rows(capsys)
@@ -559,22 +577,32 @@ class TestInPlace:
         assert "not assessable" in out
 
     def test_a_commented_manifest_holding_docs_gets_the_block_by_hand(self, toy, capsys):
+        rst_handbook(toy)
         text = "version: 1\n# ours\ndocs:\n  onboarding: incremental\n"
         (toy / MANIFEST_RELPATH).write_text(text, encoding="utf-8")
-        code, data = run_json(capsys, "docs", "adopt", "handbook", "--mode", "in_place")
+        code, data = run_json(capsys, "docs", "adopt", "guide", "--mode", "in_place")
         assert code == 0
         assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == text
         held = data["settings_by_hand"]
         assert held["path"].endswith("invariant.yaml")
-        assert yaml.safe_load(held["yaml"])["paths"] == {"docs": "handbook"}
-        code, out = run(capsys, "docs", "adopt", "handbook", "--mode", "in_place")
+        assert yaml.safe_load(held["yaml"])["paths"] == {"docs": "guide"}
+        code, out = run(capsys, "docs", "adopt", "guide", "--mode", "in_place")
         assert "by hand" in out
 
     def test_a_dry_run_says_what_it_would_write(self, toy, capsys):
-        code, out = run(capsys, "docs", "adopt", "handbook", "--mode", "in_place", "--dry-run")
+        rst_handbook(toy)
+        code, out = run(capsys, "docs", "adopt", "guide", "--mode", "in_place", "--dry-run")
         assert code == 0
-        assert "paths.docs: handbook" in out
+        assert "paths.docs: guide" in out
         assert "paths" not in read_manifest(toy)
+
+    def test_markdown_is_refused_in_place_naming_copy(self, toy, capsys):
+        """ADR-018 D11: Markdown is adopted by copy only, into a migrating project."""
+        before = (toy / MANIFEST_RELPATH).read_text(encoding="utf-8")
+        code, out = run(capsys, "docs", "adopt", "handbook", "--mode", "in_place")
+        assert code == 2
+        assert "Markdown" in out and "--mode copy" in out and "ADR-018 D11" in out
+        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == before
 
 
 class TestStoreProject:
@@ -604,7 +632,7 @@ class TestStoreProject:
         m = Manifest.locate(stored)
         arch = m.store.root / "arch"
         arch.mkdir()
-        (arch / "overview.md").write_text(DOC, encoding="utf-8")
+        (arch / "overview.rst").write_text(RST_DOC, encoding="utf-8")
         code, out = run(capsys, "docs", "adopt", str(arch), "--mode", "in_place")
         assert code == 0, out
         block = self.store_block(m)
@@ -616,10 +644,11 @@ class TestStoreProject:
         assert assess(again).documents == 1
 
     def test_in_place_under_the_repo_keeps_records_docs_in_the_repo(self, stored, capsys):
-        assert run(capsys, "docs", "adopt", "handbook", "--mode", "in_place")[0] == 0
+        rst_handbook(stored)
+        assert run(capsys, "docs", "adopt", "guide", "--mode", "in_place")[0] == 0
         m = Manifest.locate(stored)
         assert self.store_block(m)["records"] == {"docs": "repo"}
-        assert m.path_for("docs") == (stored / "handbook").resolve()
+        assert m.path_for("docs") == (stored / "guide").resolve()
 
     def test_copy_lands_in_the_store_docs_location(self, stored, capsys):
         m = Manifest.locate(stored)
@@ -651,7 +680,7 @@ class TestStoreProject:
         m = Manifest.locate(stored)
         arch = m.store.root / "arch"
         arch.mkdir()
-        (arch / "overview.md").write_text(DOC, encoding="utf-8")
+        (arch / "overview.rst").write_text(RST_DOC, encoding="utf-8")
         before = (m.store.root / "invariant.yaml").read_text(encoding="utf-8")
         code, out = run(capsys, "docs", "adopt", str(arch), "--mode", "in_place")
         assert code == 2
@@ -659,9 +688,10 @@ class TestStoreProject:
         assert (m.store.root / "invariant.yaml").read_text(encoding="utf-8") == before
 
     def test_a_dry_run_names_the_store_file(self, stored, capsys):
+        rst_handbook(stored)
         m = Manifest.locate(stored)
         code, out = run(
-            capsys, "docs", "adopt", "handbook", "--mode", "in_place", "--dry-run"
+            capsys, "docs", "adopt", "guide", "--mode", "in_place", "--dry-run"
         )
         assert code == 0
         assert str(m.store.root / "invariant.yaml") in out
@@ -670,7 +700,8 @@ class TestStoreProject:
         m = Manifest.locate(stored)
         path = m.store.root / "invariant.yaml"
         path.write_text("# ours\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
-        code, data = run_json(capsys, "docs", "adopt", "handbook", "--mode", "in_place")
+        rst_handbook(stored)
+        code, data = run_json(capsys, "docs", "adopt", "guide", "--mode", "in_place")
         assert code == 0
         assert data["written"] is None
         assert "paths" in data["settings_by_hand"]["yaml"]

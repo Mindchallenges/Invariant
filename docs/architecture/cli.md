@@ -121,17 +121,15 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
     --dry-run.
 
     Where the docs directory (`paths.docs`, `docs/architecture` by default)
-    does not exist it also writes a starter `overview.md` there. A fresh
-    project otherwise began by failing its own docs-first gate with nothing
-    to read: `doctor` reported the directory missing and the first `pipeline
-    advance` blocked on `docs.read_architecture` — "read the relevant doc
-    under docs/architecture" — against a path with nothing in it. The starter
-    is generic, with the project name substituted: what the file is for, a
-    Layers diagram to replace, a responsibilities table, and a compliance
-    checklist the reviewing agents read as canonical. A directory that EXISTS
-    — even empty — is the project's and is left alone, `--force` included:
-    that flag rewrites the manifest, not the docs. `--dry-run` lists the write
-    when it would happen. Written once; no command rewrites it afterwards.
+    does not exist it also writes the docs starter (ADR-018 D11, below). A
+    fresh project otherwise began by failing its own docs-first gate with
+    nothing to read: `doctor` reported the directory missing and the first
+    `pipeline advance` blocked on `docs.read_architecture` — "read the
+    relevant doc under docs/architecture" — against a path with nothing in
+    it. A directory that EXISTS — even empty — is the project's and is left
+    alone, `--force` included: that flag rewrites the manifest, not the docs.
+    `--dry-run` lists the writes when they would happen. Written once; no
+    command rewrites it afterwards.
 
     Each declared ecosystem's adapter may add settings its static defaults
     cannot know (`Adapter.init_settings`), written beneath any answer the
@@ -307,19 +305,41 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
     non-interactive report, 2 the interactive core, 3 builds the scripted
     flags, and 4 the advanced step and the catalogue at the levels.
 
-    Accepted, not yet built (ADR-018 D10, D11). `init`, interactive or
-    not, writes a Sphinx starter instead of the Markdown `overview.md`
-    wherever `paths.docs` / `records.docs` resolves: `conf.py` (sphinx-needs
-    and sphinxcontrib-mermaid, the seven baseline need types, the link set,
-    the item fields), `index.rst`, a fully pinned `requirements.txt`,
-    `.gitignore`, `architecture/overview.rst` with one `element` need per
-    detected source area, `requirements.rst`, `decisions/index.rst`,
-    `ui.rst`, the generated `rules.rst` and `backlog.rst` (the items store,
-    `items.backend: sphinx_needs`), and `docs.needs.state: enforced`. The
-    starter builds strictly on its own. Only interactive `init` creates the
-    docs environment (`invariant docs venv`); without a terminal, and under
-    `--dry-run`, it writes the same files and names that command. The `docs`
-    step still asks no format. Increment 4 of ADR-018 builds it.
+    Built (ADR-018 D10, D11, increment 4): the docs starter. `init`,
+    interactive or not, writes a sphinx-needs docs project wherever
+    `paths.docs` / `records.docs` resolves (the Markdown `overview.md` is
+    retired). Its source directory is the one above `paths.docs` (`docs/`
+    around `docs/architecture`, D3), and it holds, from the templates under
+    `data/scaffold/sphinx/`: `conf.py` (sphinx-needs and sphinxcontrib-mermaid;
+    `needs_types` from the configuration's need types, the seven baseline
+    ones by default; `needs_links` with dang's set plus `amends` and
+    `supersedes`; `needs_fields` with `design_link` and, read from the items
+    page at build time, every option an item carries; `needs_id_required`,
+    `needs_id_regex`, `needs_build_json`; the keys of the pinned sphinx-needs,
+    which warns on the deprecated ones), `index.rst` (a toctree of every
+    page), a fully pinned `requirements.txt` (the set the suite builds the
+    starter in), `.gitignore` (`.venv/`, `_build/`),
+    `<paths.docs>/overview.rst` (the three sections the assessment requires
+    by default, any further `docs.assess.sections` heading, and one `element`
+    need per source area, its id the element prefix and the area name as a
+    need id, the path where two names collide), `requirements.rst`,
+    `decisions/index.rst`, `ui.rst`, the generated `rules.rst` and
+    `checklist.rst` (rendered from no ruleset, with the managed marker, so
+    `guidelines render` takes them over), and `backlog.rst` (the items
+    store). The manifest gains `docs.format: sphinx`, `docs.needs.state:
+    enforced`, `docs.needs.srcdir` and `items.backend: sphinx_needs` with
+    `items.path` the backlog page (a store project: in its block, with
+    `records.backlog: store`). The starter is not written, and the project
+    is left migrating with a note naming why, where the source directory
+    would be the root, already holds a `conf.py`, or holds a file the
+    starter would write. Only an interactive `init` creates the docs
+    environment (`docs venv`, which needs the network); a failure is
+    reported and is never a failed `init`. Without a terminal, and under
+    `--dry-run`, it writes (or lists) the same files and names `invariant
+    docs venv`; `--json` carries `docs_venv`: `{"created", "srcdir",
+    "command"}` and `error` when one was met, null with no starter. The
+    `docs` step still asks no format. `init --force` over an enforced
+    manifest keeps the keys that make it enforced.
 
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is
@@ -778,7 +798,11 @@ invariant docs assess [--json]
       areas     each source area no doc names as a whole word; the areas
                 come from the adapter's `source_areas` hook, from globs or
                 from a declared list (`docs.assess.areas`), less `exclude`.
-                An adapter that cannot tell is a gap naming the ecosystem
+                An adapter that cannot tell is a gap naming the ecosystem.
+                Where the docs are a sphinx-needs project (`docs.format:
+                sphinx` and the docs project's `conf.py` lists
+                `sphinx_needs`), only an `element` need's title and content
+                name an area (ADR-018 D11); prose elsewhere does not
       links     each relative link whose target does not exist, by file and
                 line. Anchors and queries are stripped; external URLs and
                 root-absolute paths are never checked
@@ -840,6 +864,9 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
                 offering copy. A format with no reader is refused naming it
                 and offering copy (ruling 5). Nothing is copied, so the
                 docs-first gate reads, and agents update, the original.
+                Markdown is refused in place, offering copy (ADR-018 D11):
+                Markdown is adopted by copy only, into a migrating project,
+                whose migration converts it.
       copy      every file is copied into the resolved docs location (repo,
                 or store under `records.docs: store`), and the original is
                 never written. Any format copies; one with no reader is
@@ -856,7 +883,8 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
                 The source and the docs location may not lie one inside the
                 other.
     Refused, exit 2, before anything is written: a mode outside the two, a
-    receipt that cannot be read, and in a store project a key the pointer
+    source in any format but `sphinx` in an enforced project (ADR-018 D11),
+    a receipt that cannot be read, and in a store project a key the pointer
     sets, because the pointer is read above the store's block and would
     silently win. A file holding comments a rewrite would drop is not
     rewritten: in the in-repo manifest the settings are appended as a block
@@ -918,8 +946,9 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
                              fails the strict build, wherever conversion
                              fails (increment 6).
     This file gains their sections when they are built.
-    `docs adopt` of Markdown docs is limited to copy mode into a migrating
-    project, which the migration then converts (D11, increment 4).
+    Built (D11, increment 4): `docs adopt` of Markdown docs is limited to
+    copy mode into a migrating project, which the migration then converts
+    (`docs adopt`, above).
 
     A Sphinx tree adopts in place like Markdown: its `.rst` files make the
     detected format `sphinx`, which has a reader (built in ADR-018 increment
@@ -1768,13 +1797,24 @@ invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local
     `invariant guidelines render --insert guidelines/index`, and the rule
     does not fail on that alone (A5 increment 4).
 
-    Accepted, not yet built (ADR-018 D12, increment 4). The render writes a
-    third file, `<docs>/rules.rst`: one `rule` need per rule, id
-    `RULE_<RULE_ID_UPPERCASED>` (every non-alphanumeric character as `_`),
-    with the managed marker `guidelines.generated_current` checks. Two rule
-    ids that would collide are refused at ruleset load. Need ids in the
-    ruleset's `links` and `amended[].adr` render as `decided_by` links.
-    Under the mandate the checklist is rendered in rST only.
+    Built (ADR-018 D12, increment 4). Where the docs are a sphinx-needs
+    project in the tree (`docs.format: sphinx` and a source directory), the
+    render writes a third file, `<srcdir>/rules.rst`: one need per rule of
+    the `rule` role's first type (`rule`, `RULE_` by default), id the prefix
+    and the rule id upper-cased with every non-alphanumeric character as `_`
+    (`RULE_LAYERS_ONLY_THE_CLI_IMPORTS_THE_ORACLE`), its content the
+    checklist's text of the rule, with the managed marker
+    `guidelines.generated_current` checks as it checks the checklist (new,
+    stale, edited, and refused where a file without the marker is there).
+    Two rule ids that would collide are refused at ruleset load, naming
+    both. Need ids (`NEED_ID`, the starter's `needs_id_regex`) in a rule's
+    `links` and `amended[].adr` render as its `decided_by`; a path link
+    stays text. Under the mandate (`docs.needs.state: enforced`, which only
+    `docs.format: sphinx` loads with) the checklist is rST, and a null
+    `guidelines.checklist` puts it at `<srcdir>/checklist.rst`, beside
+    `rules.rst`, where the starter's toctree names both. The text output
+    adds a line for `rules.rst`, and `--json` a `rules` field, `{"path",
+    "status", "written"}`, null with no rules page.
 
     With no ruleset configured it reports "nothing to render" and exits 0
     (ADR-012 D3, "No ruleset, no change"). --json carries status, written,

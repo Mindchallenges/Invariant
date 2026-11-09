@@ -2496,6 +2496,17 @@ class BlockPlan:
 
 
 @dataclass(frozen=True)
+class PagePlan:
+    """A generated page beside the checklist, decided and checked, not yet written."""
+
+    #: ``new``, ``current``, ``stale`` or ``edited``, as for the checklist.
+    status: str
+    path: Path
+    relpath: str
+    text: str
+
+
+@dataclass(frozen=True)
 class RenderPlan:
     """Everything one render would write, decided before the first write."""
 
@@ -2511,6 +2522,9 @@ class RenderPlan:
     #: The ids of the ruleset's ``always`` rules, which the block carries in
     #: full: what the always-layer note counts (A5 ruling D12).
     always: tuple[str, ...] = ()
+    #: The rules as needs, ``<srcdir>/rules.rst`` (ADR-018 D12); ``None`` where
+    #: the docs are not a docs project in this tree.
+    rules: PagePlan | None = None
 
 
 def plan_render(
@@ -2539,8 +2553,8 @@ def plan_render(
     manifest = ctx.manifest
     source = guidelines_relpath(ctx, manifest.get("guidelines.ruleset"))
     fmt = _checklist_format(manifest)
-    rel = _checklist_target(ctx, source, fmt)
     tree = guidelines_tree(ctx)
+    rel = _checklist_target(ctx, source, fmt, tree)
     path = tree / rel
     if is_exempt_path(manifest, tree, path):
         raise RenderRefused(
@@ -2560,7 +2574,8 @@ def plan_render(
             f"nothing was written",
             f"remove it from {source}, then render again",
         )
-    status = _checklist_status(path, rel, fmt, text)
+    status = _generated_status(path, rel, fmt, text, "guidelines.checklist")
+    rules = _plan_rules_page(ctx, ruleset, source, tree, scanner)
 
     body = guidelines_reader.render_index_block(
         ruleset, source=source, max_lines=manifest.get("guidelines.injection.max_lines")
@@ -2589,7 +2604,69 @@ def plan_render(
         status=status, path=path, relpath=rel, ruleset=ruleset.digest, text=text,
         blocks=tuple(blocks),
         always=tuple(r.id for r in ruleset.rules if "always" in r.phases),
+        rules=rules,
     )
+
+
+def _docs_project_relpath(ctx: RuleContext, tree: Path) -> str | None:
+    """The docs project's source directory, spelled against ``tree``, where
+    the docs are a sphinx-needs project there (ADR-018 D3); else ``None``.
+
+    ``docs.format: sphinx`` is the test, as for the docs project's gates
+    (D10): a Markdown project's ``conf.py`` is no docs project. A source
+    directory outside the tree (a store's) is not this command's to write.
+    """
+    from . import needs  # local: one reader of the docs project's source directory
+
+    if ctx.manifest.get("docs.format") != "sphinx":
+        return None
+    srcdir = needs.srcdir_of(ctx.manifest, tree)
+    if srcdir is None or not srcdir.is_dir():
+        return None
+    try:
+        rel = srcdir.resolve().relative_to(Path(tree).resolve()).as_posix()
+    except ValueError:
+        return None
+    return None if rel == "." else rel
+
+
+def _plan_rules_page(
+    ctx: RuleContext,
+    ruleset: guidelines_reader.Ruleset,
+    source: str | None,
+    tree: Path,
+    scanner: PrivacyScanner,
+) -> PagePlan | None:
+    """``<srcdir>/rules.rst``, the rules as needs (ADR-018 D12), checked as the
+    checklist is, or ``None`` where there is no docs project in ``tree``."""
+    from . import needs  # local: one reader of the docs project's types
+
+    srcdir = _docs_project_relpath(ctx, tree)
+    if srcdir is None:
+        return None
+    rel = posixpath.join(srcdir, guidelines_reader.RULES_PAGE)
+    path = tree / rel
+    if is_exempt_path(ctx.manifest, tree, path):
+        raise RenderRefused(
+            f"the rules page {rel} is exempt from session isolation, and a "
+            f"generated file never is (ADR-012 ruling 13)",
+            "keep the docs project's source directory outside session.exempt_paths "
+            "and the declared stores",
+        )
+    kind = needs.type_of_role(needs.types_of(ctx.manifest), "rule")
+    text = guidelines_reader.render_rule_needs(
+        ruleset, source=source, directive=kind.directive, prefix=kind.prefix
+    )
+    findings = scanner.scan_text(text, path=Path(rel))
+    if findings:
+        named = ", ".join(f"{rel}:{f.line} {f.pattern} {f.redacted}" for f in findings)
+        raise RenderRefused(
+            f"the rendered rules page fails the privacy scan ({named}); "
+            f"nothing was written",
+            f"remove it from {source}, then render again",
+        )
+    status = _generated_status(path, rel, "sphinx", text, "the docs project's rules page")
+    return PagePlan(status=status, path=path, relpath=rel, text=text)
 
 
 def ruleset_or_refuse(ctx: RuleContext) -> guidelines_reader.Ruleset | None:
@@ -2617,11 +2694,11 @@ def _checklist_format(manifest: Manifest) -> str:
     return fmt
 
 
-def _checklist_target(ctx: RuleContext, source: str, fmt: str) -> str:
+def _checklist_target(ctx: RuleContext, source: str, fmt: str, tree: Path) -> str:
     suffix = guidelines_reader.CHECKLIST_SUFFIXES[fmt]
     configured = ctx.manifest.get("guidelines.checklist")
     if configured is None:
-        return posixpath.join(posixpath.dirname(source), f"checklist{suffix}")
+        return _default_checklist(ctx, source, suffix, tree)
     rel = guidelines_relpath(ctx, configured)
     if rel is None:
         raise RenderRefused(
@@ -2710,7 +2787,19 @@ def _plan_block(
     return BlockPlan(BlockRendered(rel, name, state, True), path, text)
 
 
-def _checklist_status(path: Path, rel: str, fmt: str, text: str) -> str:
+def _default_checklist(ctx: RuleContext, source: str, suffix: str, tree: Path) -> str:
+    """Where a null ``guidelines.checklist`` puts the checklist: beside the
+    ruleset, or under the mandate in the docs project's source directory,
+    beside ``rules.rst``, where the starter's toctree names both (ADR-018
+    D12)."""
+    if ctx.manifest.get("docs.needs.state") == "enforced":
+        srcdir = _docs_project_relpath(ctx, tree)
+        if srcdir is not None:
+            return posixpath.join(srcdir, f"checklist{suffix}")
+    return posixpath.join(posixpath.dirname(source), f"checklist{suffix}")
+
+
+def _generated_status(path: Path, rel: str, fmt: str, text: str, setting: str) -> str:
     if not path.exists():
         return "new"
     existing = path.read_text(encoding="utf-8")
@@ -2719,7 +2808,9 @@ def _checklist_status(path: Path, rel: str, fmt: str, text: str) -> str:
         raise RenderRefused(
             f"{rel} exists and has no invariant-managed marker, so render "
             f"did not write it and will not overwrite it",
-            "move that file, or point guidelines.checklist at another path",
+            f"move that file, or point {setting} at another path"
+            if setting.startswith("guidelines.")
+            else f"move that file: it is {setting}",
         )
     if digest != guidelines_reader.digest_of(body.encode("utf-8")):
         return "edited"
@@ -2813,13 +2904,17 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
         return Verdict.na("no guidelines ruleset configured")
 
     findings: list[str] = []
-    checklist = {
-        "new": f"{plan.relpath} is missing: the checklist was never rendered",
-        "stale": f"{plan.relpath} is stale: rendered from an older ruleset",
-        "edited": f"{plan.relpath} was edited by hand",
-    }
-    if plan.status in checklist:
-        findings.append(checklist[plan.status])
+    pages = [(plan.relpath, plan.status, "the checklist")]
+    if plan.rules is not None:
+        pages.append((plan.rules.relpath, plan.rules.status, "the rules page"))
+    for relpath, status, what in pages:
+        said = {
+            "new": f"{relpath} is missing: {what} was never rendered",
+            "stale": f"{relpath} is stale: rendered from an older ruleset",
+            "edited": f"{relpath} was edited by hand",
+        }
+        if status in said:
+            findings.append(said[status])
     edited_block = False
     absent: list[str] = []
     for block in plan.blocks:
@@ -2836,12 +2931,12 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
     note = [f"{gap[0]}; try: {gap[1]}"] if gap else []
 
     if not findings:
-        current = 1 + len(plan.blocks) - len(absent)
+        current = len(pages) + len(plan.blocks) - len(absent)
         return Verdict.clean(
             f"{current} generated output(s) current against ruleset {plan.ruleset}",
             detail="; ".join(absent + note) or None,
         )
-    hand_edited = plan.status == "edited" or edited_block
+    hand_edited = any(status == "edited" for _rel, status, _what in pages) or edited_block
     fixes = [
         (
             "move the edit into the ruleset, then: invariant guidelines render"
@@ -3858,7 +3953,7 @@ def _checklist_relpath(ctx: RuleContext, source: str | None) -> str | None:
     suffix = guidelines_reader.CHECKLIST_SUFFIXES.get(ctx.manifest.get("docs.format"))
     if suffix is None or source is None:
         return None
-    return posixpath.join(posixpath.dirname(source), f"checklist{suffix}")
+    return _default_checklist(ctx, source, suffix, guidelines_tree(ctx))
 
 
 def _baselined_rules(

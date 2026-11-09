@@ -1308,8 +1308,9 @@ Details that are load-bearing rather than incidental:
 - **A fresh project has something to read.** The read gate blocks on an empty
   `paths.docs`, and `init` used to leave a new project exactly there: `doctor`
   red on the directory, the first `advance` blocked, nothing to read and
-  nothing saying what to write. `init` now scaffolds a starter `overview.md`
-  when the directory is absent, and the gate stays at `block`. The fix for a
+  nothing saying what to write. `init` now writes a starter when the
+  directory is absent, since ADR-018 D11 a sphinx-needs docs project around
+  `overview.rst`, and the gate stays at `block`. The fix for a
   gate nobody can satisfy is to make it satisfiable, not to lower it.
 - **Injection is by role, not by state name.** A methodology this library has
   never seen still receives the gates, provided it labels its states. A

@@ -10,6 +10,10 @@ ADR-018 increment 2). A format with no reader answers ``None`` from
 pass. :func:`detect_format` names the format a set of files is written in,
 for `docs adopt` (D7).
 
+:func:`rst_directives` reads rST's directives with their argument, options
+and content, which is how the assessment finds a sphinx-needs project's
+element needs (ADR-018 D11).
+
 Pure: every reader takes text and returns what it found, with 1-based line
 numbers, in the order it appears. Nothing here touches the file system.
 """
@@ -377,6 +381,76 @@ def _toctree_entry(entry: str) -> tuple[str, bool] | None:
     if _SCHEME.match(target):
         return target, False
     return target, True
+
+
+@dataclass(frozen=True)
+class Directive:
+    """One rST directive: its name, argument, options and content.
+
+    What the assessment needs of a sphinx-needs need (ADR-018 D11): its
+    directive, its title (the argument) and its content. ``content`` is the
+    body after the options, dedented, code inside it blanked.
+    """
+
+    line: int
+    name: str
+    argument: str
+    options: dict[str, str]
+    content: str
+
+
+_OPTION = re.compile(r"^:([^:\s][^:]*):(?:[ \t]+(.*))?$")
+
+
+def rst_directives(text: str) -> list[Directive]:
+    """Every directive in ``text``, nested ones included, in order.
+
+    A directive's block is every line after its own that is blank or
+    indented further. Its options are the ``:name: value`` lines that open
+    the block, and its content is the rest. Directives inside code or a
+    comment are not read.
+    """
+    lines = text.splitlines()
+    kept = _rst_prose(text)
+    found: list[Directive] = []
+    for index, line in enumerate(kept):
+        if line is None:
+            continue
+        explicit = _EXPLICIT.match(line)
+        directive = _DIRECTIVE.match(explicit.group(2) or "") if explicit else None
+        if directive is None:
+            continue
+        indent = _indent(line)
+        block: list[str] = []
+        for offset in range(index + 1, len(lines)):
+            raw = lines[offset]
+            if raw.strip() and _indent(raw) <= indent:
+                break
+            block.append(kept[offset] or "")
+        options: dict[str, str] = {}
+        rest = 0
+        for rest, entry in enumerate(block):
+            option = _OPTION.match(entry.strip())
+            if not entry.strip() or option is None:
+                break
+            options[option.group(1)] = (option.group(2) or "").strip()
+        else:
+            rest = len(block)
+        found.append(
+            Directive(
+                line=index + 1,
+                name=directive.group(1),
+                argument=(directive.group(2) or "").strip(),
+                options=options,
+                content=_dedent(block[rest:]),
+            )
+        )
+    return found
+
+
+def _dedent(block: list[str]) -> str:
+    margin = min((_indent(line) for line in block if line.strip()), default=0)
+    return "\n".join(line[margin:] for line in block).strip("\n")
 
 
 #: Each ``docs.format`` with a reader: Markdown, and reStructuredText as

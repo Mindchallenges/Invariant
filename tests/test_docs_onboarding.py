@@ -58,6 +58,22 @@ TODAYS_MANIFEST = (
     "# prints the resolved configuration and where each value came from.\n"
 )
 
+#: What init writes for the same project where the docs directory is absent:
+#: the docs starter, and the project enforced on it (ADR-018 D10, D11).
+STARTER_MANIFEST = TODAYS_MANIFEST.replace(
+    "\n# Everything else",
+    "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: docs\n"
+    "\nitems:\n  backend: sphinx_needs\n  path: docs/backlog.rst\n"
+    "\n# Everything else",
+)
+
+#: The settings the starter adds to a store's block for this repository.
+STARTER_STORE = {
+    "records": {"backlog": "store"},
+    "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "notes"}},
+    "items": {"backend": "sphinx_needs", "path": "notes/backlog.rst"},
+}
+
 #: Names alpha and nothing else, with all three starter sections.
 HALF = (
     "# Toy\n\n## Layers\n\nThe alpha package does things.\n\n"
@@ -529,13 +545,16 @@ class TestNonInteractiveInit:
         before = tree(toy / "docs") if shape != "absent" else None
         code, text = init(capsys)
         assert code == 0, text
-        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
+        written = (toy / MANIFEST_RELPATH).read_text(encoding="utf-8")
         if shape == "absent":
-            assert (toy / "docs" / "architecture" / "overview.md").is_file()
+            # ADR-018 D11: the docs starter, which documents every area.
+            assert written == STARTER_MANIFEST
+            assert (toy / "docs" / "architecture" / "overview.rst").is_file()
         else:
+            assert written == TODAYS_MANIFEST
             assert tree(toy / "docs") == before
+            assert "beta" in text
         assert "docs assessment:" in text
-        assert "beta" in text
         assert parked(toy) == []
 
     @pytest.mark.parametrize("shape", ["absent", "unrelated"])
@@ -547,8 +566,13 @@ class TestNonInteractiveInit:
         )
         assert code == 0, text
         payload = json.loads(text)
-        assert "beta" in area_gaps(payload["docs_assessment"])
-        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
+        written = (toy / MANIFEST_RELPATH).read_text(encoding="utf-8")
+        if shape == "absent":
+            assert area_gaps(payload["docs_assessment"]) == []
+            assert written == STARTER_MANIFEST
+        else:
+            assert "beta" in area_gaps(payload["docs_assessment"])
+            assert written == TODAYS_MANIFEST
 
     @pytest.mark.parametrize("shape", ["absent", "half"])
     def test_dry_run_writes_nothing_and_assesses_what_is_there(self, toy, capsys, shape):
@@ -632,7 +656,11 @@ class TestLocationOffer:
         m = Manifest.locate(unrelated)
         assert m.get("paths.docs") == "design/arch"
         assert m.source_of("paths.docs") == f"repo:{MANIFEST_RELPATH}"
-        assert (unrelated / "design" / "arch" / "overview.md").is_file()
+        # The starter's source directory is the one above the chosen path.
+        assert (unrelated / "design" / "arch" / "overview.rst").is_file()
+        assert (unrelated / "design" / "conf.py").is_file()
+        assert m.get("docs.needs.srcdir") == "design"
+        assert m.get("items.path") == "design/backlog.rst"
         assert tree(unrelated / "docs") == before
 
     def test_another_existing_repo_path_is_reused_untouched(
@@ -659,7 +687,12 @@ class TestLocationOffer:
         assert m.path_for("docs") == m.store.root / "docs" / "architecture"
         assert m.get("project.ecosystems") == ["generic"]
         assert m.get("enforcement.profile") == "standard"
-        assert (m.store.root / "docs" / "architecture" / "overview.md").is_file()
+        # The starter goes where records.docs resolves (ADR-016 ruling G), and
+        # the items store with it (ADR-018 D3).
+        assert (m.store.root / "docs" / "architecture" / "overview.rst").is_file()
+        assert (m.store.root / "docs" / "conf.py").is_file()
+        assert m.get("docs.needs.state") == "enforced"
+        assert m.get("records.backlog") == "store"
         assert tree(unrelated / "docs") == before
         assert str(m.store.root) in text
         assert "the manifest lives there" in text
@@ -694,8 +727,10 @@ class TestLocationOffer:
         assert m.get("project.name") == "shared"
         body = yaml.safe_load((store / "invariant.yaml").read_text(encoding="utf-8"))
         assert body["store"]["repos"][identity.key] == {
-            "records": {"docs": "store"},
+            "records": {"docs": "store", "backlog": "store"},
             "paths": {"docs": "notes/arch"},
+            "docs": STARTER_STORE["docs"],
+            "items": STARTER_STORE["items"],
         }
         assert tree(unrelated / "docs") == before
 
@@ -731,9 +766,10 @@ class TestLocationOffer:
             "store": {
                 "repos": {
                     key: {
-                        "records": {"docs": "store"},
+                        "records": {"docs": "store", "backlog": "store"},
                         "paths": {"docs": "notes/arch"},
-                        "docs": {"onboarding": "incremental"},
+                        "docs": {**STARTER_STORE["docs"], "onboarding": "incremental"},
+                        "items": STARTER_STORE["items"],
                     }
                 }
             }
@@ -752,8 +788,10 @@ class TestLocationOffer:
         assert "comment" in by_hand["reason"]
         key = Manifest.locate(unrelated).store.key
         assert yaml.safe_load(by_hand["yaml"])["store"]["repos"][key] == {
-            "records": {"docs": "store"},
+            "records": {"docs": "store", "backlog": "store"},
             "paths": {"docs": "docs/architecture"},
+            "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "docs"}},
+            "items": {"backend": "sphinx_needs", "path": "docs/backlog.rst"},
         }
 
     def test_an_uncommented_store_carries_no_by_hand_field(
@@ -799,7 +837,7 @@ class TestLocationOffer:
         assert [keys for _, keys in scripted.asked] == [
             ["not_now", "incremental", "all_at_once"]
         ]
-        assert (toy / "docs" / "architecture" / "overview.md").is_file()
+        assert (toy / "docs" / "architecture" / "overview.rst").is_file()
 
 
 # -- D4.2-3: the assessment and the onboarding offer --------------------------
@@ -849,9 +887,26 @@ class TestOnboardingOffer:
         assert f"invariant session resume {session.name}" in text
 
     def test_all_at_once_in_a_store_project_records_the_plan(
-        self, unrelated, capsys, interactive
+        self, unrelated, capsys, interactive, tmp_path
     ):
-        interactive("store", "", "", "all_at_once")
+        # Docs already in the store with a gap: a starter, written where the
+        # docs are absent, would leave none to plan (ADR-018 D11).
+        from invariant.core.stores import ensure_local_id
+
+        store = tmp_path / "shared"
+        (store / "notes" / "arch").mkdir(parents=True)
+        (store / "notes" / "arch" / "overview.md").write_text(HALF, encoding="utf-8")
+        git(store, "init", "-q", "-b", "main")
+        key = ensure_local_id(unrelated).key
+        (store / "invariant.yaml").write_text(
+            yaml.safe_dump({
+                "version": 1,
+                "project": {"name": "shared", "ecosystems": ["generic"]},
+                "store": {"repos": {key: {}}},
+            }),
+            encoding="utf-8",
+        )
+        interactive("store", str(store), "notes/arch", "all_at_once")
         code, text = init(capsys)
         assert code == 0, text
         m = Manifest.locate(unrelated)

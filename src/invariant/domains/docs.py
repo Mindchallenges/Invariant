@@ -55,7 +55,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
@@ -64,12 +64,21 @@ import yaml
 from ..adapters import get_adapter
 from ..adapters.sphinx import diagnostics
 from ..core import git
+from ..core import guidelines as guidelines_reader
 from ..core import needs as needs_reader
-from ..core.docformat import Link, Reader, detect_format, normalise_heading, reader_for
-from ..core.errors import LockTimeout, StateError, UsageError
+from ..core.docformat import (
+    Link,
+    Reader,
+    detect_format,
+    normalise_heading,
+    reader_for,
+    rst_directives,
+)
+from ..core.errors import InvariantError, LockTimeout, StateError, UsageError
 from ..core.manifest import (
     ADOPT_MODES,
     ASSESS_CHECKS,
+    DATA_DIR,
     Manifest,
     glob_matches,
     project_relative,
@@ -199,7 +208,7 @@ def assess(manifest: Manifest) -> Assessment:
     if "sections" in checks:
         gaps.extend(_sections(settings["sections"], texts, reader, fmt))
     if "areas" in checks:
-        areas, area_gaps = _areas(manifest, settings["areas"], texts)
+        areas, area_gaps = _areas(manifest, settings["areas"], _naming_texts(manifest, texts))
         gaps.extend(area_gaps)
     if "links" in checks:
         link_gaps, targets = _links(docs_root, texts, reader, fmt)
@@ -315,9 +324,55 @@ def _resolves(path: Path, link: Link, reader: Reader) -> bool:
     )
 
 
+def _naming_texts(manifest: Manifest, texts: dict[str, str]) -> dict[str, str]:
+    """The text an area may be named in (D2's whole-word rule).
+
+    Every doc's text, unless the docs are a sphinx-needs project: then only
+    the title and content of each ``element`` need, since an area is
+    documented when an element need names it (ADR-018 D11). "A sphinx-needs
+    project" is ``docs.format: sphinx`` with a ``conf.py`` at the docs
+    project's source directory that lists ``sphinx_needs``; one whose
+    extensions cannot be read is read as before.
+    """
+    if manifest.get("docs.format") != "sphinx":
+        return texts
+    srcdir = needs_reader.srcdir_of(manifest)
+    if srcdir is None:
+        return texts
+    from ..adapters.sphinx import conf_facts
+
+    extensions = conf_facts(srcdir / "conf.py").extensions
+    if extensions is None or "sphinx_needs" not in extensions:
+        return texts
+    elements = {
+        kind.directive for kind in needs_reader.types_of(manifest) if kind.role == "element"
+    }
+    return {
+        rel: "\n".join(
+            f"{need.argument}\n{need.content}"
+            for need in rst_directives(text)
+            if need.name in elements
+        )
+        for rel, text in texts.items()
+    }
+
+
 def _areas(
     manifest: Manifest, settings: dict[str, Any], texts: dict[str, str]
 ) -> tuple[tuple[Area, ...], list[Gap]]:
+    areas, gaps = _assessed_areas(manifest, settings)
+    corpus = "\n".join(texts.values())
+    for area in areas:
+        if not re.search(rf"(?<!\w){re.escape(area.name)}(?!\w)", corpus):
+            gaps.append(Gap("areas", area.path, f"{area.name} is named in no doc"))
+    return areas, gaps
+
+
+def _assessed_areas(
+    manifest: Manifest, settings: dict[str, Any]
+) -> tuple[tuple[Area, ...], list[Gap]]:
+    """The areas the assessment holds the docs to, sorted, the excluded ones
+    left out, and a gap where they cannot be derived."""
     found, gaps = _derive_areas(manifest, settings)
     exclude = [project_relative(glob) for glob in settings["exclude"]]
     areas = tuple(
@@ -330,10 +385,6 @@ def _areas(
             key=lambda area: (area.path, area.name),
         )
     )
-    corpus = "\n".join(texts.values())
-    for area in areas:
-        if not re.search(rf"(?<!\w){re.escape(area.name)}(?!\w)", corpus):
-            gaps.append(Gap("areas", area.path, f"{area.name} is named in no doc"))
     return areas, gaps
 
 
@@ -424,6 +475,227 @@ def plan_deliverables(assessment: Assessment) -> list[str]:
     return lines
 
 
+# -- the starter (ADR-018 D11) ----------------------------------------------------
+
+#: The starter's shipped text: templates read by eye, as the agents and the
+#: machines are, with ``{{name}}`` placeholders this module fills.
+STARTER_DIR = DATA_DIR / "scaffold" / "sphinx"
+
+#: How each role's type is drawn by sphinx-needs: (title, colour, style).
+_ROLE_LOOK = {
+    "requirement": ("Requirement", "#BFD8D2", "node"),
+    "decision": ("Decision", "#FEDCD2", "node"),
+    "element": ("Element", "#DCB239", "component"),
+    "ui": ("UI", "#F4D6A0", "node"),
+    "rule": ("Guideline rule", "#E8E8E8", "node"),
+    "idea": ("Idea", "#FFF2B3", "node"),
+    "bug": ("Bug", "#FFB3B3", "node"),
+}
+_EXTENSION_LOOK = ("#D7D7D7", "node")
+
+
+class StarterNotWritten(InvariantError):
+    """Why `init` writes no starter where the docs would go: never over a
+    file that is there, and never with the root as the docs project."""
+
+
+@dataclass(frozen=True)
+class Starter:
+    """The docs project `init` writes (D11) and the settings it owes.
+
+    ``files`` are ``(path, text)`` with the path relative to ``srcdir``;
+    ``settings`` are the manifest keys that make the project enforced on it
+    (D10), relative to ``base``, the root ``records.docs`` names.
+    """
+
+    base: Path
+    srcdir: Path
+    files: tuple[tuple[str, str], ...]
+    settings: dict[str, Any]
+
+    def paths(self) -> list[Path]:
+        return [self.srcdir / rel for rel, _text in self.files]
+
+
+def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> Starter:
+    """The starter for ``docs`` (``paths.docs``, relative to ``base``).
+
+    The source directory is the directory above ``docs`` (D3: the starter's
+    ``docs/`` around ``docs/architecture``). ``manifest`` is the
+    configuration being written, read for the need types, the assessment's
+    sections and the source areas, one ``element`` need each. Nothing is
+    written here. Raises :class:`StarterNotWritten` where the source
+    directory would be ``base`` itself, already holds a ``conf.py``, or holds
+    any file the starter would write.
+    """
+    rel = project_relative(docs)
+    parts = PurePosixPath(rel).parts
+    if len(parts) < 2:
+        raise StarterNotWritten(
+            f"paths.docs {docs} has no directory above it but the root, and the "
+            f"root is never the docs project (ADR-018 D3), so the docs starter was "
+            f"not written. Set paths.docs to <dir>/{rel}, then run 'invariant init "
+            f"--force'."
+        )
+    srcdir = Path(base) / PurePosixPath(*parts[:-1])
+    spelled = PurePosixPath(*parts[:-1]).as_posix()
+    if (srcdir / "conf.py").exists():
+        raise StarterNotWritten(
+            f"{spelled}/conf.py exists, so {spelled}/ is a Sphinx project already and "
+            f"the docs starter was not written over it; the docs project for this "
+            f"one is ADR-018 D13's (increment 8). Point paths.docs at a directory "
+            f"whose parent holds no conf.py, then run 'invariant init --force'."
+        )
+    types = needs_reader.types_of(manifest)
+    element = needs_reader.type_of_role(types, "element")
+    rule = needs_reader.type_of_role(types, "rule")
+    areas, _gaps = _assessed_areas(manifest, manifest.get("docs.assess")["areas"])
+    fill = {
+        "project": json.dumps(project),
+        "title": project,
+        "types": _types_literal(types),
+        "item_files": json.dumps([_BACKLOG]),
+        "architecture": f"{parts[-1]}/overview",
+        "element": element.directive,
+        "diagram": _diagram(project, areas, element),
+        "elements": _element_needs(areas, element),
+        "sections": _extra_sections(manifest.get("docs.assess.sections")),
+    }
+    files = [
+        ("conf.py", _template("conf.py", fill)),
+        ("index.rst", _template("index.rst", fill, f"{project} docs")),
+        ("requirements.txt", _template("requirements.txt", fill)),
+        (".gitignore", _template("gitignore", fill)),
+        (
+            f"{parts[-1]}/overview.rst",
+            _template("architecture/overview.rst", fill, f"{project} architecture"),
+        ),
+        ("requirements.rst", _template("requirements.rst", fill)),
+        ("decisions/index.rst", _template("decisions/index.rst", fill)),
+        ("ui.rst", _template("ui.rst", fill)),
+        (
+            guidelines_reader.RULES_PAGE,
+            guidelines_reader.render_rule_needs(
+                None, source=None, directive=rule.directive, prefix=rule.prefix
+            ),
+        ),
+        ("checklist.rst", guidelines_reader.render_checklist(None, "sphinx", source=None)),
+        (_BACKLOG, _template("backlog.rst", fill)),
+    ]
+    there = [name for name, _text in files if (srcdir / name).exists()]
+    if there:
+        raise StarterNotWritten(
+            f"{', '.join(f'{spelled}/{name}' for name in there)} already "
+            f"exist{'s' if len(there) == 1 else ''}, so the docs starter was not "
+            f"written over {'it' if len(there) == 1 else 'them'}. Move "
+            f"{'it' if len(there) == 1 else 'them'}, then run 'invariant init --force'."
+        )
+    settings = {
+        "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": spelled}},
+        "items": {"backend": "sphinx_needs", "path": f"{spelled}/{_BACKLOG}"},
+    }
+    return Starter(base=Path(base), srcdir=srcdir, files=tuple(files), settings=settings)
+
+
+def write_starter(starter: Starter) -> list[Path]:
+    """Write the starter's files; the paths written."""
+    written = []
+    for rel, text in starter.files:
+        path = starter.srcdir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        written.append(path)
+    return written
+
+
+#: The items store's page in the source directory (``items.path``).
+_BACKLOG = "backlog.rst"
+
+
+def _template(name: str, fill: Mapping[str, str], heading: str | None = None) -> str:
+    text = (STARTER_DIR / name).read_text(encoding="utf-8")
+    values = dict(fill)
+    if heading is not None:
+        values["heading"] = f"{heading}\n{'=' * len(heading)}"
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def _types_literal(types: Sequence[needs_reader.NeedType]) -> str:
+    """``needs_types`` as Python, one type per line."""
+    lines = ["["]
+    for kind in types:
+        if kind.role is None:
+            title, (colour, style) = kind.directive.capitalize(), _EXTENSION_LOOK
+        else:
+            title, colour, style = _ROLE_LOOK[kind.role]
+        entry = {
+            "directive": kind.directive,
+            "title": title,
+            "prefix": kind.prefix,
+            "color": colour,
+            "style": style,
+        }
+        lines.append(f"    {json.dumps(entry)},")
+    lines.append("]")
+    return "\n".join(lines)
+
+
+def _element_ids(areas: Sequence[Area], prefix: str) -> list[str]:
+    """One need id per area, from its name; from its path where two names
+    would give one id."""
+    stems = [needs_reader.id_stem(area.name) for area in areas]
+    return [
+        prefix + (stem if stems.count(stem) == 1 else needs_reader.id_stem(area.path))
+        for stem, area in zip(stems, areas)
+    ]
+
+
+def _diagram(project: str, areas: Sequence[Area], element: needs_reader.NeedType) -> str:
+    def label(text: str) -> str:
+        return text.replace('"', "#quot;")
+
+    if not areas:
+        return f'       PROJECT["{label(project)}"]'
+    return "\n".join(
+        f'       {need}["{label(area.name)}"]'
+        for need, area in zip(_element_ids(areas, element.prefix), areas)
+    )
+
+
+def _element_needs(areas: Sequence[Area], element: needs_reader.NeedType) -> str:
+    if not areas:
+        return (
+            "No source area was found when this page was written. Add an element "
+            "need for each component as it appears."
+        )
+    blocks = []
+    for need, area in zip(_element_ids(areas, element.prefix), areas):
+        blocks.append(
+            f".. {element.directive}:: {area.name}\n"
+            f"   :id: {need}\n"
+            f"\n"
+            f"   The ``{area.path}`` source area. Say what it owns, what it never\n"
+            f"   does, and which elements it uses."
+        )
+    return "\n\n".join(blocks)
+
+
+#: The sections the overview template already holds, as the assessment
+#: compares them.
+_TEMPLATE_SECTIONS = ("layers", "component responsibilities", "compliance checklist")
+
+
+def _extra_sections(required: Sequence[str]) -> str:
+    """A section for each heading ``docs.assess.sections`` requires beyond
+    the template's three, so the starter has no gap on its own."""
+    extra = [h for h in required if normalise_heading(h) not in _TEMPLATE_SECTIONS]
+    return "".join(
+        f"\n{heading}\n{'-' * len(heading)}\n\nWrite this section.\n" for heading in extra
+    )
+
+
 # -- adoption: in place or by copy (ADR-016 D7, D8) --------------------------
 
 #: The copy receipt, written in the docs location (D8). Its name starts with a
@@ -509,6 +781,26 @@ def plan_adoption(
     return _plan_copy(manifest, source, path, files, fmt, force)
 
 
+def _refuse_under_the_mandate(manifest: Manifest, source: str, mode: str, fmt: str) -> None:
+    """ADR-018 D11: Markdown is adopted by copy only, into a migrating
+    project, whose migration converts it (D14); an enforced project's docs
+    are a sphinx-needs project, so it adopts only rST."""
+    if manifest.get("docs.needs.state") == "enforced" and fmt != "sphinx":
+        raise UsageError(
+            f"{source} is written in {fmt}, and this project is enforced "
+            f"(docs.needs.state: enforced): its docs are a sphinx-needs project "
+            f"(ADR-018 D1, D11). Adopt it by copy into a migrating project, whose "
+            f"migration converts it, or convert it to rST first."
+        )
+    if fmt == "markdown" and mode == "in_place":
+        raise UsageError(
+            f"{source} is written in Markdown, which is adopted by copy only, "
+            f"into a migrating project whose migration converts it (ADR-018 D11): "
+            f"in place, the Markdown would stay the design record. Adopt it by "
+            f"copy instead: invariant docs adopt {source} --mode copy"
+        )
+
+
 def _source_files(root: Path) -> list[tuple[str, Path]]:
     """Every file under ``root``, sorted, anything dot-named held out."""
     found = []
@@ -558,6 +850,7 @@ def _plan_in_place(
             f"{source} is the {record} root itself: in place, paths.docs would "
             f"name every file there. Name the directory the docs are in."
         )
+    _refuse_under_the_mandate(manifest, source, "in_place", fmt)
     if reader_for(fmt) is None:
         raise UsageError(
             f"{source} is written in {fmt}, and this build has no reader for "
@@ -594,6 +887,7 @@ def _plan_copy(
     """By copy (D7, D8): into the resolved docs location, never writing the
     original. Refused, unless ``force``, when it would write over a copy
     edited since the receipt or a file no earlier copy wrote."""
+    _refuse_under_the_mandate(manifest, source, "copy", fmt)
     dest = manifest.path_for("docs")
     if path == dest or dest in path.parents or path in dest.parents:
         raise UsageError(

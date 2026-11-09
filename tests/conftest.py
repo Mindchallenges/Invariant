@@ -118,6 +118,19 @@ def _no_real_process_walk(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_docs_environment(monkeypatch):
+    """No test creates a real docs environment unless it says so.
+
+    An interactive `init` that writes the docs starter creates the pinned
+    environment with uv (ADR-018 D4, D11), which needs the network and takes
+    a while. Every test that drives `init` through a scripted prompter would
+    otherwise do it. With no uv found, `init` reports the environment not
+    created and carries on; a test of the environment supplies its own `uv`.
+    """
+    monkeypatch.setattr("invariant.domains.docs._uv", lambda: None)
+
+
 class InertWatch:
     """A successor watch that reads no process table.
 

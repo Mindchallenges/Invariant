@@ -226,8 +226,8 @@ class TestDoctorAndConfig:
         # adopter what the rule was and nothing about how to satisfy it, and
         # the gate it stood for blocks the first `pipeline advance`.
         text = out(capsys)
-        assert "overview.md" in text
-        assert "invariant init" in text
+        assert "create the architecture docs there" in text
+        assert "invariant init" in text and "docs starter" in text
         assert "enforcement.rules.docs.read_architecture: warn" in text
 
     def test_doctor_names_coverage_advisory_paths_as_an_active_exception(
@@ -3029,31 +3029,35 @@ class TestInitScaffoldsTheArchitectureDoc:
     `pipeline advance red` blocked on `docs.read_architecture` — "read the
     relevant doc under docs/architecture" — against an empty directory. `init`
     now writes a starter when the directory is absent, and only then: a
-    directory that exists, even empty, is the project's.
+    directory that exists, even empty, is the project's. Since ADR-018 D11 the
+    starter is a sphinx-needs docs project around the architecture pages
+    (tests/test_adr_018_starter.py holds its own proofs).
     """
 
     def scaffold(self, project):
-        return project / "docs" / "architecture" / "overview.md"
+        return project / "docs" / "architecture" / "overview.rst"
 
     def test_a_fresh_project_gets_a_starter_doc(self, project, capsys):
         import shutil
 
         shutil.rmtree(project / "docs")
         assert run("init", "--ecosystem", "python", "--name", "widgets") == 0
-        assert "docs/architecture/overview.md" in out(capsys)
+        assert "docs/architecture/overview.rst" in out(capsys)
         body = self.scaffold(project).read_text(encoding="utf-8")
         assert "widgets" in body
-        assert "## Layers" in body
-        assert "```mermaid" in body
-        assert "## Component responsibilities" in body
-        assert "## Compliance checklist" in body
+        assert "\nLayers\n------\n" in body
+        assert ".. mermaid::" in body
+        assert "\nComponent responsibilities\n" in body
+        assert "\nCompliance checklist\n" in body
         assert "docs.read_architecture" in body and "docs.updated" in body
 
     def test_an_existing_docs_directory_is_left_alone(self, project, capsys):
-        before = self.scaffold(project).read_text(encoding="utf-8")
+        before = (project / "docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
         assert run("init", "--ecosystem", "python") == 0
-        assert "overview.md" not in out(capsys)
-        assert self.scaffold(project).read_text(encoding="utf-8") == before
+        assert "overview.rst" not in out(capsys)
+        after = (project / "docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
+        assert after == before
+        assert not (project / "docs" / "conf.py").exists()
 
     def test_an_empty_docs_directory_counts_as_present(self, project, capsys):
         import shutil
@@ -3061,7 +3065,7 @@ class TestInitScaffoldsTheArchitectureDoc:
         shutil.rmtree(project / "docs")
         (project / "docs" / "architecture").mkdir(parents=True)
         assert run("init", "--ecosystem", "python") == 0
-        assert "overview.md" not in out(capsys)
+        assert "overview.rst" not in out(capsys)
         assert list((project / "docs" / "architecture").iterdir()) == []
 
     def test_dry_run_lists_the_scaffold_and_writes_nothing(self, project, capsys):
@@ -3069,14 +3073,17 @@ class TestInitScaffoldsTheArchitectureDoc:
 
         shutil.rmtree(project / "docs")
         assert run("init", "--dry-run") == 0
-        assert "docs/architecture/overview.md" in out(capsys)
+        assert "docs/architecture/overview.rst" in out(capsys)
         assert not (project / "docs").exists()
 
     def test_force_does_not_touch_existing_docs(self, project, capsys):
+        import shutil
+
+        shutil.rmtree(project / "docs")
         run("init", "--ecosystem", "python")
-        self.scaffold(project).write_text("# mine\n", encoding="utf-8")
+        self.scaffold(project).write_text("Mine\n====\n", encoding="utf-8")
         assert run("init", "--force", "--ecosystem", "python") == 0
-        assert self.scaffold(project).read_text(encoding="utf-8") == "# mine\n"
+        assert self.scaffold(project).read_text(encoding="utf-8") == "Mine\n====\n"
 
     def test_the_scaffold_passes_the_privacy_scan(self, project, capsys):
         """It is committed, and the project's own gate screens it."""

@@ -43,12 +43,26 @@ INIT_COMMENT = (
 
 #: What an interactive init that accepts every default writes: the project
 #: block and init's comment, no `enforcement` block (ruling 4).
+#: The repository has no docs, so init writes the docs starter and the
+#: settings that enforce the project on it (ADR-018 D10, D11).
+STARTER_DOCS = {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "docs"}}
+
 ACCEPTED_MANIFEST = (
     "version: 1\n"
     "\n"
     "project:\n"
     "  name: toy\n"
     "  ecosystems: [python]\n"
+    "\n"
+    "docs:\n"
+    "  format: sphinx\n"
+    "  needs:\n"
+    "    state: enforced\n"
+    "    srcdir: docs\n"
+    "\n"
+    "items:\n"
+    "  backend: sphinx_needs\n"
+    "  path: docs/backlog.rst\n"
     "\n" + INIT_COMMENT
 )
 
@@ -676,7 +690,7 @@ class TestInteractiveInit:
         assert code == 0, text
         raw = yaml.safe_load((toy / MANIFEST_RELPATH).read_text(encoding="utf-8"))
         assert raw["methodology"] == {"pipeline": "chore", "gates": {"coverage_min": 75}}
-        assert raw["docs"] == {"onboarding": "incremental"}
+        assert raw["docs"] == {"onboarding": "incremental", **STARTER_DOCS}
         assert "enforcement" not in raw
         assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8").endswith(INIT_COMMENT)
 

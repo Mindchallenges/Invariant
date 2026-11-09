@@ -67,6 +67,11 @@ DEFAULT_REQUIRE_LINKS = (
 STATES = ("migrating", "enforced")
 
 PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*_$")
+#: A need id: a prefix (:data:`PREFIX`) and at least one more character. The
+#: starter's ``needs_id_regex`` is this pattern, and it is how a ruleset's
+#: ``links`` and ``amended[].adr`` tell a need id from a path (D12).
+NEED_ID = re.compile(r"^[A-Z][A-Z0-9_]*_[A-Z0-9_]+$")
+_NOT_ALNUM = re.compile(r"[^A-Za-z0-9]")
 _TYPE_KEYS = ("directive", "prefix", "role")
 _LINK_KEYS = ("from", "to", "via")
 
@@ -187,6 +192,25 @@ def types_of(manifest: Any) -> tuple[NeedType, ...]:
     if raw is None:
         return default_types(str(manifest.get("items.id_prefix") or ""))
     return parse_types(raw)
+
+
+def type_of_role(types: Sequence[NeedType], role: str) -> NeedType:
+    """The first type mapped to ``role``: the one a generated need is written
+    as. Every role has one, which :func:`type_problems` makes sure of."""
+    found = next((t for t in types if t.role == role), None)
+    if found is None:
+        raise ValueError(f"no type is mapped to the role {role!r}")
+    return found
+
+
+def is_need_id(text: str) -> bool:
+    return bool(NEED_ID.match(text))
+
+
+def id_stem(text: str) -> str:
+    """``text`` as the part of a need id after its prefix: upper case, every
+    character that is not a letter or a digit as ``_`` (D12)."""
+    return _NOT_ALNUM.sub("_", text).upper()
 
 
 # -- required links -----------------------------------------------------------

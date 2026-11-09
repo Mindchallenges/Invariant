@@ -1,8 +1,10 @@
 """The guidelines domain: the effects the ruleset has on the tree (ADR-012 D12).
 
 Not an FSM, like ``stats`` and ``sweep``: there is no lifecycle to advance.
-It owns two effects. Rendering: the human checklist (A2 increment 3) and the
-managed ``guidelines/index`` block in each instruction file (increment 4).
+It owns two effects. Rendering: the human checklist (A2 increment 3), the
+managed ``guidelines/index`` block in each instruction file (increment 4), and
+in a sphinx-needs docs project the rules as needs, ``<srcdir>/rules.rst``
+(ADR-018 D12), where the checklist itself moves beside it under the mandate.
 And the ratchet baseline (A3 increment 5, D6): ``baseline`` records or
 prunes the file ``guidelines.baseline`` names, writing what
 ``core.rules.plan_baseline`` decided, the same shape as render.
@@ -119,6 +121,10 @@ class Rendered:
     ruleset: str | None = None
     #: One entry per instruction file and block.
     blocks: tuple[BlockRendered, ...] = ()
+    #: The rules as needs, ``<srcdir>/rules.rst`` (ADR-018 D12): its path and
+    #: state, both ``None`` where the docs are no docs project.
+    rules_relpath: str | None = None
+    rules_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +208,8 @@ class GuidelinesDomain:
         if not dry_run:
             plan.path.parent.mkdir(parents=True, exist_ok=True)
             plan.path.write_text(plan.text, encoding="utf-8")
+            if plan.rules is not None:
+                plan.rules.path.write_text(plan.rules.text, encoding="utf-8")
             for block in plan.blocks:
                 if block.text is not None:
                     block.path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +224,8 @@ class GuidelinesDomain:
                 )
                 for block in plan.blocks
             ),
+            rules_relpath=None if plan.rules is None else plan.rules.relpath,
+            rules_status=None if plan.rules is None else plan.rules.status,
         )
 
     def show(self) -> Shown:

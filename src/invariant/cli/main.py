@@ -24,7 +24,7 @@ from typing import Any
 from ..core import plan as plan_reader
 from ..core.agents import AgentSource
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
-from ..core.manifest import DATA_DIR, DEFAULTS, MANIFEST_RELPATH, Level, Manifest
+from ..core.manifest import DEFAULTS, MANIFEST_RELPATH, Level, Manifest
 from ..core.rules import (
     DOCTOR_ROW_RULES,
     HELD_OUT_OF_STANDDOWN,
@@ -54,11 +54,6 @@ from ..domains.session import (
 _ABSOLUTE_PATH = re.compile(r"/[^\s'\"`,;]+")
 
 EXIT_OK = 0
-
-#: The starter architecture doc `init` writes when the docs directory is
-#: absent. Shipped text lives under `data/` beside the agents and the
-#: machines; `{project}` is the one substitution.
-ARCHITECTURE_SCAFFOLD = DATA_DIR / "scaffold" / "architecture-overview.md"
 
 #: Distinguishes "not resolved yet" from "resolved to nothing". A plain None
 #: default would re-run host detection on every access for a project whose
@@ -1025,6 +1020,7 @@ def cmd_init(args) -> int:
             f"{manifest_path.relative_to(root)} already exists; pass --force to "
             f"overwrite, or edit it directly"
         )
+    mandate = _kept_mandate(root) if manifest_path.exists() else {}
 
     ecosystems = [args.ecosystem] if args.ecosystem else detect(root)
     name = args.name or root.name
@@ -1077,7 +1073,8 @@ def cmd_init(args) -> int:
     eco_settings, eco_notes = _init_ecosystem_settings(root, ecosystems)
     if store is None:
         repo_settings = _under(repo_settings, eco_settings)
-    body = _init_body(name, ecosystems, _init_settings(repo_settings, docs))
+    settings = _init_settings(repo_settings, docs)
+    body = _init_body(name, ecosystems, settings)
 
     if store is not None:
         actions = list(store.lines)
@@ -1085,33 +1082,53 @@ def cmd_init(args) -> int:
     else:
         actions = [f"write {manifest_path.relative_to(root)}"]
         docs_dir = root / docs.choice.docs
+    # The docs starter (ADR-018 D11), ONLY where the docs directory is absent.
+    # A fresh project otherwise starts out failing its own docs-first gate with
+    # nothing to read. A directory that exists, even empty, is the project's,
+    # and `--force` does not change that: it rewrites the manifest, not the
+    # docs. The starter makes the project enforced on it (D10).
+    starter, starter_note = (
+        _init_starter(root, manifest_path, body, name, docs)
+        if not docs_dir.exists()
+        else (None, None)
+    )
+    if store is None and (starter is not None or mandate):
+        settings = _over(settings, starter.settings if starter is not None else mandate)
+        body = _init_body(name, ecosystems, settings)
     host = ClaudeCodeHost(root)
     actions.extend(host.plan_install())
     actions.append("add the state root to .gitignore")
     actions.append("register this project in the oracle index")
-    # A starter architecture doc, ONLY where the docs directory is absent. A
-    # fresh project otherwise starts out failing its own docs-first gate with
-    # nothing to read: `doctor` reports the directory missing and the first
-    # `pipeline advance` blocks on `docs.read_architecture` against an empty
-    # path. A directory that exists — even empty — is the project's, and
-    # `--force` does not change that: it rewrites the manifest, not the docs.
-    scaffold = docs_dir / "overview.md" if not docs_dir.exists() else None
-    if scaffold is not None:
-        actions.append(
-            f"write {_spelled_under(root, scaffold)} (a starter architecture doc; "
-            f"the docs-first gate reads this directory)"
+    venv = None
+    if starter is not None:
+        actions.extend(
+            f"write {_spelled_under(root, path)} (the docs project's starter)"
+            for path in starter.paths()
         )
+        venv = {
+            "created": False,
+            "srcdir": _spelled_under(root, starter.srcdir),
+            "command": "invariant docs venv",
+        }
+        if args.dry_run or (prompter is None and asker is None):
+            actions.append(_venv_deferred(root, starter))
+    notes_after = [starter_note] if starter_note else []
 
     if args.dry_run:
         resolved = _init_resolved(root, manifest_path, body, written=False)
         assessment, report = _init_assessment(resolved)
-        payload = {"actions": actions, "docs_assessment": report, "notes": eco_notes}
+        payload = {
+            "actions": actions,
+            "docs_assessment": report,
+            "notes": eco_notes + notes_after,
+            "docs_venv": venv,
+        }
         text = (
             "would:\n"
             + "\n".join(f"  - {a}" for a in actions)
             + "\n\n"
             + _assessment_text(assessment, report)
-            + "".join(f"\n\n{note}" for note in eco_notes)
+            + "".join(f"\n\n{note}" for note in eco_notes + notes_after)
         )
         if prompter is None:
             listed, payload["configuration"] = _init_configuration(resolved)
@@ -1135,6 +1152,8 @@ def cmd_init(args) -> int:
                 actions.append(store.write(block.sets, block.removes))
     if store is not None and eco_settings:
         actions.append(store.write(eco_settings))
+    if store is not None and starter is not None:
+        actions.append(store.write(_over(starter.settings, {"records": {"backlog": "store"}})))
     if store is not None and docs.mode in ("incremental", "all_at_once"):
         actions.append(store.write({"docs": {"onboarding": docs.mode}}))
     elif docs.mode in ("incremental", "all_at_once"):
@@ -1154,14 +1173,27 @@ def cmd_init(args) -> int:
                 f"\n# invariant runtime state: machine-local and session-scoped\n{marker}\n"
             )
 
-    if scaffold is not None:
-        scaffold.parent.mkdir(parents=True, exist_ok=True)
-        scaffold.write_text(
-            ARCHITECTURE_SCAFFOLD.read_text(encoding="utf-8").replace(
-                "{project}", name
-            ),
-            encoding="utf-8",
-        )
+    if starter is not None:
+        from ..domains import docs as docs_domain
+
+        docs_domain.write_starter(starter)
+        # The environment needs the network, so only a run that may ask
+        # creates it (ADR-018 D4); a failure is reported, never a failed init.
+        if prompter is not None or asker is not None:
+            try:
+                docs_domain.sync_venv(starter.srcdir)
+            except InvariantError as exc:
+                venv["error"] = str(exc)
+                actions.append(
+                    f"the docs environment was not created: {exc}\n"
+                    f"    run 'invariant docs venv' once that is fixed"
+                )
+            else:
+                venv["created"] = True
+                actions.append(
+                    f"created the docs environment {_spelled_under(root, starter.srcdir)}"
+                    f"/.venv from its requirements.txt"
+                )
 
     JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
     registration = _register_after_init(root)
@@ -1182,6 +1214,7 @@ def cmd_init(args) -> int:
         after.append("\n".join(notes))
     if eco_notes:
         after.append("\n".join(eco_notes))
+    after.extend(notes_after)
     # A file holding comments is never rewritten (it would lose them): what
     # init would have written is printed to add by hand, and init carries on.
     by_hand = store.by_hand() if store is not None else None
@@ -1198,6 +1231,7 @@ def cmd_init(args) -> int:
         "docs_assessment": report,
         "store_settings_by_hand": by_hand,
         "settings_by_hand": by_hand_settings,
+        "docs_venv": venv,
     }
     # Each core question's resolved value and where it came from (ADR-017
     # D9), after everything else. Only where nothing was asked.
@@ -1221,6 +1255,81 @@ def cmd_init(args) -> int:
         + note
         + "".join(f"\n\n{text}" for text in after if text),
     )
+
+
+def _init_starter(root: Path, manifest_path: Path, body: str, name: str, docs: _InitDocs):
+    """``(starter, note)``: the docs starter `init` writes (ADR-018 D11), or
+    ``None`` and why not.
+
+    Planned over the configuration being written, before the starter's own
+    keys are added: its need types, its assessment sections and the source
+    areas its adapters derive. In a store project that is the store's, and
+    the starter goes under the store root, where ``records.docs`` resolves
+    (ADR-016 ruling G).
+    """
+    from ..domains import docs as docs_domain
+
+    if docs.store is not None:
+        base = docs.store.root
+        try:
+            candidate = Manifest.locate(root)
+        except InvariantError as exc:
+            candidate = exc
+    else:
+        base = root
+        candidate = _init_resolved(root, manifest_path, body, written=False)
+    if isinstance(candidate, InvariantError):
+        return None, f"The docs starter was not written: the configuration does not load: {candidate}"
+    try:
+        return (
+            docs_domain.plan_starter(candidate, project=name, base=base, docs=docs.choice.docs),
+            None,
+        )
+    except docs_domain.StarterNotWritten as exc:
+        return None, str(exc)
+
+
+def _kept_mandate(root: Path) -> dict[str, Any]:
+    """What `init --force` keeps of an enforced manifest it rewrites: the keys
+    that put the project under the mandate (ADR-018 D10). Rewriting the
+    manifest never moves a project back to migrating, which only the
+    reasoned route may do; ``{}`` for a manifest that is not enforced or
+    does not load."""
+    try:
+        old = Manifest.locate(root)
+    except InvariantError:
+        return {}
+    if old.store is not None or old.get("docs.needs.state") != "enforced":
+        return {}
+    needs = {"state": "enforced"}
+    if old.get("docs.needs.srcdir") is not None:
+        needs["srcdir"] = old.get("docs.needs.srcdir")
+    items = {"backend": old.get("items.backend"), "path": old.get("items.path")}
+    if old.get("items.closed_path") is not None:
+        items["closed_path"] = old.get("items.closed_path")
+    return {"docs": {"format": old.get("docs.format"), "needs": needs}, "items": items}
+
+
+def _venv_deferred(root: Path, starter) -> str:
+    """The action line naming the command that creates the docs environment."""
+    srcdir = _spelled_under(root, starter.srcdir)
+    return (
+        f"create the docs environment {srcdir}/.venv: run 'invariant docs venv' "
+        f"(only an interactive init creates it: it needs the network)"
+    )
+
+
+def _over(settings: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:
+    """``settings`` with every key of ``extra`` written over it."""
+    import copy
+
+    merged = copy.deepcopy(dict(settings))
+    for key, value in extra.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _over(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def _spelled_under(root: Path, path: Path) -> str:
@@ -1340,9 +1449,9 @@ def cmd_doctor(args) -> int:
                 + (
                     ""
                     if docs.is_dir()
-                    else "  missing: create overview.md there (invariant init "
-                    "scaffolds one when this directory is absent), or set "
-                    "enforcement.rules.docs.read_architecture: warn"
+                    else "  missing: create the architecture docs there (invariant "
+                    "init writes the docs starter when this directory is absent), or "
+                    "set enforcement.rules.docs.read_architecture: warn"
                 ),
             )
         )
@@ -4444,8 +4553,16 @@ def cmd_guidelines_render(args) -> int:
         verb = "would write" if args.dry_run else "wrote"
         text = _RENDER_STATUS[result.status].format(verb=verb, rel=result.relpath)
         text += f" (ruleset {result.ruleset})"
+        rules = (
+            [
+                _RENDER_STATUS[result.rules_status].format(verb=verb, rel=result.rules_relpath)
+                + " (the rules as needs)"
+            ]
+            if result.rules_relpath is not None
+            else []
+        )
         text = "\n".join(
-            [text, *(_block_line(b, verb, args.overwrite_local) for b in result.blocks)]
+            [text, *rules, *(_block_line(b, verb, args.overwrite_local) for b in result.blocks)]
         )
     return emit(args, {
         "status": result.status,
@@ -4453,6 +4570,11 @@ def cmd_guidelines_render(args) -> int:
         "dry_run": args.dry_run,
         "path": result.relpath,
         "ruleset": result.ruleset,
+        "rules": None if result.rules_relpath is None else {
+            "path": result.rules_relpath,
+            "status": result.rules_status,
+            "written": result.written,
+        },
         "blocks": [
             {"path": b.relpath, "block": b.name, "status": b.status, "written": b.written}
             for b in result.blocks

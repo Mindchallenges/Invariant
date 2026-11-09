@@ -212,8 +212,11 @@ guidelines:                    # the project's coding guidelines (ADR-012 D3, D1
                                # `guidelines baseline`; never exempt from isolation
   checklist: null              # where `guidelines render` writes the human
                                # checklist, in docs.format; null =
-                               # checklist.<md|rst> beside the ruleset. A
-                               # generated file: never exempt from isolation
+                               # checklist.<md|rst> beside the ruleset, and
+                               # under the mandate (docs.needs.state:
+                               # enforced) <srcdir>/checklist.rst, beside
+                               # rules.rst (ADR-018 D12). A generated file:
+                               # never exempt from isolation
   instruction_files: null      # the .md files carrying the managed
                                # guidelines/index block; null = the host
                                # adapter's default (CLAUDE.md for claude_code).
@@ -354,7 +357,7 @@ docs:
       exclude: []                # globs held out of every source
 ```
 
-The defaults are the starter `overview.md`'s shape, and they change nothing
+The defaults are the docs starter's overview shape, and they change nothing
 but `doctor`'s informational `docs assessment` row. `Manifest` refuses at
 load, naming it, an unknown key under `docs.assess` or `docs.assess.areas`,
 an unknown or repeated check, a `from` outside the three, a glob that climbs

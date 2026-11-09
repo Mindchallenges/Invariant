@@ -830,6 +830,82 @@ behind `INVARIANT_TEST_NEEDS_JSON`) classified with its seven element types
 mapped to `element` and nothing unmapped. This repository, migrating on
 `docs.format: markdown`: both gates N/A.
 
+### As built: increment 4 (2026-11-09)
+
+D11 and D12, as the architecture docs describe them (cli.md, `init`, `docs
+assess`, `docs adopt` and `guidelines render`; overview.md, `domains/docs`,
+`core/guidelines`, `core/docformat`, `core/needs`; manifest.md,
+`guidelines.checklist`). Where the build settles what the text left open:
+
+- **The pins.** `requirements.txt` pins sphinx-needs 9.2.0, Sphinx 9.1.1,
+  sphinxcontrib-mermaid 2.1.1 and every package they pull, resolved for
+  Python 3.12 (run with `uv pip compile`). sphinx-needs 9.2 is the release
+  dang's strict build is green on (run, above), and its keys are
+  `needs_fields` and `needs_links`, which 8.1.1 already warns the old keys
+  over (increment 3). Sphinx 9.1 is the newest release on Python 3.12; 9.2
+  needs 3.13. The suite builds the starter strictly in exactly this set,
+  created by `init` itself on Python 3.14, and the same set was run by hand
+  on 3.12: both green, no warning.
+- **The source directory is the directory above `paths.docs`**, so the
+  default is D3's `docs/` around `docs/architecture`, and a path offered at
+  `init` (`design/arch`) gets `design/`. The starter is not written, and
+  the project stays migrating with a note saying why, where that directory
+  would be the root, already holds a `conf.py` (a Sphinx project of the
+  project's own, D13's), or holds any file the starter writes. Nothing is
+  ever written over.
+- **`docs.needs.srcdir` is written**, though the default rule would find
+  it: `--dry-run` resolves the manifest it would write before `conf.py`
+  exists, and an enforced manifest with no docs project is refused at load.
+- **In a store** the starter goes under the store root, where
+  `records.docs` resolves (ADR-016 ruling G), and its keys go to this
+  repository's block with `records.backlog: store` (D3). D5's store leg
+  answers it "not established" until increment 8, as D5 recommends.
+- **The two generated pages are written by the starter from no ruleset**,
+  with the managed marker, so the toctree names pages that exist before any
+  ruleset does and `guidelines render` takes them over. So that the toctree
+  names the checklist where it will be rendered, a null
+  `guidelines.checklist` is `<srcdir>/checklist.rst` under the mandate,
+  beside `rules.rst`, instead of beside the ruleset.
+- **`rules.rst` is rendered where `docs.format` is `sphinx`** and the
+  source directory lies in the tree (a store's is not this command's), so a
+  migrating project on Markdown, such as this one, gains no page. The need
+  type is the `rule` role's first type. A link is a need id when it matches
+  the starter's `needs_id_regex`, `^[A-Z][A-Z0-9_]*_[A-Z0-9_]+$`
+  (`core/needs.NEED_ID`); a path never does.
+- **The item fields** are read by `conf.py` at build time from the items
+  pages it names (`_ITEM_FILES`, the backlog page), less the options a need
+  directive owns, as dang's `_backlog_fields` does.
+- **The element needs** are the assessment's own areas, so a fresh starter
+  has no `areas` gap; an id is the element prefix and the area's name as a
+  need id, or its path where two names would collide. "Sphinx-needs
+  present", for the assessment's element-need rule, is `docs.format: sphinx`
+  with a `conf.py` whose literal `extensions` list `sphinx_needs`; one that
+  cannot be read keeps the whole-text rule.
+- **Adoption** refuses Markdown in place anywhere, and any source not in
+  `sphinx` in an enforced project, by copy too; both after the location
+  checks, so a source outside the roots is still told why first.
+- **`init --force`** over an enforced manifest keeps the keys that make it
+  enforced: rewriting the manifest never moves a project back to
+  migrating, which D10 keeps to the reasoned route.
+- **The environment** is created when either prompter may ask (the docs
+  step's or the questionnaire's), and a failure, `uv` absent or a sync that
+  failed, is reported with `invariant docs venv` named, never a failed
+  `init`.
+- **Not built here:** the refusal of a level question over `docs.format`,
+  which D11 places with ADR-017 increment 3 (increment 8).
+
+The proofs: `init` on a toy Python project and a toy Flutter tree writing
+the starter, the manifest enforced on it, and the assessment finding no gap;
+interactive `init` creating the environment with uv and `docs build` green
+on both, then `guidelines render` with this repository's ruleset green too
+(behind `INVARIANT_TEST_SPHINX_BUILD`); `--dry-run` naming every file
+written without a terminal, neither creating an environment, both naming
+`invariant docs venv`; `guidelines render` writing `rules.rst` and
+`generated_current` catching a hand edit; a collision of two rule ids
+refused at load. The existing init proofs (ADR-016's offers, ADR-017's
+report) stand where the docs exist, and change only where the starter
+replaced the Markdown one.
+
 ## Alternatives rejected
 
 | Alternative | Why not |

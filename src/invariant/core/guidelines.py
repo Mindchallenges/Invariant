@@ -36,6 +36,11 @@ It also renders the human checklist (A2 increment 3): text in the project's
 ``docs.format`` whose first line is a managed marker holding the digest of
 everything after it, so a hand edit is detectable without re-rendering
 (ruling DN-B). Rendering is pure; writing the file is ``domains/guidelines``'.
+In a sphinx-needs docs project it renders the rules as needs too (ADR-018
+D12, ``render_rule_needs``): one need of the ``rule`` role's type per rule,
+its id the rule id as a need id (``rule_need_id``), and the need ids in its
+``links`` and ``amended[].adr`` as ``decided_by``. Two rule ids that would
+give one need id are refused at load.
 
 And it renders the managed block an instruction file carries (A2 increment
 4): one block, ``guidelines/index``, holding the rule index and the
@@ -64,6 +69,7 @@ from typing import Any
 
 import yaml
 
+from . import needs as needs_reader
 from .errors import InvariantError
 from .manifest import glob_matches, project_relative
 
@@ -442,6 +448,8 @@ class _Reader:
             self.problem("rules must be a list")
             return ()
         found: list[Guideline] = []
+        #: Each need id stem met so far and the rule id that gave it (D12).
+        stems: dict[str, str] = {}
         for position, item in enumerate(raw, start=1):
             where = f"rules[{position}]"
             if not isinstance(item, Mapping):
@@ -456,6 +464,18 @@ class _Reader:
             where = f"rule {rule_id!r}"
             if any(r.id == rule_id for r in found):
                 self.problem(f"{where} is declared twice; a rule id is never reused")
+                continue
+            stem = needs_reader.id_stem(rule_id)
+            twin = stems.setdefault(stem, rule_id)
+            if twin != rule_id:
+                # ADR-018 D12: each rule is rendered as the need RULE_<stem>, and
+                # two needs with one id fail the docs project's build.
+                self.problem(
+                    f"{where} and rule {twin!r} collide as one need id, "
+                    f"{rule_need_id(rule_id)}: a rule id upper-cased, with every "
+                    f"character that is not a letter or a digit as _, names one "
+                    f"rule need (ADR-018 D12). Rename one of them"
+                )
                 continue
             if rule_id in self.registered:
                 # DN-15: `invariant override <id>` names a registered rule or a
@@ -1134,7 +1154,10 @@ class _Reader:
                 on = ""
             adr = item.get("adr")
             if adr is not None and not (isinstance(adr, str) and adr.strip()):
-                self.problem(f"{at}: adr must be a non-empty string naming an ADR file")
+                self.problem(
+                    f"{at}: adr must be a non-empty string naming an ADR file or a "
+                    f"decision need id"
+                )
                 adr = None
             found.append(Amendment(on=on, note=self.text(at, item, "note"), adr=adr))
         return tuple(found)
@@ -1173,16 +1196,52 @@ class _Reader:
 # -- the generated checklist (ADR-012 D3, ruling DN-B) ---------------------------
 
 
-def render_checklist(ruleset: Ruleset, fmt: str, *, source: str) -> str:
+def render_checklist(ruleset: Ruleset | None, fmt: str, *, source: str | None) -> str:
     """The human checklist for ``ruleset`` in ``fmt``, marker line first.
 
     ``source`` is the ruleset's project-relative path, named in the header so
     a reader knows where to make a change. The marker's digest is the digest
     of everything after the marker line, which is what makes a hand edit
-    detectable by :func:`split_managed` alone.
+    detectable by :func:`split_managed` alone. With no ruleset, the page
+    says how to get one: the docs starter writes it so that its toctree
+    names a page that exists before any ruleset does (ADR-018 D12).
     """
     _format(fmt)
-    writer = _MarkdownWriter() if fmt == "markdown" else _RstWriter()
+    return _managed(_MarkdownWriter() if fmt == "markdown" else _RstWriter(), ruleset, source)
+
+
+#: The rules page's file name, in the docs project's source directory (ADR-018 D12).
+RULES_PAGE = "rules.rst"
+#: The ``rule`` role's default type, as ``core/needs`` declares it.
+DEFAULT_RULE_DIRECTIVE = "rule"
+DEFAULT_RULE_PREFIX = "RULE_"
+
+
+def rule_need_id(rule_id: str, prefix: str = DEFAULT_RULE_PREFIX) -> str:
+    """The need id a rule is rendered as: ``prefix`` and the rule id upper-cased,
+    every character that is not a letter or a digit as ``_`` (ADR-018 D12)."""
+    return prefix + needs_reader.id_stem(rule_id)
+
+
+def render_rule_needs(
+    ruleset: Ruleset | None,
+    *,
+    source: str | None,
+    directive: str = DEFAULT_RULE_DIRECTIVE,
+    prefix: str = DEFAULT_RULE_PREFIX,
+) -> str:
+    """The rules as needs (ADR-018 D12), rST, managed marker first.
+
+    One ``directive`` need per rule, under its section's title, with id
+    :func:`rule_need_id`. The need ids among the rule's ``links`` and its
+    amendments' ``adr`` are its ``decided_by`` links, so a ``rule → decision``
+    link rule can be met; a path link stays text. The need's content is the
+    checklist's text of the rule. With no ruleset, a page with no rules.
+    """
+    return _managed(_RuleNeedsWriter(directive, prefix), ruleset, source)
+
+
+def _managed(writer: _Writer, ruleset: Ruleset | None, source: str | None) -> str:
     body = "\n" + writer.render(ruleset, source)
     return writer.marker(digest_of(body.encode("utf-8"))) + "\n" + body
 
@@ -1266,8 +1325,16 @@ class _Writer:
     heading: Callable[[str, int], list[str]]
     code: Callable[[str], str]
 
-    def render(self, ruleset: Ruleset, source: str) -> str:
+    def render(self, ruleset: Ruleset | None, source: str | None) -> str:
         lines = self.heading(self.title, 1)
+        if ruleset is None or source is None:
+            lines.append(
+                f"No guidelines ruleset is configured, so there are no rules yet. "
+                f"Set {self.code('guidelines.ruleset')} to the project's ruleset, "
+                f"then run {self.code('invariant guidelines render')}: it writes "
+                f"this page from the ruleset."
+            )
+            return "\n".join(lines).rstrip("\n") + "\n"
         lines.append(
             f"Generated by {self.code('invariant guidelines render')} from "
             f"{self.code(source)} (ruleset {ruleset.digest}). Do not edit this "
@@ -1341,6 +1408,43 @@ class _RstWriter(_Writer):
 
     def code(self, text: str) -> str:
         return f"``{text}``"
+
+
+class _RuleNeedsWriter(_RstWriter):
+    """The checklist's rST, each rule a need rather than a subsection."""
+
+    title = "Guideline rules"
+
+    def __init__(self, directive: str, prefix: str) -> None:
+        self.directive = directive
+        self.prefix = prefix
+
+    def rule(self, rule: Guideline) -> list[str]:
+        decided = list(
+            dict.fromkeys(
+                [link for link in rule.links if needs_reader.is_need_id(link)]
+                + [
+                    a.adr for a in rule.amended
+                    if a.adr is not None and needs_reader.is_need_id(a.adr)
+                ]
+            )
+        )
+        shown = replace(
+            rule, links=tuple(link for link in rule.links if not needs_reader.is_need_id(link))
+        )
+        # The checklist's text of the rule, without its subsection title.
+        content = super().rule(shown)[3:]
+        first = next(i for i, line in enumerate(content) if line.startswith("- "))
+        content.insert(first, f"- Rule: {self.code(rule.id)}")
+        lines = [
+            f".. {self.directive}:: {' '.join(rule.title.split())}",
+            f"   :id: {rule_need_id(rule.id, self.prefix)}",
+        ]
+        if decided:
+            lines.append(f"   :decided_by: {', '.join(decided)}")
+        lines.append("")
+        lines += [f"   {line}" if line else "" for line in content]
+        return lines
 
 
 

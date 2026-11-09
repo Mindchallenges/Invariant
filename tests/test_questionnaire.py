@@ -55,6 +55,15 @@ TODAYS_MANIFEST = (
     "# prints the resolved configuration and where each value came from.\n"
 )
 
+#: What init writes for the same repository, which has no docs: the docs
+#: starter, and the project enforced on it (ADR-018 D10, D11).
+STARTER_MANIFEST = TODAYS_MANIFEST.replace(
+    "\n# Everything else",
+    "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: docs\n"
+    "\nitems:\n  backend: sphinx_needs\n  path: docs/backlog.rst\n"
+    "\n# Everything else",
+)
+
 CORE_KEYS = [
     "project.ecosystems",
     "commands.test",
@@ -666,7 +675,7 @@ class TestNonInteractiveInit:
     ):
         code, text = run(capsys, "init", "--name", "toy")
         assert code == 0, text
-        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
+        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST
         assessment = text.index("docs assessment:")
         listed = text.index("configuration (core questions):")
         assert assessment < listed
@@ -693,7 +702,7 @@ class TestNonInteractiveInit:
                 )
             code, text = run(capsys, *argv)
             assert code == 0, text
-            assert (root / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
+            assert (root / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST
             assert (root / ".gitignore").read_text(encoding="utf-8") == (
                 "\n# invariant runtime state: machine-local and session-scoped\n"
                 ".claude/invariant/state/\n"
@@ -712,7 +721,7 @@ class TestNonInteractiveInit:
             "value": "docs/architecture",
             "provenance": "default",
         }
-        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
+        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST
 
     def test_the_field_matches_config_show_for_every_listed_key(self, toy, capsys):
         write_user({"version": 1, "defaults": {"methodology": {"gates": {"coverage_min": 80}}}})
@@ -798,4 +807,4 @@ class TestInteractiveInitIsUnchanged:
         code, text = run(capsys, "init", "--name", "toy")
         assert code == 0, text
         assert "configuration (core questions):" not in text
-        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
+        assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST
