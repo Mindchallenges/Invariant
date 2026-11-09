@@ -439,14 +439,20 @@ invariant doctor
     so a typed and a hand-written command are judged alike; a misshapen
     command still loads.
 
-    Accepted, not yet built (ADR-018 D4, D10). A `docs venv` row: the docs
-    environment is present, matches `requirements.txt` and its
-    `sphinx-build` runs. A `plantuml` row when `docs.diagrams` lists
-    `plantuml`, because PlantUML needs Java outside the environment. A `docs
-    mandate` row that fails for a project still `migrating`, naming the
-    migration, so the debt is never silent. Increment 3 of ADR-018 builds
-    all three, with the state key the last one reads; increment 7 proves
-    `docs mandate` passing for invariant itself.
+    Built (ADR-018 D4, D10, increment 3). The `docs mandate` row passes for
+    an enforced project and fails for one still `migrating`, naming the
+    migration (D14) and its last step, `docs.needs.state: enforced`, so the
+    debt is never silent; increment 7 proves it passing for invariant itself.
+    The `docs venv` row: the docs environment is present, matches
+    `requirements.txt` (the hash recorded in it) and its `sphinx-build
+    --version` runs; each failure names `invariant docs venv`. While a
+    project migrates on a docs format other than `sphinx` it passes, saying
+    the environment is not required until the migration. The `plantuml` row,
+    present only when `docs.diagrams` lists `plantuml`, checks that the
+    program of the command `conf.py` assigns to `plantuml` (read without
+    running it; the extension's default `plantuml` otherwise) is found on
+    `PATH`, because PlantUML needs Java outside the environment. Nothing is
+    run but `sphinx-build --version`.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -863,18 +869,42 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
     `source`, `location`, `format`, `assessable`, `files`, `overwrites`,
     `kept`, `settings`, `written` and `dry_run`.
 
-    Accepted, not yet built (ADR-018 D4, D5, D7, D11, D14). The `docs` group
+    Built (ADR-018 D4, D5, increment 3):
+      docs venv [--check]    create `<srcdir>/.venv` with `uv venv` when it
+                             is absent, then `uv pip sync` it to the pinned
+                             `<srcdir>/requirements.txt`, and record the
+                             file's SHA-256 in
+                             `.venv/invariant-requirements.sha256`, written
+                             only after a sync that succeeded. `--check`
+                             creates nothing and exits 1 unless the
+                             environment is present and its recorded hash
+                             matches the file. No `uv` on `PATH`, no
+                             requirements file, or a failed step is refused,
+                             naming it. `--json` carries `srcdir`, `venv`,
+                             `present`, `in_sync` and both hashes.
+      docs build [--force]   the strict build: `<srcdir>/.venv/bin/sphinx-build
+                             -E -W --keep-going -n -b html -D
+                             needs_build_json=1 <srcdir>
+                             <state>/docs/build/html`, under a lock on the
+                             state root (a second build refuses rather than
+                             share the output directory). An absent or stale
+                             environment is refused naming `invariant docs
+                             venv`, and records nothing. The record,
+                             `<state>/docs/builds/<digest>.json`, holds the
+                             exit status, every `WARNING:`/`ERROR:`/
+                             `CRITICAL:`/`SEVERE:` line read by the `sphinx`
+                             adapter's parser and spelled from the project
+                             (file, line, `[type]`), the documents read, the
+                             command, and the path of the build's
+                             `needs.json`, kept beside the record as
+                             `<digest>.needs.json`. The digest is of the
+                             source directory's tree (core/needs,
+                             `tree_digest`). A tree already recorded green is
+                             not built again unless `--force`; a red one is.
+                             Exit 0 when green, 1 when not. `--json` carries
+                             the record and `built`.
+    Accepted, not yet built (ADR-018 D7, D11, D14). The `docs` group
     gains:
-      docs venv [--check]    create or re-sync `<docs project>/.venv` with
-                             `uv` from its pinned `requirements.txt`, or
-                             report whether it matches (increment 3).
-      docs build             the strict build, `-E -W --keep-going -n -b
-                             html` with `needs_build_json` forced, run with
-                             the environment's own `sphinx-build` and
-                             recorded with its exit status, parsed warnings,
-                             `needs.json` path and the source tree's digest,
-                             which `docs.builds_strict` and
-                             `docs.needs_traceable` read (increment 3).
       docs decision new "<title>"
                              mint the next decision record page under
                              `<srcdir>/decisions/` with its `DEC_ADR_<nnn>`

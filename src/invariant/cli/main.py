@@ -1280,7 +1280,7 @@ def _register_after_init(root: Path) -> dict:
 
 
 def cmd_doctor(args) -> int:
-    from ..domains.docs import adoption_drift
+    from ..domains.docs import adoption_drift, mandate_row, plantuml_row, venv_row
     from ..hosts.claude_code import ClaudeCodeHost
 
     checks: list[tuple[str, bool, str]] = []
@@ -1365,6 +1365,13 @@ def cmd_doctor(args) -> int:
             checks.append(("docs adoption", True, drift.detail()))
             if not drift.clean:
                 warned.add("docs adoption")
+        # The docs mandate (ADR-018 D4, D10): its state, the pinned docs
+        # environment, and PlantUML's launcher when the diagrams list it.
+        checks.append(mandate_row(ctx.manifest))
+        checks.append(venv_row(ctx.manifest))
+        plantuml = plantuml_row(ctx.manifest)
+        if plantuml is not None:
+            checks.append(plantuml)
 
         for name in ("build", "test"):
             configured = ctx.manifest.get(f"commands.{name}")
@@ -1627,6 +1634,61 @@ def cmd_docs_assess(args) -> int:
     session = onboarding.record_plan(ctx, assessment)
     payload["plan"] = onboarding.plan_payload(session)
     return emit(args, payload, "\n".join([text, "", *onboarding.plan_lines(session)]))
+
+
+def cmd_docs_venv(args) -> int:
+    """Create or re-sync the docs project's pinned environment (ADR-018 D4).
+
+    ``--check`` reports whether it matches ``requirements.txt`` and exits 1
+    when it does not; it creates nothing.
+    """
+    from ..domains.docs import docs_project, sync_venv, venv_state
+
+    ctx = Context()
+    srcdir = docs_project(ctx.manifest)
+    state = venv_state(srcdir) if args.check else sync_venv(srcdir)
+    payload = {
+        "srcdir": str(srcdir),
+        "venv": str(state.venv),
+        "present": state.present,
+        "in_sync": state.in_sync,
+        "requirements_sha256": state.expected,
+        "recorded_sha256": state.recorded,
+    }
+    emit(args, payload, state.describe())
+    return EXIT_OK if state.in_sync else 1
+
+
+def cmd_docs_build(args) -> int:
+    """The docs project's strict build, recorded for its tree (ADR-018 D5).
+
+    Exit 0 on a green build (or one already recorded green for this tree,
+    not built again), 1 on a failed one; the record is what
+    ``docs.builds_strict`` and ``docs.needs_traceable`` read.
+    """
+    from ..domains.docs import build_docs
+
+    ctx = Context()
+    record, built = build_docs(ctx.manifest, force=args.force)
+    payload = {**record.to_dict(), "built": built}
+    short = record.digest[:12]
+    if record.passed:
+        text = (
+            f"strict build of {record.srcdir}/ green at {short}"
+            + ("" if built else " (already recorded green; not built again)")
+        )
+    else:
+        text = "\n".join(
+            [
+                (
+                    f"strict build of {record.srcdir}/ failed at {short}: exit "
+                    f"{record.exit_code}, {len(record.diagnostics)} warning(s) or error(s)"
+                ),
+                *(f"  {line}" for line in record.diagnostics),
+            ]
+        )
+    emit(args, payload, text)
+    return EXIT_OK if record.passed else 1
 
 
 def cmd_docs_adopt(args) -> int:
@@ -6276,6 +6338,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(func=cmd_docs_adopt)
+    q = p.add_parser(
+        "venv",
+        help="create or re-sync the docs project's pinned environment with uv",
+    )
+    q.add_argument(
+        "--check",
+        action="store_true",
+        help="report whether it matches requirements.txt; create nothing",
+    )
+    q.set_defaults(func=cmd_docs_venv)
+    q = p.add_parser(
+        "build",
+        help="the docs project's strict build, recorded for its tree's digest",
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="build again even when this tree is already recorded green",
+    )
+    q.set_defaults(func=cmd_docs_build)
 
     p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
     q = p.add_parser("init", help="create a store for this repository and link it")

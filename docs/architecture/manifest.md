@@ -271,34 +271,69 @@ manifest key (its id is its key) or a shipped one's prompt and choices. A
 step (`docs`, `store`, `commands`) may be moved, never defined (ruling 11).
 Every default is the shipped catalogue, which changes no resolved value.
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D1 to D3, D5, D6, D8 to D10, D13).** `docs`
-gains a `needs` block: `state` (`migrating` or `enforced`, read as
-`migrating` where absent), `types` (a list of `{directive, prefix, role}`
-mapping the project's need types to the seven roles `requirement`,
-`decision`, `element`, `ui`, `rule`, `idea` and `bug`, replacing the
-defaults whole when set; a type with no role is an extension type),
-`srcdir` (the docs project's source directory, default the nearest
-directory at or above `paths.docs` holding a `conf.py`), `require_links`
-(default: every `decision` and every `bug` links to an `element`),
-`decision_statuses`, `refused_paths`, and for a documentation repository
-`home` and `external`. `docs.diagrams` becomes a list (one name still
-loads), and `docs.diagrams_current` reads the rST markers `.. mermaid::`
-and `.. uml::` beside the Markdown fences. `enforcement.rules` gains `docs.builds_strict`,
-`docs.needs_traceable`, `docs.design_home`, `docs.decisions_recorded` and
-`items.decisions_linked`, which warn while migrating and block when
-enforced. Refused at load, naming it: a role with no type, an unknown role,
-a directive or prefix used twice, a prefix not matching
-`^[A-Z][A-Z0-9_]*_$`, and an `idea` or `bug` type whose prefix differs from
-what the items backend mints; and, when enforced, `docs.format` other than
-`sphinx`, `items.backend` other than `sphinx_needs`, an items store outside
-the source directory, and any of the five rules set below `block` (see "An
-override either takes effect or says it did not"). `paths.docs` keeps its
-meaning: the architecture pages. Increment 3 builds `state`, `types`,
-`srcdir`, `require_links`, `decision_statuses`, the first two rules and
-the enforced refusals of `docs.format`, `items.backend` and the items
-store, and the `docs.diagrams` list with `docs.diagrams_current`'s rST
-markers; 5 `refused_paths`, the other three
-rules and the floor; 8 `home` and `external`.
+**Built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) increment 3; D1 to D3, D5, D6, D10).** `docs` has a `needs` block:
+
+```yaml
+docs:
+  diagrams: [mermaid, plantuml]   # a list; one name still loads as a list of one
+  needs:
+    state: migrating              # migrating | enforced; the default
+    types:                        # null: the seven baseline types; a list replaces them whole
+      - {directive: component, prefix: COMP_, role: element}
+      - {directive: dec,       prefix: DEC_,  role: decision}
+      - {directive: instr,     prefix: INSTR_}       # no role: an extension type
+    srcdir: null                  # null: the nearest dir at or above paths.docs with a conf.py
+    require_links:                # each need of role `from` links to one of role `to`
+      - {from: decision, to: element}
+      - {from: bug, to: element}
+      # - {from: rule, to: decision, via: [decided_by]}   # only through those options
+    decision_statuses: [proposed, accepted, superseded, rejected]
+```
+
+- **`state`** reads `migrating` where absent, so upgrading invariant blocks
+  nothing. `enforced` is written by the migration's last step (D14).
+- **`types`** maps the project's sphinx-needs directives to the seven roles
+  `requirement`, `decision`, `element`, `ui`, `rule`, `idea` and `bug`. Null
+  is the baseline: `req`/`REQ_`, `dec`/`DEC_`, `comp`/`COMP_`, `ui`/`UI_`,
+  `rule`/`RULE_`, `idea` and `bug`, whose prefixes are what the items backend
+  mints, `items.id_prefix` followed by `IDEA_` or `BUG_`. A list replaces
+  the baseline whole, so it names every role.
+- **`srcdir`** is the docs project's source directory, read against the
+  repository (or the store, under `records.docs: store`; it is a docs path
+  key). Null is the default rule the `sphinx` adapter's detection uses: the
+  nearest directory at or above `paths.docs` holding a `conf.py`, strictly
+  below the root.
+- **`require_links`** and **`decision_statuses`** are what
+  `docs.needs_traceable` holds a built `needs.json` to (state_model.md).
+
+Refused at load, naming it: an unknown key under `docs.needs`; a `state`
+outside the two; in `types`, an entry that is not a mapping of
+`directive`, `prefix` and `role`, a role with no type, an unknown role, a
+directive or prefix used twice, a prefix not matching `^[A-Z][A-Z0-9_]*_$`,
+an `idea` or `bug` role with any type but its own directive, and an item
+type whose prefix differs from what the items backend mints; in
+`require_links`, an entry with an unknown role, without `from` or `to`, or
+whose `via` is not a non-empty list; an empty or multi-line
+`decision_statuses`; a `srcdir` that is not one line; and a `docs.diagrams`
+that is neither a name nor a list of names. **When enforced**, also:
+`docs.format` other than `sphinx`, `items.backend` other than
+`sphinx_needs`, `records.backlog` differing from `records.docs`, no docs
+project (no `conf.py` at or above `paths.docs` and no `srcdir`), and an
+`items.path` or `items.closed_path` outside the source directory.
+
+`enforcement.rules` gains `docs.builds_strict` and `docs.needs_traceable`,
+`warn` in every profile; an enforced project's load raises both to `block`
+from its profile (provenance `profile:<name> (docs.needs.state: enforced)`),
+and a level may still set them until increment 5's floor. `paths.docs` keeps
+its meaning: the architecture pages.
+
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D8, D9, D13).** `docs.needs` gains
+`refused_paths` (increment 5), and for a documentation repository `home` and
+`external` (increment 8). `enforcement.rules` gains `docs.design_home`,
+`docs.decisions_recorded` and `items.decisions_linked`, which warn while
+migrating and block when enforced, and all five rules gain the floor of
+`block` in an enforced project (see "An override either takes effect or says
+it did not"), increment 5.
 
 **Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9, increment 1).** `docs.assess` configures the
 docs assessment (`invariant docs assess`, cli.md), and `enforcement.rules`
@@ -2077,9 +2112,10 @@ vars:
   skipped (ADR-018 D3): the nearest directory at or above `paths.docs` that
   holds a `conf.py`, never the repository root itself, because a root
   `conf.py` is a documentation repository's own content and the starter puts
-  the docs project at `docs/`. Until `docs.needs.srcdir` is a key (ADR-018
-  increment 3) that default rule is read against the default `paths.docs`,
-  `docs/architecture`. So a Python project whose only Sphinx tree is a
+  the docs project at `docs/`. Detection reads that rule against the default
+  `paths.docs`, `docs/architecture`: an adapter is handed the root alone, so
+  a configured `paths.docs` or `docs.needs.srcdir` (ADR-018 increment 3,
+  whose default this rule is) does not reach it. So a Python project whose only Sphinx tree is a
   starter-shaped `docs/conf.py` is `python`, not `sphinx`, and a
   documentation repository keeping its content at `docs/` is detected only
   by `init --ecosystem sphinx`. Two remaining trees are not guessed between:
@@ -2138,7 +2174,7 @@ the derivation of commands from CI (D3, D4). Adapters also gain
 `related_selectors(changed)` and `global_inputs()` for the measured cadence
 (D5, increment 4). The docs project of ADR-018 is built by `invariant docs
 build` from its own environment, never through `commands.*` (ADR-018 D3,
-D5, increment 3).
+D5; built in increment 3).
 
 ## Backends for work items
 

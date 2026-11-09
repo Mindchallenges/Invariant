@@ -55,7 +55,18 @@ LANDING_ROLE = "landing"
 #: ENTRY gate. Same moment on the shipping edge, absent on every other.
 DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
     "design": {"exit": ["docs.read_architecture"]},
-    "landing": {"entry": ["docs.updated", "docs.diagrams_current"]},
+    "landing": {
+        "entry": [
+            "docs.updated",
+            "docs.diagrams_current",
+            # The docs project's strict build and its traceability (ADR-018
+            # D5, D6): on every lane, N/A where the change touches neither the
+            # source directory nor docs.needs, and on a migrating project
+            # whose docs are not yet sphinx (D10).
+            "docs.builds_strict",
+            "docs.needs_traceable",
+        ]
+    },
 }
 
 #: Attached to the landing state's ENTRY beside the update gate, and only on a

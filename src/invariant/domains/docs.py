@@ -32,6 +32,16 @@ what `docs adopt` would do, in place or by copy, and refuses what it must;
 never touching the original; :func:`adoption_drift` names every original
 file changed, added or removed since. The configuration itself is written by
 the CLI, at the project's own level.
+
+The docs project (ADR-018 D4, D5) is the other part that runs anything:
+:func:`sync_venv` creates or re-syncs ``<srcdir>/.venv`` with ``uv`` from the
+pinned ``requirements.txt`` and records the file's hash there;
+:func:`build_docs` runs the environment's own ``sphinx-build`` strictly, HTML
+with ``needs_build_json`` forced, and records the result under the state root
+for the source tree's digest, which ``docs.builds_strict`` and
+``docs.needs_traceable`` read (``core/needs`` holds the record's shape).
+``doctor``'s ``docs venv``, ``plantuml`` and ``docs mandate`` rows are
+answered here too.
 """
 
 from __future__ import annotations
@@ -39,6 +49,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
+import shutil
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -49,9 +62,11 @@ from urllib.parse import unquote
 import yaml
 
 from ..adapters import get_adapter
+from ..adapters.sphinx import diagnostics
 from ..core import git
+from ..core import needs as needs_reader
 from ..core.docformat import Link, Reader, detect_format, normalise_heading, reader_for
-from ..core.errors import UsageError
+from ..core.errors import LockTimeout, StateError, UsageError
 from ..core.manifest import (
     ADOPT_MODES,
     ASSESS_CHECKS,
@@ -59,6 +74,7 @@ from ..core.manifest import (
     glob_matches,
     project_relative,
 )
+from ..core.store import JsonStore
 
 #: A link target naming a scheme (``https:``, ``mailto:``) or a network path.
 _EXTERNAL = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.-]*:|//)")
@@ -406,7 +422,6 @@ def plan_deliverables(assessment: Assessment) -> list[str]:
         if gap.subject in unnamed
     )
     return lines
-
 
 
 # -- adoption: in place or by copy (ADR-016 D7, D8) --------------------------
@@ -817,3 +832,331 @@ def adoption_drift(manifest: Manifest) -> Drift | None:
         added=tuple(sorted(set(current) - set(recorded))),
         removed=tuple(sorted(set(recorded) - set(current))),
     )
+
+
+# -- the docs project: environment and strict build (ADR-018 D4, D5) -----------
+
+#: The environment's directory under the source directory, and the file in it
+#: holding the hash of the requirements it was synced from.
+VENV = ".venv"
+VENV_HASH = "invariant-requirements.sha256"
+REQUIREMENTS = "requirements.txt"
+#: Where the strict build writes its HTML, under the state root (D3, D5).
+BUILD_OUTPUT = Path("docs") / "build" / "html"
+#: How long a second build waits for one already running before refusing.
+_BUILD_LOCK_SECONDS = 1.0
+
+
+def _run(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run one tool, captured. A seam: the suite replaces it."""
+    return subprocess.run(
+        list(argv), cwd=str(cwd), capture_output=True, text=True, check=False
+    )
+
+
+def _uv() -> str | None:
+    """The ``uv`` this process would run. A seam: the suite replaces it."""
+    return shutil.which("uv")
+
+
+def docs_project(manifest: Manifest) -> Path:
+    """The docs project's source directory, or a refusal naming the fix."""
+    srcdir = needs_reader.srcdir_of(manifest)
+    if srcdir is None or not srcdir.is_dir():
+        raise UsageError(
+            "no docs project: no conf.py at or above paths.docs "
+            f"({manifest.get('paths.docs')}). Set docs.needs.srcdir to the docs "
+            "project's source directory, or create one there."
+        )
+    return srcdir
+
+
+def _sha_file(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass(frozen=True)
+class VenvState:
+    """Whether ``<srcdir>/.venv`` is there and matches ``requirements.txt``."""
+
+    srcdir: Path
+    present: bool
+    expected: str | None
+    recorded: str | None
+
+    @property
+    def venv(self) -> Path:
+        return self.srcdir / VENV
+
+    @property
+    def sphinx_build(self) -> Path:
+        return self.venv / "bin" / "sphinx-build"
+
+    @property
+    def in_sync(self) -> bool:
+        return self.present and self.expected is not None and self.expected == self.recorded
+
+    def describe(self) -> str:
+        if self.expected is None:
+            return (
+                f"no {REQUIREMENTS} in {self.srcdir}: the environment has no pins; "
+                "write one pinning every package with ==, then run 'invariant docs venv'"
+            )
+        if not self.present:
+            return f"no environment at {self.venv}; run 'invariant docs venv'"
+        if not self.in_sync:
+            return (
+                f"{self.venv} does not match {REQUIREMENTS} (synced from "
+                f"{(self.recorded or 'nothing recorded')[:12]}, the file is now "
+                f"{self.expected[:12]}); run 'invariant docs venv'"
+            )
+        return f"{self.venv} in sync with {REQUIREMENTS} ({self.expected[:12]})"
+
+
+def venv_state(srcdir: Path) -> VenvState:
+    srcdir = Path(srcdir)
+    venv = srcdir / VENV
+    recorded = None
+    try:
+        recorded = (venv / VENV_HASH).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        pass
+    return VenvState(
+        srcdir=srcdir,
+        present=(venv / "bin" / "sphinx-build").is_file() or (venv / "bin" / "python").is_file(),
+        expected=_sha_file(srcdir / REQUIREMENTS),
+        recorded=recorded,
+    )
+
+
+def sync_venv(srcdir: Path, *, run=None, uv: str | None = "") -> VenvState:
+    """Create ``<srcdir>/.venv`` if absent, ``uv pip sync`` it to the pinned
+    ``requirements.txt``, and record the file's hash there (D4).
+
+    The hash is written only after a sync that succeeded, so a failed one
+    leaves the environment reading out of sync.
+    """
+    run = run or _run
+    uv = _uv() if uv == "" else uv
+    srcdir = Path(srcdir)
+    requirements = srcdir / REQUIREMENTS
+    if not requirements.is_file():
+        raise UsageError(
+            f"no {REQUIREMENTS} in {srcdir}: the docs environment is built from "
+            f"its pins (ADR-018 D4). Write one with every package pinned with ==."
+        )
+    if not uv:
+        raise UsageError(
+            "uv is not on PATH: the docs environment is created with uv "
+            "(https://docs.astral.sh/uv/). Install it, then run "
+            "'invariant docs venv' again."
+        )
+    venv = srcdir / VENV
+    steps = []
+    if not (venv / "bin" / "python").is_file():
+        steps.append([uv, "venv", str(venv)])
+    steps.append([uv, "pip", "sync", "--python", str(venv / "bin" / "python"), str(requirements)])
+    for argv in steps:
+        done = run(argv, srcdir)
+        if done.returncode != 0:
+            said = (done.stderr or done.stdout or "").strip()
+            raise UsageError(
+                f"{' '.join(argv[1:3])} failed (exit {done.returncode}): {said}"
+            )
+    expected = _sha_file(requirements)
+    (venv / VENV_HASH).write_text(f"{expected}\n", encoding="utf-8")
+    return venv_state(srcdir)
+
+
+def _build_argv(sphinx_build: Path, srcdir: Path, outdir: Path) -> list[str]:
+    """D5's command: strict, HTML, needs.json forced through ``-D``."""
+    return [
+        str(sphinx_build),
+        "-E", "-W", "--keep-going", "-n", "-b", "html",
+        "-D", "needs_build_json=1",
+        str(srcdir), str(outdir),
+    ]
+
+
+def build_docs(
+    manifest: Manifest, *, force: bool = False, run=None, now: datetime | None = None
+) -> tuple[needs_reader.BuildRecord, bool]:
+    """Build the docs project strictly and record it for its tree's digest.
+
+    Answers the record and whether it was built now: a digest already
+    recorded green is not built again unless ``force``. An absent or stale
+    environment is refused naming ``invariant docs venv`` and records
+    nothing, so the gate has no green record (D5).
+    """
+    run = run or _run
+    srcdir = docs_project(manifest)
+    digest = needs_reader.tree_digest(srcdir)
+    state_root = manifest.state_root
+    known = needs_reader.read_record(state_root, digest)
+    if known is not None and known.passed and not force:
+        return known, False
+    env = venv_state(srcdir)
+    if not env.in_sync or not env.sphinx_build.is_file():
+        said = (
+            env.describe()
+            if not env.in_sync
+            else f"no {env.sphinx_build}; run 'invariant docs venv'"
+        )
+        raise UsageError(f"the docs build runs the environment's own sphinx-build: {said}")
+    store = JsonStore(state_root)
+    outdir = state_root / BUILD_OUTPUT
+    argv = _build_argv(env.sphinx_build, srcdir, outdir)
+    try:
+        with store.lock("docs/build", timeout=_BUILD_LOCK_SECONDS):
+            done = run(argv, srcdir)
+            built = outdir / "needs.json"
+            kept = None
+            if built.is_file():
+                kept = state_root / needs_reader.needs_copy_relpath(digest)
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(built, kept)
+                built.unlink()
+    except LockTimeout as exc:
+        raise UsageError(
+            "another docs build is running on this repository; run "
+            "'invariant docs build' again when it finishes"
+        ) from exc
+    except StateError as exc:
+        raise UsageError(str(exc)) from exc
+    project = Path(manifest.root).resolve()
+    found = [
+        _spelled_diagnostic(d.render(), Path(manifest.root))
+        for d in diagnostics(done.stderr or "") + diagnostics(done.stdout or "")
+    ]
+    counts = [
+        int(a) + int(c)
+        for a, c in re.findall(
+            r"updating environment: (?:\[[^\]]*\] )?(\d+) added, (\d+) changed",
+            f"{done.stdout}\n{done.stderr}",
+        )
+    ]
+    record = needs_reader.BuildRecord(
+        digest=digest,
+        passed=done.returncode == 0 and not found,
+        exit_code=done.returncode,
+        diagnostics=tuple(found),
+        needs_json=None if kept is None else str(kept),
+        srcdir=_spelled(project, srcdir),
+        sphinx_build=str(env.sphinx_build),
+        command=shlex.join(argv),
+        documents=sum(counts) if counts else None,
+        at=(now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
+    )
+    store.write(needs_reader.record_relpath(digest), record.to_dict())
+    return record, True
+
+
+def _spelled_diagnostic(text: str, project: Path) -> str:
+    """A diagnostic's file spelled from the project, never the machine."""
+    for base in sorted({f"{project}/", f"{project.resolve()}/"}, key=len, reverse=True):
+        text = text.replace(base, "")
+    return text
+
+
+# -- doctor's rows (D4, D10) --------------------------------------------------
+
+
+def mandate_row(manifest: Manifest) -> tuple[str, bool, str]:
+    """`docs mandate`: passes when enforced, fails while migrating (D10)."""
+    state = manifest.get("docs.needs.state")
+    if state == "enforced":
+        return ("docs mandate", True, "enforced: the docs are a strict-building sphinx-needs project")
+    return (
+        "docs mandate",
+        False,
+        (
+            f"migrating (docs.format {manifest.get('docs.format')}, items.backend "
+            f"{manifest.get('items.backend')}): the migration to a sphinx-needs docs "
+            "project is owed (ADR-018 D14); its last step sets docs.needs.state: enforced"
+        ),
+    )
+
+
+def venv_row(manifest: Manifest, *, run=None) -> tuple[str, bool, str]:
+    """`docs venv`: present, in sync with ``requirements.txt``, and its
+    ``sphinx-build`` runs (D4). Not required while a project migrates on
+    another docs format."""
+    run = run or _run
+    if manifest.get("docs.needs.state") != "enforced" and manifest.get("docs.format") != "sphinx":
+        return (
+            "docs venv",
+            True,
+            f"not required until the migration (docs.format {manifest.get('docs.format')})",
+        )
+    try:
+        srcdir = docs_project(manifest)
+    except UsageError as exc:
+        return ("docs venv", False, str(exc))
+    env = venv_state(srcdir)
+    if not env.in_sync:
+        return ("docs venv", False, env.describe())
+    try:
+        done = run([str(env.sphinx_build), "--version"], srcdir)
+    except OSError as exc:
+        return ("docs venv", False, f"{env.sphinx_build} does not run: {exc}")
+    if done.returncode != 0:
+        return (
+            "docs venv",
+            False,
+            (
+                f"{env.sphinx_build} does not run (exit {done.returncode}); "
+                "run 'invariant docs venv'"
+            ),
+        )
+    version = (done.stdout or done.stderr or "").strip().splitlines()
+    return ("docs venv", True, env.describe() + (f"; {version[0]}" if version else ""))
+
+
+def plantuml_row(manifest: Manifest) -> tuple[str, bool, str] | None:
+    """`plantuml`, when ``docs.diagrams`` lists it: the command ``conf.py``
+    names (``plantuml``, the extension's default, when it names none) is
+    found. PlantUML needs Java, outside the environment (D4)."""
+    if "plantuml" not in manifest.diagram_formats():
+        return None
+    srcdir = needs_reader.srcdir_of(manifest)
+    command = "plantuml"
+    if srcdir is not None:
+        command = _conf_string(srcdir / "conf.py", "plantuml") or command
+    try:
+        program = shlex.split(command)[0]
+    except (ValueError, IndexError):
+        return ("plantuml", False, f"conf.py's plantuml command {command!r} cannot be read")
+    found = shutil.which(program)
+    if found is None:
+        return (
+            "plantuml",
+            False,
+            (
+                f"{program!r} (conf.py's plantuml command: {command!r}) is not found; "
+                "PlantUML needs Java and a plantuml launcher outside the docs environment"
+            ),
+        )
+    return ("plantuml", True, f"{command!r} found at {found}")
+
+
+def _conf_string(conf: Path, name: str) -> str | None:
+    """A string literal ``conf.py`` assigns to ``name``, read without running it."""
+    import ast
+
+    try:
+        tree = ast.parse(conf.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    value = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            value = node.value.value
+    return value

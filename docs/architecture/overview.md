@@ -69,6 +69,7 @@ graph TD
         CIDENT["identity (ADR-014 D4)"]
         CSTORES["stores (ADR-014 D2)"]
         CDOCFMT["docformat (ADR-016 D1): markdown, rst"]
+        CNEEDS["needs (ADR-018 D2, D3, D5, D6)"]
         CQUEST["questionnaire (ADR-017 D1, D2)"]
     end
 
@@ -80,7 +81,7 @@ graph TD
         STATSDOMAIN[stats]
         SWEEPD["sweep (ADR-010)"]
         GDOM["guidelines (ADR-012 D12)"]
-        DOCSD["docs (ADR-016 D1, D2)"]
+        DOCSD["docs (ADR-016 D1, D2; ADR-018 D4, D5)"]
     end
 
     subgraph adapters["adapters/ — ecosystem knowledge"]
@@ -284,6 +285,13 @@ graph TD
     CVERD -- Guideline, Ruleset, digest_of, meets --> CGUIDE
     CVERD -- project_relative --> MANIFEST
     CLI -- "docs assess, docs adopt, doctor's docs adoption row" --> DOCSD
+    CLI -- "docs venv, docs build; doctor's docs mandate, docs venv and plantuml rows" --> DOCSD
+    DOCSD -- "srcdir_of, tree_digest, BuildRecord, read_record: the record it writes" --> CNEEDS
+    DOCSD -- "diagnostics: one reading of a Sphinx run" --> SPHINX
+    RULES -- "docs.builds_strict, docs.needs_traceable: srcdir_of, tree_digest, read_record, load_needs_json, check" --> CNEEDS
+    CNEEDS -- "docs_project_srcdir: the default of docs.needs.srcdir" --> SPHINX
+    MANIFEST -. "type_problems, link_rule_problems, resolve_srcdir: the docs.needs load check, imported at call time" .-> CNEEDS
+    CNEEDS -. "project_relative, imported at call time" .-> MANIFEST
     RULES -. "docs.assessment, docs.area_documented, imported at call time" .-> DOCSD
     DOCSD -- "headings, links: the reader for docs.format; detect_format" --> CDOCFMT
     DOCSD -- "docs.assess, docs.adopt, ADOPT_MODES, path_for, project_relative, glob_matches" --> MANIFEST
@@ -465,6 +473,27 @@ route into the domain is `docs.area_documented` (ADR-016 D6, increment 3),
 injected at the landing only under `docs.onboarding: incremental`: it asks
 the domain for the assessment of the session's tree and for the area each
 touched source file lies in, through the same dotted arrow.
+
+The docs project (ADR-018 increment 3) adds `CNEEDS`, `core/needs`. `CLI
+--> DOCSD` gains `invariant docs venv [--check]`, which creates or re-syncs
+`<srcdir>/.venv` with `uv` from the pinned `requirements.txt` and records the
+file's hash in the environment, and `invariant docs build`, which runs that
+environment's own `sphinx-build -E -W --keep-going -n -b html -D
+needs_build_json=1 <srcdir> <state>/docs/build/html` and writes the record
+(`DOCSD --> CNEEDS`) under the state root for the source tree's digest, with
+the run read by the `sphinx` adapter's `diagnostics` (`DOCSD --> SPHINX`), the
+one reading of a Sphinx run. `RULES --> CNEEDS` is the two landing gates,
+`docs.builds_strict` and `docs.needs_traceable`: they compute the digest of
+the session's tree, read the record and, when green, its `needs.json`, and
+run nothing, so `pipeline gates` and the oracle's gate cache can ask them.
+`CNEEDS --> SPHINX` is the default of `docs.needs.srcdir`, the increment-2
+rule the adapter already holds (an adapter imports nothing from the engine,
+so the rule stays there). `MANIFEST -.-> CNEEDS` is dotted for the reason
+`RULES -.-> DOCSD` is: `core/manifest` asks `core/needs` to check the
+`docs.needs` block at load, through an import made at call time, because
+`core/needs` reads `project_relative` back from the manifest
+(`CNEEDS -.-> MANIFEST`, also made at call time). Neither module imports the
+other at import time, so the pair is no import cycle.
 
 `CONBOARD` is `cli/onboarding` (ADR-016 D4, D5, increment 2): `init`'s
 docs offers and the all-at-once plan, in the CLI layer because it joins
@@ -1526,14 +1555,12 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, the acting agent the host stamps, and `token`, the submission's, each written only when set and both dropped by `resubmitted`, A4 increment 8); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused; each refused line as a `Refusal` naming its predicate, entry and rule apart from the prose, and `PREDICATES`, every name a refusal gives (A4 increment 7); for `guidelines.verdicts_complete` (A4 increment 3), the owed rules (`owed`, over `not_owed`, the one reading of why a rule is or is not owed), a record read back as a submission (`resubmitted`) and each owed rule's `Standing` (`standings`: current, missing, stale, or answered by the engine's N/A, a pass or fail on it set aside); for `guidelines verdicts show` (A4 increment 4), the recorded verdicts on rules no longer owed (`unowed`) | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
 | `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); reStructuredText as `sphinx` (`RstReader`, ADR-018 increment 2): section titles under an underline, or between an overline and a matching underline, starting in the first column after a blank line unless an overline insets them, an adornment shorter than its title kept from four characters, as docutils keeps it; links from `:doc:` and `toctree` entries (`Link.document`: a document name without its suffix), `:download:`, the `include`, `literalinclude`, `image` and `figure` arguments, embedded hyperlink targets and target definitions, `:ref:` read as the label it is, not a file; literal blocks, code directives (`code-block`, `mermaid`, `math` and their kin), doctest blocks, inline literals and comments skipped; `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
+| `needs` | The docs project's needs (ADR-018 increment 3): the seven roles and their default types, the item types' prefixes following `items.id_prefix` (`default_types`, `types_of`); the load check of `docs.needs.types` and `docs.needs.require_links` that `core/manifest` calls (`type_problems`, `link_rule_problems`); the docs project's source directory (`resolve_srcdir`, `srcdir_of`, against a session's tree when asked: `docs.needs.srcdir`, or the increment-2 rule of the `sphinx` adapter as its default); a built `needs.json` read (`parse_needs_json`, `load_needs_json`: sphinx-needs 8.x and 9.x write `versions`, the current version, `needs`; link options from `needs_schema`'s `field_type: links`, or the keys with a `_back` twin), each need's file and line; the check against the types, the required-link rules and `docs.needs.decision_statuses` (`check`, `Problem`), an external need held to nothing and a role with no needs no failure; counts by role and type (`classify`); the strict build's record (`BuildRecord`, `record_relpath`, `read_record`) keyed by the source tree's digest (`tree_digest`: every file's path and bytes, hidden directories and `_build` left out) | Run a build or any command; parse rST; write the record (`domains/docs` does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 | `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9); judging an answer (increment 2): its kind read (`parse_answer`, `Refused`), its choices, path rule and command shape checked (`command_problem`, `command_problems`, the one shape check `doctor` reads, ruling 13) and the configuration it produces validated through a `Draft` of the levels; the nearest level that may hold an answer (`route`, D4); the write plan, changed answers only, the inherited value removing a key (`plan`, `Answer`, `LevelWrite`, `WritePlan`, D5, ruling 12) | Prompt for anything; write any level; run a command; import above `core` |
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md)).** A new `core/needs` reads a recorded
-build's `needs.json` against `docs.needs.types`' roles and the
-`require_links` rules, and never runs a build or parses rST (increment 3).
-`domains/docs` gains the
-starter, `docs venv`, `docs build` and its record, `docs decision new` and
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md)).** `domains/docs` gains the
+starter, `docs decision new` and
 the migration commands; `domains/workitem` gains `item migrate` and the
 decision-id check on an item write; `core/rules` gains the five new
 rules, which read recorded builds and run nothing; `core/manifest` gains
@@ -1545,7 +1572,12 @@ is unchanged: `core/machines` names the new gates and never imports
 persists history, as an `.. invariant-history:` comment in the directive body
 (BUG_073; manifest.md, "The `sphinx_needs` round trip"). **Built (increment
 2):** `core/docformat`'s rST reader (the row above), and ADR-015 D1's
-`sphinx` adapter (`adapters/`, below), both pulled forward.
+`sphinx` adapter (`adapters/`, below), both pulled forward. **Built
+(increment 3):** `core/needs` (the row above), `domains/docs`' `docs venv`,
+`docs build` and its record and `doctor`'s three docs-project rows,
+`core/manifest`'s `docs.needs` block and its load refusals, and in
+`core/rules` `docs.builds_strict` and `docs.needs_traceable`, which read the
+record and run nothing (the paragraph after the diagram's docs arrows).
 
 ### `domains/`
 

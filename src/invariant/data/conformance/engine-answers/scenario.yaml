@@ -106,6 +106,8 @@ expect:
       privacy.clean: pass
       docs.updated: pass
       docs.diagrams_current: pass
+      docs.builds_strict: skip
+      docs.needs_traceable: skip
       agents.design_agent_ran: pass
       agents.review_agent_ran: pass
       agents.rendered_current: warn

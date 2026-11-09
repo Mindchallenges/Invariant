@@ -751,6 +751,85 @@ test by document, line and type and its fix passing, with
 starter-shaped `docs/conf.py` detected as `python`; and `docs assess` over an
 rST tree printing the same gaps twice.
 
+### As built: increment 3 (2026-11-09)
+
+D1's `docs.diagrams` list, D2, D3's `docs.needs.srcdir` and items placement,
+D4, D5, D6 and D10's state, as the architecture docs describe them
+(manifest.md, "Full schema"; cli.md, `doctor` and the `docs` group;
+state_model.md, the docs gates; overview.md, `core/needs`). Where the build
+settles what the text left open:
+
+- **The record is keyed by the tree's digest**, at
+  `<state>/docs/builds/<digest>.json`, and the build's `needs.json` is kept
+  beside it as `<digest>.needs.json`. The HTML still goes to
+  `<state>/docs/build/html`, as D5 says, which the next build rewrites, so the
+  record cannot point into it. Two builds never share that directory: a
+  build holds a lock on the state root and a second one refuses after a
+  second's wait, naming the command to run again.
+- **The digest** is of every file under the source directory, path and
+  bytes, leaving out hidden directories (the `.venv`) and `_build`. The
+  environment enters it through `requirements.txt`, which is in the tree.
+- **The environment's hash** is `.venv/invariant-requirements.sha256`, the
+  SHA-256 of `requirements.txt`, written only after `uv pip sync`
+  succeeded. `uv venv` runs only when `.venv/bin/python` is absent. A
+  `docs build` refuses a stale environment as it refuses a missing one,
+  naming `invariant docs venv`, and records nothing.
+- **A green digest is not built again; a red one is.** `docs build --force`
+  rebuilds a green one. Exit 0 when green, 1 when not.
+- **The level by state** is set at load: every profile says `warn`, and an
+  enforced project's load raises both rules to `block`, with the provenance
+  `profile:<name> (docs.needs.state: enforced)`, so `config show` and `rules
+  list` say what holds. A level may still lower them until increment 5's
+  floor.
+- **"Touches `docs.needs`"** compares the block in the repository's manifest
+  with the base's, as parsed YAML. A base that cannot be read counts as a
+  change, the side an unanswerable question falls on. The user and store
+  levels are not compared; ADR-014 D9's store leg is where a store's change
+  is seen.
+- **N/A versus failure.** A migrating project with no docs project is N/A;
+  an enforced one is refused at load (no `conf.py` at or above `paths.docs`
+  and no `srcdir`) and fails the gate if it reaches one. A docs project in a
+  store answers "not established", the failure D5 recommends.
+- **Reading `needs.json`.** The current version is `current_version`'s entry,
+  or the last one. A need's link options are the fields `needs_schema` marks
+  `field_type: links` (both majors write it, run on Heap's 8.1.1 and dang's
+  9.2.0 output), or, without a schema, the keys with a `_back` twin.
+  `parent_needs` is one of them, so a decision nested inside an element links
+  to it. An external need (`is_external`) is another project's and is held to
+  nothing. A decision with no status fails D6 item 4, as one outside the list
+  does. A verdict names twenty failures at most, then the count.
+- **The item roles take exactly their own directive** (`idea`, `bug`), the
+  *recommended* rule of D2, refused at load like the prefix.
+- **`docs.diagrams`** keeps its value as written; `Manifest.diagram_formats()`
+  reads it as a list, `none` and null as no format, so no manifest and no
+  `config show` output changes. A name with no known marker is not refused:
+  `docs.diagrams_current` then finds no diagram, as before.
+- **The adapter's detection keeps its default rule.** An adapter is handed
+  the root alone (manifest.md, "Adapters"), so a configured `paths.docs` or
+  `docs.needs.srcdir` does not reach detection; `core/needs.srcdir_of` is
+  where the key is read, with the adapter's rule as its default.
+- **`doctor`'s `docs venv` row** passes while a project migrates on a docs
+  format other than `sphinx`, saying the environment is not required until
+  the migration, so invariant's own `doctor` is not red twice for one debt.
+  The `docs mandate` row carries that debt.
+- **For increment 4's starter:** sphinx-needs 8.1.1 warns `needs.deprecated`
+  on `needs_extra_links` ("use `needs_links`"), which fails a strict build,
+  so the starter's `conf.py` declares its links with `needs_links` (run).
+
+The proofs: on a toy docs project, enforced, in Heap's pinned environment
+(Sphinx 9.1.0, sphinx-needs 8.1.1, behind `INVARIANT_TEST_SPHINX_BUILD`), a
+dangling link (`[needs.link_outgoing]`), an unregistered option and a
+docutils error each block `docs.builds_strict` named by file and line, and
+the fix passes both gates; a decision with no element link blocks
+`docs.needs_traceable` by name. With a stand-in `sphinx-build`: a landing
+with no docs change N/A; an unmapped directive named; no record for the
+digest blocking, naming `invariant docs build`; a green digest not built
+again; a role with no needs passing; the same project migrating on `sphinx`
+warning on each; on `markdown`, N/A. Heap's `needs.json` (run, 1,291 needs,
+behind `INVARIANT_TEST_NEEDS_JSON`) classified with its seven element types
+mapped to `element` and nothing unmapped. This repository, migrating on
+`docs.format: markdown`: both gates N/A.
+
 ## Alternatives rejected
 
 | Alternative | Why not |

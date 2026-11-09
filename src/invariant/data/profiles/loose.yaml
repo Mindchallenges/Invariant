@@ -40,6 +40,11 @@ rules:
   docs.assessment: warn
   docs.updated: warn
   docs.diagrams_current: "off"
+  # The docs project's strict build and traceability (ADR-018 D5, D6). Warn
+  # in every profile while docs.needs.state is migrating; an enforced
+  # project's load raises both to block (D10).
+  docs.builds_strict: warn
+  docs.needs_traceable: warn
   # The incremental docs path (ADR-016 D6): each touched source area no
   # architecture doc names is owed. Injected at the landing only under
   # docs.onboarding: incremental. Warns in loose and standard, blocks in strict.

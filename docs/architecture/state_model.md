@@ -1294,7 +1294,8 @@ Shipped methodologies:
 `docs-first` is not in this list because it is not a methodology (D12). It is a
 pair of gates the engine injects into whichever methodology is configured:
 `docs.read_architecture` leaving the design state, `docs.updated` entering the
-landing state. A methodology cannot opt out of it; a project can only retune
+landing state (with `docs.diagrams_current`, and ADR-018's
+`docs.builds_strict` and `docs.needs_traceable` beside it). A methodology cannot opt out of it; a project can only retune
 the gates' level, and even that is discouraged.
 
 Details that are load-bearing rather than incidental:
@@ -1504,28 +1505,68 @@ graph LR
     V -- "no" --> OWED["owed: area and doc to write"]
 ```
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D5, D6, D8, D9, D10).** Four rules join the
-docs gates, and one the work-item gates. `docs.builds_strict` (increment 3)
-rides the landing state's entry set of every lane, beside `docs.updated`
-(`DOCS_FIRST_GATES`), when the changed set touches the docs project's source
-directory or `docs.needs`, N/A otherwise. It runs nothing: it reads the
-green record `invariant docs build` wrote for the source tree's current
-digest, and fails naming that command when there is none.
-`docs.needs_traceable` (increment 3) rides beside it and reads that build's
-`needs.json`: every need's type is declared, its id carries its type's
-prefix, and the `require_links` rules hold, each violation named by need,
-file and line; a role with no needs is not a failure.
-`docs.decisions_recorded` (increment 5) is a landing entry gate over the
-decisions a session declared (`session decisions`): a draft, or an id the
-green build does not hold, blocks. `docs.design_home` (increment 5) is a
-pre-tool-use rule on the edit tools refusing a write to
-`docs.needs.refused_paths`, and `items.decisions_linked` (increment 5)
-refuses an item write naming an unheld decision, requirement, ui or rule id
-and runs again at the landing over the items the session changed. While
-`docs.needs.state` is `migrating` each of them warns, and D5 and D6 are N/A
-unless `docs.format` is `sphinx`; when `enforced` each blocks and no level
-lowers it. A change moving the key back from `enforced` is refused at its
-landing and passes only with `pipeline advance --force --reason`.
+**Built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D5, D6, D10, increment 3).** Two rules
+join the landing state's entry set of every lane, after `docs.updated` and
+`docs.diagrams_current` (`DOCS_FIRST_GATES`): `docs.builds_strict` and
+`docs.needs_traceable`. Neither runs a command. Both first decide whether
+they apply:
+
+- **N/A** while `docs.needs.state` is `migrating` and `docs.format` is not
+  `sphinx`, saying so (D10): invariant's own docs, a MyST site with no
+  sphinx-needs, are not built by a gate they have no environment for. N/A
+  when nothing changed, and when the change touches neither a file under the
+  docs project's source directory (in the session's tree) nor the `docs.needs`
+  block of the repository's manifest (compared as parsed YAML against the
+  base; a base that cannot be read counts as a change). A migrating project
+  with no docs project is N/A; an enforced one fails, naming
+  `docs.needs.srcdir`.
+- **Not established** (a failure, never N/A) when the changed set cannot be
+  read, as for `docs.updated`, and for a docs project in a store
+  (`records.docs: store`), which only ADR-014 D9's store leg can see.
+
+Where they apply, both read the record `invariant docs build` wrote for the
+**digest of the source tree as it stands** (core/needs, `tree_digest`). None,
+or only one for an older digest, fails, naming `invariant docs build`.
+`docs.builds_strict` passes on a green record and otherwise names each
+warning by file, line and type (`docs/backlog.rst:9 [docutils] ...`), twenty
+at most, then the count. `docs.needs_traceable` needs a green record and
+reads its `needs.json`: every need's directive is declared in
+`docs.needs.types` and its id carries its type's prefix, every decision's
+status is one of `docs.needs.decision_statuses`, and every `require_links`
+rule holds, each violation named by need, file and line; an external need is
+held to nothing, and a role with no needs is not a failure.
+
+Both are `warn` in every profile. An enforced project's load raises both to
+`block` (manifest.md), so the same toy project warns while migrating on
+`sphinx` and blocks when enforced. The floor that stops a level lowering them
+again is increment 5.
+
+**Accepted, not yet built (ADR-018 D8, D9, D10, increment 5).** Three more
+rules. `docs.decisions_recorded` is a landing entry gate over the decisions
+a session declared (`session decisions`): a draft, or an id the green build
+does not hold, blocks. `docs.design_home` is a pre-tool-use rule on the edit
+tools refusing a write to `docs.needs.refused_paths`, and
+`items.decisions_linked` refuses an item write naming an unheld decision,
+requirement, ui or rule id and runs again at the landing over the items the
+session changed. While `docs.needs.state` is `migrating` each of them warns;
+when `enforced` each blocks and no level lowers it, nor
+`docs.builds_strict` and `docs.needs_traceable`. A change moving the key back
+from `enforced` is refused at its landing and passes only with `pipeline
+advance --force --reason`.
+
+```mermaid
+graph LR
+    LAND["landing entry, every lane"] --> STRICT["docs.builds_strict"]
+    LAND --> TRACE["docs.needs_traceable"]
+    STRICT --> APPLY{"sphinx or enforced, and srcdir or docs.needs touched?"}
+    TRACE --> APPLY
+    APPLY -- "no" --> NA["N/A, saying why"]
+    APPLY -- "yes" --> DIGEST["tree_digest of the session's srcdir"]
+    DIGEST --> REC["record for the digest (invariant docs build)"]
+    REC -- "none" --> OWED["fail: invariant docs build"]
+    REC -- "red" --> RED["builds_strict: each file, line, type"]
+    REC -- "green" --> JSON["needs_traceable: needs.json against types, links, statuses"]
+```
 
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —

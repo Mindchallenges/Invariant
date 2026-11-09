@@ -1931,6 +1931,14 @@ def _docs_area_documented(ctx: RuleContext) -> Verdict:
     )
 
 
+#: What marks a diagram of each format, in Markdown and in rST (ADR-018 D1):
+#: a fenced block or a directive at the start of a line.
+DIAGRAM_MARKERS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "mermaid": (re.compile(r"```mermaid"), re.compile(r"(?m)^\s*\.\. mermaid::")),
+    "plantuml": (re.compile(r"@startuml"), re.compile(r"(?m)^\s*\.\. uml::")),
+}
+
+
 @rule(
     "docs.diagrams_current",
     summary="A doc whose structure changed has its diagram updated too.",
@@ -1939,9 +1947,10 @@ def _docs_area_documented(ctx: RuleContext) -> Verdict:
 def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
     if not ctx.manifest.get("docs.require_diagram_update", True):
         return Verdict.na("diagram updates not required")
-    fmt = ctx.manifest.get("docs.diagrams")
-    if fmt in {None, "none"}:
+    formats = ctx.manifest.diagram_formats()
+    if not formats:
         return Verdict.na("no diagram format configured")
+    fmt = ", ".join(formats)
 
     # A methodology that declares itself documentation is declaring there is no
     # structural change, and this gate fires on structural change. Read from
@@ -1968,15 +1977,15 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
             return _unestablished_changed_set(touched)
         return Verdict.na("no doc changed")
 
-    markers = {"mermaid": "```mermaid", "plantuml": "@startuml"}
-    marker = markers.get(str(fmt), "")
+    markers = [m for name in formats for m in DIAGRAM_MARKERS.get(name, ())]
     with_diagrams = []
     for rel in docs_changed:
         try:
-            if marker and marker in (root / rel).read_text(encoding="utf-8"):
-                with_diagrams.append(rel)
-        except OSError:
+            text = (root / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
+        if any(marker.search(text) for marker in markers):
+            with_diagrams.append(rel)
     if with_diagrams:
         return Verdict.clean(f"{len(with_diagrams)} changed doc(s) carry a diagram")
     return Verdict.fail(
@@ -1985,6 +1994,203 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
         "describes the map in prose, which is the thing diagrams exist to "
         "replace.",
         fixes=(f"add a {fmt} diagram to the changed doc",),
+    )
+
+
+# -- the docs project's strict build (ADR-018 D5, D6, D10) -------------------
+
+
+#: How many build failures or needs a verdict names before counting the rest.
+_DOCS_NAMED = 20
+
+
+@dataclass(frozen=True)
+class _DocsBuild:
+    """What both docs-project gates read: the record for the tree in hand."""
+
+    srcdir: str
+    digest: str
+    record: Any  # core.needs.BuildRecord | None
+
+
+def _docs_build(ctx: RuleContext) -> _DocsBuild | Verdict:
+    """The docs project's recorded build for the session's tree, or the
+    verdict that settles the gate before any record is read.
+
+    N/A on a migrating project whose docs are not yet sphinx (D10), and when
+    the change touches neither the source directory nor ``docs.needs``. A
+    docs project in a store is seen only through ADR-014 D9's store leg, not
+    built yet, so it is "not established", a failure, as ``docs.updated``
+    answers an unestablished changed set. Runs nothing: the digest is read
+    from the files, and the record from the state root.
+    """
+    from . import needs  # local: one reader of the docs project's needs
+
+    manifest = ctx.manifest
+    state = manifest.get("docs.needs.state")
+    fmt = manifest.get("docs.format")
+    if state != "enforced" and fmt != "sphinx":
+        return Verdict.na(
+            f"docs.needs.state is {state} on docs.format {fmt}: the strict build "
+            f"applies once the docs are sphinx (ADR-018 D10)"
+        )
+    touched = _changed_set(ctx)
+    if not touched.paths:
+        if not touched.answerable:
+            return _unestablished_changed_set(touched)
+        return Verdict.na("nothing changed")
+    if manifest.get("records.docs") == "store":
+        return Verdict.fail(
+            "the changed set could not be established for a docs project in a store",
+            detail="A store's docs are seen only through the store leg of the "
+            "changed set (ADR-014 D9), which is not built yet. An unanswered "
+            "question is not a negative answer.",
+            fixes=("invariant pipeline advance <state> --force --reason '<why>'",),
+        )
+    tree = _session_tree(ctx)
+    srcdir = needs.srcdir_of(manifest, tree)
+    if srcdir is None:
+        if state == "enforced":
+            return Verdict.fail(
+                "no docs project: no conf.py at or above paths.docs",
+                fixes=("set docs.needs.srcdir to the docs project's source directory",),
+            )
+        return Verdict.na("no docs project: no conf.py at or above paths.docs")
+    spelled = _rel(srcdir, tree.resolve())
+    inside = [
+        p for p in touched.paths if _is_within((tree / p).resolve(), srcdir)
+    ]
+    if not inside and not _docs_needs_changed(ctx, touched, tree):
+        return Verdict.na(f"the change touches neither {spelled}/ nor docs.needs")
+    digest = needs.tree_digest(srcdir)
+    return _DocsBuild(spelled, digest, needs.read_record(manifest.state_root, digest))
+
+
+def _docs_needs_changed(ctx: RuleContext, touched: _ChangedSet, tree: Path) -> bool:
+    """Did the change move ``docs.needs`` in the repository's manifest?
+
+    Compared as parsed YAML, so a reformatted manifest is no change. A base
+    that cannot be read counts as a change: the gate then applies, the side
+    an unanswerable question falls on.
+    """
+    if Path(MANIFEST_RELPATH) not in touched.paths:
+        return False
+    try:
+        now = yaml.safe_load((tree / MANIFEST_RELPATH).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return True
+    before_text = git.file_at(tree, touched.base, MANIFEST_RELPATH) if touched.base else None
+    if before_text is None:
+        return True
+    try:
+        before = yaml.safe_load(before_text) or {}
+    except yaml.YAMLError:
+        return True
+
+    def needs_block(doc: Any) -> Any:
+        docs = doc.get("docs") if isinstance(doc, Mapping) else None
+        return docs.get("needs") if isinstance(docs, Mapping) else None
+
+    return needs_block(now) != needs_block(before)
+
+
+def _no_build_recorded(build: _DocsBuild) -> Verdict:
+    return Verdict.fail(
+        f"no docs build recorded for {build.srcdir}/ at its digest "
+        f"{build.digest[:12]}",
+        detail="A gate runs no command: the strict build is run and recorded "
+        "by 'invariant docs build', and a record for an older tree does not "
+        "count.",
+        fixes=("invariant docs build",),
+    )
+
+
+@rule(
+    "docs.builds_strict",
+    summary="A change touching the docs project builds strictly.",
+    events=(),
+)
+def _docs_builds_strict(ctx: RuleContext) -> Verdict:
+    """ADR-018 D5: the green record of `invariant docs build` for the tree."""
+    build = _docs_build(ctx)
+    if isinstance(build, Verdict):
+        return build
+    record = build.record
+    if record is None:
+        return _no_build_recorded(build)
+    if record.passed:
+        documents = f", {record.documents} document(s)" if record.documents else ""
+        return Verdict.clean(
+            f"strict build green for {build.srcdir}/ at {build.digest[:12]}{documents}"
+        )
+    shown = list(record.diagnostics[:_DOCS_NAMED])
+    more = len(record.diagnostics) - len(shown)
+    return Verdict.fail(
+        f"the strict build of {build.srcdir}/ failed: "
+        f"{len(record.diagnostics)} warning(s) or error(s), exit {record.exit_code}",
+        detail="; ".join(shown) + (f"; and {more} more" if more > 0 else "")
+        or f"sphinx-build exited {record.exit_code} with nothing parsed",
+        fixes=(
+            "fix each named file and line, then: invariant docs build",
+        ),
+    )
+
+
+@rule(
+    "docs.needs_traceable",
+    summary="Every need is of a declared type and meets the required-link rules.",
+    events=(),
+)
+def _docs_needs_traceable(ctx: RuleContext) -> Verdict:
+    """ADR-018 D6: the green build's needs.json against `docs.needs`."""
+    from . import needs  # local: one reader of the docs project's needs
+
+    build = _docs_build(ctx)
+    if isinstance(build, Verdict):
+        return build
+    record = build.record
+    if record is None:
+        return _no_build_recorded(build)
+    if not record.passed:
+        return Verdict.fail(
+            f"no green build of {build.srcdir}/ at {build.digest[:12]} to read: "
+            f"docs.builds_strict names its failures",
+            fixes=("fix the build, then: invariant docs build",),
+        )
+    if not record.needs_json:
+        return Verdict.fail(
+            f"the green build of {build.srcdir}/ recorded no needs.json",
+            detail="Is sphinx_needs in the docs project's extensions?",
+            fixes=("invariant docs build --force",),
+        )
+    try:
+        read = needs.load_needs_json(Path(record.needs_json))
+    except needs.NeedsJsonError as exc:
+        return Verdict.fail(str(exc), fixes=("invariant docs build --force",))
+    manifest = ctx.manifest
+    problems = needs.check(
+        read,
+        needs.types_of(manifest),
+        needs.parse_link_rules(manifest.get("docs.needs.require_links") or ()),
+        manifest.get("docs.needs.decision_statuses") or (),
+        prefix=f"{build.srcdir}/",
+    )
+    if not problems:
+        return Verdict.clean(
+            f"{len(read.needs)} need(s), each declared and linked as docs.needs requires"
+        )
+    shown = [p.render() for p in problems[:_DOCS_NAMED]]
+    more = len(problems) - len(shown)
+    return Verdict.fail(
+        f"{len(problems)} need problem(s): "
+        + ", ".join(sorted({p.need for p in problems})[:_DOCS_NAMED]),
+        detail="; ".join(shown) + (f"; and {more} more" if more > 0 else ""),
+        fixes=(
+            (
+                "link each named need, or map its directive in docs.needs.types, "
+                "then: invariant docs build"
+            ),
+        ),
     )
 
 
@@ -2660,7 +2866,6 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
         ]),
         fixes=tuple(fixes),
     )
-
 
 
 @rule(

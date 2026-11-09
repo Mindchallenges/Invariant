@@ -220,6 +220,22 @@ DEFAULTS: dict[str, Any] = {
         # and records drift against a receipt. Written by `docs adopt`; null
         # is today's behaviour.
         "adopt": {"mode": None, "source": None},
+        # The docs project's needs (ADR-018 D2, D3, D6, D10). `state` is
+        # `migrating` until the migration's last step writes `enforced`.
+        # `types` null means the seven baseline types (core/needs), the item
+        # types following `items.id_prefix`; a list replaces them whole.
+        # `srcdir` null means the nearest directory at or above `paths.docs`
+        # holding a conf.py, below the root.
+        "needs": {
+            "state": "migrating",
+            "types": None,
+            "srcdir": None,
+            "require_links": [
+                {"from": "decision", "to": "element"},
+                {"from": "bug", "to": "element"},
+            ],
+            "decision_statuses": ["proposed", "accepted", "superseded", "rejected"],
+        },
     },
     "methodology": {
         "pipeline": "tdd",
@@ -459,7 +475,13 @@ _ASSESS_KEYS = ("checks", "sections", "areas")
 #: The `docs` keys this build reads, and the onboarding modes (ADR-016 D9).
 _DOCS_KEYS = (
     "format", "diagrams", "index", "require_diagram_update", "assess", "onboarding", "adopt",
+    "needs",
 )
+#: The `docs.needs` keys this build reads (ADR-018 increment 3).
+_NEEDS_KEYS = ("state", "types", "srcdir", "require_links", "decision_statuses")
+#: The rules whose level follows `docs.needs.state` (ADR-018 D5, D6, D10):
+#: the profile's `warn` while migrating, `block` when enforced.
+MANDATE_RULES = ("docs.builds_strict", "docs.needs_traceable")
 ONBOARDING_MODES = ("off", "incremental", "all_at_once")
 #: The `docs.adopt` keys and modes (ADR-016 D7, D9); null is no adoption.
 _ADOPT_KEYS = ("mode", "source")
@@ -487,7 +509,7 @@ RECORD_LOCATIONS: dict[str, tuple[str, ...]] = {
 #: are policy files too; `agents.overlays` is a mapping whose values are the
 #: paths.
 RECORD_PATH_KEYS: dict[str, tuple[str, ...]] = {
-    "docs": ("paths.docs",),
+    "docs": ("paths.docs", "docs.needs.srcdir"),
     "backlog": ("items.path", "items.closed_path"),
     "guidelines": (
         "guidelines.ruleset",
@@ -739,6 +761,15 @@ class Manifest:
             provenance,
             f"profile:{profile_name}",
         )
+        # An enforced project's docs rules block from its profile (ADR-018
+        # D10); a level may still set them, until increment 5's floor.
+        if _highest(levels, "docs", "needs", "state") == "enforced":
+            _merge(
+                data,
+                {"enforcement": {"rules": dict.fromkeys(MANDATE_RULES, "block")}},
+                provenance,
+                f"profile:{profile_name} (docs.needs.state: enforced)",
+            )
 
         # Layer 5 — the config levels, lowest first (ADR-014 D3): the user's
         # defaults, the store and its block for this repo, then the repo's own.
@@ -928,6 +959,7 @@ class Manifest:
         self._validate_freshness_level()
         self._validate_guidelines()
         self._validate_docs()
+        self._validate_docs_needs()
         self._validate_docs_assess()
         self._validate_docs_adopt()
         self._validate_agents()
@@ -1271,6 +1303,16 @@ class Manifest:
         if not isinstance(section, Mapping):
             raise ManifestError(f"docs must be a mapping, got {section!r}")
         _refuse_unknown("docs", section, _DOCS_KEYS)
+        diagrams = section.get("diagrams")
+        if not (
+            diagrams is None
+            or isinstance(diagrams, str)
+            or (isinstance(diagrams, list) and all(isinstance(d, str) for d in diagrams))
+        ):
+            raise ManifestError(
+                f"docs.diagrams must be a diagram format or a list of them "
+                f"(mermaid, plantuml), got {diagrams!r}"
+            )
         mode = section.get("onboarding")
         if mode is False:
             section["onboarding"] = mode = "off"
@@ -1279,6 +1321,99 @@ class Manifest:
                 f"docs.onboarding is {mode!r}; it is one of "
                 f"{', '.join(ONBOARDING_MODES)}."
             )
+
+    def _validate_docs_needs(self) -> None:
+        """Refuse a `docs.needs` value this build cannot read (ADR-018 D2, D3,
+        D6), and, when enforced, a project not in the mandate's shape (D3,
+        D10): another docs format or items backend, the backlog in another
+        record than the docs, or an items store outside the source directory.
+        """
+        from . import needs  # local: core/needs reads the manifest back
+
+        section = self.get("docs.needs")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"docs.needs must be a mapping, got {section!r}")
+        _refuse_unknown("docs.needs", section, _NEEDS_KEYS)
+        state = section.get("state")
+        if state not in needs.STATES:
+            raise ManifestError(
+                f"docs.needs.state is {state!r}; it is one of {', '.join(needs.STATES)}"
+            )
+        id_prefix = str(self.get("items.id_prefix") or "")
+        if section.get("types") is not None:
+            problems = needs.type_problems(section["types"], id_prefix)
+            if problems:
+                raise ManifestError("docs.needs.types: " + "; ".join(problems))
+        problems = needs.link_rule_problems(section.get("require_links"))
+        if problems:
+            raise ManifestError("docs.needs.require_links: " + "; ".join(problems))
+        statuses = section.get("decision_statuses")
+        if (
+            not isinstance(statuses, list)
+            or not statuses
+            or not all(_is_one_line(s) for s in statuses)
+        ):
+            raise ManifestError(
+                f"docs.needs.decision_statuses must be a non-empty list of one-line "
+                f"statuses, got {statuses!r}"
+            )
+        srcdir = section.get("srcdir")
+        if srcdir is not None and not _is_one_line(srcdir):
+            raise ManifestError(
+                f"docs.needs.srcdir must be one line naming the docs project's "
+                f"source directory, got {srcdir!r}"
+            )
+        if state == "enforced":
+            self._validate_enforced(srcdir)
+
+    def _validate_enforced(self, srcdir: Any) -> None:
+        from . import needs  # local: core/needs reads the manifest back
+
+        enforced = "docs.needs.state is enforced (ADR-018 D10)"
+        fmt = self.get("docs.format")
+        if fmt != "sphinx":
+            raise ManifestError(
+                f"docs.format is {fmt!r}, but {enforced}: an enforced project's "
+                f"docs are a sphinx-needs project, docs.format: sphinx"
+            )
+        backend = self.get("items.backend")
+        if backend != "sphinx_needs":
+            raise ManifestError(
+                f"items.backend is {backend!r}, but {enforced}: items are needs in "
+                f"the docs project, items.backend: sphinx_needs"
+            )
+        records = self.data["records"]
+        if records.get("backlog") != records.get("docs"):
+            raise ManifestError(
+                f"records.backlog is {records.get('backlog')!r} and records.docs is "
+                f"{records.get('docs')!r}, but {enforced}: the items store is in the "
+                f"docs project's build, so the two records are one (ADR-018 D3)"
+            )
+        base = self.store_root if records.get("docs") == "store" else self.root
+        if base is None:
+            return  # a store with no root is refused by the records check
+        docs = project_relative(self.get("paths.docs"))
+        found = needs.resolve_srcdir(
+            Path(base), None if srcdir is None else str(srcdir), docs
+        )
+        if found is None:
+            raise ManifestError(
+                f"{enforced}, but there is no docs project: no conf.py at or above "
+                f"paths.docs ({self.get('paths.docs')}). Set docs.needs.srcdir, or "
+                f"create the docs project there"
+            )
+        spelled = _spelled_from(Path(base), found)
+        for key in ("items.path", "items.closed_path"):
+            value = self.get(key)
+            if value is None:
+                continue
+            where = (Path(base) / str(value)).resolve()
+            if found != where and found not in where.parents:
+                raise ManifestError(
+                    f"{key} is {value!r}, outside the docs project's source "
+                    f"directory {spelled}, but {enforced}: items are needs in the "
+                    f"docs project's build, so the items store lies under {spelled}"
+                )
 
     def _validate_docs_adopt(self) -> None:
         """Refuse a `docs.adopt` block that would load and adopt nothing, or
@@ -1565,6 +1700,16 @@ class Manifest:
 
     def source_of(self, dotted: str) -> str:
         return self.provenance.get(dotted, "default")
+
+    def diagram_formats(self) -> list[str]:
+        """``docs.diagrams`` as a list (ADR-018 D1): a single name is a list of
+        one, and null or ``none`` is no format."""
+        value = self.get("docs.diagrams")
+        if value is None or value == "none":
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(name) for name in value if name != "none"]
 
     def rule_level(self, rule_id: str) -> Level:
         rules = self.data["enforcement"]["rules"]
@@ -2040,6 +2185,13 @@ def _is_path(value: Any) -> bool:
 def _is_tier(value: Any) -> bool:
     """A name from the tier vocabulary. An unhashable or non-string value is not."""
     return isinstance(value, str) and value in TIERS
+
+
+def _spelled_from(base: Path, path: Path) -> str:
+    try:
+        return path.relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _is_one_line(value: Any) -> bool:
