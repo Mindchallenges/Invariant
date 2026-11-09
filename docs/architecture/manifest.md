@@ -1975,6 +1975,38 @@ implementation must prefer the first: calling an inert file live costs a
 spurious block, which is visible and sends someone to look; calling a live
 file inert passes unmeasured code silently.
 
+**Dart and Flutter ([ADR-019](../adr/ADR-019-dart-and-flutter-get-an-adapter.md)).**
+`dart` and `flutter` are detected from `pubspec.yaml` (`flutter` when it
+names an `sdk: flutter` dependency) and differ only in their runner:
+
+```yaml
+project:
+  ecosystems: [flutter]        # or [dart] for a pure Dart package
+# defaults, for dart (flutter: `flutter test`, `flutter test --coverage`):
+#   test:            dart test
+#   test_one:        dart test {selector}
+#   lint:            dart analyze
+#   coverage:        dart test --coverage-path={result_bundle}/lcov.info
+#   coverage_one:    dart test --coverage-path={result_bundle}/lcov.info {selector}
+#   coverage_report: cat {result_bundle}/lcov.info
+```
+
+The report is written inside the per-run result bundle, which is cleared
+before each run, so a run that wrote none is refused rather than read as the
+last one. `parse_coverage` reads lcov records (`SF:` ... `LF:` ... `LH:` ...
+`end_of_record`) and summary rows (`<path>.dart  <hit> <found>  <pct>%`) alike.
+A project whose coverage command is its own script printing such rows sets
+`commands.coverage_report: null`, because the script prints the measurement
+itself; left at the default, the report leg reads an empty bundle and the run
+is refused. Test counts come from the reporter's closing line per run
+(`+P ~S -F: ...`), summed across runs, and `No tests ran.` is a hazard.
+`carries_executable_code` answers `False` only for a file marked
+`// coverage:ignore-file` and one holding only directives, typedefs, plain
+enums and abstract signatures, the shapes the reporter writes no record for.
+A package-relative `SF:` path suffix-matches a same-named file in another
+workspace package, so a workspace reads coverage through rows that name
+project paths.
+
 **Accepted, not yet built ([ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) D1, D5).** A `sphinx` adapter (also
 selected by `docs`): strict `sphinx-build` commands with `-E -W -n`, a test
 of linkcheck plus, when `sphinx_needs` is configured, the needs builder, the

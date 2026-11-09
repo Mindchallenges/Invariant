@@ -97,8 +97,9 @@ scheme that builds nothing, a test target that was never linked). A hazard is
 not a rule; it annotates a result so that a green is not mistaken for proof.
 
 Adapters are registered in `src/invariant/adapters/__init__.py`, so adding
-one is a contribution to the library rather than a project setting. The three
-shipped ones — `python_.py`, `node.py`, `swift_xcode.py` — are the templates,
+one is a contribution to the library rather than a project setting. The
+shipped ones — `python_.py`, `node.py`, `swift_xcode.py`, `dart.py` (which
+also holds `flutter`, ADR-019) — are the templates,
 and the interface is documented in
 [manifest.md § Adapters](../architecture/manifest.md#adapters). Tests live in
 `tests/test_adapters.py`; the coverage floor applies to the adapter too.

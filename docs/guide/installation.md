@@ -53,7 +53,7 @@ The shims will still find the binary there, but you will want it for yourself:
 
 ```bash
 cd <project>
-invariant init [--ecosystem python|node|swift|generic] [--profile standard|strict|loose]
+invariant init [--ecosystem python|node|swift|dart|flutter|generic] [--profile standard|strict|loose]
 git add -A && git commit -m "adopt invariant"
 invariant doctor
 ```

@@ -47,6 +47,7 @@ adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci
 adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them
 adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again
 adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project
+adr/ADR-019-dart-and-flutter-get-an-adapter
 ```
 
 ```{toctree}

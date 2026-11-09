@@ -88,6 +88,7 @@ graph TD
         SWIFT[swift_xcode]
         PY[python]
         NODE[node]
+        DART["dart / flutter (ADR-019)"]
     end
 
     subgraph data["shipped data"]
@@ -1738,6 +1739,7 @@ Which adapters mask and read imports, and how:
 | `python` | `mask`, `imports` | Through `tokenize`, for `.py`. An f-string or t-string is one string region, replacement fields included, on every interpreter from 3.10, so a verdict never depends on which interpreter ran. | Through `ast`, for `.py`. Every import statement counts, at any depth. A relative import resolves by the file's package. An absolute one resolves against the first ancestor of the file with no `__init__.py`, then the project root, and is the project's when its first segment is a module, a package, or a directory holding Python there. `from pkg import name` is the submodule's file when `name` is one, else the package's `__init__.py`. A project import that does not resolve, and a syntax error, make the file unanswerable. |
 | `swift_xcode` | `mask` | One region reader (`_swift_regions`) for `.swift`, consumed by the comment-and-string blanker, the coverage reducer and the mask. Known limits: a raw string's `#"…"#` delimiter and a quote inside a `\( )` interpolation are read as ordinary quotes. | `None`. A Swift module's layers are folder-to-type references, which need a symbol index (ADR-012 ruling 3). |
 | `node`, `generic` | none | `None`. A node lexer is IDEA_038. | `None` (DN-9). |
+| `dart`, `flutter` | none | `None`. A Dart lexer is IDEA_047. The adapter's only Dart reader is the declaration reader behind `carries_executable_code` (ADR-019 D6). | `None` (IDEA_047). |
 
 Both questions take text, and text is what decodes as UTF-8. A file that does
 not decode is not text: the caller asks no adapter about it, so it gets no
@@ -1750,6 +1752,17 @@ The `swift_xcode` adapter exists first because the originating project needs
 it, and because it carries the most instructive ecosystem traps — a build tool
 whose exit codes can silently drop whole test suites, and a destination
 argument whose convenient form resolves to the wrong thing.
+
+The `dart` and `flutter` adapters (ADR-019) are one class family:
+`FlutterAdapter` subclasses `DartAdapter` and changes only its default
+commands (`flutter test` for `dart test`) and its detection (a `pubspec.yaml`
+with an `sdk: flutter` dependency, else `dart`). Their coverage run writes
+lcov into the per-run result-bundle directory, which the pipeline clears
+before each run, so a run that wrote no report cannot be read as the last
+one; `parse_coverage` reads lcov records and `<path> <cells> <pct>%` summary
+rows alike, anchored on `.dart`, keeping a file's lower figure when it is
+read twice. `read_run` reads only the console, because the bundle holds the
+report and no test counts.
 
 ### `hosts/`
 

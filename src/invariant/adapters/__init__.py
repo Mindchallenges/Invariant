@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import Adapter, Hazard, TestResult
+from .dart import DartAdapter, FlutterAdapter
 from .node import NodeAdapter
 from .python_ import PythonAdapter
 from .swift_xcode import SwiftXcodeAdapter
@@ -21,6 +22,8 @@ _REGISTRY: dict[str, type[Adapter]] = {
     "swift_xcode": SwiftXcodeAdapter,
     "python": PythonAdapter,
     "node": NodeAdapter,
+    "dart": DartAdapter,
+    "flutter": FlutterAdapter,
 }
 
 __all__ = [
@@ -53,7 +56,7 @@ def defaults_for(ecosystem: str) -> dict[str, Any]:
 def detect(root: Path) -> list[str]:
     """Ecosystems whose marker files are present. Ordered, deduped."""
     found: list[str] = []
-    for name in ("swift_xcode", "python", "node"):
+    for name in ("swift_xcode", "python", "node", "flutter", "dart"):
         if _REGISTRY[name]().detect(Path(root)) and name not in found:
             found.append(name)
     return found or ["generic"]

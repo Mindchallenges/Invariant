@@ -515,10 +515,16 @@ class TestNodeAdapter:
 
 
 def test_every_shipped_adapter_declares_unique_hazard_ids():
+    """One hazard id per family: an alias or a subclass sharing ``hazards`` repeats them."""
     seen: set[str] = set()
+    families: set[object] = set()
     for name in available():
+        family = type(get_adapter(name)).hazards
+        if family in families:
+            continue
+        families.add(family)
         for hazard in get_adapter(name).hazards():
-            assert hazard.id not in seen or name in {"swift", "swift_xcode"}
+            assert hazard.id not in seen
             seen.add(hazard.id)
 
 

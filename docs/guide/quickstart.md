@@ -13,7 +13,8 @@ invariant init
 ```
 
 `init` detects the ecosystem from what is in the directory (`pyproject.toml` →
-`python`, `package.json` → `node`, an `.xcodeproj`/`.xcworkspace` → `swift`;
+`python`, `package.json` → `node`, an `.xcodeproj`/`.xcworkspace` → `swift`,
+`pubspec.yaml` → `flutter` when it depends on the Flutter SDK, else `dart`;
 anything else → `generic`) and writes:
 
 | Path | What it is |
