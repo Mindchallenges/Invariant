@@ -8,14 +8,26 @@ default (the value the configuration resolves to now), that value's
 provenance label as ``config show`` prints it, its current value at the
 target level, the levels allowed to hold its key, and its choices.
 
+It also judges an answer (D6): parsed by its kind (`parse_answer`), checked
+against its choices, its path rule and, for a command, its shape
+(`command_problem`, the one check `doctor`'s `command shape` row reads too),
+then as the configuration it produces, through `Manifest.validate` on a
+`Draft` of the levels with every answer so far placed at its level. It routes
+an answer its level may not hold to the nearest level that may (`route`, D4),
+and turns the answers into the writes by level, changed answers only
+(`plan`, D5, ruling 12).
+
 It prompts for nothing and writes nothing. It reads ``core/manifest``,
 ``core/machines``, ``core/home``, ``core/privacy`` and the adapters, and
 imports nothing above ``core``, so the oracle boundary holds by construction.
-``cli/main`` renders its report after a non-interactive ``init`` (D9).
+``cli/main`` renders its report after a non-interactive ``init`` (D9);
+``cli/configure`` asks the questions and applies the plan.
 """
 
 from __future__ import annotations
 
+import copy
+import string
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,7 +38,7 @@ import yaml
 from .. import adapters
 from . import machines
 from .errors import ManifestError
-from .home import PROJECT_SPECIFIC
+from .home import PROJECT_SPECIFIC, load_user_config
 from .manifest import (
     COMMAND_NAMES,
     DATA_DIR,
@@ -35,9 +47,10 @@ from .manifest import (
     RECORD_LOCATIONS,
     Manifest,
     profile_names,
+    project_relative,
 )
 from .privacy import PATTERNS
-from .stores import POINTER_KEYS
+from .stores import POINTER_KEYS, without
 
 #: The shipped catalogue (D1).
 CATALOGUE = DATA_DIR / "questionnaire" / "catalogue.yaml"
@@ -74,6 +87,9 @@ COMMAND_PLACEHOLDERS: dict[str, tuple[str, ...]] = {
     "test_one": ("selector",),
     "coverage_one": ("selector",),
 }
+
+#: The placeholders the engine substitutes for every command it runs.
+ENGINE_PLACEHOLDERS = ("result_bundle",)
 
 #: The commands the non-interactive report lists for each ecosystem (D9);
 #: the rest are in `configure --questions`.
@@ -428,6 +444,15 @@ def resolve(
     ]
 
 
+def resolve_entry(
+    manifest: Manifest, target: str, section: str, entry: Entry
+) -> list[Question]:
+    """The questions one catalogue entry asks, resolved against ``manifest``
+    for the level ``target``: a run re-resolves each entry after the answers
+    before it, so the commands follow the ecosystems answered (D3)."""
+    return _Resolver(manifest, _target_level(manifest, target)).questions(section, entry)
+
+
 class _Resolver:
     def __init__(self, manifest: Manifest, level: Mapping[str, Any]) -> None:
         self.manifest = manifest
@@ -544,6 +569,349 @@ class _Resolver:
         if source == "privacy_patterns":
             return tuple(PATTERNS)
         return RECORD_LOCATIONS[str(entry.key).split(".", 1)[1]]
+
+
+# -- routing (D4) ----------------------------------------------------------------
+
+
+def _refusal_reason(key: str, level: str) -> str:
+    """Why ``level`` may not hold ``key``, as the questionnaire says it."""
+    if level == "user":
+        top = key.split(".")[0]
+        held = top if top in PROJECT_SPECIFIC else key
+        return f"the user level may not hold {held}"
+    # The store's two levels hold every key, so the only other level that
+    # refuses one is a store project's repo level, its pointer.
+    return "the pointer holds only " + ", ".join(POINTER_KEYS[:-1]) + f" and {POINTER_KEYS[-1]}"
+
+
+def route(key: str, target: str, *, store_project: bool) -> tuple[str, str | None]:
+    """The level an answer over ``key`` aimed at ``target`` is written at, and
+    the note saying so when that is not ``target`` (D4, ruling 3).
+
+    The nearest level that may hold the key, searching towards the project's
+    own level first (up the order `user`, `store`, `store-repo`, `repo`) and
+    then away from it, so a project-specific answer from the user level lands
+    with the project and a policy answer from the pointer lands in the
+    store's block for this repository.
+    """
+    allowed = allowed_levels(key, store_project=store_project)
+    if target in allowed:
+        return target, None
+    at = LEVELS.index(target)
+    for level in [*LEVELS[at + 1 :], *reversed(LEVELS[:at])]:
+        if level in allowed:
+            return level, f"{key} goes to {level}: {_refusal_reason(key, target)}"
+    # The repo level holds every key in an in-repo project, and the store's
+    # two levels every key in a store project, so the search always ends.
+    raise ManifestError(f"no level of this project may hold {key}")  # pragma: no cover
+
+
+# -- the shape of a command (D6, ruling 13) -----------------------------------------
+
+
+def _template_fields(template: str) -> list[str]:
+    seen: list[str] = []
+    for _literal, name, _spec, _conv in string.Formatter().parse(template):
+        if name is not None and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def command_problem(manifest: Manifest, name: str, value: Any) -> str | None:
+    """What is wrong with ``value`` as the command ``name``, or ``None``.
+
+    Shape only, never run (ruling 8): one non-empty line, every placeholder
+    the engine substitutes for this command that it needs present, and no
+    placeholder that nothing substitutes (the engine, ``vars`` or
+    ``discover``). Unset is not malformed. The questionnaire refuses at entry
+    on it, and `doctor`'s `command shape` row warns on it, so a typed and a
+    hand-written command are judged by one rule (ruling 13).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return "is not text"
+    if not value.strip():
+        return "is empty"
+    if "\n" in value or "\r" in value:
+        return "is more than one line"
+    try:
+        fields = _template_fields(value)
+    except ValueError:
+        return "has an unbalanced brace: write a literal one as {{ or }}"
+    required = COMMAND_PLACEHOLDERS.get(name, ())
+    for placeholder in required:
+        if placeholder not in fields:
+            return f"lacks {{{placeholder}}}, which the engine substitutes for {name}"
+    supplied = {
+        *ENGINE_PLACEHOLDERS,
+        *required,
+        *(manifest.get("vars") or {}),
+        *(manifest.get("discover") or {}),
+    }
+    for placeholder in fields:
+        if placeholder not in supplied:
+            return (
+                f"names {{{placeholder}}}, which nothing substitutes for {name}: "
+                f"not the engine, vars or discover"
+            )
+    return None
+
+
+def command_problems(manifest: Manifest) -> list[tuple[str, str]]:
+    """Every configured command of every declared ecosystem that is misshapen,
+    as ``(key, problem)``: what `doctor`'s `command shape` row names."""
+    found = []
+    for eco in manifest.declared_ecosystems:
+        for name in COMMAND_NAMES:
+            key = manifest.command_key(name, eco)
+            problem = command_problem(manifest, name, manifest.get(key))
+            if problem is not None:
+                found.append((key, problem))
+    return found
+
+
+# -- an answer, read and judged (D6) -------------------------------------------------
+
+
+class Refused(ManifestError):
+    """An answer refused at entry; its message is the reason."""
+
+
+_YES = ("yes", "y", "true")
+_NO = ("no", "n", "false")
+
+
+def parse_answer(question: Question, text: str) -> Any:
+    """``text``, as typed, read as the value ``question``'s kind takes.
+
+    A list is comma-separated; a percent is a number, a count a whole one; a
+    bool is yes or no; empty or ``none`` is no value for a text, path or
+    command. Refused, naming
+    the text, when it cannot be read as the kind.
+    """
+    text = text.strip()
+    kind = question.kind
+    if kind == "list":
+        return [part.strip() for part in text.split(",") if part.strip()]
+    if kind in ("percent", "count"):
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError:
+            value = None
+        if kind == "count" and not (isinstance(value, int) and not isinstance(value, bool)):
+            raise Refused(f"{text!r} is not a whole number")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise Refused(f"{text!r} is not a number")
+        return value
+    if kind == "bool":
+        if text.lower() in _YES:
+            return True
+        if text.lower() in _NO:
+            return False
+        raise Refused(f"{text!r} is not yes or no")
+    if kind in ("text", "path", "command") and (not text or text.lower() == "none"):
+        return None
+    return text
+
+
+def check(question: Question, value: Any, draft: Draft, level: str) -> str | None:
+    """Why ``value`` is refused as the answer to ``question`` at ``level``, or
+    ``None`` (D6, ruling 8).
+
+    A choice is checked against its choices and a path against the rule a
+    path key has, so the refusal names the options; a command against its
+    shape. Then the answer is placed in ``draft`` and the configuration it
+    produces is resolved through `Manifest.validate`, the same code a
+    hand-written value meets at load; its refusal is the reason.
+    """
+    choices = question.choices
+    if choices is not None:
+        for entry in value if isinstance(value, list) else [value]:
+            if entry not in choices:
+                return f"{entry!r} is not one of " + ", ".join(str(c) for c in choices)
+    if question.kind == "path" and value is not None:
+        spelled = project_relative(value) if isinstance(value, str) and value else None
+        if not spelled or Path(value).is_absolute():
+            return f"{value!r} is not a path inside the project: no '..', not absolute"
+    if question.kind == "command":
+        problem = command_problem(draft.manifest(), question.key.rsplit(".", 1)[1], value)
+        if problem is not None:
+            return problem
+    try:
+        draft.placed(str(question.key), value, level).manifest()
+    except ManifestError as exc:
+        return str(exc)
+    return None
+
+
+# -- a draft of the levels, every answer placed --------------------------------------
+
+
+def _set(mapping: dict[str, Any], dotted: str, value: Any) -> None:
+    *parents, leaf = dotted.split(".")
+    node = mapping
+    for part in parents:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[leaf] = value
+
+
+class Draft:
+    """The config levels of a project with answers placed at their levels.
+
+    Built from a resolved `Manifest`'s levels as read (`Manifest.levels`),
+    lowest first; the user level is present even when it sets nothing, so an
+    answer can be placed there. `manifest` resolves the draft through
+    `Manifest.from_raw`, validation included.
+    """
+
+    def __init__(self, base: Manifest, user_label: str | None = None) -> None:
+        self.base = base
+        levels = [
+            [_level_of(base, label) or label, label, copy.deepcopy(raw)]
+            for label, raw in base.levels
+        ]
+        if not any(target == "user" for target, _label, _raw in levels):
+            label = user_label or load_user_config().label
+            levels.insert(0, ["user", label, {}])
+        store = base.store
+        if store is not None and not any(t == "store-repo" for t, _l, _r in levels):
+            # A store lists a repository whose block sets nothing; the block
+            # is still a level an answer can be placed at.
+            at = next(i for i, (t, _l, _r) in enumerate(levels) if t == "store") + 1
+            levels.insert(at, ["store-repo", store.repo_label, {}])
+        self._levels = levels
+
+    def _copy(self) -> Draft:
+        other = object.__new__(Draft)
+        other.base = self.base
+        other._levels = [[t, label, copy.deepcopy(raw)] for t, label, raw in self._levels]
+        return other
+
+    def _index(self, level: str) -> int:
+        for index, (target, _label, _raw) in enumerate(self._levels):
+            if target == level:
+                return index
+        raise ManifestError(
+            f"the level {level!r} is not one this project has; it has "
+            + ", ".join(t for t, _l, _r in self._levels)
+        )
+
+    def raw(self, level: str) -> dict[str, Any]:
+        """What ``level`` itself sets, as the draft holds it."""
+        return self._levels[self._index(level)][2]
+
+    def placed(self, key: str, value: Any, level: str) -> Draft:
+        """A draft with ``key`` set to ``value`` at ``level``."""
+        other = self._copy()
+        _set(other._levels[other._index(level)][2], key, value)
+        return other
+
+    def below(self, key: str, level: str) -> Draft:
+        """A draft where ``key`` resolves from the levels below ``level``:
+        removed at ``level`` and every level above it."""
+        other = self._copy()
+        for index in range(other._index(level), len(other._levels)):
+            other._levels[index][2] = without(other._levels[index][2], key)
+        return other
+
+    def manifest(self) -> Manifest:
+        """The draft resolved and validated, as a load would."""
+        *lower, (_target, label, top) = self._levels
+        return Manifest.from_raw(
+            top,
+            root=self.base.root,
+            path=self.base.path,
+            below=[(lbl, raw) for _t, lbl, raw in lower if raw or _t != "user"],
+            store=self.base.store,
+            label=label,
+            located=self.base.located,
+        )
+
+
+# -- the write plan (D5) -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Answer:
+    """An answer as given: its key, its value, the level it goes to (after
+    routing), and the default it was shown with."""
+
+    key: str
+    value: Any
+    level: str
+    default: Any = None
+
+
+@dataclass(frozen=True)
+class LevelWrite:
+    """What one level gains and loses."""
+
+    level: str
+    sets: dict[str, Any]
+    removes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WritePlan:
+    """The writes by level, lowest first, and what the questionnaire says
+    about them."""
+
+    writes: tuple[LevelWrite, ...]
+    notes: tuple[str, ...] = ()
+
+    def at(self, level: str) -> LevelWrite:
+        for write in self.writes:
+            if write.level == level:
+                return write
+        return LevelWrite(level=level, sets={})
+
+
+def plan(base: Manifest, answers: Sequence[Answer]) -> WritePlan:
+    """The writes ``answers`` make over ``base`` (D5, ruling 4, 12). Pure.
+
+    An answer equal to the default it was shown with writes nothing. One
+    equal to what the levels below its level resolve removes the key from
+    its level when that level sets it, and says so; otherwise it writes
+    nothing either. Any other answer is written at its level.
+    """
+    draft = Draft(base)
+    for answer in answers:
+        draft = draft.placed(answer.key, answer.value, answer.level)
+    original = Draft(base)
+    sets: dict[str, dict[str, Any]] = {}
+    removes: dict[str, list[str]] = {}
+    notes: list[str] = []
+    for answer in answers:
+        if answer.value == answer.default:
+            continue
+        try:
+            beneath = draft.below(answer.key, answer.level).manifest()
+            inherited = beneath.get(answer.key, _UNSET)
+            source = beneath.source_of(answer.key)
+        except ManifestError:
+            inherited, source = _UNSET, ""
+        if answer.value == inherited:
+            if _dig(original.raw(answer.level), answer.key) is not _UNSET:
+                removes.setdefault(answer.level, []).append(answer.key)
+                notes.append(
+                    f"{answer.key}: {shown(answer.value)} is what the levels below "
+                    f"{answer.level} resolve, so it is removed from {answer.level} "
+                    f"and flows from {source} again"
+                )
+            continue
+        _set(sets.setdefault(answer.level, {}), answer.key, answer.value)
+    writes = tuple(
+        LevelWrite(level=level, sets=sets.get(level, {}), removes=tuple(removes.get(level, ())))
+        for level in LEVELS
+        if level in sets or level in removes
+    )
+    return WritePlan(writes=writes, notes=tuple(notes))
 
 
 # -- the non-interactive report (D9) -------------------------------------------

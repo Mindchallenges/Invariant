@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -531,17 +531,64 @@ class StoreWrite:
     reason: str = ""
 
 
+#: The comment `init` writes at the end of the manifest. A file whose only
+#: comment lines are exactly these is treated as holding none: it is rewritten
+#: merged and the comment is put back at its end (ADR-017 ruling 9).
+INIT_COMMENT = (
+    "# Everything else has a default. 'invariant config show --provenance'\n"
+    "# prints the resolved configuration and where each value came from.\n"
+)
+
+
+def without(mapping: Mapping[str, Any], dotted: str) -> dict[str, Any]:
+    """A copy of ``mapping`` without the key ``dotted``, and without any
+    parent the removal leaves empty (ADR-017 ruling 12)."""
+    head, _, rest = dotted.partition(".")
+    out = dict(mapping)
+    if head not in out:
+        return out
+    if not rest:
+        del out[head]
+        return out
+    child = out[head]
+    if not isinstance(child, Mapping):
+        return out
+    pruned = without(child, rest)
+    if pruned:
+        out[head] = pruned
+    else:
+        del out[head]
+    return out
+
+
+def _removed(mapping: Mapping[str, Any], keys: Sequence[str]) -> dict[str, Any]:
+    out = dict(mapping)
+    for key in keys:
+        out = without(out, key)
+    return out
+
+
 #: A YAML comment: a ``#`` opening a line, or after whitespace. A ``#`` inside
 #: a quoted value can read as one too, which errs towards not writing.
 _COMMENT = re.compile(r"(?:^|\s)#")
 
 
+def _comment_lines(path: Path) -> list[str]:
+    return [
+        line
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if _COMMENT.search(line)
+    ]
+
+
 def holds_comments(path: Path) -> bool:
     """Does the YAML file at ``path`` carry a comment a rewrite would drop?"""
-    return any(
-        _COMMENT.search(line)
-        for line in Path(path).read_text(encoding="utf-8").splitlines()
-    )
+    return bool(_comment_lines(path))
+
+
+def holds_only_init_comment(path: Path) -> bool:
+    """Are the file's only comment lines exactly `init`'s (ruling 9)?"""
+    return _comment_lines(path) == INIT_COMMENT.splitlines()
 
 
 def by_hand_block(
@@ -560,9 +607,11 @@ def write_store_settings(
     *,
     top: Mapping[str, Any] | None = None,
     repo: Mapping[str, Any] | None = None,
+    remove_repo: Sequence[str] = (),
 ) -> StoreWrite:
     """Merge settings into the store at ``root`` (D3, 5b): ``top`` into the
-    store's own level, ``repo`` into its ``store.repos.<key>`` block.
+    store's own level, ``repo`` into its ``store.repos.<key>`` block, and
+    ``remove_repo``, dotted keys, taken out of that block (ADR-017 ruling 12).
 
     The settings `init` chose for one repository go in that repository's
     block, so a store serving several is not changed for the others
@@ -586,14 +635,14 @@ def write_store_settings(
             by_hand=by_hand_block(key, top, repo),
             reason=(
                 f"{path} holds comments, and rewriting it would drop them, so "
-                f"nothing was written to it"
+                f"nothing was written to it" + _removal_note(remove_repo, f"store.repos.{key}.")
             ),
         )
     raw = _read_yaml(path, "the store config") or {}
     body = _merged(raw, top or {})
     block = dict(body.get("store") or {})
     listed = dict(block.get("repos") or {})
-    listed[key] = _merged(repos[key], repo or {})
+    listed[key] = _removed(_merged(repos[key], repo or {}), remove_repo)
     block["repos"] = listed
     body["store"] = block
     _write_atomic(path, yaml.safe_dump(dict(body), sort_keys=False))
@@ -607,43 +656,60 @@ def _reads_as(text: str, expected: Mapping[str, Any]) -> bool:
         return False
 
 
-def write_repo_settings(path: Path, settings: Mapping[str, Any]) -> StoreWrite:
-    """Merge ``settings`` into a repository's own manifest at ``path`` (D3, 5c).
+def _removal_note(keys: Sequence[str], prefix: str = "") -> str:
+    if not keys:
+        return ""
+    return "; remove " + ", ".join(f"{prefix}{key}" for key in keys) + " by hand as well"
+
+
+def write_repo_settings(
+    path: Path, settings: Mapping[str, Any], remove: Sequence[str] = ()
+) -> StoreWrite:
+    """Merge ``settings`` into a repository's own manifest at ``path`` (D3,
+    5c), and take the dotted keys ``remove`` out of it (ADR-017 ruling 12).
 
     The same rule as :func:`write_store_settings`: a file holding no comment
-    is rewritten whole, merged. One holding a comment is never rewritten,
-    since that would drop it; instead, when none of the top-level keys
-    ``settings`` sets is in the file, the settings are appended as a block of
-    their own, which leaves every byte already there as it was. The appended
-    text is parsed back first and written only when it reads as exactly the
-    merged settings. Otherwise nothing is written, and the result carries the
-    block to add by hand and why (ADR-016 D7, `docs adopt`).
+    is rewritten whole, merged. A file whose only comment is the one `init`
+    writes counts as holding none: it is rewritten merged and that comment is
+    put back at its end (ADR-017 ruling 9). One holding any other comment is
+    never rewritten, since that would drop it; instead, when nothing is to be
+    removed and none of the top-level keys ``settings`` sets is in the file,
+    the settings are appended as a block of their own, which leaves every
+    byte already there as it was. The appended text is parsed back first and
+    written only when it reads as exactly the merged settings. Otherwise
+    nothing is written, and the result carries the block to add by hand and
+    why (ADR-016 D7, `docs adopt`).
     """
     path = Path(path)
     raw = _read_yaml(path, "the manifest") or {}
     if not isinstance(raw, Mapping):
         raise ManifestError(f"{path} must contain a mapping")
-    merged = _merged(raw, settings)
-    if not holds_comments(path):
-        _write_atomic(path, yaml.safe_dump(merged, sort_keys=False))
+    merged = _removed(_merged(raw, settings), remove)
+    if not holds_comments(path) or holds_only_init_comment(path):
+        body = yaml.safe_dump(merged, sort_keys=False)
+        if holds_comments(path):
+            body += "\n" + INIT_COMMENT
+        _write_atomic(path, body)
         return StoreWrite(path=path, written=True)
     block = yaml.safe_dump(dict(settings), sort_keys=False)
     text = path.read_text(encoding="utf-8")
     appended = text + ("" if not text or text.endswith("\n") else "\n") + "\n" + block
     shared = sorted(set(settings) & set(raw))
-    if not shared and _reads_as(appended, merged):
+    if not shared and not remove and _reads_as(appended, merged):
         _write_atomic(path, appended)
         return StoreWrite(path=path, written=True)
-    why = (
-        f"already sets {', '.join(shared)}" if shared
-        else "would not read back as the merged settings with a block appended"
-    )
+    if remove:
+        why = "a key is to be removed: " + ", ".join(remove)
+    elif shared:
+        why = f"already sets {', '.join(shared)}"
+    else:
+        why = "would not read back as the merged settings with a block appended"
     return StoreWrite(
         path=path,
         written=False,
         by_hand=block,
         reason=(
             f"{path} holds comments, which a rewrite would drop, and {why}, so "
-            f"nothing was written to it"
+            f"nothing was written to it" + _removal_note(remove)
         ),
     )

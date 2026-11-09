@@ -1588,13 +1588,18 @@ of text: empty, not a string, or holding a line break, a trailing one included,
 is refused. What a value says is never checked. `kind` is not judged at load:
 the commands that need an adapter refuse a kind with none, by name.
 
-**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D6, D11).** Every answer the
+**Built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D6, increment 2).** Every answer the
 questionnaire takes is validated by this same `validate`, as the
-configuration it would produce, so a typed value and a hand-written one meet
-one rule. A shape a question checks that load does not yet (a coverage floor
-outside 0 to 100) is added here in the increment that asks it (2). Command
-shape is the exception: it is not refused at load (ruling 13); `doctor`'s
-`command shape` row warns instead. `questionnaire` is refused, naming the
+configuration it would produce (`core/questionnaire.check`, through a
+`Draft` of the levels resolved by `from_raw`), so a typed value and a
+hand-written one meet one rule. `methodology.gates.coverage_min` is refused
+at load unless it is a number from 0 to 100, naming the key and the value;
+null (no floor) and a quoted number still load, as the gates have always
+read them (`float(value or 0)`). Command shape is the exception: it is not
+refused at load (ruling 13), and `doctor`'s `command shape` row warns
+instead, reading the questionnaire's own check.
+
+**Accepted, not yet built (ADR-017 D11, increment 4).** `questionnaire` is refused, naming the
 entry, for a section id the catalogue and `sections` do not hold, a section
 in both `core` and `advanced`, a question over a key the manifest does not
 have, an unknown kind, a step defined or redefined, and `choices` on a kind
@@ -1691,19 +1696,30 @@ same way, each with its label, and the pointer refuses them.
 default. `docs.adopt.mode` is accepted there, and then each project names
 its own source.
 
-**Accepted, not yet built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D4, D5, D11).** The questionnaire
+**Built ([ADR-017](../adr/ADR-017-init-asks-the-configuration-as-a-questionnaire-and-configure-asks-it-again.md) D4, D5, increment 2).** The questionnaire
 writes at layer 5's levels: `user` (`defaults:`), `store` (the store's own
 level), `store-repo` (its `store.repos.<identity>` block) and `repo`. An
-answer is written only when it differs from what the levels below its target
-resolve, so defaults keep flowing upward; an answer equal to that inherited
-value removes the key from a level that set it (ruling 12). An answer its
-target may not hold (`project` and `records` at the user level, a policy key
-at the pointer) goes to the nearest level that may, searching towards the
-project's own level first. The user level gains a writer,
-`core/home.write_user_defaults`, with the comment rule the store and repo
-writers keep. `questionnaire` resolves at user `defaults:`, the store and an
-in-repo manifest like any key, a list replaced whole; the pointer refuses
-it. Increment 2 builds the writes, 4 the `questionnaire` key.
+answer equal to the default it was shown with writes nothing (ruling 4);
+one equal to what the levels below its level resolve removes the key from
+that level when the level sets it, and says so (ruling 12); any other is
+written at its level (`core/questionnaire.plan`). An answer its target may
+not hold (`project` and `records` at the user level, `docs.adopt.source`
+there too, a policy key at the pointer) goes to the nearest level that may,
+searching towards the project's own level first and then away from it
+(`route`), and the questionnaire says so. The user level has a writer,
+`core/home.write_user_defaults`: merged into `defaults:`, a removed key
+taking its emptied parents with it, `version` and `repos:` kept, and a file
+holding a comment never rewritten (the block to add by hand is returned).
+`write_repo_settings` and `write_store_settings` take keys to remove as
+well, and a manifest whose only comment lines are exactly `init`'s
+(`core/stores.INIT_COMMENT`, the constant `init`'s body writes) counts as
+holding none: it is rewritten merged and the comment put back at its end
+(ruling 9); any other comment, or init's edited, holds the file as before.
+At `init` the repo level's answers are folded into the manifest it writes.
+
+**Accepted, not yet built (ADR-017 D11, increment 4).** `questionnaire`
+resolves at user `defaults:`, the store and an in-repo manifest like any
+key, a list replaced whole; the pointer refuses it.
 
 **Built (ADR-017 D2, increment 1): the reading half.** A resolved
 `Manifest` keeps its config levels as read, `Manifest.levels`, lowest

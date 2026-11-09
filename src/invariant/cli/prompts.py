@@ -68,7 +68,8 @@ class TerminalPrompter:
         self._write(question)
         for number, (key, label) in enumerate(options, start=1):
             marker = "  (default)" if key == default else ""
-            self._write(f"  {number}) {key}: {label}{marker}")
+            described = f": {label}" if label else ""
+            self._write(f"  {number}) {key}{described}{marker}")
         while True:
             answer = self._line(f"choose 1-{len(options)} or a name [{default}]: ")
             if not answer:

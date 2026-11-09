@@ -114,7 +114,7 @@ Nothing reaches the engine another way.
 ## Setup
 
 ```
-invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
+invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
     Write a manifest, install shims, wire host settings, create the state root,
     and add the state root to .gitignore. Refuses to clobber an existing
     manifest without --force; prints a diff of what it would change with
@@ -174,7 +174,8 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
       2. The assessment (`invariant docs assess`) runs on the chosen
          location and prints its gaps.
       3. Where there are gaps, init offers `not_now` (the default: writes
-         nothing), `incremental` (writes `docs.onboarding: incremental`,
+         nothing), `incremental` (writes `docs.onboarding: incremental`, with
+         the rest of init's writes since ADR-017 increment 2,
          which injects `docs.area_documented` at every landing)
          or `all_at_once` (writes `docs.onboarding: all_at_once`, then the
          plan of ruling 9). When the base already carries the manifest, a
@@ -222,35 +223,78 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile standard]
     resolved: reported, never a failed init. An interactive run lists
     nothing. `invariant configure` itself is increment 3 (below).
 
-    Accepted, not yet built (ADR-017, increments 2 to 4). `init` asks the configuration as a
-    questionnaire whose catalogue is data (`data/questionnaire/catalogue.yaml`,
-    `core/questionnaire`, driven by `cli/configure` through the same
-    `Prompter`). First the target level: `user`, `store`, `store-repo` (this
-    repository's block) or `repo`, default `repo` (`store-repo` in a store
-    project). Then the core sections, each value shown with its default and
-    provenance: ecosystems and commands, profile, lane
-    (`methodology.pipeline`), coverage floor, and the docs step, which is
-    ADR-016 D4's offers above, unchanged in order and meaning. Then one
+    Built (ADR-017, increment 2): interactive `init` asks the core
+    questions. The catalogue is data (`data/questionnaire/catalogue.yaml`,
+    `core/questionnaire`), and `cli/configure` asks it through the same
+    `Prompter`. First the target level: `user` (`defaults:` in
+    `~/.invariant/config.yaml`) or `repo`, default `repo`; a fresh project has
+    no store yet, so `store` and `store-repo` are not offered. Then the core
+    sections in catalogue order, each question shown with its default and
+    where that comes from, "(now standard, from default)": the ecosystems
+    (pre-filled from the adapters' detection, "from detected"), the commands
+    step (every command of every declared ecosystem in one table with its
+    default and provenance, then "change any?", default no; yes walks them one
+    by one, and Enter keeps a command's default), the profile, the lane
+    (`methodology.pipeline`) and the coverage floor, then the docs step, which
+    is ADR-016 D4's offers above in their order, with their defaults and
+    meaning. A flag given is an answer, checked like a typed one and not
+    asked: `--profile`, which has no parser default any more (absent, a
+    non-interactive `init` writes `profile: standard` as before), and
+    `--ecosystem`. A flag refused is exit 2, before anything is written.
+
+    Every answer is checked as the configuration it produces: the config
+    levels with every answer so far placed at its level, resolved through the
+    manifest's own `validate`. A refusal prints the manifest's reason and the
+    question is asked again (a floor of 101: "methodology.gates.coverage_min
+    must be a number from 0 to 100, got 101"). A choice is checked against its
+    choices and a path against the path rule first, so the refusal names the
+    options, and a command against its shape only, never run: one non-empty
+    line, the placeholders the engine substitutes for it present (`{selector}`
+    for `test_one` and `coverage_one`), and none that nothing substitutes (the
+    engine's `{result_bundle}`, `vars` or `discover`). An answer its level may
+    not hold goes to the nearest level that may, saying so beside it:
+    "project.ecosystems goes to repo: the user level may not hold project".
+
+    Nothing but a chosen store is written until the last answer. Then only
+    answers that differ from the default they were shown with are written, at
+    their level; one equal to what the levels below its level resolve, at a
+    level that sets the key, removes the key there and says so (ruling 12).
+    The user level is written through `core/home.write_user_defaults`, merged,
+    unless the file holds a comment: then nothing is written to it, and the
+    `defaults:` block to add by hand is printed, and carried under `--json`
+    in `settings_by_hand`, a list of `{"path", "reason", "yaml"}` (`[]` when
+    every file was written; the store's held block is in it too, and keeps
+    its own `store_settings_by_hand`). The repo level's answers are folded
+    into the manifest init writes, so accepting everything writes the
+    `project` block and init's comment, and no `enforcement` block: a profile
+    set at the user level keeps applying. Where the docs step chose a store,
+    the project's repo level is its pointer, which init does not write, and an
+    answer aimed at it goes to the store's block for this repository, saying
+    so. The docs step's assessment reads the candidate configuration, as
+    `--dry-run` does, so an absent docs directory is assessed as absent and
+    the starter is written after the offer; `docs.onboarding` is written with
+    the rest, and an all-at-once plan is recorded after the writes from the
+    docs as written. An interactive run lists no configuration report.
+
+    The questionnaire's prompter comes from its own seam,
+    `_questionnaire_prompter`, beside `_init_prompter`, which answers the
+    docs step; both answer by `prompts.interactive`. The suite replaces each
+    on its own, so a run whose questionnaire is not asked (only the docs step
+    scripted) writes the body init always wrote.
+
+    Accepted, not yet built (ADR-017, increments 3 and 4). Then one
     question, "configure advanced settings?", default no, which opens agents,
     guidelines, records and store, privacy and session, and a review where any
-    answer can be moved to another level. An answer its level may not hold
-    goes to the nearest level that may, saying so. Only answers that differ
-    from what the levels below resolve are written, all in one phase after the
-    last answer, a store created or linked first; an answer equal to the
-    inherited value at a level that sets it removes the key there. Every
-    answer is validated as the configuration it produces and asked again with
-    the manifest's reason; commands are checked for shape only, never run.
-    Scripted: `--set <id>=<value>`, `--answers <file.yaml>`, `--yes` and
-    `--level`, each answer validated the same way and refused with exit 2
-    before anything is written; `--questions [--json]` prints the questions
-    instead of asking them. `--profile` loses its parser default: given, it is
-    an answer; absent, a non-interactive `init` writes `profile: standard` as
-    today. Non-interactive `init` without those flags writes today's files
-    byte for byte and adds the report above. `init` never rewrites an
-    existing manifest for this; that is `invariant configure` (below).
-    Increment 1 of ADR-017 built the non-interactive report, 2 builds the
-    interactive core, 3 the scripted flags, and 4 the advanced step and the
-    catalogue at the levels.
+    answer can be moved to another level; the `store` and `store-repo` levels
+    for a store project. Scripted: `--set <id>=<value>`, `--answers
+    <file.yaml>`, `--yes` and `--level`, each answer validated the same way
+    and refused with exit 2 before anything is written; `--questions
+    [--json]` prints the questions instead of asking them. Non-interactive
+    `init` without those flags writes today's files byte for byte and adds
+    the report above. `init` never rewrites an existing manifest for this;
+    that is `invariant configure` (below). Increment 1 of ADR-017 built the
+    non-interactive report, 2 the interactive core, 3 builds the scripted
+    flags, and 4 the advanced step and the catalogue at the levels.
 
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is
@@ -356,12 +400,14 @@ invariant doctor
     this machine. Nothing re-syncs: its fix is re-running `docs adopt`
     (below). A project that adopted nothing has no such row.
 
-    Accepted, not yet built (ADR-017 ruling 13, increment 2). A `command
-    shape` row warns, and never fails, naming each configured command that
-    is not one non-empty line or lacks a placeholder its command requires
-    (`{selector}` for `test_one` and `coverage_one`), with its key. It reads
-    the questionnaire's own check, so a typed and a hand-written command are
-    judged alike; a misshapen command still loads.
+    Built (ADR-017 ruling 13, increment 2). The `command shape` row warns,
+    and never fails, naming each configured command of every declared
+    ecosystem that is not one non-empty line, lacks a placeholder the engine
+    substitutes for it (`{selector}` for `test_one` and `coverage_one`), or
+    names one nothing substitutes, with its key and what is wrong. It reads
+    the questionnaire's own check (`core/questionnaire.command_problems`),
+    so a typed and a hand-written command are judged alike; a misshapen
+    command still loads.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule

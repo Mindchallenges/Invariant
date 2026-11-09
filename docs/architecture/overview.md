@@ -23,6 +23,7 @@ graph TD
         CREPLAY["conformance replay"]
         CONBOARD["onboarding: init's docs offers, the plan (ADR-016 D4, D5)"]
         CPROMPTS["prompts (ADR-016 D4)"]
+        CCONFIG["configure: asks a questionnaire run (ADR-017 D2, D3)"]
     end
 
     subgraph oracle["oracle/ — machine-wide view (ADR-007)"]
@@ -295,10 +296,17 @@ graph TD
     CONBOARD -- "start the docs pipeline" --> PIPELINE
     CONBOARD -- "exists_at: does the base carry the manifest" --> GIT
     CLI -- "init's configuration report: load_catalogue, core_report, render_report" --> CQUEST
+    CLI -- "init's questionnaire: Draft, plan, route; command_problems for doctor" --> CQUEST
+    CLI -- "interactive init: the level, the core sections, the user level's writes" --> CCONFIG
+    CLI -- "_questionnaire_prompter: a terminal, or nobody" --> CPROMPTS
+    CCONFIG -- "say, choose, ask" --> CPROMPTS
+    CCONFIG -- "resolve_entry, parse_answer, check, route, Draft" --> CQUEST
+    CCONFIG -- "write_user_defaults" --> CHOME
+    CHOME -. "StoreWrite, holds_comments: at call time" .-> CSTORES
     CQUEST --> QCAT
     CQUEST -- "levels, get, source_of, profile_names, DEFAULTS, RECORD_LOCATIONS" --> MANIFEST
     CQUEST -- "PROJECT_SPECIFIC: what the user level refuses" --> CHOME
-    CQUEST -- "POINTER_KEYS: what a pointer holds" --> CSTORES
+    CQUEST -- "POINTER_KEYS: what a pointer holds; without: a key removed" --> CSTORES
     CQUEST -- "PATTERNS: privacy_patterns choices" --> PRIVACY
     CQUEST -- "available: ecosystems choices" --> adapters
 ```
@@ -458,7 +466,8 @@ docs offers and the all-at-once plan, in the CLI layer because it joins
 three domains and a store write, as `cli/conformance` sits there to drive
 the CLI. It asks every question through `CPROMPTS`, `cli/prompts`, whose
 `Prompter` protocol the suite answers from a script; `cli/main`'s
-`_init_prompter` is the one place a `TerminalPrompter` is made, and only
+`_init_prompter`, and since ADR-017 increment 2 `_questionnaire_prompter`
+beside it, are the places a `TerminalPrompter` is made, and only
 when `prompts.interactive` allows (no `--dry-run`, no `--json`, a terminal
 on both sides). The store choice reaches `core/stores` (`init_store` or
 `link_repo`, then `write_store_settings` into the repository's block), the
@@ -491,14 +500,44 @@ its report lists each core question's resolved value and provenance
 (`core_report`, `render_report`) and, under `--json`, carries them as
 `configuration` (cli.md, `init`).
 
-**Accepted, not yet built (ADR-017, increments 2 to 4).** `core/questionnaire`
-gains the check of an answer through `core/manifest`'s validation and the
-command shape (D6), the write plan by level (D4, D5) and the catalogue with
-the levels' `questionnaire` settings applied (D11). `cli/configure` joins and
-drives a run for `init` and `invariant configure`: it asks through
-`CPROMPTS`, calls `CONBOARD` for the docs step and the store placement, and
-applies the plan through `core/stores` and `core/home`'s writers. This
-diagram gains it, and its arrows, in increment 2.
+**Built (ADR-017, increment 2).** `core/questionnaire` gained its judging
+and planning half. An answer is parsed by its kind (`parse_answer`), checked
+against its choices, its path rule and, for a command, its shape
+(`command_problem`), then resolved as the configuration it produces: a
+`Draft` holds the config levels as read with every answer so far placed at
+its level and resolves them through `Manifest.from_raw`, so `validate` judges
+a typed value exactly as a hand-written one (`check`). `route` sends an
+answer its level may not hold to the nearest level that may, with the note
+that says so (D4), and `plan` turns the answers into the writes by level,
+changed answers only, an inherited value at a level that sets the key
+removing it there (D5, ruling 12). It still prompts for nothing and writes
+nothing. `command_problems` is the one shape check, read by the questionnaire
+at entry and by `doctor`'s `command shape` row (ruling 13), which
+`CLI --> CQUEST` draws. `CQUEST --> CSTORES` also reads `without`, the one
+removal of a dotted key the writers share.
+
+`CCONFIG` is `cli/configure`: it asks a run through `CPROMPTS`, the level
+(`ask_level`) and then the sections in catalogue order (`ask_sections`),
+each entry re-resolved after the answers before it (`resolve_entry`), the
+`commands` step as one table and "change any?", and a step its caller
+handles, `docs`, handed in as a callable. A flag already given (`--profile`,
+`--ecosystem`) is an answer checked like a typed one. Nothing is written
+while asking; `write_user` applies the user level's share of the plan through
+`core/home.write_user_defaults` (`CCONFIG --> CHOME`), which keeps the
+comment rule the store and repo writers keep and reaches `core/stores`' write
+pieces at call time (`CHOME -.-> CSTORES`, dotted: `core/stores` imports
+`core/home` at load). `init` (`CLI --> CCONFIG`) drives it, asks the docs
+step through `CONBOARD` at its place among the core sections, places a
+chosen store first, and writes the rest after the last answer: the user
+level, the store's block for this repository, then the manifest, whose body
+carries the repo level's answers. The questionnaire's prompter comes from its
+own seam, `_questionnaire_prompter`, beside `_init_prompter`, which answers
+the docs step; both answer by `prompts.interactive`.
+
+**Accepted, not yet built (ADR-017, increments 3 and 4).** `invariant
+configure` and the scripted flags (D7, D8) reuse `CCONFIG`, and the catalogue
+gains the levels' `questionnaire` settings (D11), the advanced step and the
+review of where each answer goes (D3.3).
 
 `oracle/` is the newest layer and the only one whose state is not a
 project's. It sits below the CLI and beside `domains/`, and the arrows into it
@@ -1465,14 +1504,14 @@ the CLI would have traded a documentation edit for an architecture violation.
 |---|---|---|
 | `fsm` | Loading a declarative state-machine definition; validating a proposed transition; computing legal next states and pending gates; attaching gates to a machine by state role or beside a named gate | Persist anything; know what a session or a bug is |
 | `store` | Atomic, concurrency-safe JSON persistence under the state root; the advisory lock a read-modify-write holds, as `locked` for the cross-session registry and as `lock` alone for a caller that may write nothing, which is how `domains/pipeline` guards each pipeline record (BUG_107); the round-trip contract a persisted record honours in both directions; the inert variant (`InertStore`) that reads the state root and discards every write, for a caller that must run the real path and leave no trace (BUG_059) | Interpret the contents |
-| `manifest` | Finding the project and its config levels (`Manifest.locate`, the only entry point, ADR-014 D2), and the questions asked of it (`is_project_root`, `set_by_project`); parsing and validating the project manifest; merging profile defaults with per-rule overrides, and the user level's defaults below the project's own (ADR-014 D3, ruling 19), naming them (`user_level_values`); the `docs.assess`, `docs.onboarding` and `docs.adopt` keys and their refusals, `docs.adopt.source` refused at the user level (ADR-016 D9, ruling 11); the `records` block, its refusals, and reading a `store` record's path keys against the store root (`RECORD_PATH_KEYS`, `store_record_paths`, ADR-014 D1); resolving adapter selection; refusing a key it does not read, under `agents`, `guidelines` and `host` alike; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands; interpret a `host.tier_map` value, or hold a list of model names |
+| `manifest` | Finding the project and its config levels (`Manifest.locate`, the only entry point, ADR-014 D2), and the questions asked of it (`is_project_root`, `set_by_project`); parsing and validating the project manifest; merging profile defaults with per-rule overrides, and the user level's defaults below the project's own (ADR-014 D3, ruling 19), naming them (`user_level_values`); the `docs.assess`, `docs.onboarding` and `docs.adopt` keys and their refusals, `docs.adopt.source` refused at the user level (ADR-016 D9, ruling 11); the `records` block, its refusals, and reading a `store` record's path keys against the store root (`RECORD_PATH_KEYS`, `store_record_paths`, ADR-014 D1); resolving adapter selection; a coverage floor outside 0 to 100 (ADR-017 D6); refusing a key it does not read, under `agents`, `guidelines` and `host` alike; the one canonical spelling of a declared path (`project_relative`) that every rule comparing a target against a declaration goes through, and the one matcher of a canonical glob against a path (`glob_matches`) | Read state; run commands; interpret a `host.tier_map` value, or hold a list of model names |
 | `rules` | The rule registry: each rule is an id, a bound host event, an evaluation function, and a level; the guidelines render plan (`plan_render`, `RenderRefused`), because `guidelines.generated_current` asks what `guidelines render` would write; what a pipeline pins of the ruleset at `start` (`ruleset_pin`), read as `ruleset_valid` reads it; every read `guidelines.mechanical_clean` needs (the changed files from the tree in hand, their bytes, the adapters' masks, references and executable text, and the change's history from `git`), handed to `core/findings` as callables; the verdict plan (`plan_verdicts`, `VerdictPlan`, `VerdictRefused`, A4 increment 1), every read D5's checks need gathered as `core/verdicts`' `Facts`, nothing recorded; `guidelines.verdicts_complete` (A4 increment 3), which reads the same `Facts` and asks `core/verdicts` how each owed judgement rule stands, through `read_standings` and `standings_verdict`, the one read `guidelines verdicts show` prints too (`StandingsRead`, `StandingsRefused`, A4 increment 4); reading the ratchet baseline in full or failing (`load_baseline`), what `guidelines baseline` would write (`plan_baseline`, `BaselineRefused`), and `doctor`'s summary of it (`baseline_summary`); the always-layer warning (ADR-012 A5.4, the A5 ruling D12): when the ruleset has `always` rules and no instruction file's `guidelines/index` block carries them, `doctor`'s row (`always_layer_summary`) and the note `guidelines.generated_current` adds, both read from the render plan, whose instruction files are the manifest's or the host default the context carries; `guidelines.baseline_only_shrinks`' reads of the base branch at the merge base (its manifest's two `guidelines` paths, its baseline in full or failing, its ruleset with registries read there) and the admission of growth DN-6 allows; the edit-time advisory (`edit_advisory`, ADR-012 A3.8), a projection of `guidelines.mechanical_clean`'s pattern and boundary findings over one edited file with the ratchet applied, silent without a ruleset and never raising; the edit layer's statements (`edit_guidelines`, ADR-012 A5.3), the judgement rules the current state's phases select for one edited file through `core/guidelines.select`, silent without a ruleset or with `guidelines.injection.on_edit` false, and never raising; the file scope guideline selection reads (`touched_paths`, ADR-012 A5.1), the session's declared plus changed files project-relative, through `_changed_set`; the library agents' currency (`agents_currency`, `AgentCopy`, ADR-012 A6.4), the one judgement `agents.rendered_current` and the host's `library agents current` row give, over a host install plan handed in as a callable (`RuleContext.host_agent_plan`) | Decide policy — levels come from the manifest; write a generated file (`domains/guidelines` does); evaluate a guideline itself (`core/findings` does) |
 | `items` | The work-item model and the pluggable store backends that read and write it; the ids a backend has spent across its open and declared closed store (`items.closed_path`), and minting from them; where a new entry is placed | Know an item's lifecycle, or which of its keys `item new` may set — that is `domains/workitem` |
 | `memory` | Memory file schema, parsing, dedup detection, index generation, link validation | Decide what is worth remembering |
 | `privacy` | Pattern-based detection of personal data in text; the exemption marker and how far it reaches; the structural excuses a match is judged by, each read from the match itself and the text right against it and never from the whole line (a row number, a duration word, an XML identifier, a scaled image name in the domain position, the portrait ratio as the whole of a quoted literal, the midnight bound); on the manifest's own path alone, a match exactly equal to a value its scoped entries declare (BUG_110); reading `privacy.allow` into plain values and path-scoped entries (`parse_allow`, `ScopedAllow`), and deciding whether an entry reaches a match at the path it was handed | Know which files matter: which paths are scanned is `privacy.scope`, decided by the caller, and a path reaches the scanner only to be compared with an allow entry |
 | `git` | Queries about the repository — worktrees, branches, the staged set and the bytes staged for a path, the tracked changes, the files committed under a directory at a ref, the commit a revision names, and for the cochange kind the merge base (`merge_base`), whether a path was a file at a revision (`exists_at`, absent kept apart from unreadable), its exact bytes there (`blob_at`) and the lines a change added from the merge base to the working tree with untracked files counted whole (`changed_lines`); every file the index tracks (`tracked_files`), for `guidelines baseline --record`; every rename git detects from the merge base to the working tree (`renamed_files`), which a baseline entry follows (DN-7) — plus three writes, each named as such: `commit_only`, the sweep's own commit of exactly the paths it wrote; `set_local_config`, one key of the local git config (`invariant.id`, ADR-014 D4); and `init_repository`, a new store (ADR-014 D2) | Decide what an answer means; a question it cannot answer returns `None` and relaxes nothing; push |
-| `home` | The user's home for invariant, `$INVARIANT_HOME` else `~/.invariant` (`invariant_home`, which the oracle's `oracle_home` asks); the user level of the configuration, `config.yaml` (`load_user_config`, `UserConfig`): its `defaults`, its `repos` map and its `store_naming`, each shape refused naming the file; a path spelled for a provenance label (`display_path`) (ADR-014 D3) | Merge a level into a configuration (`manifest` does); write the file; resolve a store |
-| `stores` | Stores (ADR-014 D2): the pointer (`read_pointer`, which refuses a policy key), which store a repo names (`find_store`: the pointer, then the user level by identity, then by local ID, `StoreLink`), the store's levels (`store_levels`, `read_store_manifest`), refused unless `store.repos` lists the repo; naming under ruling 14 with its collision fallback (`plan_store_path`); and the link's writes, the user level's `repos:` entry, `invariant.id` and the linked-identity index (`link_repo`, `update_link`, `init_store`); merging settings into a store's own level or one repository's block (`write_store_settings`, ADR-016 D4), refused for a repository the store does not list, and never rewriting a file that holds a comment: it answers the block to add by hand instead (`StoreWrite`, `by_hand_block`); the same rule for an in-repo manifest (`write_repo_settings`, ADR-016 D7), which may append a block of its own to a commented file when it sets none of that block's top-level keys and the result reads back as the merge | Merge levels into a configuration (`manifest` does); clone, pull or push a store; know a host |
+| `home` | The user's home for invariant, `$INVARIANT_HOME` else `~/.invariant` (`invariant_home`, which the oracle's `oracle_home` asks); the user level of the configuration, `config.yaml` (`load_user_config`, `UserConfig`): its `defaults`, its `repos` map and its `store_naming`, each shape refused naming the file; a path spelled for a provenance label (`display_path`) (ADR-014 D3); writing the user level's `defaults:` (`write_user_defaults`, ADR-017 D5), merged, a key removed with its emptied parents, every other key kept, and never rewriting a file holding a comment: it answers the block to add by hand instead | Merge a level into a configuration (`manifest` does); write `repos:` (`stores` does, for `store link`); resolve a store |
+| `stores` | Stores (ADR-014 D2): the pointer (`read_pointer`, which refuses a policy key), which store a repo names (`find_store`: the pointer, then the user level by identity, then by local ID, `StoreLink`), the store's levels (`store_levels`, `read_store_manifest`), refused unless `store.repos` lists the repo; naming under ruling 14 with its collision fallback (`plan_store_path`); and the link's writes, the user level's `repos:` entry, `invariant.id` and the linked-identity index (`link_repo`, `update_link`, `init_store`); merging settings into a store's own level or one repository's block (`write_store_settings`, ADR-016 D4), refused for a repository the store does not list, and never rewriting a file that holds a comment: it answers the block to add by hand instead (`StoreWrite`, `by_hand_block`); the same rule for an in-repo manifest (`write_repo_settings`, ADR-016 D7), which may append a block of its own to a commented file when it sets none of that block's top-level keys and the result reads back as the merge; `init`'s own comment (`INIT_COMMENT`, shared with `init`'s body) counting as none, the file rewritten merged and the comment put back (ADR-017 ruling 9); a dotted key removed from a level (`without`, ruling 12) | Merge levels into a configuration (`manifest` does); clone, pull or push a store; know a host |
 | `identity` | A repository's identity (ADR-014 D4): normalising an origin URL (`normalise_origin`, the host lowercased, the path too on GitHub, GitLab and Bitbucket), the git common directory read from `.git` and `commondir` (`common_dir_of`), a git config file parsed (`read_git_config`), and the identity itself (`repo_identity`, `Identity`), all without a subprocess; a fresh local ID (`new_local_id`) and its write (`write_local_id`, through `core/git`) | Follow a config `include`, or apply `insteadOf`; decide which store an identity uses |
 | `stats` | Telemetry record types, the price table, the arithmetic, and the `SampleSource` / `WatermarkSource` protocols | Read a transcript; know any host's on-disk format |
 | `plan` | Reading a session's deliverable set: the entries, the next number, how far along it is, and how to render it | Change one; know where the list is stored, or that a session is what holds it |
@@ -1483,7 +1522,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
 | `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
-| `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9) | Prompt for anything; write any level; run a command; import above `core` |
+| `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9); judging an answer (increment 2): its kind read (`parse_answer`, `Refused`), its choices, path rule and command shape checked (`command_problem`, `command_problems`, the one shape check `doctor` reads, ruling 13) and the configuration it produces validated through a `Draft` of the levels; the nearest level that may hold an answer (`route`, D4); the write plan, changed answers only, the inherited value removing a key (`plan`, `Answer`, `LevelWrite`, `WritePlan`, D5, ruling 12) | Prompt for anything; write any level; run a command; import above `core` |
 
 ### `domains/`
 

@@ -19,6 +19,7 @@ import time
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from ..core import plan as plan_reader
 from ..core.agents import AgentSource
@@ -679,7 +680,7 @@ class Context:
 
 
 def _init_prompter(args):
-    """Who answers `init`'s offers: a terminal, or nobody (ADR-016 ruling H).
+    """Who answers `init`'s docs offers: a terminal, or nobody (ADR-016 ruling H).
 
     A seam, like ``_doctor_host_environments``: the suite replaces it to
     drive the interactive path with a scripted prompter, so no test fakes a
@@ -691,9 +692,32 @@ def _init_prompter(args):
     return prompts.TerminalPrompter() if prompts.interactive(args) else None
 
 
-def _init_body(name: str, ecosystems: list[str], profile: str, docs: str | None) -> str:
-    """The in-repo manifest `init` writes: today's text, plus `paths.docs`
-    where another repo path was chosen (ADR-016 D4.1)."""
+def _questionnaire_prompter(args):
+    """Who answers the questionnaire's level and core questions (ADR-017 D3):
+    a terminal, or nobody.
+
+    The seam beside ``_init_prompter``, which answers the docs step. In real
+    use the two answer alike, both by ``prompts.interactive``. The suite
+    replaces each on its own, so ADR-016's docs-offer tests script the docs
+    step alone, and a run whose questionnaire is not asked writes the body
+    `init` always wrote.
+    """
+    from . import prompts
+
+    return prompts.TerminalPrompter() if prompts.interactive(args) else None
+
+
+def _init_body(name: str, ecosystems: list[str], settings: Mapping[str, Any]) -> str:
+    """The in-repo manifest `init` writes: the project block, then each
+    top-level block of ``settings`` (ADR-017 D5), then init's own comment.
+
+    A run that asks no questionnaire passes today's settings, the profile and
+    any `paths.docs` the docs step chose (ADR-016 D4.1), so its text is the
+    text `init` has always written."""
+    import yaml
+
+    from ..core.stores import INIT_COMMENT
+
     lines = [
         "version: 1",
         "",
@@ -701,18 +725,32 @@ def _init_body(name: str, ecosystems: list[str], profile: str, docs: str | None)
         f"  name: {name}",
         f"  ecosystems: [{', '.join(ecosystems)}]",
         "",
-        "enforcement:",
-        f"  profile: {profile}",
-        "",
     ]
-    if docs is not None:
-        lines += ["paths:", f"  docs: {docs}", ""]
-    lines += [
-        "# Everything else has a default. 'invariant config show --provenance'",
-        "# prints the resolved configuration and where each value came from.",
-        "",
-    ]
-    return "\n".join(lines)
+    for top, value in settings.items():
+        lines += yaml.safe_dump({top: value}, sort_keys=False).splitlines()
+        lines.append("")
+    return "\n".join(lines) + "\n" + INIT_COMMENT
+
+
+def _merge_setting(settings: dict[str, Any], dotted: str, value: Any) -> None:
+    *parents, leaf = dotted.split(".")
+    node = settings
+    for part in parents:
+        node = node.setdefault(part, {})
+    node[leaf] = value
+
+
+def _init_settings(base: Mapping[str, Any], docs: _InitDocs) -> dict[str, Any]:
+    """``base`` with the docs step's in-repo choices: `paths.docs` for another
+    repo path, `docs.onboarding` for a mode that writes one."""
+    import copy
+
+    settings = copy.deepcopy(dict(base))
+    if docs.choice.kind == "path":
+        _merge_setting(settings, "paths.docs", docs.choice.docs)
+    if docs.store is None and docs.mode in ("incremental", "all_at_once"):
+        _merge_setting(settings, "docs.onboarding", docs.mode)
+    return settings
 
 
 def _store_refusal(root: Path) -> str | None:
@@ -731,6 +769,20 @@ def _store_refusal(root: Path) -> str | None:
     return None
 
 
+def _init_candidate(root: Path, manifest_path: Path, raw: Mapping[str, Any]) -> Manifest:
+    """``raw`` resolved as the manifest `init` would write, over the tree as it
+    stands, with the user level below."""
+    from ..core.home import load_user_config
+
+    user = load_user_config()
+    return Manifest.from_raw(
+        raw,
+        root=root,
+        path=manifest_path,
+        below=[(user.label, user.defaults)] if user.defaults else [],
+    )
+
+
 def _init_resolved(root: Path, manifest_path: Path, body: str, written: bool):
     """The configuration `init` reports on: the project as written, or for a
     dry run the manifest it would write over the tree as it stands, with the
@@ -738,18 +790,10 @@ def _init_resolved(root: Path, manifest_path: Path, body: str, written: bool):
     initialised by the time a written run asks."""
     import yaml
 
-    from ..core.home import load_user_config
-
     try:
         if written:
             return Manifest.locate(root)
-        user = load_user_config()
-        return Manifest.from_raw(
-            yaml.safe_load(body) or {},
-            root=root,
-            path=manifest_path,
-            below=[(user.label, user.defaults)] if user.defaults else [],
-        )
+        return _init_candidate(root, manifest_path, yaml.safe_load(body) or {})
     except InvariantError as exc:
         return exc
 
@@ -790,10 +834,150 @@ def _init_configuration(resolved) -> tuple[str, list | dict]:
     return f"configuration not resolved: {error}", {"error": str(error)}
 
 
+@dataclass
+class _InitDocs:
+    """What `init`'s docs step decided (ADR-016 D4, re-housed by ADR-017 D3)."""
+
+    #: Where the docs live: a ``cli.onboarding.DocsChoice``.
+    choice: Any
+    #: The store created or linked, a ``cli.onboarding.StorePlacement``.
+    store: Any = None
+    #: How the gaps are closed; ``None`` when the offer was not made.
+    mode: str | None = None
+
+
+def _init_docs_step(prompter, root: Path, docs: _InitDocs, candidate, project) -> None:
+    """ADR-016 D4.1 to D4.3 as the questionnaire's docs step, in their order
+    and with their meaning: where the docs live, the assessment of that
+    location, and how its gaps are closed.
+
+    The assessment reads the candidate configuration (``candidate``, given
+    the location chosen), as `init --dry-run` does (ADR-017 D3), and the key
+    the offer chooses is written with the rest. A store is created or linked
+    as soon as it is chosen, as before: it is the first write, the one most
+    likely to be refused, and the assessment reads the docs in it. A store
+    `init` creates gets ``project()`` at its own level.
+    """
+    from . import onboarding
+
+    if (root / docs.choice.docs).exists():
+        docs.choice = onboarding.offer_location(
+            prompter, root, docs.choice.docs, _store_refusal(root)
+        )
+    if docs.choice.kind == "store":
+        docs.store = onboarding.place_in_store(_store_repo(root), docs.choice, project())
+        try:
+            resolved = Manifest.locate(root)
+        except InvariantError as exc:
+            resolved = exc
+    else:
+        resolved = candidate(docs.choice)
+    assessment, _report = _init_assessment(resolved)
+    if assessment is not None and assessment.gaps:
+        docs.mode = onboarding.offer_onboarding(prompter, assessment)
+
+
+def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
+              ecosystems: list[str], docs: _InitDocs):
+    """ADR-017 D3.1 and D3.2: the level, then the core sections in catalogue
+    order, the docs step at its place among them. Returns ``(base, asked)``:
+    the configuration the answers were asked over, and the answers.
+
+    A flag given is an answer, checked as a typed one and not asked:
+    `--profile` (ADR-017 D5) and `--ecosystem`. A refused flag is a usage
+    error, before anything is written.
+    """
+    from ..core import questionnaire
+    from . import configure
+
+    try:
+        base = _init_candidate(
+            root,
+            manifest_path,
+            {"version": 1, "project": {"name": name, "ecosystems": ecosystems}},
+        )
+        catalogue = questionnaire.load_catalogue()
+    except InvariantError as exc:
+        raise UsageError(f"the questionnaire cannot be asked: {exc}") from exc
+    asked = configure.Asked(
+        level=configure.ask_level(asker, base), draft=questionnaire.Draft(base)
+    )
+    given: dict[str, tuple[Any, str]] = {}
+    if args.ecosystem:
+        given["project.ecosystems"] = ([args.ecosystem], "--ecosystem")
+    if args.profile is not None:
+        given["enforcement.profile"] = (args.profile, "--profile")
+
+    def candidate(choice):
+        draft = asked.draft
+        if choice.kind == "path":
+            draft = draft.placed("paths.docs", choice.docs, "repo")
+        try:
+            return draft.manifest()
+        except InvariantError as exc:
+            return exc
+
+    def docs_step(_asked) -> None:
+        if prompter is None:
+            return
+        _init_docs_step(
+            prompter,
+            root,
+            docs,
+            candidate,
+            lambda: {
+                "project": {
+                    "name": name,
+                    "ecosystems": list(asked.value("project.ecosystems", ecosystems)),
+                }
+            },
+        )
+
+    try:
+        configure.ask_sections(
+            asker,
+            catalogue,
+            asked,
+            catalogue.core,
+            given=given,
+            prefill={"project.ecosystems": (ecosystems, "detected")},
+            steps={"docs": docs_step},
+        )
+    except questionnaire.Refused as exc:
+        raise UsageError(str(exc)) from exc
+    return base, asked
+
+
+def _init_plan(asker, root: Path, base: Manifest, asked, docs: _InitDocs):
+    """ADR-017 D4, D5: the writes the answers make, over the configuration as
+    it now stands. The project block is init's own body and is not planned.
+    When the docs step made this a store project, its repo level is the
+    pointer, which init does not write: an answer aimed at it goes to this
+    repository's block in the store, saying so (D4)."""
+    from ..core import questionnaire
+    from . import configure
+
+    answers = [a for a in asked.answers if not a.key.startswith("project.")]
+    if docs.store is not None:
+        base = Manifest.locate(root)
+        moved = []
+        for answer in answers:
+            if answer.level == "repo":
+                level, note = questionnaire.route(answer.key, "repo", store_project=True)
+                if note is not None:
+                    asked.notes.append(note)
+                    asker.say(note)
+                answer = replace(answer, level=level)
+            moved.append(answer)
+        answers = moved
+    plan = questionnaire.plan(base, answers)
+    return plan, configure.say_notes(asker, plan.notes)
+
+
 def cmd_init(args) -> int:
     from ..adapters import detect
     from ..hosts.claude_code import ClaudeCodeHost
-    from . import onboarding
+    from . import configure, onboarding
 
     root = Path(args.root or Path.cwd()).resolve()
     manifest_path = root / ".claude" / "invariant.yaml"
@@ -806,37 +990,58 @@ def cmd_init(args) -> int:
 
     ecosystems = [args.ecosystem] if args.ecosystem else detect(root)
     name = args.name or root.name
+    profile = args.profile or DEFAULTS["enforcement"]["profile"]
 
-    # Where the docs go (ADR-016 D4.1). Only an interactive run is offered
-    # anything, and only where `paths.docs` exists: an absent directory gets
-    # the starter as it always has. The existing directory is never written.
+    # The questions (ADR-017 D3). Only an interactive run is asked anything:
+    # the level and the core sections, then the docs step (ADR-016 D4), which
+    # offers a location only where `paths.docs` exists; an absent directory
+    # gets the starter as it always has, and the existing one is never
+    # written. Nothing but a chosen store is written until the last answer.
     prompter = _init_prompter(args)
-    choice = onboarding.DocsChoice("reuse", DEFAULTS["paths"]["docs"])
-    if prompter is not None and (root / choice.docs).exists():
-        choice = onboarding.offer_location(
-            prompter, root, choice.docs, _store_refusal(root)
+    asker = _questionnaire_prompter(args)
+    docs = _InitDocs(onboarding.DocsChoice("reuse", DEFAULTS["paths"]["docs"]))
+    asked = None
+    if asker is not None:
+        base, asked = _init_ask(
+            asker, prompter, args, root, manifest_path, name, ecosystems, docs
         )
-    body = _init_body(
-        name, ecosystems, args.profile, choice.docs if choice.kind == "path" else None
-    )
-
-    # A store is created or linked first: it is the step most likely to be
-    # refused, and nothing else has been written when it is.
-    store = None
-    if choice.kind == "store":
-        store = onboarding.place_in_store(
-            _store_repo(root),
-            choice,
-            {
+        ecosystems = list(asked.value("project.ecosystems", ecosystems))
+    elif prompter is not None:
+        _init_docs_step(
+            prompter,
+            root,
+            docs,
+            lambda choice: _init_resolved(
+                root,
+                manifest_path,
+                _init_body(
+                    name, ecosystems, _init_settings({"enforcement": {"profile": profile}}, docs)
+                ),
+                written=False,
+            ),
+            lambda: {
                 "project": {"name": name, "ecosystems": ecosystems},
-                "enforcement": {"profile": args.profile},
+                "enforcement": {"profile": profile},
             },
         )
+
+    # Only answers that differ from what the levels below resolve are
+    # written (ADR-017 D5); a run that asked nothing writes today's body.
+    plan, notes = (None, [])
+    if asked is not None:
+        plan, notes = _init_plan(asker, root, base, asked, docs)
+    repo_settings = (
+        {"enforcement": {"profile": profile}} if plan is None else plan.at("repo").sets
+    )
+    body = _init_body(name, ecosystems, _init_settings(repo_settings, docs))
+
+    store = docs.store
+    if store is not None:
         actions = list(store.lines)
-        docs_dir = store.root / choice.docs
+        docs_dir = store.root / docs.choice.docs
     else:
         actions = [f"write {manifest_path.relative_to(root)}"]
-        docs_dir = root / choice.docs
+        docs_dir = root / docs.choice.docs
     host = ClaudeCodeHost(root)
     actions.extend(host.plan_install())
     actions.append("add the state root to .gitignore")
@@ -868,6 +1073,26 @@ def cmd_init(args) -> int:
             listed, payload["configuration"] = _init_configuration(resolved)
             text += f"\n\n{listed}"
         return emit(args, payload, text)
+
+    # The writes, all after the last answer (ADR-017 D5): the store's, then
+    # the user level's, then the repository's.
+    by_hand_settings: list[dict[str, str]] = []
+    if plan is not None:
+        user = plan.at("user")
+        if user.sets or user.removes:
+            applied = configure.write_user(user)
+            if applied.action is not None:
+                actions.append(applied.action)
+            if applied.by_hand is not None:
+                by_hand_settings.append(applied.by_hand)
+        if store is not None:
+            block = plan.at("store-repo")
+            if block.sets or block.removes:
+                actions.append(store.write(block.sets, block.removes))
+    if store is not None and docs.mode in ("incremental", "all_at_once"):
+        actions.append(store.write({"docs": {"onboarding": docs.mode}}))
+    elif docs.mode in ("incremental", "all_at_once"):
+        actions.append(f"write docs.onboarding: {docs.mode} to {MANIFEST_RELPATH}")
 
     if store is None:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -903,29 +1128,32 @@ def cmd_init(args) -> int:
 
     resolved = _init_resolved(root, manifest_path, body, written=True)
     assessment, report = _init_assessment(resolved)
-    if prompter is not None and assessment is not None and assessment.gaps:
-        after = _init_onboarding(
-            prompter, root, manifest_path, store, assessment, actions
-        )
+    if docs.mode is not None:
+        after = _init_onboarding(docs.mode, root, assessment, report)
     else:
         after = [_assessment_text(assessment, report)]
-    # A store file holding comments is never rewritten (it would lose them):
-    # what init would have written is printed to add by hand, and init
-    # carries on.
+    if notes:
+        after.append("\n".join(notes))
+    # A file holding comments is never rewritten (it would lose them): what
+    # init would have written is printed to add by hand, and init carries on.
     by_hand = store.by_hand() if store is not None else None
     if by_hand is not None:
         after.append("\n".join(onboarding.by_hand_lines(by_hand)))
+        by_hand_settings.append(by_hand)
+    for held in by_hand_settings:
+        if held is not by_hand:
+            after.append("\n".join(configure.by_hand_lines(held)))
     payload = {
         "actions": actions,
         "ecosystems": ecosystems,
         "oracle": registration,
         "docs_assessment": report,
         "store_settings_by_hand": by_hand,
+        "settings_by_hand": by_hand_settings,
     }
     # Each core question's resolved value and where it came from (ADR-017
-    # D9), after everything else. Only where nothing was asked: an
-    # interactive run showed the docs offers instead.
-    if prompter is None:
+    # D9), after everything else. Only where nothing was asked.
+    if prompter is None and asker is None:
         listed, payload["configuration"] = _init_configuration(resolved)
         after.append(listed)
     return emit(
@@ -961,23 +1189,18 @@ def _assessment_text(assessment, report: dict) -> str:
     return assessment.render()
 
 
-def _init_onboarding(prompter, root, manifest_path, store, assessment, actions) -> list[str]:
-    """ADR-016 D4.2-3 and ruling 9: the onboarding offer, the key it writes,
-    and the plan where the base already carries the manifest. Returns what
-    the report adds; ``actions`` gains what was written."""
+def _init_onboarding(mode: str, root: Path, assessment, report: dict) -> list[str]:
+    """ADR-016 D4.3 and ruling 9, after the writes: what the onboarding
+    answer says, and the all-at-once plan where the base already carries the
+    manifest, recorded from the docs as written."""
     from . import onboarding
 
-    mode = onboarding.offer_onboarding(prompter, assessment)
     if mode == "not_now":
         return ["Not now: nothing written. 'invariant docs assess' shows the gaps again."]
-    if store is not None:
-        actions.append(store.write({"docs": {"onboarding": mode}}))
-    else:
-        with manifest_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"\ndocs:\n  onboarding: {mode}\n")
-        actions.append(f"write docs.onboarding: {mode} to {MANIFEST_RELPATH}")
     if mode != "all_at_once":
         return []
+    if assessment is None:
+        return [f"All at once: the plan was not recorded: {report['error']}"]
     # Reported, never raised: the project is initialised by now, and a plan
     # refused (one already parked here, say) is not a failed `init`.
     try:
@@ -1100,6 +1323,13 @@ def cmd_doctor(args) -> int:
             checks.append(
                 (f"commands.{name} configured", bool(configured), str(configured or "unset"))
             )
+        # A command of the wrong shape still loads (ADR-017 ruling 13): this
+        # row names it, and warns, never fails. It reads the questionnaire's
+        # own check, so a typed and a hand-written command are judged alike.
+        label, detail, warns = command_shape_row(ctx.manifest)
+        checks.append((label, True, detail))
+        if warns:
+            warned.add(label)
 
         # The adapter's own tooling, resolved the way THIS process resolves it
         # rather than the way a shell with hand-exported variables would.
@@ -1446,6 +1676,21 @@ def _refuse_a_higher_level(manifest: Manifest, setting_lines: list[str]) -> None
                 f"writes there would not take effect. Remove it from that file "
                 f"first."
             )
+
+
+def command_shape_row(manifest: Manifest) -> tuple[str, str, bool]:
+    """`doctor`'s `command shape` row (ADR-017 ruling 13): ``(label, detail,
+    warns)``, each misshapen command named with its key and what is wrong."""
+    from ..core.questionnaire import command_problems
+
+    problems = command_problems(manifest)
+    if not problems:
+        return "command shape", "every configured command is one line with its placeholders", False
+    return (
+        "command shape",
+        "; ".join(f"{key} {problem}" for key, problem in problems),
+        True,
+    )
 
 
 def user_defaults_summary(manifest: Manifest) -> str:
@@ -5882,7 +6127,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root")
     p.add_argument("--name")
     p.add_argument("--ecosystem")
-    p.add_argument("--profile", default="standard")
+    p.add_argument("--profile")
     p.add_argument("--force", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_init)

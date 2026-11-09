@@ -921,6 +921,7 @@ class Manifest:
                     f"methodology.gates.{key} must be a list of glob strings, "
                     f"got {value!r}"
                 )
+        self._validate_coverage_floor(gates)
         self._validate_schedule(gates)
         self._validate_records()
         self._validate_ecosystem_commands()
@@ -946,6 +947,24 @@ class Manifest:
             find_machine_file(methodology, self)
         except ManifestError as exc:
             raise ManifestError(f"methodology.pipeline: {exc}") from exc
+
+    @staticmethod
+    def _validate_coverage_floor(gates: Mapping[str, Any]) -> None:
+        """A floor is a percent (ADR-017 D6): the questionnaire and a
+        hand-written value meet this one rule. Null and a quoted number load,
+        as the gates have always read them (``float(value or 0)``)."""
+        floor = gates.get("coverage_min")
+        if floor is None:
+            return
+        try:
+            percent = None if isinstance(floor, bool) else float(floor)
+        except (TypeError, ValueError):
+            percent = None
+        if percent is None or not 0 <= percent <= 100:
+            raise ManifestError(
+                f"methodology.gates.coverage_min must be a number from 0 to 100, "
+                f"got {floor!r}"
+            )
 
     def _validate_records(self) -> None:
         """Refuse a `records` block that would place a record nowhere (D1).

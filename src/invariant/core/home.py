@@ -26,7 +26,7 @@ and nothing in core may import the oracle; ``oracle.home`` asks it.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -203,3 +203,52 @@ def _store_naming(raw: Mapping[str, Any], where: str) -> str:
             f"{', '.join(STORE_NAMINGS)}"
         )
     return str(naming)
+
+
+def write_user_defaults(
+    settings: Mapping[str, Any],
+    remove: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+):
+    """Merge ``settings`` into the user level's ``defaults:``, and take the
+    dotted keys ``remove`` out of it (ADR-017 D5, ruling 12).
+
+    The comment rule the store and repo writers keep: a file holding a
+    comment is never rewritten, since a rewrite would drop it, and the result
+    carries the ``defaults:`` block to add by hand and why. Otherwise the file
+    is rewritten merged, every other key (``repos:`` included) kept, and read
+    back through :func:`load_user_config`. A malformed file is refused before
+    anything is written. Returns a ``core.stores.StoreWrite``.
+    """
+    # `core/stores` imports this module at load, so its writer pieces are
+    # imported here, at call time.
+    from .stores import StoreWrite, _removed, _write_atomic, holds_comments
+    from .stores import _merged as merged_with
+
+    current = load_user_config(env)
+    path = current.path
+    if path.is_file() and holds_comments(path):
+        removal = (
+            "; remove " + ", ".join(f"defaults.{key}" for key in remove) + " by hand as well"
+            if remove
+            else ""
+        )
+        return StoreWrite(
+            path=path,
+            written=False,
+            by_hand=yaml.safe_dump({"defaults": dict(settings)}, sort_keys=False),
+            reason=(
+                f"{display_path(path)} holds comments, and rewriting it would drop "
+                f"them, so nothing was written to it{removal}"
+            ),
+        )
+    raw = dict(yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.is_file() else {}
+    raw.setdefault("version", 1)
+    defaults = _removed(merged_with(raw.get("defaults") or {}, settings), remove)
+    if defaults:
+        raw["defaults"] = defaults
+    else:
+        raw.pop("defaults", None)
+    _write_atomic(path, yaml.safe_dump(raw, sort_keys=False))
+    load_user_config(env)
+    return StoreWrite(path=path, written=True)

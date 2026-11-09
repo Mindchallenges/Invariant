@@ -18,7 +18,7 @@ only once the base carries the manifest.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,13 +85,16 @@ class StorePlacement:
     lines: tuple[str, ...]
     held: StoreWrite | None = None
     held_repo: dict[str, Any] = field(default_factory=dict)
+    #: Keys to take out of the block by hand (ADR-017 ruling 12).
+    held_removals: tuple[str, ...] = ()
 
-    def write(self, repo: Mapping[str, Any]) -> str:
-        """Write ``repo`` into this repository's block, or hold it with the
+    def write(self, repo: Mapping[str, Any], remove: Sequence[str] = ()) -> str:
+        """Write ``repo`` into this repository's block, and take the dotted
+        keys ``remove`` out of it (ADR-017 ruling 12), or hold them with the
         rest when the file is held; the action line either way."""
-        settings = ", ".join(setting_lines(repo))
+        settings = ", ".join([*setting_lines(repo), *(f"remove {key}" for key in remove)])
         if self.held is None:
-            result = write_store_settings(self.root, self.key, repo=repo)
+            result = write_store_settings(self.root, self.key, repo=repo, remove_repo=remove)
             if result.written:
                 return (
                     f"write {settings} to {result.path} "
@@ -99,6 +102,7 @@ class StorePlacement:
                 )
             self.held = result
         self.held_repo = _merge(self.held_repo, repo)
+        self.held_removals += tuple(remove)
         return f"not written, to add by hand: {settings} (see below)"
 
     def by_hand(self) -> dict[str, str] | None:
@@ -106,9 +110,13 @@ class StorePlacement:
         everything was written."""
         if self.held is None:
             return None
+        reason = self.held.reason
+        if self.held_removals:
+            keys = ", ".join(f"store.repos.{self.key}.{k}" for k in self.held_removals)
+            reason += f"; remove {keys} by hand as well"
         return {
             "path": str(self.held.path),
-            "reason": self.held.reason,
+            "reason": reason,
             "yaml": by_hand_block(self.key, None, self.held_repo),
         }
 
