@@ -407,15 +407,14 @@ class TestCopy:
         assert "would" in text
 
     def test_an_unreadable_format_copies_and_says_not_assessable(self, toy, capsys):
-        sphinx = toy / "manual"
-        sphinx.mkdir()
-        (sphinx / "index.rst").write_text("Toy\n===\n\nalpha\n", encoding="utf-8")
-        (sphinx / "conf.py").write_text("project = 'toy'\n", encoding="utf-8")
+        manual = toy / "manual"
+        manual.mkdir()
+        (manual / "index.adoc").write_text("= Toy\n\nalpha\n", encoding="utf-8")
         code, out = run(capsys, "docs", "adopt", "manual", "--mode", "copy")
         assert code == 0, out
-        assert "not assessable" in out and "sphinx" in out
+        assert "not assessable" in out and "asciidoc" in out
         m = Manifest.locate(toy)
-        assert m.get("docs.format") == "sphinx"
+        assert m.get("docs.format") == "asciidoc"
         assessment = assess(m)
         assert [g.subject for g in assessment.by_check("sections")] == ["not assessable"]
         assert [g.subject for g in assessment.by_check("links")] == ["not assessable"]
@@ -549,11 +548,11 @@ class TestInPlace:
     ):
         manual = toy / "manual"
         manual.mkdir()
-        (manual / "index.rst").write_text("Toy\n===\n", encoding="utf-8")
+        (manual / "index.adoc").write_text("= Toy\n", encoding="utf-8")
         before = (toy / MANIFEST_RELPATH).read_text(encoding="utf-8")
         code, out = run(capsys, "docs", "adopt", "manual", "--mode", "in_place")
         assert code == 2
-        assert "sphinx" in out and "no reader" in out and "--mode copy" in out
+        assert "asciidoc" in out and "no reader" in out and "--mode copy" in out
         assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == before
         code, out = run(capsys, "docs", "adopt", "manual", "--mode", "copy")
         assert code == 0
@@ -691,3 +690,31 @@ class TestPlanAdoption:
     def test_an_unknown_mode_is_refused(self, toy):
         with pytest.raises(UsageError, match="mirror"):
             plan_adoption(Manifest.locate(toy), "handbook", "mirror", cwd=toy)
+
+
+class TestASphinxTreeInPlace:
+    """ADR-016 increment 4's deferred proof: a Sphinx tree adopted in place
+    and assessed through the rST reader (ADR-018 increment 2)."""
+
+    def test_it_is_adopted_and_assessed(self, toy, capsys):
+        manual = toy / "manual"
+        manual.mkdir()
+        (manual / "conf.py").write_text("project = 'toy'\n", encoding="utf-8")
+        (manual / "index.rst").write_text(
+            "Toy\n===\n\nLayers\n------\n\nalpha. See :doc:`gone`.\n",
+            encoding="utf-8",
+        )
+        code, out = run(capsys, "docs", "adopt", "manual", "--mode", "in_place")
+        assert code == 0, out
+        assert "no reader" not in out
+        m = Manifest.locate(toy)
+        assert m.get("docs.format") == "sphinx"
+        assert m.get("paths.docs") == "manual"
+        assessment = assess(m)
+        assert [g.subject for g in assessment.by_check("sections")] == [
+            "Component responsibilities",
+            "Compliance checklist",
+        ]
+        assert [g.render() for g in assessment.by_check("links")] == [
+            "index.rst:7: gone does not exist"
+        ]

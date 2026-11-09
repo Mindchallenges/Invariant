@@ -15,6 +15,8 @@ invariant init
 `init` detects the ecosystem from what is in the directory (`pyproject.toml` →
 `python`, `package.json` → `node`, an `.xcodeproj`/`.xcworkspace` → `swift`,
 `pubspec.yaml` → `flutter` when it depends on the Flutter SDK, else `dart`;
+a Sphinx `conf.py` at the root or under `docs/`, `doc/` or `source/` that is
+not the architecture docs project → `sphinx`, with `vars.srcdir` written;
 anything else → `generic`) and writes:
 
 | Path | What it is |

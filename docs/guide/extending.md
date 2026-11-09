@@ -99,7 +99,8 @@ not a rule; it annotates a result so that a green is not mistaken for proof.
 Adapters are registered in `src/invariant/adapters/__init__.py`, so adding
 one is a contribution to the library rather than a project setting. The
 shipped ones — `python_.py`, `node.py`, `swift_xcode.py`, `dart.py` (which
-also holds `flutter`, ADR-019) — are the templates,
+also holds `flutter`, ADR-019), `sphinx.py` (a documentation repository,
+coverage declared not applicable, ADR-015 D1) — are the templates,
 and the interface is documented in
 [manifest.md § Adapters](../architecture/manifest.md#adapters). Tests live in
 `tests/test_adapters.py`; the coverage floor applies to the adapter too.

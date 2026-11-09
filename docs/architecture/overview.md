@@ -68,7 +68,7 @@ graph TD
         CHOME["home (ADR-014 D3)"]
         CIDENT["identity (ADR-014 D4)"]
         CSTORES["stores (ADR-014 D2)"]
-        CDOCFMT["docformat (ADR-016 D1)"]
+        CDOCFMT["docformat (ADR-016 D1): markdown, rst"]
         CQUEST["questionnaire (ADR-017 D1, D2)"]
     end
 
@@ -89,6 +89,7 @@ graph TD
         PY[python]
         NODE[node]
         DART["dart / flutter (ADR-019)"]
+        SPHINX["sphinx (ADR-015 D1)"]
     end
 
     subgraph data["shipped data"]
@@ -287,6 +288,7 @@ graph TD
     DOCSD -- "headings, links: the reader for docs.format; detect_format" --> CDOCFMT
     DOCSD -- "docs.assess, docs.adopt, ADOPT_MODES, path_for, project_relative, glob_matches" --> MANIFEST
     DOCSD -- source_areas --> adapters
+    CLI -- "init: detect, init_settings; doctor's coverage row" --> adapters
     DOCSD -- tracked_files --> GIT
     CLI -- "init's offers, docs assess --plan" --> CONBOARD
     CLI -- "_init_prompter: a terminal, or nobody" --> CPROMPTS
@@ -436,9 +438,11 @@ D1 to D3, increment 1). It is not an FSM, like `stats`: `assess` reads the
 docs at the resolved `paths.docs` and returns their gaps by check
 (`sections`, `areas`, `links`) with a digest of every input, and writes
 nothing; only adoption writes (below). `DOCSD --> CDOCFMT` is how it reads a doc: `core/docformat` holds
-one reader per `docs.format` (markdown in increment 1), pure, answering
-headings and links with their lines; a format with no reader is "not
-assessable", never a pass. `DOCSD --> adapters` is the `source_areas` hook
+one reader per `docs.format` (markdown, and rST as `sphinx`, built in ADR-018
+increment 2), pure, answering headings and links with their lines; a format
+with no reader is "not assessable", never a pass. An rST link that names a
+Sphinx document without its suffix (a `:doc:` target, a `toctree` entry)
+resolves to the file with any suffix the reader reads. `DOCSD --> adapters` is the `source_areas` hook
 (D2), which takes the tracked files as a parameter because an adapter asks
 git nothing, so `DOCSD --> GIT` is `tracked_files`. `CLI --> DOCSD` is
 `invariant docs assess`, and `invariant docs adopt` (D7, D8, increment
@@ -1521,15 +1525,14 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `findings` | The mechanical guidelines' evaluation (ADR-012 D4, A3 increments 3 and 4): `Finding`, its record in D5's shape, `fingerprint` (twelve hex of SHA-256 over the rule id and a kind-specific key, shared with the ruleset's exceptions), the `pattern`, `boundary` and `cochange` evaluators over the changed files, an `each` template's derived path (`derive`), with path and fingerprint exceptions named and unanswerable files counted as findings; the ratchet's arithmetic (`ratchet`, `Stale`, `counted`, A3 increment 5) over the entries `core/rules` read; the only-shrinks arithmetic (`growth`, `Growth`, A3 increment 6) between the base branch's entries and the change's, through the change's renames; a judgement rule's mechanical N/A conditions (`na_answer`, `NaAnswer`, A4 increment 2), `no_added_match` and `no_executable_change` over the rule's files, read through `core/guidelines`' `meets` (A4's DN-3) | Read a file, call `git`, or ask an adapter directly: the bytes, the mask, the references and the change's history (`History`) arrive as callables. Give a cochange finding a fingerprint (DN-4). Decide a gate's verdict or level (`core/rules` does). Persist a finding (DN-16) |
 | `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, the acting agent the host stamps, and `token`, the submission's, each written only when set and both dropped by `resubmitted`, A4 increment 8); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused; each refused line as a `Refusal` naming its predicate, entry and rule apart from the prose, and `PREDICATES`, every name a refusal gives (A4 increment 7); for `guidelines.verdicts_complete` (A4 increment 3), the owed rules (`owed`, over `not_owed`, the one reading of why a rule is or is not owed), a record read back as a submission (`resubmitted`) and each owed rule's `Standing` (`standings`: current, missing, stale, or answered by the engine's N/A, a pass or fail on it set aside); for `guidelines verdicts show` (A4 increment 4), the recorded verdicts on rules no longer owed (`unowed`) | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
-| `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
+| `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); reStructuredText as `sphinx` (`RstReader`, ADR-018 increment 2): section titles under an underline, or between an overline and a matching underline, starting in the first column after a blank line unless an overline insets them, an adornment shorter than its title kept from four characters, as docutils keeps it; links from `:doc:` and `toctree` entries (`Link.document`: a document name without its suffix), `:download:`, the `include`, `literalinclude`, `image` and `figure` arguments, embedded hyperlink targets and target definitions, `:ref:` read as the label it is, not a file; literal blocks, code directives (`code-block`, `mermaid`, `math` and their kin), doctest blocks, inline literals and comments skipped; `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 | `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9); judging an answer (increment 2): its kind read (`parse_answer`, `Refused`), its choices, path rule and command shape checked (`command_problem`, `command_problems`, the one shape check `doctor` reads, ruling 13) and the configuration it produces validated through a `Draft` of the levels; the nearest level that may hold an answer (`route`, D4); the write plan, changed answers only, the inherited value removing a key (`plan`, `Answer`, `LevelWrite`, `WritePlan`, D5, ruling 12) | Prompt for anything; write any level; run a command; import above `core` |
 
 **Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md)).** A new `core/needs` reads a recorded
 build's `needs.json` against `docs.needs.types`' roles and the
 `require_links` rules, and never runs a build or parses rST (increment 3).
-`core/docformat` gains its rST reader, and `adapters/` gains ADR-015 D1's
-`sphinx` adapter, both pulled forward (increment 2). `domains/docs` gains the
+`domains/docs` gains the
 starter, `docs venv`, `docs build` and its record, `docs decision new` and
 the migration commands; `domains/workitem` gains `item migrate` and the
 decision-id check on an item write; `core/rules` gains the five new
@@ -1540,7 +1543,9 @@ rules, which read recorded builds and run nothing; `core/manifest` gains
 is unchanged: `core/machines` names the new gates and never imports
 `core/rules`. **Built (increment 1):** `core/items`' `SphinxNeedsBackend`
 persists history, as an `.. invariant-history:` comment in the directive body
-(BUG_073; manifest.md, "The `sphinx_needs` round trip").
+(BUG_073; manifest.md, "The `sphinx_needs` round trip"). **Built (increment
+2):** `core/docformat`'s rST reader (the row above), and ADR-015 D1's
+`sphinx` adapter (`adapters/`, below), both pulled forward.
 
 ### `domains/`
 
@@ -1755,7 +1760,7 @@ Which adapters mask and read imports, and how:
 |---|---|---|---|
 | `python` | `mask`, `imports` | Through `tokenize`, for `.py`. An f-string or t-string is one string region, replacement fields included, on every interpreter from 3.10, so a verdict never depends on which interpreter ran. | Through `ast`, for `.py`. Every import statement counts, at any depth. A relative import resolves by the file's package. An absolute one resolves against the first ancestor of the file with no `__init__.py`, then the project root, and is the project's when its first segment is a module, a package, or a directory holding Python there. `from pkg import name` is the submodule's file when `name` is one, else the package's `__init__.py`. A project import that does not resolve, and a syntax error, make the file unanswerable. |
 | `swift_xcode` | `mask` | One region reader (`_swift_regions`) for `.swift`, consumed by the comment-and-string blanker, the coverage reducer and the mask. Known limits: a raw string's `#"…"#` delimiter and a quote inside a `\( )` interpolation are read as ordinary quotes. | `None`. A Swift module's layers are folder-to-type references, which need a symbol index (ADR-012 ruling 3). |
-| `node`, `generic` | none | `None`. A node lexer is IDEA_038. | `None` (DN-9). |
+| `node`, `generic`, `sphinx` | none | `None`. A node lexer is IDEA_038; `sphinx` reads `conf.py` only for its own settings. | `None` (DN-9). |
 | `dart`, `flutter` | none | `None`. A Dart lexer is IDEA_047. The adapter's only Dart reader is the declaration reader behind `carries_executable_code` (ADR-019 D6). | `None` (IDEA_047). |
 
 Both questions take text, and text is what decodes as UTF-8. A file that does
@@ -1780,6 +1785,22 @@ one; `parse_coverage` reads lcov records and `<path> <cells> <pct>%` summary
 rows alike, anchored on `.dart`, keeping a file's lower figure when it is
 read twice. `read_run` reads only the console, because the bundle holds the
 report and no test counts.
+
+The `sphinx` adapter (ADR-015 D1, built in ADR-018 increment 2; manifest.md,
+"Adapters") is the first whose coverage is not applicable, and it brought
+three questions to the base: `coverage_applicable` with `coverage_reason`
+and `claims(relative, root)`, which `core/rules`' `coverage.meets_floor`
+asks to answer N/A by name for the files an adapter without coverage claims
+(`_coverage_not_applicable`), before it asks for any measurement;
+`annotate(result, root)`, asked by `domains/pipeline` and `domains/sweep`
+after `read_run`, because a run's adapter cannot otherwise see the project's
+files, and what it adds is a note, never a hazard; and `init_settings(root)`,
+which `init` asks for the settings a static default cannot know, placing a
+secondary ecosystem's commands under its own key. Its detection skips the
+docs project's source directory (ADR-018 D3), so a project whose only Sphinx
+tree is its docs project is not a `sphinx` ecosystem. It reads `conf.py`
+through `ast`, never by running it. It offers no guideline engine, so in the
+table above it is with `node` and `generic`.
 
 ### `hosts/`
 

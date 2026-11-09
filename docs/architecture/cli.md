@@ -133,6 +133,17 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
     that flag rewrites the manifest, not the docs. `--dry-run` lists the write
     when it would happen. Written once; no command rewrites it afterwards.
 
+    Each declared ecosystem's adapter may add settings its static defaults
+    cannot know (`Adapter.init_settings`), written beneath any answer the
+    questionnaire gave, and a further ecosystem's commands under its own
+    `commands.<ecosystem>` key. Only `sphinx` adds any (ADR-015 D1, built in
+    ADR-018 increment 2): `vars.srcdir`, the source directory it detected,
+    and, when that `conf.py` lists `sphinx_needs`, a `commands.test` and
+    `commands.test_one` that run the needs builder after linkcheck. Two
+    candidate trees, none, or extensions it cannot read are each a note in
+    the report (`notes` under `--dry-run --json`) naming what to set. A store
+    project gets them in its block of the store.
+
     Built (ADR-016 D4, D5, increment 2): the docs offers. Interactive
     init, and only interactive init, asks; `cli/onboarding` holds the
     offers and `cli/prompts` asks them. Interactive means no `--dry-run`, no
@@ -386,15 +397,20 @@ invariant doctor
     ADR-015 D2 makes the command rows follow the lanes the project's sessions
     can run: a command is required when a selectable lane carries a gate that
     runs it, each row names that lane and gate, and `commands.build`, which no
-    gate runs, is reported rather than required. D1 shows `coverage: not
-    applicable (sphinx)` instead of a missing coverage command, and D5 names
-    the measured median, the budget and which side of it the project is on.
-    It also adds a `commands` command group (`commands derive`, with
-    `--accept`, `--update` and `--measure`, D3 to D5) and the rule
+    gate runs, is reported rather than required, and D5 names the measured
+    median, the budget and which side of it the project is on. It also adds
+    a `commands` command group (`commands derive`, with `--accept`,
+    `--update` and `--measure`, D3 to D5) and the rule
     `commands.derivation_current`; this file gains their sections when they
-    are built. Increment 2 of ADR-015 builds the D1 and D2 rows, increment 3
+    are built. Increment 2 of ADR-015 builds the D2 rows, increment 3
     `commands derive` and the rule, and increment 4 `--measure` and the D5
     row.
+
+    `coverage` (ADR-015 D1, built in ADR-018 increment 2), once per declared
+    ecosystem whose adapter declares coverage not applicable, reads `not
+    applicable (sphinx): a documentation build executes no measurable lines`
+    and passes, so an unset coverage command reads as the stated choice it
+    is.
 
     `docs assessment` (ADR-016 D3, increment 1) asks the rule
     `docs.assessment` directly, as the guidelines rows do, and lists the
@@ -761,9 +777,13 @@ invariant docs assess [--json]
                 line. Anchors and queries are stripped; external URLs and
                 root-absolute paths are never checked
     Headings and links are read through `core/docformat`'s reader for
-    `docs.format`. Markdown has one; any other format makes `sections` and
-    `links` report "not assessable: no reader for <format>", never a pass,
-    and `areas` reads every file's text. Files are read in sorted order and
+    `docs.format`. Markdown has one, and so has `sphinx`, which reads the
+    `.rst` files (ADR-018 increment 2): section titles, and the `:doc:`,
+    `toctree`, `:download:`, `include`, `image` and `figure` targets and
+    hyperlink targets, a document name resolving to its `.rst` file, with
+    literal blocks, code directives and comments skipped. Any other format
+    makes `sections` and `links` report "not assessable: no reader for
+    <format>", never a pass, and `areas` reads every file's text. Files are read in sorted order and
     the digest covers every input (the settings, each doc's bytes, the
     areas, each link target checked), so two runs over an unchanged tree
     print byte-identical output. Anything under a dot-named directory of the
@@ -867,15 +887,15 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
                              `.. invariant-unconverted::` directive, which
                              fails the strict build, wherever conversion
                              fails (increment 6).
-    This file gains their sections when they are built. Increment 2 of
-    ADR-018 builds the rST reader the next paragraph says is missing.
+    This file gains their sections when they are built.
     `docs adopt` of Markdown docs is limited to copy mode into a migrating
     project, which the migration then converts (D11, increment 4).
 
-    The rST reader is not built (ADR-015 increment 2 has not landed), so a
-    Sphinx tree is adopted by copy today and refused in place, naming
-    `sphinx`. With `records.docs: store` an adopted source is store docs like
-    any other, so ADR-014 D5's docs lock covers it once that lock is built.
+    A Sphinx tree adopts in place like Markdown: its `.rst` files make the
+    detected format `sphinx`, which has a reader (built in ADR-018 increment
+    2), so `paths.docs` points at it and the assessment reads it. With
+    `records.docs: store` an adopted source is store docs like any other, so
+    ADR-014 D5's docs lock covers it once that lock is built.
 ```
 
 ### A managed file the operator has edited

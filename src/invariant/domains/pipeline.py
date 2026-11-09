@@ -1312,8 +1312,9 @@ class PipelineDomain:
         )
 
         proc = run_command(command, Path(cwd or self.manifest.root))
-        result = adapter.read_run(
-            proc.stdout, proc.stderr, proc.returncode, bundle=bundle
+        result = adapter.annotate(
+            adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle),
+            Path(cwd or self.manifest.root),
         )
         phase = phase or pipeline.state
         result, read_as_red = self._read_red_phase_run(

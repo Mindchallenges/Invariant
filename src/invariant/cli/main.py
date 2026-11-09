@@ -16,7 +16,7 @@ import re
 import shlex
 import sys
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -753,6 +753,44 @@ def _init_settings(base: Mapping[str, Any], docs: _InitDocs) -> dict[str, Any]:
     return settings
 
 
+def _init_ecosystem_settings(
+    root: Path, ecosystems: Sequence[str]
+) -> tuple[dict[str, Any], list[str]]:
+    """What each declared ecosystem's adapter has init write for this project
+    (`Adapter.init_settings`), with its notes.
+
+    A primary's commands are the flat `commands.*` keys and a further
+    ecosystem's are under `commands.<ecosystem>` (ADR-013 D1), so each
+    adapter names its commands bare and they are placed here.
+    """
+    from ..adapters import get_adapter
+
+    settings: dict[str, Any] = {}
+    notes: list[str] = []
+    for index, eco in enumerate(dict.fromkeys(ecosystems)):
+        found, said = get_adapter(eco).init_settings(root)
+        notes.extend(said)
+        for top, value in found.items():
+            if top == "commands" and index:
+                settings.setdefault("commands", {}).setdefault(eco, {}).update(value)
+            else:
+                settings.setdefault(top, {}).update(value)
+    return settings, notes
+
+
+def _under(settings: dict[str, Any], defaults: Mapping[str, Any]) -> dict[str, Any]:
+    """``settings`` with every key of ``defaults`` it does not already set."""
+    import copy
+
+    merged = copy.deepcopy(dict(settings))
+    for key, value in defaults.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _under(merged[key], value)
+        elif key not in merged:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def _store_refusal(root: Path) -> str | None:
     """Why `init` cannot offer a store at ``root``, or ``None`` when it can."""
     from ..core import git
@@ -1033,9 +1071,14 @@ def cmd_init(args) -> int:
     repo_settings = (
         {"enforcement": {"profile": profile}} if plan is None else plan.at("repo").sets
     )
+    # What the adapters need written that their static defaults cannot know
+    # (the sphinx source directory), never over an answer given above.
+    store = docs.store
+    eco_settings, eco_notes = _init_ecosystem_settings(root, ecosystems)
+    if store is None:
+        repo_settings = _under(repo_settings, eco_settings)
     body = _init_body(name, ecosystems, _init_settings(repo_settings, docs))
 
-    store = docs.store
     if store is not None:
         actions = list(store.lines)
         docs_dir = store.root / docs.choice.docs
@@ -1062,12 +1105,13 @@ def cmd_init(args) -> int:
     if args.dry_run:
         resolved = _init_resolved(root, manifest_path, body, written=False)
         assessment, report = _init_assessment(resolved)
-        payload = {"actions": actions, "docs_assessment": report}
+        payload = {"actions": actions, "docs_assessment": report, "notes": eco_notes}
         text = (
             "would:\n"
             + "\n".join(f"  - {a}" for a in actions)
             + "\n\n"
             + _assessment_text(assessment, report)
+            + "".join(f"\n\n{note}" for note in eco_notes)
         )
         if prompter is None:
             listed, payload["configuration"] = _init_configuration(resolved)
@@ -1089,6 +1133,8 @@ def cmd_init(args) -> int:
             block = plan.at("store-repo")
             if block.sets or block.removes:
                 actions.append(store.write(block.sets, block.removes))
+    if store is not None and eco_settings:
+        actions.append(store.write(eco_settings))
     if store is not None and docs.mode in ("incremental", "all_at_once"):
         actions.append(store.write({"docs": {"onboarding": docs.mode}}))
     elif docs.mode in ("incremental", "all_at_once"):
@@ -1134,6 +1180,8 @@ def cmd_init(args) -> int:
         after = [_assessment_text(assessment, report)]
     if notes:
         after.append("\n".join(notes))
+    if eco_notes:
+        after.append("\n".join(eco_notes))
     # A file holding comments is never rewritten (it would lose them): what
     # init would have written is printed to add by hand, and init carries on.
     by_hand = store.by_hand() if store is not None else None
@@ -1323,6 +1371,21 @@ def cmd_doctor(args) -> int:
             checks.append(
                 (f"commands.{name} configured", bool(configured), str(configured or "unset"))
             )
+        # A declared adapter whose coverage is not applicable says so, by name
+        # (ADR-015 D1), rather than leaving an unset coverage command to read
+        # as something missing.
+        from ..adapters import get_adapter
+
+        for eco in ctx.manifest.declared_ecosystems:
+            adapter = get_adapter(eco)
+            if not adapter.coverage_applicable:
+                checks.append(
+                    (
+                        "coverage",
+                        True,
+                        f"not applicable ({adapter.id}): {adapter.coverage_reason}",
+                    )
+                )
         # A command of the wrong shape still loads (ADR-017 ruling 13): this
         # row names it, and warns, never fails. It reads the questionnaire's
         # own check, so a typed and a hand-written command are judged alike.
@@ -1333,8 +1396,6 @@ def cmd_doctor(args) -> int:
 
         # The adapter's own tooling, resolved the way THIS process resolves it
         # rather than the way a shell with hand-exported variables would.
-        from ..adapters import get_adapter
-
         for label, ok, detail in get_adapter(ctx.manifest.ecosystems[0]).self_check():
             checks.append((label, ok, detail))
 

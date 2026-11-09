@@ -1924,7 +1924,17 @@ class Adapter:
     def owns_selector(self, selector: str) -> bool: ...
     def failing_test_ids(self, stdout: str, stderr: str, bundle) -> list[str] | None: ...
     def hazards(self) -> list[Hazard]: ...
+    coverage_applicable: bool                                   # ADR-015 D1
+    coverage_reason: str
+    def claims(self, relative: Path, root: Path) -> bool: ...
+    def annotate(self, result: TestResult, root: Path) -> TestResult: ...
+    def init_settings(self, root: Path) -> tuple[dict, list[str]]: ...
 ```
+
+`coverage_applicable`, `claims`, `annotate` and `init_settings` are ADR-015
+D1's, built with the `sphinx` adapter (below). Every other adapter keeps the
+base answers: coverage applies, nothing is claimed, a run is not annotated and
+`init` writes nothing for it.
 
 `test_scope_of` is asked by `sweep.no_full_run` at the hook, about a shell
 call led by the project's own `commands.test` or `commands.coverage` template:
@@ -2045,22 +2055,90 @@ A package-relative `SF:` path suffix-matches a same-named file in another
 workspace package, so a workspace reads coverage through rows that name
 project paths.
 
-**Accepted, not yet built ([ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) D1, D5).** A `sphinx` adapter (also
-selected by `docs`): strict `sphinx-build` commands with `-E -W -n`, a test
-of linkcheck plus, when `sphinx_needs` is configured, the needs builder, the
-hazards of a build without `-W` or `-E`, of narrowing `conf.py` settings and
-of a linkcheck network failure, and coverage declared not
-applicable with a reason, so `coverage.meets_floor` answers N/A by name rather
-than skipping silently. Adapters also gain `related_selectors(changed)` and
-`global_inputs()` for the measured cadence. Increment 2 of ADR-015 builds
-the adapter, increment 4 the two new adapter methods.
+**Sphinx ([ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) D1, built in [ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) increment 2).**
+`sphinx`, also selected as `docs`, is for a project whose own content is a
+Sphinx project: a documentation repository, with no unit tests and no code to
+measure.
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D3, increment 2).** ADR-015 D1's `sphinx`
-adapter is pulled forward into ADR-018's increment 2, with the rST reader.
-Its detection skips the docs project's source directory
-(`docs.needs.srcdir`), so a project whose only Sphinx tree is its docs
-project is not a `sphinx` ecosystem; the docs project is built by `invariant
-docs build` from its own environment, never through `commands.*`.
+```yaml
+project:
+  ecosystems: [sphinx]
+vars:
+  srcdir: source               # written by init: the directory holding conf.py
+# defaults:
+#   build:     sphinx-build -E -W --keep-going -n -b html {srcdir} {result_bundle}/html
+#   test:      sphinx-build -E -W --keep-going -n -b linkcheck -D linkcheck_retries=2 {srcdir} {result_bundle}/linkcheck
+#   test_one:  the test, then {selector}
+#   lint, coverage, coverage_one, coverage_report: none
+```
+
+- **Detection.** A `conf.py` at the root or under `docs/`, `doc/` or `source/`
+  (each also one `source/` deeper). The docs project's source directory is
+  skipped (ADR-018 D3): the nearest directory at or above `paths.docs` that
+  holds a `conf.py`, never the repository root itself, because a root
+  `conf.py` is a documentation repository's own content and the starter puts
+  the docs project at `docs/`. Until `docs.needs.srcdir` is a key (ADR-018
+  increment 3) that default rule is read against the default `paths.docs`,
+  `docs/architecture`. So a Python project whose only Sphinx tree is a
+  starter-shaped `docs/conf.py` is `python`, not `sphinx`, and a
+  documentation repository keeping its content at `docs/` is detected only
+  by `init --ecosystem sphinx`. Two remaining trees are not guessed between:
+  `init` writes no `srcdir` and its report names both.
+- **Commands.** `-E` re-reads every source, because an incremental build
+  validates nothing it skips; `-W` turns a warning into a failure; `-n` is
+  nitpicky; `--keep-going` reports every warning before failing. A failed
+  link is retried once (`linkcheck_retries=2`). The output goes into the
+  per-run result bundle under the state root, which the pipeline clears
+  before each run, so a build never writes into the tree and two sessions
+  never share an output directory. `{srcdir}` is a `vars` entry `init` fills
+  in (`init_settings`). When the source directory's `conf.py` lists
+  `sphinx_needs` in `extensions`, `init` also writes `commands.test` and
+  `commands.test_one` with the needs builder after linkcheck, joined with
+  `&&`, each carrying `-E -W -n`, so sphinx-needs' own warnings fail the
+  test. `conf.py` is read without running it: `extensions` from its literal
+  assignments, `+=`, `append` and `extend`; where it is built at run time
+  `init` says it could not read it and writes the linkcheck test alone. A
+  secondary `sphinx` gets the same commands under `commands.sphinx`.
+- **Reading a run.** Every `WARNING:`, `ERROR:`, `CRITICAL:` and `SEVERE:`
+  line, and every linkcheck `broken` line, is a failure, named by document,
+  line and warning type (`[ref.doc]`, `[needs.link_outgoing]`; a docutils
+  message carries its type on the line quoting the source). A run with any
+  is not passed, whatever its exit status. The executed count is the
+  documents each step read (`updating environment: N added, M changed`),
+  summed over the steps. The record's note names the first eight failures and
+  counts the rest, with the tree's paths spelled from the project.
+- **Hazards.** `sphinx.warnings_not_errors` (a build without `-W`: "build
+  succeeded, N warnings") and `sphinx.incremental` (a build without `-E`:
+  "loading pickled environment") can overstate. `sphinx.linkcheck_network`
+  (a broken link whose reason is a connection, name-resolution or timeout
+  error) can only understate. `conf.py` settings that narrow what passes
+  (`linkcheck_ignore`, `linkcheck_anchors = False`, `nitpick_ignore`,
+  `nitpick_ignore_regex`, `suppress_warnings`) are the project's stated
+  choice: `annotate` notes each on the run with its pattern count, and none is
+  a hazard, so none fails `test.all_pass`.
+- **Coverage is not applicable**, by name. `coverage_applicable` is false,
+  with the reason "a documentation build executes no measurable lines". For a
+  touched file the adapter claims (anything under a source directory, its
+  documents, `conf.py`, templates, static files and extensions; with
+  `conf.py` at the root, only `conf.py`, the documents and `_static` and
+  `_templates`), `coverage.meets_floor` answers *N/A: the sphinx adapter
+  declares coverage not applicable, because a documentation build executes no
+  measurable lines*, naming the files. Stacked with an ecosystem that has
+  coverage (ADR-013), the other files are held to the floor as before, and the
+  claimed ones are named in the verdict as set aside. `doctor` shows a
+  `coverage` row, `not applicable (sphinx)`.
+- **Selectors.** `owns_selector` claims a document (`.rst`, or a MyST
+  `.md`). Several are appended together, which `sphinx-build` reads as the
+  documents to write. `test_scope_of` is "full" with nothing after the
+  command, "scoped" with filenames alone, and doubt for anything else.
+
+**Accepted, not yet built ([ADR-015](../adr/ADR-015-docs-repositories-get-an-adapter-and-commands-derived-from-ci.md) D2 to D5).** The `docs-project`
+lane and `doctor`'s command rows per lane (D2, increment 2 of ADR-015), and
+the derivation of commands from CI (D3, D4). Adapters also gain
+`related_selectors(changed)` and `global_inputs()` for the measured cadence
+(D5, increment 4). The docs project of ADR-018 is built by `invariant docs
+build` from its own environment, never through `commands.*` (ADR-018 D3,
+D5, increment 3).
 
 ## Backends for work items
 

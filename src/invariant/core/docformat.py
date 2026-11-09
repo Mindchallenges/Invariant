@@ -2,8 +2,10 @@
 
 The docs assessment reads headings and links through a reader chosen by
 ``docs.format``, so the same checks hold whatever the docs are written in.
-Markdown is the reader built here: ATX and setext headings, inline and
-reference links. A format with no reader answers ``None`` from
+Two readers are built here: Markdown (ATX and setext headings, inline and
+reference links) and reStructuredText, ``docs.format: sphinx`` (section
+titles, and the roles, directives and hyperlink targets that name a file;
+ADR-018 increment 2). A format with no reader answers ``None`` from
 :func:`reader_for`, and the assessment reports it "not assessable", never a
 pass. :func:`detect_format` names the format a set of files is written in,
 for `docs adopt` (D7).
@@ -32,6 +34,9 @@ class Heading:
 class Link:
     line: int
     target: str
+    #: The target names a Sphinx document, written without its suffix (an rST
+    #: ``:doc:`` target or ``toctree`` entry), rather than a file.
+    document: bool = False
 
 
 class Reader(Protocol):
@@ -122,8 +127,261 @@ class MarkdownReader:
         return found
 
 
-#: Each ``docs.format`` with a reader. rST lands with ADR-015's increment 2.
-READERS: dict[str, Reader] = {"markdown": MarkdownReader()}
+#: A line that is one punctuation character repeated: a section title's
+#: underline or overline, or a transition.
+_ADORNMENT = re.compile(r"^([!-/:-@\[-`{-~])\1*[ \t]*$")
+#: Explicit markup: ``.. `` and what follows, or a bare ``..``.
+_EXPLICIT = re.compile(r"^([ \t]*)\.\.(?:[ \t]+(.*))?$")
+_DIRECTIVE = re.compile(r"^([\w][\w:.+-]*)::(?:[ \t]+(.*?))?[ \t]*$")
+_TARGET = re.compile(r"^_(?:`[^`]+`|[^:`]*):(?:[ \t]+(.*?))?[ \t]*$")
+_INLINE_LITERAL = re.compile(r"``(?!\s).*?(?<!\s)``(?!`)")
+#: ``:doc:`` (also as ``:std:doc:``) and ``:download:``; ``:ref:`` names a
+#: label, not a file, and is not a link here.
+_ROLE = re.compile(r"(?<![\w`]):(?:std:)?(doc|download):`([^`]+)`")
+#: A hyperlink reference with an embedded target: ```text <target>`_``.
+_EMBEDDED = re.compile(r"(?<![:\w])`[^`]*?<([^<>`]+)>`__?(?!\w)")
+#: The directives whose argument is a file: ``include`` and its kin.
+_FILE_DIRECTIVES = frozenset({"include", "literalinclude", "image", "figure"})
+#: The directives whose body is code or other text that is not rST.
+_CODE_DIRECTIVES = frozenset(
+    {
+        "code",
+        "code-block",
+        "sourcecode",
+        "parsed-literal",
+        "highlight",
+        "math",
+        "raw",
+        "mermaid",
+        "uml",
+        "plantuml",
+        "graphviz",
+        "digraph",
+        "graph",
+        "doctest",
+        "testcode",
+        "testoutput",
+        "testsetup",
+        "testcleanup",
+        "ipython",
+        "jupyter-execute",
+    }
+)
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _rst_prose(text: str) -> list[str | None]:
+    """Every line, ``None`` where it is code or comment rather than rST.
+
+    Held out: a literal block (the indented block after a paragraph ending in
+    ``::``), the body of a code directive (``code-block``, ``mermaid``,
+    ``math`` and their kin), a comment and its body, and a doctest block.
+    The list is as long as the text, so an index is a line number less one.
+    """
+    lines = text.splitlines()
+    kept: list[str | None] = []
+    #: The indent a skipped block's lines must exceed; ``None`` when not skipping.
+    skip: int | None = None
+    doctest = False
+    for line in lines:
+        stripped = line.strip()
+        if skip is not None:
+            if not stripped or _indent(line) > skip:
+                kept.append(None)
+                continue
+            skip = None
+        if doctest:
+            if stripped:
+                kept.append(None)
+                continue
+            doctest = False
+        if stripped.startswith(">>>"):
+            doctest = True
+            kept.append(None)
+            continue
+        explicit = _EXPLICIT.match(line)
+        if explicit:
+            body = explicit.group(2) or ""
+            directive = _DIRECTIVE.match(body)
+            if directive:
+                if directive.group(1).lower() in _CODE_DIRECTIVES:
+                    skip = _indent(line)
+                kept.append(line)
+                continue
+            if body[:1] in ("_", "[", "|"):
+                kept.append(line)
+                continue
+            # A comment: its line and its body hold nothing rST renders.
+            skip = _indent(line)
+            kept.append(None)
+            continue
+        if stripped.endswith("::"):
+            skip = _indent(line)
+        kept.append(line)
+    return kept
+
+
+def _is_adornment(line: str | None) -> bool:
+    return line is not None and bool(_ADORNMENT.match(line))
+
+
+def _is_text(line: str | None) -> bool:
+    return line is not None and bool(line.strip()) and not _is_adornment(line)
+
+
+def _long_enough(adornment: str, title: str) -> bool:
+    """docutils keeps a title whose adornment is shorter than it, with a
+    warning, once the adornment is four characters or more."""
+    length = len(adornment.rstrip())
+    return length >= len(title) or length >= 4
+
+
+def _overlined_title(line: str, following: str | None, after: str | None) -> str | None:
+    """The title between an overline and an underline, ``""`` for three lines
+    shaped like one that docutils refuses (the two lines differ, or are too
+    short), and ``None`` when the lines are not shaped like one at all."""
+    if not (_is_adornment(line) and _is_text(following) and _is_adornment(after)):
+        return None
+    title = (following or "").strip()
+    if line.rstrip() == (after or "").rstrip() and _long_enough(line, title):
+        return title
+    return ""
+
+
+class RstReader:
+    """reStructuredText's section titles and file links, as a docs check needs them.
+
+    A title is a line of text under a line of one repeated punctuation
+    character (an underline), or between two identical ones (an overline as
+    well). It starts in the first column, as every section title does, unless
+    an overline insets it, and follows a blank line. Links are what can name
+    a file: ``:doc:`` targets and ``toctree`` entries, which name a document
+    without its suffix (``Link.document``), ``:download:``, the ``include``,
+    ``literalinclude``, ``image`` and ``figure`` arguments, embedded
+    hyperlink targets (```text <target>`_``) and hyperlink target
+    definitions (``.. _name: target``). ``:ref:`` names a label, which is
+    not a file, so it is not read as a link. Code (literal blocks, code
+    directives, doctest blocks, inline literals) and comments are skipped.
+    """
+
+    suffixes: tuple[str, ...] = (".rst",)
+
+    def headings(self, text: str) -> list[Heading]:
+        kept = _rst_prose(text)
+        found: list[Heading] = []
+        index = 0
+        while index < len(kept):
+            line, following, after = (
+                kept[index + offset] if index + offset < len(kept) else None
+                for offset in range(3)
+            )
+            if line is None:
+                index += 1
+                continue
+            overlined = _overlined_title(line, following, after)
+            if overlined is not None:
+                if overlined:
+                    found.append(Heading(index + 2, overlined))
+                index += 3
+                continue
+            previous = kept[index - 1] if index else None
+            if (
+                _is_text(line)
+                and _indent(line) == 0
+                and not (previous or "").strip()
+                and following is not None
+                and _is_adornment(following)
+                and _long_enough(following, line.strip())
+            ):
+                found.append(Heading(index + 1, line.strip()))
+                index += 2
+                continue
+            index += 1
+        return found
+
+    def links(self, text: str) -> list[Link]:
+        found: list[Link] = []
+        toctree: int | None = None
+        for index, line in enumerate(_rst_prose(text)):
+            number = index + 1
+            if line is None:
+                continue
+            if toctree is not None:
+                if not line.strip():
+                    continue
+                if _indent(line) > toctree:
+                    entry = _toctree_entry(line.strip())
+                    if entry is not None:
+                        found.append(Link(number, *entry))
+                    continue
+                toctree = None
+            explicit = _EXPLICIT.match(line)
+            if explicit:
+                body = explicit.group(2) or ""
+                directive = _DIRECTIVE.match(body)
+                if directive:
+                    name = directive.group(1).lower()
+                    argument = (directive.group(2) or "").strip()
+                    if name == "toctree":
+                        toctree = _indent(line)
+                    elif name in _FILE_DIRECTIVES and argument and not argument.startswith("<"):
+                        found.append(Link(number, argument))
+                    continue
+                target = _TARGET.match(body)
+                if target:
+                    uri = (target.group(1) or "").strip()
+                    if uri and not uri.endswith("_"):
+                        found.append(Link(number, uri))
+                    continue
+            found.extend(_inline_links(number, line))
+        return found
+
+
+def _role_target(content: str) -> str:
+    """A role's target: the part in angle brackets when there is a title."""
+    explicit = re.search(r"<([^<>]+)>\s*$", content)
+    target = explicit.group(1) if explicit else content
+    return target.strip().lstrip("~!")
+
+
+def _inline_links(number: int, line: str) -> list[Link]:
+    prose = _INLINE_LITERAL.sub(lambda match: " " * len(match.group(0)), line)
+    hits: list[tuple[int, Link]] = []
+    for match in _ROLE.finditer(prose):
+        target = _role_target(match.group(2))
+        if target:
+            hits.append((match.start(), Link(number, target, document=match.group(1) == "doc")))
+    for match in _EMBEDDED.finditer(prose):
+        target = "".join(match.group(1).split())
+        if target and not target.endswith("_"):
+            hits.append((match.start(), Link(number, target)))
+    return [link for _start, link in sorted(hits, key=lambda hit: hit[0])]
+
+
+#: A scheme (``https:``, ``mailto:``): a toctree entry that is a URL.
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _toctree_entry(entry: str) -> tuple[str, bool] | None:
+    """A toctree line's target and whether it names a document, or ``None``
+    for an option, ``self`` and a glob pattern."""
+    if entry.startswith(":"):
+        return None
+    explicit = re.search(r"<([^<>]+)>\s*$", entry)
+    target = (explicit.group(1) if explicit else entry).strip()
+    if not target or target == "self" or any(c in target for c in "*?["):
+        return None
+    if _SCHEME.match(target):
+        return target, False
+    return target, True
+
+
+#: Each ``docs.format`` with a reader: Markdown, and reStructuredText as
+#: ``sphinx`` (ADR-018 increment 2).
+READERS: dict[str, Reader] = {"markdown": MarkdownReader(), "sphinx": RstReader()}
 
 
 def reader_for(fmt: str) -> Reader | None:

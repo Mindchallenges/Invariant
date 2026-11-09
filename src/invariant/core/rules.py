@@ -5000,6 +5000,23 @@ def _held_files_floor(ctx: RuleContext, advisory: list[tuple[str, str]]) -> Verd
         )
         excluded += declared_non_source
 
+        # A declared adapter whose coverage is not applicable (ADR-015 D1)
+        # answers for the files it claims, its documents included, so a
+        # change made only of them is N/A naming the adapter and its reason
+        # rather than "no source file was touched". Stacked with an
+        # ecosystem that has coverage, the rest is held as before.
+        not_applicable = _coverage_not_applicable(ctx, changed, roots)
+        if not_applicable:
+            claimed = {rel for rel, _adapter in not_applicable}
+            excluded += [
+                f"{rel} (coverage not applicable: {adapter.id})"
+                for rel, adapter in not_applicable
+                if rel in source_changed
+            ]
+            source_changed -= claimed
+            if not source_changed:
+                return _not_applicable_verdict(not_applicable)
+
         # A POLICY about where the floor binds, asked after the claims about
         # what a path IS (above) and before any question about what was
         # measured, because an advisory file is owed no measurement at all.
@@ -6332,6 +6349,40 @@ def _nothing_a_run_could_measure(
         "no touched source file is one a coverage run could measure",
         detail=_excluded_detail(set_aside),
     )
+
+
+def _coverage_not_applicable(
+    ctx: RuleContext, changed: set[str], roots: list[Path]
+) -> list[tuple[str, Adapter]]:
+    """Each changed path a declared adapter without coverage claims, with it.
+
+    Sorted by path. A path is claimed when the adapter claims it in any root
+    the change can be read in: a claim is positive evidence, and the roots
+    are where the change's tree is.
+    """
+    adapters = [a for a in _ecosystem_adapters(ctx) if not a.coverage_applicable]
+    if not adapters:
+        return []
+    bases = [Path(root) for root in roots]
+    found: list[tuple[str, Adapter]] = []
+    for rel in sorted(changed):
+        for adapter in adapters:
+            if any(adapter.claims(Path(rel), base) for base in bases):
+                found.append((rel, adapter))
+                break
+    return found
+
+
+def _not_applicable_verdict(not_applicable: list[tuple[str, Adapter]]) -> Verdict:
+    """N/A naming each adapter that declared coverage not applicable, its
+    reason, and the files."""
+    adapters = list(dict.fromkeys(adapter for _rel, adapter in not_applicable))
+    reasons = "; ".join(
+        f"the {adapter.id} adapter declares coverage not applicable, because "
+        f"{adapter.coverage_reason}"
+        for adapter in adapters
+    )
+    return Verdict.na(reasons, detail=", ".join(rel for rel, _adapter in not_applicable))
 
 
 def _explain_absent_rows(

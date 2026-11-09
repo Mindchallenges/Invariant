@@ -50,7 +50,7 @@ import yaml
 
 from ..adapters import get_adapter
 from ..core import git
-from ..core.docformat import Reader, detect_format, normalise_heading, reader_for
+from ..core.docformat import Link, Reader, detect_format, normalise_heading, reader_for
 from ..core.errors import UsageError
 from ..core.manifest import (
     ADOPT_MODES,
@@ -280,13 +280,23 @@ def _links(
             target = unquote(link.target.split("#", 1)[0].split("?", 1)[0])
             if not target or target.startswith("/") or _EXTERNAL.match(target):
                 continue
-            exists = ((docs_root / rel).parent / target).exists()
+            exists = _resolves((docs_root / rel).parent / target, link, reader)
             checked.append((f"{rel}:{link.line}:{target}", exists))
             if not exists:
                 gaps.append(
                     Gap("links", f"{rel}:{link.line}", f"{link.target} does not exist")
                 )
     return gaps, checked
+
+
+def _resolves(path: Path, link: Link, reader: Reader) -> bool:
+    """Whether a link's target exists. A Sphinx document name carries no
+    suffix, so it resolves to the file with any suffix the reader reads."""
+    if path.exists():
+        return True
+    return link.document and any(
+        path.with_name(path.name + suffix).is_file() for suffix in reader.suffixes
+    )
 
 
 def _areas(

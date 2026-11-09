@@ -197,6 +197,47 @@ class Adapter:
     id = "generic"
     manifest_defaults: ClassVar[dict[str, Any]] = {}
 
+    #: Whether a coverage floor means anything for the files this adapter
+    #: :meth:`claims` (ADR-015 D1). ``False`` comes with
+    #: :attr:`coverage_reason`, and ``coverage.meets_floor`` answers N/A for
+    #: those files naming this adapter and the reason: a stated skip, never a
+    #: silent one. Every other adapter's files are held as before.
+    coverage_applicable: ClassVar[bool] = True
+    coverage_reason: ClassVar[str] = ""
+
+    def claims(self, relative: Path, root: Path) -> bool:
+        """Is the project file ``relative`` (under ``root``) this ecosystem's own?
+
+        Asked only of an adapter whose coverage is not applicable, to decide
+        which touched files that N/A covers. A claim sets a file aside from
+        the floor, which is the relaxing direction, so it is made only on
+        positive evidence. The base claims nothing.
+        """
+        return False
+
+    def annotate(self, result: TestResult, root: Path) -> TestResult:
+        """``result`` with what only the project's own files can add to it.
+
+        Asked after a run is read, with the project root the run's adapter
+        cannot otherwise see: a setting in the project's configuration that
+        narrows what the run refuses is the project's stated choice, noted on
+        the result rather than raised as a hazard (ADR-015 D1). Anything
+        that can make the result lie belongs in :meth:`hazards` instead. The
+        base adds nothing and returns ``result`` itself.
+        """
+        return result
+
+    def init_settings(self, root: Path) -> tuple[dict[str, Any], list[str]]:
+        """Settings ``init`` writes for this ecosystem in the project at ``root``.
+
+        For what the adapter's static defaults cannot know, such as where a
+        project keeps its tree. ``commands`` are named bare; ``init`` puts them
+        under this ecosystem's key. The notes are printed in ``init``'s report,
+        each naming a setting it could not decide and the operator should set.
+        The base writes nothing.
+        """
+        return {}, []
+
     def detect(self, root: Path) -> bool:
         return False
 

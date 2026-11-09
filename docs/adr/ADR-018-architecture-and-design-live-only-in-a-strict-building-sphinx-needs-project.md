@@ -693,6 +693,64 @@ was checked on Heap's pinned environment (Sphinx 9.1.0, docutils 0.22.4,
 sphinx-needs 8.1.1). The architecture docs use the built spelling
 (manifest.md, "The `sphinx_needs` round trip").
 
+### As built: increment 2 (2026-11-09)
+
+ADR-015 D1's `sphinx` adapter and `core/docformat`'s rST reader, as the
+architecture docs describe them (manifest.md, "Adapters"; overview.md,
+`adapters/` and the `docformat` row; cli.md, `init`, `doctor` and the `docs`
+group). Where the build departs from the accepted text, or settles what it
+left open:
+
+- **D3's default rule stops below the repository root.** Read literally, "the
+  nearest directory at or above `paths.docs` that holds a `conf.py`" reaches
+  a root `conf.py`, which is ADR-015 D1's first detection home and a
+  documentation repository's own content, so detection would skip exactly
+  the tree it exists to find. The starter puts the docs project at `docs/`
+  and ruling 18 keeps it apart from the content, so the root is never the
+  docs project. Until `docs.needs.srcdir` is a key (increment 3) the rule is
+  read against the default `paths.docs`. A documentation repository keeping
+  its content at `docs/` is therefore detected only by `init --ecosystem
+  sphinx`; D13's store default means its docs project is not there.
+- **`{outdir}` is the per-run result bundle**, `{result_bundle}/html`,
+  `/linkcheck` and `/needs`, not a `vars` entry. It lies under the state
+  root as D1 requires, is cleared before each run, and is never shared by
+  two sessions. `{srcdir}` is the `vars` entry `init` fills in.
+- **The needs builder step is written by `init`.** Adapter defaults are
+  static, so whether `conf.py` configures `sphinx_needs` is read once, at
+  `init`, which writes the two-step `commands.test` and `commands.test_one`.
+  `conf.py` is read through `ast`, never run; extensions built at run time
+  are said in the report and the linkcheck test is written alone.
+- **The narrowing settings are a note, not a hazard.** Any recorded hazard
+  fails `test.all_pass`, so the settings D1 says are annotated, not blocked,
+  are noted on the run by a new base hook, `annotate(result, root)`, which
+  `domains/pipeline` and `domains/sweep` ask after `read_run`. The list adds
+  `nitpick_ignore_regex` and `suppress_warnings` to D1's three: both narrow
+  what `-W -n` refuses in the same way.
+- **The base adapter gains** `coverage_applicable` and `coverage_reason`
+  (D1's names), `claims(relative, root)` for the files that N/A covers, and
+  `init_settings(root)`. With `conf.py` at the root, `claims` covers only
+  `conf.py`, the documents, `_static` and `_templates`, so a stacked
+  ecosystem's code keeps its floor.
+- **`owns_selector` claims a document by suffix** (`.rst`, or a MyST `.md`):
+  it is asked without a root, so "a path under the source directory" cannot
+  be read there.
+- **A failed link is retried once** through `-D linkcheck_retries=2` on the
+  linkcheck step.
+- **The rST reader does not read `:ref:` as a link.** It names a label, not a
+  file, and ADR-016 D1's links check is of file targets only. A `:doc:` or
+  `toctree` target names a document without its suffix and resolves to the
+  `.rst` file.
+- **`doctor`'s `coverage: not applicable (sphinx)` row is built.** ADR-015
+  D2's command rows per lane are not: they are that record's increment 2,
+  with its lane.
+
+The proofs: a toy Sphinx tree built by Heap's pinned environment (Sphinx
+9.1.0, sphinx-needs 8.1.1), a broken `:doc:` reference failing the recorded
+test by document, line and type and its fix passing, with
+`coverage.meets_floor` N/A naming the adapter; a toy Python project with a
+starter-shaped `docs/conf.py` detected as `python`; and `docs assess` over an
+rST tree printing the same gaps twice.
+
 ## Alternatives rejected
 
 | Alternative | Why not |

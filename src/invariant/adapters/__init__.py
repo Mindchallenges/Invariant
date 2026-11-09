@@ -14,6 +14,7 @@ from .base import Adapter, Hazard, TestResult
 from .dart import DartAdapter, FlutterAdapter
 from .node import NodeAdapter
 from .python_ import PythonAdapter
+from .sphinx import SphinxAdapter
 from .swift_xcode import SwiftXcodeAdapter
 
 _REGISTRY: dict[str, type[Adapter]] = {
@@ -24,6 +25,9 @@ _REGISTRY: dict[str, type[Adapter]] = {
     "node": NodeAdapter,
     "dart": DartAdapter,
     "flutter": FlutterAdapter,
+    "sphinx": SphinxAdapter,
+    # ADR-015 D1: `docs` selects the same adapter.
+    "docs": SphinxAdapter,
 }
 
 __all__ = [
@@ -56,7 +60,7 @@ def defaults_for(ecosystem: str) -> dict[str, Any]:
 def detect(root: Path) -> list[str]:
     """Ecosystems whose marker files are present. Ordered, deduped."""
     found: list[str] = []
-    for name in ("swift_xcode", "python", "node", "flutter", "dart"):
+    for name in ("swift_xcode", "python", "node", "flutter", "dart", "sphinx"):
         if _REGISTRY[name]().detect(Path(root)) and name not in found:
             found.append(name)
     return found or ["generic"]

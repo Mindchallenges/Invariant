@@ -249,19 +249,19 @@ class TestAssessment:
             toy,
             {
                 "docs": {
-                    "format": "sphinx",
+                    "format": "asciidoc",
                     "assess": {"areas": {"from": "globs", "globs": ["pkg/*"]}},
                 }
             },
         )
-        (toy / "docs" / "architecture" / "index.rst").write_text(
-            "beta\n====\n", encoding="utf-8"
+        (toy / "docs" / "architecture" / "index.adoc").write_text(
+            "= beta\n", encoding="utf-8"
         )
         a = assess(Manifest.locate(toy))
         for check in ("sections", "links"):
             (gap,) = [g for g in a.gaps if g.check == check]
             assert gap.subject == "not assessable"
-            assert gap.detail == "no reader for sphinx"
+            assert gap.detail == "no reader for asciidoc"
         # The areas check still reads every file's text.
         assert gaps(a, "areas") == []
 
@@ -509,3 +509,105 @@ class TestRuleAndCommand:
         _code, rows = self.doctor_rows(capsys)
         assert "docs assessment" not in rows
         assert "architecture docs exist" in rows
+
+
+# -- an rST tree, read through the sphinx reader (ADR-018 increment 2) --------
+
+
+RST_OVERVIEW = """\
+========
+Overview
+========
+
+Layers
+======
+
+The alpha package does things. See :doc:`guide`, :doc:`gone <missing>`,
+:ref:`a label <nowhere>` and `the web <https://example.invalid/x.rst>`_.
+
+.. code-block:: rst
+
+   Compliance checklist
+   ====================
+
+   .. include:: never.rst
+
+.. toctree::
+
+   guide
+   absent/page
+
+.. include:: parts/shared.rst
+.. image:: pic.png
+"""
+
+
+class TestAnRstTree:
+    """`docs assess` over an rST tree gives the same gaps twice (ADR-018 row 2)."""
+
+    @pytest.fixture
+    def rst(self, toy):
+        docs = toy / "docs" / "architecture"
+        (docs / "overview.md").unlink()
+        (docs / "guide.md").unlink()
+        (docs / "overview.rst").write_text(RST_OVERVIEW, encoding="utf-8")
+        (docs / "guide.rst").write_text(
+            "Guide\n-----\n\nComponent responsibilities\n--------------------------\n",
+            encoding="utf-8",
+        )
+        (docs / "parts").mkdir()
+        (docs / "parts" / "shared.rst").write_text("shared\n", encoding="utf-8")
+        write_manifest(
+            toy,
+            {
+                "version": 1,
+                "project": {"name": "toy", "ecosystems": ["python"]},
+                "docs": {
+                    "format": "sphinx",
+                    "assess": {"areas": {"from": "globs", "globs": ["pkg/*"]}},
+                },
+            },
+        )
+        return toy
+
+    def test_the_gaps_by_check(self, rst):
+        a = assess(Manifest.locate(rst))
+        assert a.format == "sphinx"
+        # parts/shared.rst is a document too.
+        assert a.documents == 3
+        assert gaps(a, "sections") == ["Compliance checklist"]
+        assert gaps(a, "areas") == ["pkg/beta"]
+        assert [g.render() for g in a.by_check("links")] == [
+            "overview.rst:8: missing does not exist",
+            "overview.rst:21: absent/page does not exist",
+            "overview.rst:24: pic.png does not exist",
+        ]
+
+    def test_the_same_tree_gives_the_same_gaps_twice(self, rst):
+        first = assess(Manifest.locate(rst))
+        second = assess(Manifest.locate(rst))
+        assert first.render() == second.render()
+        assert json.dumps(first.to_dict(), sort_keys=True) == json.dumps(
+            second.to_dict(), sort_keys=True
+        )
+
+    def test_a_document_written_closes_its_gap(self, rst):
+        before = assess(Manifest.locate(rst))
+        docs = rst / "docs" / "architecture"
+        (docs / "missing.rst").write_text("Compliance checklist\n====\n", encoding="utf-8")
+        after = assess(Manifest.locate(rst))
+        assert gaps(after, "sections") == []
+        assert "overview.rst:8" not in gaps(after, "links")
+        assert after.digest != before.digest
+
+    def test_an_undocumented_area_is_owed_an_rst_doc(self, rst):
+        a = assess(Manifest.locate(rst))
+        (beta,) = [area for area in a.areas if area.path == "pkg/beta"]
+        assert a.doc_for(beta) == "docs/architecture/beta.rst"
+
+    def test_the_cli_prints_the_same_assessment(self, rst, capsys):
+        assert main(["docs", "assess"]) == 0
+        first = capsys.readouterr().out
+        assert main(["docs", "assess"]) == 0
+        assert capsys.readouterr().out == first
+        assert "overview.rst:21: absent/page does not exist" in first

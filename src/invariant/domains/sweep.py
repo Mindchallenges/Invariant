@@ -336,7 +336,10 @@ class SweepDomain:
             )
             return run.outcome, run.stdout, run.stderr, run.measured, bundle
         proc = self.runner(command, self.root)
-        outcome = self.adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle)
+        outcome = self.adapter.annotate(
+            self.adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle),
+            self.root,
+        )
         if outcome.total == 0:
             raise UsageError(
                 "the sweep's test run executed no tests, so it describes nothing.\n"
