@@ -241,9 +241,10 @@ class TestATransitionNeverRewritesTheBody:
         assert raw["items"][0]["body"] == self.BODY
         assert raw["items"][0]["history"][0]["ruling"] == RULING
 
-    def test_sphinx_needs_changes_only_the_status_line(self, tmp_path):
+    def test_sphinx_needs_changes_only_the_status_line_and_the_history(self, tmp_path):
         """BUG_065 pinned on the ruled path: a wrapped option, a leading role and
-        the blank line before the next heading all survive byte for byte."""
+        the blank line before the next heading all survive byte for byte. What
+        the transition adds is its status and its history block (BUG_073)."""
         m = git_project(
             tmp_path / "proj",
             {"version": 1, "items": {"backend": "sphinx_needs", "path": "backlog.rst"}},
@@ -256,16 +257,38 @@ class TestATransitionNeverRewritesTheBody:
             "BUG_WRAPPED", "fixed", ruling=RULING, evidence="HEAD", cwd=m.root
         )
 
+        sha = head(m.root)
         after = path.read_text(encoding="utf-8").splitlines()
         diff = list(difflib.unified_diff(before, after, lineterm="", n=0))
         removed = [
             line[1:] for line in diff if line.startswith("-") and not line.startswith("---")
         ]
-        added = [
-            line[1:] for line in diff if line.startswith("+") and not line.startswith("+++")
-        ]
         assert removed == [ENTRY_STATUS_LINE], "\n".join(diff)
-        assert added == ["   :status: fixed"], "\n".join(diff)
+        body = "   The body of the entry under test."
+        at = after.index(body) + 1
+        wrapped = before.index(".. bug:: Wrapped area with a leading role")
+        status_at = before.index(ENTRY_STATUS_LINE, wrapped)
+        expected_head = list(before[:at])
+        expected_head[status_at] = "   :status: fixed"
+        assert after[:at] == expected_head, "\n".join(diff)
+        assert after[at:] == [
+            "",
+            "   .. invariant-history:",
+            "      - from: filed",
+            "        to: reproduced",
+            "        reason: null",
+            "        forced: false",
+            f"        ruling: {RULING}",
+            f"        evidence: {sha}",
+            "        intermediate: true",
+            "      - from: reproduced",
+            "        to: fixed",
+            "        reason: null",
+            "        forced: false",
+            f"        ruling: {RULING}",
+            f"        evidence: {sha}",
+            *before[before.index(body) + 1 :],
+        ], "\n".join(diff)
 
 
 class TestTheRuledClosureFromTheCli:

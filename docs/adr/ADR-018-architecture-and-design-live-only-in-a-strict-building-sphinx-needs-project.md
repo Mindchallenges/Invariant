@@ -680,6 +680,19 @@ graph TD
     SESSION["domains/session: decisions on the session record"] --> RULES
 ```
 
+### As built: increment 1 (2026-11-09)
+
+The decision text above is left as accepted. Increment 1 built the history
+block with the marker spelled `.. invariant-history:`, with **one** colon,
+where this record and BUG_073 write `.. invariant-history::`. In
+reStructuredText `name::` is directive syntax, and an unknown directive is
+an error, so the strict build fails with `Unknown directive type`. The
+one-colon form is a comment: it renders nothing, passes the strict build and
+needs no `conf.py` change, which are exactly option B's requirements. This
+was checked on Heap's pinned environment (Sphinx 9.1.0, docutils 0.22.4,
+sphinx-needs 8.1.1). The architecture docs use the built spelling
+(manifest.md, "The `sphinx_needs` round trip").
+
 ## Alternatives rejected
 
 | Alternative | Why not |

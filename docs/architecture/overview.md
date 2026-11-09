@@ -1532,14 +1532,15 @@ build's `needs.json` against `docs.needs.types`' roles and the
 `sphinx` adapter, both pulled forward (increment 2). `domains/docs` gains the
 starter, `docs venv`, `docs build` and its record, `docs decision new` and
 the migration commands; `domains/workitem` gains `item migrate` and the
-decision-id check on an item write; `core/items`' `SphinxNeedsBackend`
-persists history (BUG_073, increment 1); `core/rules` gains the five new
+decision-id check on an item write; `core/rules` gains the five new
 rules, which read recorded builds and run nothing; `core/manifest` gains
 `docs.needs`, its state and the block floor;
 `domains/guidelines` writes `rules.rst` from a pure renderer in
 `core/guidelines`; `domains/session` records declared decisions. The layering
 is unchanged: `core/machines` names the new gates and never imports
-`core/rules`.
+`core/rules`. **Built (increment 1):** `core/items`' `SphinxNeedsBackend`
+persists history, as an `.. invariant-history:` comment in the directive body
+(BUG_073; manifest.md, "The `sphinx_needs` round trip").
 
 ### `domains/`
 

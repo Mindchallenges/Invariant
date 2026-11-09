@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import textwrap
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -254,6 +255,17 @@ ROLE_RE = re.compile(r"^:[\w.+-]+(?::[\w.+-]+)*:`")
 _RESERVED = ("id", "status", "residue")
 _INDENT = "   "
 
+#: The line that opens an entry's history: a reStructuredText comment inside
+#: the directive body, its rows the indented YAML under it (BUG_073). It must
+#: stay a comment, so it carries ONE colon: ``name::`` is directive syntax, and
+#: an unknown directive is an error a strict Sphinx build fails on. A comment
+#: renders nothing and needs no ``conf.py`` registration.
+HISTORY_MARKER = ".. invariant-history:"
+
+#: No wrapping: a row's value stays on its own line, so a re-dump of an
+#: unchanged row is the same bytes.
+_NO_WRAP = 2**31 - 1
+
 #: The line breaks a backlog is split on: CRLF, a lone CR, LF. ``str.splitlines``
 #: also breaks on a form feed, ``\x85`` and the Unicode line separators, which
 #: would cut a title holding one in two and write it back joined by a newline
@@ -323,10 +335,12 @@ class _Entry:
     body: str
     content_end: int  # one past the last non-blank line of the entry
     end: int  # one past the block, trailing blank lines included
+    history: list[dict] = field(default_factory=list)
+    history_start: int | None = None  # the marker line, when there is a block
+    history_end: int = 0  # one past the block's last non-blank line
 
     def value(self, name: str) -> str | None:
-        found = [o.value for o in self.options if o.name == name]
-        return found[-1] if found else None
+        return _value(self.options, name) or None
 
     @property
     def id(self) -> str:
@@ -341,8 +355,27 @@ class _Entry:
             status=self.value("status") or "",
             residue=[r.strip() for r in residue.split(";") if r.strip()],
             fields={o.name: o.value for o in self.options if o.name not in _RESERVED},
+            history=[dict(row) for row in self.history],
             body=self.body,
         )
+
+
+class _BadHistory(ValueError):
+    """A history block that does not read as rows. Never read as empty: the
+    next save would write the item's empty history over it."""
+
+
+def _history_rows(block: list[str], entry_id: str, line: int) -> list[dict]:
+    """The rows of a history block, from its lines under the marker."""
+    text = textwrap.dedent("\n".join(block))
+    where = f"the history block of {entry_id or 'an entry'} at line {line}"
+    try:
+        rows = yaml.safe_load(text) if text.strip() else []
+    except yaml.YAMLError as exc:
+        raise _BadHistory(f"{where} is not valid YAML ({exc})") from exc
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise _BadHistory(f"{where} is not a list of rows")
+    return rows
 
 
 def _scan(lines: list[str]) -> list[_Entry]:
@@ -374,12 +407,21 @@ def _read_entry(lines: list[str], start: int, match: re.Match) -> _Entry:
     * at the option column but not an option, it is nothing this backend
       understands. It joins no value and belongs to no option's lines, so no
       save rewrites or removes it.
+
+    In the body, the first :data:`HISTORY_MARKER` line opens the history
+    block: it and every line after it that is blank or indented deeper are the
+    entry's history rows, and none of them is body (BUG_073).
     """
     options: list[_Option] = []
     body: list[str] = []
     column: int | None = None
     in_options = True
     continues: _Option | None = None  # what a deeper line continues, if anything
+    block: list[str] | None = None  # the history block's lines, while in it
+    block_width = 0
+    rows: list[dict] = []
+    history_start: int | None = None
+    history_end = 0
     head_end = start + 1
     content_end = start + 1
     index = start + 1
@@ -424,9 +466,26 @@ def _read_entry(lines: list[str], start: int, match: re.Match) -> _Entry:
                 index += 1
                 continue
 
+        if block is not None:
+            if not stripped or _width(content) > block_width:
+                block.append(content)
+                if stripped:
+                    history_end = index + 1
+                index += 1
+                continue
+            rows = _history_rows(block, _value(options, "id"), history_start + 1)
+            block = None
+        if stripped == HISTORY_MARKER and history_start is None:
+            history_start, history_end = index, index + 1
+            block, block_width = [], _width(content)
+            index += 1
+            continue
+
         if stripped or body:
             body.append(content[3:] if content.startswith("   ") else stripped)
         index += 1
+    if block is not None:
+        rows = _history_rows(block, _value(options, "id"), history_start + 1)
     return _Entry(
         type=match.group("type"),
         title=match.group("title").strip(),
@@ -437,7 +496,15 @@ def _read_entry(lines: list[str], start: int, match: re.Match) -> _Entry:
         body="\n".join(body).strip(),
         content_end=content_end,
         end=index,
+        history=rows,
+        history_start=history_start,
+        history_end=history_end,
     )
+
+
+def _value(options: list[_Option], name: str) -> str:
+    found = [o.value for o in options if o.name == name]
+    return found[-1] if found else ""
 
 
 #: A section adornment: one punctuation character repeated, nothing else.
@@ -589,8 +656,12 @@ class SphinxNeedsBackend(_Store):
     an entry back from its parsed fields is what reflowed hand-wrapped values
     and dropped the blank line before the next heading (BUG_065).
 
-    ``history`` is not persisted by this backend: the directive has no
-    representation for it yet.
+    ``history`` is persisted as an RST comment at the end of the directive
+    body — :data:`HISTORY_MARKER` with the rows as indented YAML under it
+    (BUG_073). A comment renders nothing and needs no ``conf.py`` change; the
+    body read excludes it, so the body round-trips. A transition rewrites the
+    block's span, and a re-dump of unchanged rows is the same bytes, so the
+    diff of a transition is its status line plus the rows it added.
     """
 
     def _read(self) -> str:
@@ -601,7 +672,16 @@ class SphinxNeedsBackend(_Store):
             return handle.read()
 
     def load_all(self) -> list[Item]:
-        return [entry.item() for entry in _scan(_split_lines(self._read()))]
+        return [entry.item() for entry in self._entries(_split_lines(self._read()))]
+
+    def _entries(self, lines: list[str]) -> list[_Entry]:
+        try:
+            return _scan(lines)
+        except _BadHistory as exc:
+            raise UsageError(
+                f"{self.path.name}: {exc}. Read as empty, the next save would "
+                "overwrite the history, so nothing is read; repair the block."
+            ) from exc
 
     def get(self, item_id: str) -> Item | None:
         return next((i for i in self.load_all() if i.id == item_id), None)
@@ -639,7 +719,7 @@ class SphinxNeedsBackend(_Store):
             )
         lines = _split_lines(self._read())
         eol = next((_ending(line) for line in lines if _ending(line)), "\n")
-        entries = _scan(lines)
+        entries = self._entries(lines)
         entry = next((e for e in entries if e.id == item.id), None)
         if entry is not None and new:
             raise UsageError(
@@ -663,7 +743,7 @@ class SphinxNeedsBackend(_Store):
         writing it would leave a stray line for a person to find. Nothing is
         written instead.
         """
-        entries = _scan(_split_lines(text))
+        entries = self._entries(_split_lines(text))
         entry = next((e for e in entries if e.id == item.id), None)
         problem = None
         if len(entries) != count:
@@ -680,6 +760,8 @@ class SphinxNeedsBackend(_Store):
             ]
             if entry.title != _one_line(item.title):
                 wrong.insert(0, "title")
+            if entry.history != item.history:
+                wrong.append("history")
             if wrong:
                 problem = "it would read back with a different " + ", ".join(wrong)
         if problem:
@@ -782,10 +864,54 @@ class SphinxNeedsBackend(_Store):
                 edits.append((at, at, [_option_line(indent, name, new, eol)]))
 
         body = (item.body or "").strip()
+        end = max(entry.content_end, entry.head_end)
         if entry.body != body:
-            stop = max(entry.content_end, entry.head_end)
-            edits.append((entry.head_end, stop, self._render_body(body, eol)))
+            # The block, if any, is inside the span replaced, so it is put
+            # back after the new body.
+            history = self._render_history(item.history, indent, eol)
+            edits.append((entry.head_end, end, self._render_body(body, eol) + history))
+        elif entry.history != item.history:
+            edits.append(self._history_edit(lines, entry, item.history, indent, eol))
         return edits
+
+    def _history_edit(
+        self, lines: list[str], entry: _Entry, history: list[dict], indent: str, eol: str
+    ) -> tuple[int, int, list[str]]:
+        """The one edit that turns the entry's history block into ``history``."""
+        start = entry.history_start
+        if start is None:
+            end = max(entry.content_end, entry.head_end)
+            return (end, end, self._render_history(history, indent, eol))
+        if history:
+            own = _leading(lines[start])
+            rendered = self._render_history(history, own, eol)[1:]
+            return (start, entry.history_end, rendered)
+        while start > entry.start + 1 and not _content(lines[start - 1]).strip():
+            start -= 1  # the blank line that separated the block goes with it
+        return (start, entry.history_end, [])
+
+    def _render_history(self, history: list[dict], indent: str, eol: str) -> list[str]:
+        """A blank line, the marker, and the rows as YAML under it."""
+        if not history:
+            return []
+        try:
+            text = yaml.safe_dump(
+                history,
+                sort_keys=False,
+                allow_unicode=True,
+                default_flow_style=False,
+                width=_NO_WRAP,
+            )
+        except yaml.YAMLError as exc:
+            raise UsageError(
+                f"{self.path.name}: a history row cannot be written ({exc}). "
+                "The file is unchanged."
+            ) from exc
+        rows = [
+            f"{indent}{_INDENT}{line}{eol}" if line.strip() else eol
+            for line in re.split(_BREAK, text.rstrip("\n"))
+        ]
+        return [eol, f"{indent}{HISTORY_MARKER}{eol}", *rows]
 
     @staticmethod
     def _render_body(body: str, eol: str) -> list[str]:
@@ -804,7 +930,8 @@ class SphinxNeedsBackend(_Store):
         for name, value in _wanted_options(item).items():
             if value is not None:
                 lines.append(_option_line(_INDENT, name, value, eol))
-        return lines + self._render_body((item.body or "").strip(), eol)
+        body = self._render_body((item.body or "").strip(), eol)
+        return lines + body + self._render_history(item.history, _INDENT, eol)
 
 
 # -- null --------------------------------------------------------------

@@ -2,9 +2,10 @@
 only what changed (BUG_065, following BUG_006 and BUG_007).
 
 A save is a patch: the lines holding a value that changed are rewritten and
-every other byte of the file is its own. The corpus test at the bottom is the
-property — for every entry shape, a status change and a re-read differ from
-the original by exactly the status line.
+every other byte of the file is its own. The corpus tests at the bottom are the
+property — for every entry shape, a status change differs from the original by
+exactly the status line, and a transition by the status line plus the entry's
+history block (BUG_073).
 """
 
 from collections import Counter
@@ -122,8 +123,9 @@ class TestRolesAndOptions:
 
 class TestASaveIsAPatch:
     def transition(self, b, target="reproduced", item_id="BUG_X"):
+        """A status save. What a transition's history rows add is TestHistory's
+        and the corpus property's to pin; here only the status line moves."""
         item = b.get(item_id)
-        item.history.append({"from": item.status, "to": target})
         item.status = target
         b.save(item)
 
@@ -465,6 +467,9 @@ CORPUS = {
     ),
 }
 
+#: The rows one ``filed -> reproduced`` history entry is written as.
+HISTORY_ROWS = ["- from: filed", "  to: reproduced"]
+
 NEWLINES = pytest.mark.parametrize(
     "newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"]
 )
@@ -482,9 +487,28 @@ def test_a_status_change_is_byte_stable_on_every_shape(tmp_path, shape, newline)
     after_item.status = "reproduced"
     b.save(after_item)
 
-    assert raw(path) == text.replace(":status: filed", ":status: reproduced", 1)
+    written = raw(path)
+    lines_before, lines_after = Counter(text.splitlines()), Counter(written.splitlines())
+    status = next(line for line in lines_before if line.strip() == ":status: filed")
+    assert lines_before - lines_after == Counter([status])
+    added = lines_after - lines_before
+    assert added - Counter([status.replace("filed", "reproduced")]) == Counter(
+        ["", f"{status[: -len(':status: filed')]}.. invariant-history:"]
+        + [f"{status[: -len(':status: filed')]}   {row}" for row in HISTORY_ROWS]
+    )
+    # Positionally: the block is one contiguous run, and taking it out leaves
+    # the original file byte for byte with only the status line changed.
+    kept = written.splitlines(keepends=True)
+    at = next(i for i, line in enumerate(kept) if line.strip() == ".. invariant-history:")
+    del kept[at - 1 : at + 1 + len(HISTORY_ROWS)]
+    unblocked = "".join(kept)
+    expected = text.replace(":status: filed", ":status: reproduced", 1)
+    if not expected.endswith(newline):
+        expected += newline  # the last line, now followed by the block, ends
+    assert unblocked == expected
     reread = b.get("BUG_X")
     assert reread.status == "reproduced"
+    assert reread.history == [{"from": "filed", "to": "reproduced"}]
     assert (reread.title, reread.fields, reread.residue, reread.body) == (
         before.title,
         before.fields,
@@ -492,7 +516,7 @@ def test_a_status_change_is_byte_stable_on_every_shape(tmp_path, shape, newline)
         before.body,
     )
     b.save(reread)
-    assert raw(path) == text.replace(":status: filed", ":status: reproduced", 1)
+    assert raw(path) == written
 
 
 @NEWLINES
@@ -510,3 +534,230 @@ def test_a_status_save_removes_no_line_but_the_status_line(tmp_path, shape, newl
     status = next(line for line in before if line.strip() == ":status: filed")
     assert before - after == Counter([status])
     assert after - before == Counter([status.replace("filed", "reproduced")])
+
+
+# -- history (BUG_073) ---------------------------------------------------
+
+
+RULED = [
+    {
+        "from": "filed",
+        "to": "reproduced",
+        "reason": None,
+        "forced": False,
+        "ruling": "maintainer, 2026-11-09",
+        "evidence": "0123456789abcdef0123456789abcdef01234567",
+        "intermediate": True,
+    },
+    {
+        "from": "reproduced",
+        "to": "fixed",
+        "reason": None,
+        "forced": False,
+        "ruling": "maintainer, 2026-11-09",
+        "evidence": "0123456789abcdef0123456789abcdef01234567",
+    },
+]
+
+RULED_BLOCK = (
+    "   .. invariant-history:\n"
+    "      - from: filed\n"
+    "        to: reproduced\n"
+    "        reason: null\n"
+    "        forced: false\n"
+    "        ruling: maintainer, 2026-11-09\n"
+    "        evidence: 0123456789abcdef0123456789abcdef01234567\n"
+    "        intermediate: true\n"
+    "      - from: reproduced\n"
+    "        to: fixed\n"
+    "        reason: null\n"
+    "        forced: false\n"
+    "        ruling: maintainer, 2026-11-09\n"
+    "        evidence: 0123456789abcdef0123456789abcdef01234567\n"
+)
+
+
+class TestHistory:
+    """History is an RST comment inside the directive body: it renders nothing,
+    needs no conf.py registration, and is not part of the body."""
+
+    def test_rows_round_trip_with_ruling_and_evidence(self, tmp_path):
+        b, path = backend(tmp_path, entry(""))
+        item = b.get("BUG_X")
+        item.status = "fixed"
+        item.history = [dict(row) for row in RULED]
+        b.save(item)
+
+        assert raw(path) == entry("").replace(":status: filed", ":status: fixed") + (
+            "\n" + RULED_BLOCK
+        )
+        reread = SphinxNeedsBackend(path).get("BUG_X")
+        assert reread.history == RULED
+        assert reread.body == "Body."
+
+    def test_the_block_is_not_part_of_the_body(self, tmp_path):
+        text = entry("", "   Body.\n\n" + RULED_BLOCK)
+        assert backend(tmp_path, text)[0].get("BUG_X").body == "Body."
+
+    def test_an_entry_without_a_body_gets_the_block_after_its_options(self, tmp_path):
+        b, path = backend(tmp_path, ".. bug:: T\n   :id: BUG_X\n   :status: filed\n")
+        item = b.get("BUG_X")
+        item.history = [{"from": "filed", "to": "reproduced"}]
+        item.status = "reproduced"
+        b.save(item)
+        assert raw(path) == (
+            ".. bug:: T\n   :id: BUG_X\n   :status: reproduced\n\n"
+            "   .. invariant-history:\n      - from: filed\n        to: reproduced\n"
+        )
+        assert b.get("BUG_X").body == ""
+
+    def test_a_second_transition_appends_only_its_own_rows(self, tmp_path):
+        b, path = backend(tmp_path, entry(""))
+        item = b.get("BUG_X")
+        item.history = [dict(RULED[0])]
+        item.status = "reproduced"
+        b.save(item)
+        first = raw(path)
+
+        item = b.get("BUG_X")
+        item.history.append(dict(RULED[1]))
+        item.status = "fixed"
+        b.save(item)
+
+        assert raw(path) == first.replace(
+            ":status: reproduced", ":status: fixed"
+        ) + RULED_BLOCK.split("        intermediate: true\n", 1)[1]
+
+    def test_the_block_keeps_the_files_line_endings(self, tmp_path):
+        b, path = backend(tmp_path, entry("").replace("\n", "\r\n"))
+        item = b.get("BUG_X")
+        item.history = [dict(RULED[0])]
+        b.save(item)
+        assert "\r\n      - from: filed\r\n" in raw(path)
+        assert "\n" not in raw(path).replace("\r\n", "")
+        assert b.get("BUG_X").history == [RULED[0]]
+
+    def test_a_tab_indented_entry_indents_its_block_the_same_way(self, tmp_path):
+        b, path = backend(tmp_path, ".. bug:: T\n\t:id: BUG_X\n\t:status: filed\n")
+        item = b.get("BUG_X")
+        item.history = [{"from": "filed", "to": "reproduced"}]
+        b.save(item)
+        assert raw(path).endswith(
+            "\n\n\t.. invariant-history:\n\t   - from: filed\n\t     to: reproduced\n"
+        )
+        assert b.get("BUG_X").history == item.history
+
+    def test_a_multi_line_reason_round_trips(self, tmp_path):
+        b, path = backend(tmp_path, entry(""))
+        item = b.get("BUG_X")
+        item.history = [
+            {"from": "filed", "to": "reproduced", "reason": "one\n\ntwo", "forced": True}
+        ]
+        b.save(item)
+        assert b.get("BUG_X").history == item.history
+        assert b.get("BUG_X").body == "Body."
+        assert not any(line != line.rstrip() for line in raw(path).splitlines())
+
+    def test_a_changed_body_keeps_the_block_after_it(self, tmp_path):
+        b, path = backend(tmp_path, entry("", "   Body.\n\n" + RULED_BLOCK))
+        item = b.get("BUG_X")
+        item.body = "New body."
+        b.save(item)
+        assert raw(path) == entry("", "   New body.\n\n" + RULED_BLOCK)
+
+    def test_a_body_written_after_the_block_by_hand_stays_put(self, tmp_path):
+        text = entry("", "   Body.\n\n" + RULED_BLOCK + "\n   Later prose.\n")
+        b, path = backend(tmp_path, text)
+        item = b.get("BUG_X")
+        assert item.body == "Body.\n\nLater prose."
+        assert item.history == RULED
+        item.history.append({"from": "fixed", "to": "reproduced"})
+        b.save(item)
+        assert raw(path) == text.replace(
+            "\n\n   Later prose.",
+            "\n      - from: fixed\n        to: reproduced\n\n   Later prose.",
+        )
+
+    def test_an_emptied_history_removes_the_block(self, tmp_path):
+        b, path = backend(tmp_path, entry("", "   Body.\n\n" + RULED_BLOCK))
+        item = b.get("BUG_X")
+        item.history = []
+        b.save(item)
+        assert raw(path) == entry("")
+
+    def test_a_new_entry_is_written_with_its_history(self, tmp_path):
+        b, path = backend(tmp_path, "")
+        b.add(
+            Item(
+                id="BUG_X", type="bug", title="T", status="fixed",
+                history=[dict(row) for row in RULED], body="Body.",
+            )
+        )
+        assert raw(path) == (
+            ".. bug:: T\n   :id: BUG_X\n   :status: fixed\n\n   Body.\n\n" + RULED_BLOCK
+        )
+        assert b.get("BUG_X").history == RULED
+
+    def test_an_unchanged_history_writes_nothing(self, tmp_path):
+        text = entry("", "   Body.\n\n" + RULED_BLOCK)
+        b, path = backend(tmp_path, text)
+        b.save(b.get("BUG_X"))
+        assert raw(path) == text
+
+    @pytest.mark.parametrize(
+        "block, problem",
+        [
+            ("   .. invariant-history:\n      - from: [unclosed\n", "not valid YAML"),
+            ("   .. invariant-history:\n      from: filed\n", "not a list of rows"),
+            ("   .. invariant-history:\n      - just text\n", "not a list of rows"),
+        ],
+    )
+    def test_an_unreadable_block_is_an_error_not_an_empty_history(
+        self, tmp_path, block, problem
+    ):
+        """Read as empty, the next save would overwrite the audit trail."""
+        b, _ = backend(tmp_path, entry("", "   Body.\n\n" + block))
+        with pytest.raises(UsageError, match=problem) as exc:
+            b.get("BUG_X")
+        assert "BUG_X" in str(exc.value) and "line 7" in str(exc.value)
+
+    def test_an_empty_block_reads_as_no_history(self, tmp_path):
+        b, _ = backend(tmp_path, entry("", "   Body.\n\n   .. invariant-history:\n"))
+        assert b.get("BUG_X").history == []
+
+    def test_a_row_yaml_cannot_write_is_refused_and_nothing_written(self, tmp_path):
+        b, path = backend(tmp_path, entry(""))
+        item = b.get("BUG_X")
+        item.history = [{"from": "filed", "to": "reproduced", "at": object()}]
+        with pytest.raises(UsageError, match="history"):
+            b.save(item)
+        assert raw(path) == entry("")
+
+    def test_a_row_that_would_read_back_differently_is_refused(self, tmp_path):
+        b, path = backend(tmp_path, entry(""))
+        item = b.get("BUG_X")
+        item.history = [{"from": "filed", "to": "reproduced", "steps": ("a", "b")}]
+        with pytest.raises(UsageError, match="different history"):
+            b.save(item)
+        assert raw(path) == entry("")
+
+
+def test_a_ruled_closure_satisfies_history_matches_status(tmp_path):
+    """ADR-018 increment 1: on sphinx_needs the rule is quiet after a ruled
+    closure, because the rows that explain the status are on the page."""
+    from test_domains import git_project
+
+    from invariant.core.rules import RuleContext, evaluate
+    from invariant.domains.workitem import WorkItemDomain
+
+    m = git_project(
+        tmp_path / "proj",
+        {"version": 1, "items": {"backend": "sphinx_needs", "path": "backlog.rst"}},
+    )
+    domain = WorkItemDomain(m)
+    bug = domain.new("bug", "A defect")
+    domain.transition(bug.id, "fixed", ruling="maintainer", evidence="HEAD", cwd=m.root)
+    [verdict] = evaluate(
+        ["item.history_matches_status"], RuleContext(manifest=m, cwd=m.root)
+    )
+    assert verdict.verdict.ok and not verdict.verdict.skipped, verdict.verdict.message

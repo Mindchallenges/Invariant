@@ -1495,9 +1495,11 @@ invariant item transition <id> <status> [--reason <text>] [--force]
 invariant item residue <id> [--add <text> | --clear <text>]
 ```
 
-**Accepted, not yet built (ADR-018).** On `sphinx_needs`, `transition`
-persists its history rows in an `.. invariant-history::` block, so `show`
-reads them back on that backend too (BUG_073, increment 1). `invariant item migrate --to
+**Built (ADR-018 increment 1).** On `sphinx_needs`, `transition` persists
+its history rows in an `.. invariant-history:` comment block, so `show` reads
+them back on that backend too (BUG_073).
+
+**Accepted, not yet built (ADR-018).** `invariant item migrate --to
 sphinx_needs` moves every item, open and closed, with its id, fields, body
 and history, and writes nothing when a read-back differs (D14, increment 6).
 An item write naming a decision, requirement, ui or rule need id (`DEC_`,

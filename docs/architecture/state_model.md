@@ -1923,9 +1923,9 @@ by `git log` — is not a reproduction, and its route stays `not_reproducible`.
 **Body text.** A transition writes status and history and never rewrites the
 body, on every backend — pinned by a round-trip test per backend on this
 path, including the `sphinx_needs` fixture BUG_065 was fixed against. On
-`sphinx_needs` the ruling itself is not yet stored: that backend persists no
-history (BUG_073), so there the status is right and the provenance survives
-only in version control until that lands.
+`sphinx_needs` the rows, ruling and evidence included, are kept in the
+entry's `.. invariant-history:` comment block, which is not body (BUG_073;
+manifest.md, "The `sphinx_needs` round trip").
 
 **Retirement is deferred.** Moving a closed entry into a backend-declared
 closed store in the same transition is the other half of IDEA_019. Its
@@ -1937,9 +1937,7 @@ writes it. Retiring on close stays deferred because none of what would make it
 safe exists yet: a move touches two files, so it is not one atomic outcome
 without a recovery story for a write that lands in one and not the other; the
 closed file has its own layout, and placing an entry there is the placement
-question BUG_074 (b) answered for the open store only; and the only backend
-that wants a closed store today is the one that cannot yet keep the ruling
-(BUG_073).
+question BUG_074 (b) answered for the open store only.
 
 A separate field records *residue* — what remains owed after the status says
 done, such as a device soak that has not been run. Status and residue are

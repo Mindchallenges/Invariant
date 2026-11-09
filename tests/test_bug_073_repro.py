@@ -15,7 +15,6 @@ back after a transition — and not on the directive format the fix will use.
 
 import subprocess
 
-import pytest
 from test_domains import git_project
 
 from invariant.domains.workitem import WorkItemDomain
@@ -25,10 +24,6 @@ RULING = "maintainer, 2026-11-09"
 SPHINX_NEEDS = {"version": 1, "items": {"backend": "sphinx_needs", "path": "backlog.rst"}}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG_073 is live — delete this marker with the fix",
-)
 def test_BUG_073_sphinx_needs_history_reads_back_after_a_ruled_closure(tmp_path):
     m = git_project(tmp_path / "proj", SPHINX_NEEDS)
     domain = WorkItemDomain(m)

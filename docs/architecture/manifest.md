@@ -2085,10 +2085,11 @@ by every backend in `core/items`, and reads `taken_ids`.
 the status and the history rows and nothing else the item holds. Each backend
 carries a round-trip test on the ruled closure path that proves it — the
 markdown body byte for byte, the JSON `body` value, and on `sphinx_needs` a
-diff in which the status line is the only line that changes (IDEA_019). A
-ruling's `ruling` and `evidence` keys travel in the history rows, so they are
-kept wherever history is: in the markdown frontmatter and the JSON document,
-and not yet on `sphinx_needs` (below).
+diff in which the status line is the only line that changes and the only
+lines added are the transition's history rows (IDEA_019, BUG_073). A ruling's
+`ruling` and `evidence` keys travel in the history rows, so they are kept
+wherever history is: in the markdown frontmatter, the JSON document, and the
+`sphinx_needs` entry's history block (below).
 
 ### The ids a store has spent, and the closed store
 
@@ -2154,7 +2155,8 @@ one file, and the second save would overwrite the first.
 A reStructuredText backlog is usually written by hand, so the backend's
 guarantee is about bytes, not just fields: **a save rewrites only the lines
 holding a value that changed.** A transition replaces the `:status:` line (or
-inserts one after `:id:` if there was none) and nothing else — a wrapped
+inserts one after `:id:` if there was none), adds its rows to the entry's
+history block (below), and does nothing else — a wrapped
 option, its continuation indentation, inline roles, trailing whitespace, the
 blank lines around the entry, neighbouring entries and the file's line endings
 survive byte for byte. A changed field rewrites that option's lines, a removed
@@ -2217,16 +2219,81 @@ them falls back to the default, because an entry filed in the wrong section is
 the commit-shaped repair job the option exists to remove. The markdown and
 json backends have no sections and refuse either option.
 
-**`history` is not persisted by this backend.** The directive has no
-representation for a transition log yet, so `item.history_matches_status`
-cannot be satisfied on a `sphinx_needs` project for any item past its initial
-status, and an item's audit trail — a ruled closure's ruling and evidence
-commit included — lives only in version control (BUG_073).
+**History is a comment at the end of the directive body** (BUG_073; the
+user-approved option B of 2026-10-21). The rows are the same ones the other
+backends store — `from`, `to`, `reason`, `forced`, and on a ruled transition
+`ruling`, `evidence` and `intermediate` — written as YAML, indented one step
+under a marker line at the directive's own option column, after a blank line:
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) increment 1; D3, D10).** BUG_073's fix
-persists the history rows in an `.. invariant-history::` comment block
-inside the directive body (the user-approved option B of 2026-10-21, with
-indented YAML), excluded from the body and byte-stable across a round trip.
-In an enforced project `sphinx_needs` is the only items backend,
+```rst
+.. bug:: A defect
+   :id: BUG_001
+   :status: fixed
+
+   The body.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: null
+        forced: false
+        ruling: maintainer, 2026-11-09
+        evidence: 0123456789abcdef0123456789abcdef01234567
+        intermediate: true
+      - from: reproduced
+        to: fixed
+        ...
+```
+
+The marker carries **one** colon, and must: `name::` is directive syntax,
+and an unknown directive is an error a strict Sphinx build fails on, while
+`.. invariant-history:` is a reStructuredText comment. A comment renders
+nothing and needs no `conf.py` registration (checked against Sphinx 9.1.0,
+docutils 0.22.4 and sphinx-needs 8.1.1: the double-colon spelling the option
+was first sketched with fails `-W` as `Unknown directive type`).
+
+Reading, the first marker line in the body opens the block, and it runs over
+every following line that is blank or indented deeper than the marker; none
+of those lines is body, so the body round-trips. Body text a person wrote
+after the block is still body and stays where it is. A block that is not
+YAML, or not a list of rows, is an **error** naming the entry and the line,
+never an empty history: read as empty, the next save would write the item's
+empty history over the audit trail.
+
+```mermaid
+graph TD
+    T["save(item)"] --> B{"body changed?"}
+    B -- yes --> R["replace the body span:<br/>new body, then the block"]
+    B -- no --> H{"history changed?"}
+    H -- no --> N["no history edit"]
+    H -- yes --> E{"block present?"}
+    E -- no --> I["insert blank line + block<br/>after the entry's last line"]
+    E -- yes --> F{"rows left?"}
+    F -- yes --> W["rewrite the block's own span"]
+    F -- no --> D["remove the block and<br/>the blank line before it"]
+    R --> C["re-read: title, status, fields,<br/>history as saved?"]
+    N --> C
+    I --> C
+    W --> C
+    D --> C
+    C -- no --> X["refused, file unchanged"]
+    C -- yes --> O["written"]
+```
+
+Writing, a transition with no block inserts one, blank line first, after the
+entry's last non-blank line; with a block, it rewrites the block's own span.
+Rows are dumped unsorted and unwrapped, so a re-dump of unchanged rows is the
+same bytes and the diff of a transition is its status line plus the rows it
+added. A changed body is written with the block put back after it; an
+emptied history removes the block and the blank line before it. The re-read
+before writing compares history as well, so a row YAML would read back
+differently (a tuple becomes a list) is refused with the file unchanged, as
+is a row YAML cannot write at all. `item.history_matches_status` therefore
+reads a `sphinx_needs` project's statuses against their recorded history the
+way it reads every other backend's.
+
+**Built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) increment 1; D3, D10)** — the history block above.
+**Accepted, not yet built (increment 3).** In an enforced project
+`sphinx_needs` is the only items backend,
 `items.path` and `items.closed_path` lie under the docs project's source
 directory, and `records.backlog` equals `records.docs` (increment 3).
