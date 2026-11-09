@@ -1504,6 +1504,29 @@ graph LR
     V -- "no" --> OWED["owed: area and doc to write"]
 ```
 
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D5, D6, D8, D9, D10).** Four rules join the
+docs gates, and one the work-item gates. `docs.builds_strict` (increment 3)
+rides the landing state's entry set of every lane, beside `docs.updated`
+(`DOCS_FIRST_GATES`), when the changed set touches the docs project's source
+directory or `docs.needs`, N/A otherwise. It runs nothing: it reads the
+green record `invariant docs build` wrote for the source tree's current
+digest, and fails naming that command when there is none.
+`docs.needs_traceable` (increment 3) rides beside it and reads that build's
+`needs.json`: every need's type is declared, its id carries its type's
+prefix, and the `require_links` rules hold, each violation named by need,
+file and line; a role with no needs is not a failure.
+`docs.decisions_recorded` (increment 5) is a landing entry gate over the
+decisions a session declared (`session decisions`): a draft, or an id the
+green build does not hold, blocks. `docs.design_home` (increment 5) is a
+pre-tool-use rule on the edit tools refusing a write to
+`docs.needs.refused_paths`, and `items.decisions_linked` (increment 5)
+refuses an item write naming an unheld decision, requirement, ui or rule id
+and runs again at the landing over the items the session changed. While
+`docs.needs.state` is `migrating` each of them warns, and D5 and D6 are N/A
+unless `docs.format` is `sphinx`; when `enforced` each blocks and no level
+lowers it. A change moving the key back from `enforced` is refused at its
+landing and passes only with `pipeline advance --force --reason`.
+
 A note on `docs`, because the reasoning generalises. A documentation-only
 change run through `tdd` blocks on three gates it cannot satisfy in principle —
 no implementation means no test could have failed first, no code means nothing

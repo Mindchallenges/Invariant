@@ -1525,6 +1525,22 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 | `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9); judging an answer (increment 2): its kind read (`parse_answer`, `Refused`), its choices, path rule and command shape checked (`command_problem`, `command_problems`, the one shape check `doctor` reads, ruling 13) and the configuration it produces validated through a `Draft` of the levels; the nearest level that may hold an answer (`route`, D4); the write plan, changed answers only, the inherited value removing a key (`plan`, `Answer`, `LevelWrite`, `WritePlan`, D5, ruling 12) | Prompt for anything; write any level; run a command; import above `core` |
 
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md)).** A new `core/needs` reads a recorded
+build's `needs.json` against `docs.needs.types`' roles and the
+`require_links` rules, and never runs a build or parses rST (increment 3).
+`core/docformat` gains its rST reader, and `adapters/` gains ADR-015 D1's
+`sphinx` adapter, both pulled forward (increment 2). `domains/docs` gains the
+starter, `docs venv`, `docs build` and its record, `docs decision new` and
+the migration commands; `domains/workitem` gains `item migrate` and the
+decision-id check on an item write; `core/items`' `SphinxNeedsBackend`
+persists history (BUG_073, increment 1); `core/rules` gains the five new
+rules, which read recorded builds and run nothing; `core/manifest` gains
+`docs.needs`, its state and the block floor;
+`domains/guidelines` writes `rules.rst` from a pure renderer in
+`core/guidelines`; `domains/session` records declared decisions. The layering
+is unchanged: `core/machines` names the new gates and never imports
+`core/rules`.
+
 ### `domains/`
 
 Each domain binds a state machine to a store and exposes the operations that

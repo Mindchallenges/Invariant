@@ -271,6 +271,35 @@ manifest key (its id is its key) or a shipped one's prompt and choices. A
 step (`docs`, `store`, `commands`) may be moved, never defined (ruling 11).
 Every default is the shipped catalogue, which changes no resolved value.
 
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D1 to D3, D5, D6, D8 to D10, D13).** `docs`
+gains a `needs` block: `state` (`migrating` or `enforced`, read as
+`migrating` where absent), `types` (a list of `{directive, prefix, role}`
+mapping the project's need types to the seven roles `requirement`,
+`decision`, `element`, `ui`, `rule`, `idea` and `bug`, replacing the
+defaults whole when set; a type with no role is an extension type),
+`srcdir` (the docs project's source directory, default the nearest
+directory at or above `paths.docs` holding a `conf.py`), `require_links`
+(default: every `decision` and every `bug` links to an `element`),
+`decision_statuses`, `refused_paths`, and for a documentation repository
+`home` and `external`. `docs.diagrams` becomes a list (one name still
+loads), and `docs.diagrams_current` reads the rST markers `.. mermaid::`
+and `.. uml::` beside the Markdown fences. `enforcement.rules` gains `docs.builds_strict`,
+`docs.needs_traceable`, `docs.design_home`, `docs.decisions_recorded` and
+`items.decisions_linked`, which warn while migrating and block when
+enforced. Refused at load, naming it: a role with no type, an unknown role,
+a directive or prefix used twice, a prefix not matching
+`^[A-Z][A-Z0-9_]*_$`, and an `idea` or `bug` type whose prefix differs from
+what the items backend mints; and, when enforced, `docs.format` other than
+`sphinx`, `items.backend` other than `sphinx_needs`, an items store outside
+the source directory, and any of the five rules set below `block` (see "An
+override either takes effect or says it did not"). `paths.docs` keeps its
+meaning: the architecture pages. Increment 3 builds `state`, `types`,
+`srcdir`, `require_links`, `decision_statuses`, the first two rules and
+the enforced refusals of `docs.format`, `items.backend` and the items
+store, and the `docs.diagrams` list with `docs.diagrams_current`'s rST
+markers; 5 `refused_paths`, the other three
+rules and the floor; 8 `home` and `external`.
+
 **Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9, increment 1).** `docs.assess` configures the
 docs assessment (`invariant docs assess`, cli.md), and `enforcement.rules`
 gains `docs.assessment`, `warn` in every profile:
@@ -1610,6 +1639,15 @@ that takes none (increment 4).
 The rule ids in `enforcement.rules` are checked against the registry, and a key
 naming nothing is a **refusal at load** carrying the nearest real id.
 
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D1, ruling 19, increment 5).** In a project
+whose `docs.needs.state` is `enforced`, `docs.builds_strict`,
+`docs.needs_traceable`, `docs.design_home`, `docs.decisions_recorded` and
+`items.decisions_linked` have a floor of `block`: a profile or an
+`enforcement.rules` entry setting one lower is refused at load, naming
+ruling 1. This removes ADR-001 D25's permanent route for those rules only;
+`invariant override`, `pipeline advance --force --reason`, `invariant
+standdown` and `invariant uninstall` stand.
+
 Only the *value* used to be parsed. `rule_level()` answers `warn` for any id it
 does not hold, so `privacy_clean: off` written beside a real `privacy.clean`
 loaded without error, left the real rule at `block`, and showed a provenance
@@ -2017,6 +2055,13 @@ than skipping silently. Adapters also gain `related_selectors(changed)` and
 `global_inputs()` for the measured cadence. Increment 2 of ADR-015 builds
 the adapter, increment 4 the two new adapter methods.
 
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D3, increment 2).** ADR-015 D1's `sphinx`
+adapter is pulled forward into ADR-018's increment 2, with the rST reader.
+Its detection skips the docs project's source directory
+(`docs.needs.srcdir`), so a project whose only Sphinx tree is its docs
+project is not a `sphinx` ecosystem; the docs project is built by `invariant
+docs build` from its own environment, never through `commands.*`.
+
 ## Backends for work items
 
 The item model is fixed; storage is pluggable, so a project keeps whatever
@@ -2177,3 +2222,11 @@ representation for a transition log yet, so `item.history_matches_status`
 cannot be satisfied on a `sphinx_needs` project for any item past its initial
 status, and an item's audit trail — a ruled closure's ruling and evidence
 commit included — lives only in version control (BUG_073).
+
+**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) increment 1; D3, D10).** BUG_073's fix
+persists the history rows in an `.. invariant-history::` comment block
+inside the directive body (the user-approved option B of 2026-10-21, with
+indented YAML), excluded from the body and byte-stable across a round trip.
+In an enforced project `sphinx_needs` is the only items backend,
+`items.path` and `items.closed_path` lie under the docs project's source
+directory, and `records.backlog` equals `records.docs` (increment 3).

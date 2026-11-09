@@ -296,6 +296,20 @@ invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
     non-interactive report, 2 the interactive core, 3 builds the scripted
     flags, and 4 the advanced step and the catalogue at the levels.
 
+    Accepted, not yet built (ADR-018 D10, D11). `init`, interactive or
+    not, writes a Sphinx starter instead of the Markdown `overview.md`
+    wherever `paths.docs` / `records.docs` resolves: `conf.py` (sphinx-needs
+    and sphinxcontrib-mermaid, the seven baseline need types, the link set,
+    the item fields), `index.rst`, a fully pinned `requirements.txt`,
+    `.gitignore`, `architecture/overview.rst` with one `element` need per
+    detected source area, `requirements.rst`, `decisions/index.rst`,
+    `ui.rst`, the generated `rules.rst` and `backlog.rst` (the items store,
+    `items.backend: sphinx_needs`), and `docs.needs.state: enforced`. The
+    starter builds strictly on its own. Only interactive `init` creates the
+    docs environment (`invariant docs venv`); without a terminal, and under
+    `--dry-run`, it writes the same files and names that command. The `docs`
+    step still asks no format. Increment 4 of ADR-018 builds it.
+
     A successful, non-dry-run `init` also registers the project in the
     oracle's index (`via: init`; see "Oracle" below). A failure to register is
     REPORTED and never fails the command — the project is initialised by then
@@ -408,6 +422,15 @@ invariant doctor
     the questionnaire's own check (`core/questionnaire.command_problems`),
     so a typed and a hand-written command are judged alike; a misshapen
     command still loads.
+
+    Accepted, not yet built (ADR-018 D4, D10). A `docs venv` row: the docs
+    environment is present, matches `requirements.txt` and its
+    `sphinx-build` runs. A `plantuml` row when `docs.diagrams` lists
+    `plantuml`, because PlantUML needs Java outside the environment. A `docs
+    mandate` row that fails for a project still `migrating`, naming the
+    migration, so the debt is never silent. Increment 3 of ADR-018 builds
+    all three, with the state key the last one reads; increment 7 proves
+    `docs mandate` passing for invariant itself.
 
     A failing row names its remedy. The architecture-docs row used to say
     only "docs-first is core policy", which told a fresh adopter the rule
@@ -819,6 +842,35 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
     it would write and writes nothing. `--json` carries the plan: `mode`,
     `source`, `location`, `format`, `assessable`, `files`, `overwrites`,
     `kept`, `settings`, `written` and `dry_run`.
+
+    Accepted, not yet built (ADR-018 D4, D5, D7, D11, D14). The `docs` group
+    gains:
+      docs venv [--check]    create or re-sync `<docs project>/.venv` with
+                             `uv` from its pinned `requirements.txt`, or
+                             report whether it matches (increment 3).
+      docs build             the strict build, `-E -W --keep-going -n -b
+                             html` with `needs_build_json` forced, run with
+                             the environment's own `sphinx-build` and
+                             recorded with its exit status, parsed warnings,
+                             `needs.json` path and the source tree's digest,
+                             which `docs.builds_strict` and
+                             `docs.needs_traceable` read (increment 3).
+      docs decision new "<title>"
+                             mint the next decision record page under
+                             `<srcdir>/decisions/` with its `DEC_ADR_<nnn>`
+                             need, numbered after the record pages already
+                             there, ids never reused (increment 5).
+      docs migrate adr <files>, docs migrate prose <files>
+                             Markdown ADRs to record pages and Markdown
+                             architecture pages to rST, through pandoc in
+                             the docs environment, leaving an
+                             `.. invariant-unconverted::` directive, which
+                             fails the strict build, wherever conversion
+                             fails (increment 6).
+    This file gains their sections when they are built. Increment 2 of
+    ADR-018 builds the rST reader the next paragraph says is missing.
+    `docs adopt` of Markdown docs is limited to copy mode into a migrating
+    project, which the migration then converts (D11, increment 4).
 
     The rST reader is not built (ADR-015 increment 2 has not landed), so a
     Sphinx tree is adopted by copy today and refused in place, naming
@@ -1294,6 +1346,13 @@ invariant session plan add "<deliverable>" | done <n> | reopen <n>
     to decide whether a run commits and stops or commits and finishes the
     session. See state_model.md, "How a session lands".
 
+    Accepted, not yet built (ADR-018 D9, increment 5). `invariant session
+    decisions add <DEC_id>` or `add --draft "<one line>"` declares a
+    decision on the session record. The landing gate
+    `docs.decisions_recorded` blocks while an entry is a draft or names an
+    id the session's green `docs build` does not hold, and the decision ids
+    a plan deliverable cites are held to the same check.
+
 invariant session sync [--id <id>]
     Rebase this session's branch onto its base. What
     `session.branch_is_current` names as its fix: the model has always said
@@ -1435,6 +1494,16 @@ invariant item transition <id> <status> [--reason <text>] [--force]
     closes through a ruling").
 invariant item residue <id> [--add <text> | --clear <text>]
 ```
+
+**Accepted, not yet built (ADR-018).** On `sphinx_needs`, `transition`
+persists its history rows in an `.. invariant-history::` block, so `show`
+reads them back on that backend too (BUG_073, increment 1). `invariant item migrate --to
+sphinx_needs` moves every item, open and closed, with its id, fields, body
+and history, and writes nothing when a read-back differs (D14, increment 6).
+An item write naming a decision, requirement, ui or rule need id (`DEC_`,
+`REQ_`, `UI_` or `RULE_` by default) the last recorded build does not hold
+is refused, `items.decisions_linked` (D8, increment 5); it warns while the
+project is migrating.
 
 `item show` prints the history, one row per line, with its reason, `forced`,
 the ruling and the evidence commit, and marks a row recorded on a ruling
@@ -1646,6 +1715,14 @@ invariant guidelines render [--dry-run] [--insert <block>]... [--overwrite-local
     says so, with the count, the files and
     `invariant guidelines render --insert guidelines/index`, and the rule
     does not fail on that alone (A5 increment 4).
+
+    Accepted, not yet built (ADR-018 D12, increment 4). The render writes a
+    third file, `<docs>/rules.rst`: one `rule` need per rule, id
+    `RULE_<RULE_ID_UPPERCASED>` (every non-alphanumeric character as `_`),
+    with the managed marker `guidelines.generated_current` checks. Two rule
+    ids that would collide are refused at ruleset load. Need ids in the
+    ruleset's `links` and `amended[].adr` render as `decided_by` links.
+    Under the mandate the checklist is rendered in rST only.
 
     With no ruleset configured it reports "nothing to render" and exits 0
     (ADR-012 D3, "No ruleset, no change"). --json carries status, written,
