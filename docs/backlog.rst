@@ -14831,3 +14831,51 @@ is a decision need, linked by id.
    **Why now / why this tier:** Low: matters once a Dart project writes guideline rules or hits a comment-only coverage block. Filed so ADR-019 D7 is on record.
 
    **Related:** ADR-019, ADR-012 D4, IDEA_038 (the same gap for node), BUG_114.
+
+.. idea:: An in-repo project can keep .claude/ machine-local and out of git
+   :id: IDEA_048
+   :status: proposed
+   :priority: medium
+   :effort: L
+   :tier: 5
+   :area: core/manifest, domains/session, cli (init, doctor), hosts/claude_code
+
+   **Context:** An in-repo project must commit ``.claude/invariant.yaml``, and in practice the rest of ``.claude/`` with it. Some users want that directory kept local, out of git entirely, and invariant does not allow it. Every session runs in its own git worktree (``session isolate``), and a worktree holds only committed files. An untracked or git-ignored manifest is therefore absent there, and ``Manifest.locate`` finds no project. Some commands also refuse outright until the manifest is committed: ``docs assess --plan`` is refused "until the base carries the manifest: in an in-repo project, ``.claude/invariant.yaml`` committed at HEAD" (:need:`COMP_CMD_SETUP`).
+
+   **Proposal:** a machine-local mode for ``.claude/``. It stays in the repository's main checkout, but git ignores it, and invariant treats the main checkout's copy as the project's config.
+
+   - ``invariant init`` offers the mode and, when chosen, writes ``.claude/`` to ``.gitignore``. The default stays committed.
+   - ``session isolate`` puts the main checkout's manifest and host assets (hook settings and scripts, rendered agents, memory) into each worktree, as a copy or a link (decided in design), so ``Manifest.locate`` and the host find them there.
+   - Every check and reader that requires the manifest at HEAD, or reads it from the base branch, accepts the local manifest in this mode, and says that it did.
+   - ``doctor`` reports the mode, and whether the worktrees' copies match the main checkout's.
+
+   This is the light option beside :need:`IDEA_040 <IDEA_040>` and :need:`DEC_ADR_014`. ADR-014 takes a project's records out of the repository into a home store, found through the user-level ``repos:`` map (:need:`DEC_ADR_014_D2`, :need:`DEC_ADR_014_D3`), with the host wired from user level (:need:`DEC_ADR_014_D11`). Here there is no store: the files stay where they are today, and only git stops tracking them.
+
+   **Acceptance:**
+
+   - In a project initialised in local mode, ``git status`` in the main checkout shows nothing under ``.claude/``, and a session runs from start through isolate, gates, review and merge with nothing of ``.claude/`` committed on its branch or on the base.
+   - Inside that session's worktree, ``invariant config show`` resolves the same values as in the main checkout, and the hooks fire there.
+   - ``docs assess --plan`` and every other command that today requires the manifest committed at HEAD runs in local mode instead of refusing.
+   - A gate that compares the manifest against the base branch (the baseline gate's base-copy reader, ``session merge``'s ``privacy.allow``) reads the local manifest in local mode, and its output says so.
+   - ``doctor`` names the mode. After the main checkout's manifest is edited, it reports any live worktree whose copy no longer matches.
+   - A project with a committed ``.claude/`` behaves exactly as today.
+
+   **Architecture sketch:**
+
+   - ``core/manifest`` (:need:`COMP_CORE_MANIFEST`, :need:`COMP_MANIFEST_FILE`): how the mode is declared, given that the manifest is the file being made local. Probably a ``.gitignore`` check, or a key that is legal only when the file is untracked.
+   - ``domains/session`` (:need:`COMP_DOMAINS_SESSION`, :need:`COMP_CMD_SESSION`): ``isolate`` places the local files in the worktree.
+   - ``core/rules`` (:need:`COMP_CORE_RULES`): the readers that take the manifest from the base branch.
+   - ``cli`` setup (:need:`COMP_CMD_SETUP`): init's offer and ``.gitignore`` line, and doctor's row.
+   - ``hosts/claude_code`` (:need:`COMP_HOSTS_CLAUDE_CODE`, :need:`COMP_HOSTS_ASSETS`): which host assets the worktree needs.
+
+   **Risks / open questions:**
+
+   - Copy or link. A symlink keeps one source of truth, but edits made in the worktree land in the main checkout before the merge, and a link to a path outside the worktree may meet the worktree-edit guards. A copy diverges silently. Doctor's drift row covers a copy, not a link.
+   - Config changes lose review. A policy edit (a floor, an enforcement level, a ``privacy.allow`` entry) is never in a diff, so the review boundary and ``session merge`` have no base version to compare against. Decide whether local mode treats the main checkout's current copy as the base, and say in the merge output that it did.
+   - No sharing: teammates and other machines each keep their own copy, so two clones of one repo can run under different policy. Record this as the accepted trade-off of the mode, and decide whether doctor warns on a repo with a remote.
+   - Scope: all of ``.claude/``, or the manifest alone. Memory (``paths.memory``) and other declared stores may be wanted local or shared independently (:need:`BUG_072 <BUG_072>`, :need:`BUG_032 <BUG_032>`).
+   - Whether this is a third record location in ADR-014 D1 (``repo`` / ``store`` / ``local``) or a separate decision. The design session settles it before code.
+
+   **Why now / why this tier:** Medium value. It removes a hard adoption blocker for users who will not commit tool config, and it is far smaller than the home store. Effort L, because it crosses init, isolate, the base-branch readers, doctor and the host assets. Tier 5: distinctive but not on the frozen critical path, and IDEA_040 remains the route for repositories that must carry nothing at all.
+
+   **Related:** :need:`IDEA_040 <IDEA_040>` and ADR-014 (the heavier route: records in a home store, nothing in the repo). :need:`BUG_116 <BUG_116>` (init's ``.gitignore`` line names the wrong state root; this idea writes another ``.gitignore`` line in the same code, so it should build on the fix). :need:`BUG_063 <BUG_063>` (``session merge`` reads ``privacy.allow`` from the manifest the merge replaces; same reader). :need:`BUG_032 <BUG_032>` and :need:`BUG_072 <BUG_072>` (exempt stores under isolation).
