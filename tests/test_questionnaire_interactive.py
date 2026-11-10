@@ -45,7 +45,7 @@ INIT_COMMENT = (
 #: block and init's comment, no `enforcement` block (ruling 4).
 #: The repository has no docs, so init writes the docs starter and the
 #: settings that enforce the project on it (ADR-018 D10, D11).
-STARTER_DOCS = {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "docs"}}
+STARTER_DOCS = {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "invariant-docs"}}
 
 ACCEPTED_MANIFEST = (
     "version: 1\n"
@@ -54,15 +54,18 @@ ACCEPTED_MANIFEST = (
     "  name: toy\n"
     "  ecosystems: [python]\n"
     "\n"
+    "paths:\n"
+    "  docs: invariant-docs/architecture\n"
+    "\n"
     "docs:\n"
     "  format: sphinx\n"
     "  needs:\n"
     "    state: enforced\n"
-    "    srcdir: docs\n"
+    "    srcdir: invariant-docs\n"
     "\n"
     "items:\n"
     "  backend: sphinx_needs\n"
-    "  path: docs/backlog.rst\n"
+    "  path: invariant-docs/backlog.rst\n"
     "\n"
     "guidelines:\n"
     "  ruleset: docs/guidelines/ruleset.yaml\n"

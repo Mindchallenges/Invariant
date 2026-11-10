@@ -825,3 +825,74 @@ Consequences
   share, and invariant keeps ``docs/``.
 - IDEA_048 closes, merged into IDEA_040. BUG_118 keeps only its first
   cause once increment 1 lands.
+
+As built: increment 1 (2026-11-10)
+----------------------------------
+
+D8, as the architecture docs describe it (``cli.rst``, ``init``;
+``manifest.rst``, ``docs.needs`` and the sphinx adapter's detection;
+``overview.rst``, ``core/needs``, ``adapters/sphinx`` and "Where things live
+at rest"). Where the build settles what the text left open:
+
+.. dec:: ADR-020 increment 1 as built: how the adapter learns the docs project, and where a new project begins
+   :id: DEC_ADR_020_I1
+   :status: accepted
+   :part_of: DEC_ADR_020
+   :affects: COMP_ADAPTERS_BASE, COMP_ADAPTERS_SPHINX, COMP_CORE_NEEDS, COMP_CMD_SETUP, COMP_CLI_ONBOARDING, COMP_DOMAINS_DOCS, COMP_DOMAINS_PIPELINE, COMP_DOMAINS_SWEEP
+
+   - **The adapter is told, when it is made.** An adapter imports nothing
+     from the engine, so the resolved ``docs.needs.srcdir`` is handed in:
+     every adapter takes ``docs_srcdir`` (``Adapter(docs_srcdir=...)``,
+     ``adapters.get_adapter`` and ``adapters.detect``), and the ``sphinx``
+     adapter skips that directory, compared resolved. An adapter told
+     nothing skips nothing, never a fixed ``docs/``. ``init`` tells it a new
+     project's ``invariant-docs/``, and, under ``--force``, what the existing
+     manifest resolves (``srcdir_of``; the default rule over the default
+     ``paths.docs`` where that manifest does not load). A pipeline's test run
+     and the sweep tell it ``srcdir_of``, so the narrowing notes of
+     ``annotate`` never read the docs project as content.
+   - **The default rule moves to the key it defaults.** ADR-018 D3's rule,
+     the nearest ``conf.py`` at or above ``paths.docs`` strictly below the
+     root, is ``core/needs.default_srcdir``. It was the adapter's only while
+     detection read it against the default ``paths.docs``. The
+     ``CNEEDS --> SPHINX`` arrow and the adapter's ``DEFAULT_DOCS`` are gone;
+     ``init`` (``CLI``), ``domains/pipeline`` and ``domains/sweep`` reach
+     ``core/needs`` for ``srcdir_of`` instead.
+   - **The refused folders are the adapter's content homes.** A content
+     folder is where the ``sphinx`` adapter looks for a documentation
+     repository's ``conf.py`` below the root (``HOMES``): ``docs``,
+     ``docs/source``, ``doc``, ``doc/source`` and ``source``. That is D8's
+     four and ``doc/source``, refused for the same reason, and one list, so
+     the refusal and the detection cannot drift apart
+     (``domains/docs.refused_srcdir``). It is checked where ``init`` takes a
+     docs location, the docs step's ``path`` and store answers, which are
+     asked again naming ``invariant-docs`` (as a path climbing out with
+     ``..`` already is). A non-interactive ``init`` takes no location, so
+     that offer is the one route. ``store migrate``'s refusal is with its
+     own increment (ADR-014 increment 7).
+   - **A new project is one with no** ``.claude/invariant.yaml``. Only it gets
+     ``invariant-docs/architecture`` and the refusal. ``init --force`` keeps
+     the existing manifest's ``paths.docs`` (D2: it rewrites the manifest in
+     place), so a project ``init`` wrote keeps ``invariant-docs/`` and one
+     with no ``paths.docs``, invariant among them, keeps ``docs/``.
+   - **``paths.docs`` is written wherever it is not the load-time default**,
+     so a new project's manifest sets it even where the folder already
+     exists and no starter is written, and ``init``'s configuration report
+     reads it from ``repo:``, not ``default``. In a store project it is in the
+     store's block, as before.
+   - **Unchanged here:** the guidelines ruleset the starter writes stays at
+     ADR-012 D3's default path, ``docs/guidelines/ruleset.yaml`` (that
+     record's ruling 1), so a new project still gains a ``docs/guidelines/``
+     folder beside ``invariant-docs/``. D8 does not move it.
+
+The proofs: ``init`` on a toy Python repository writes the starter in
+``invariant-docs/``, with both keys in the manifest, and interactive
+``init`` creates its pinned environment and ``invariant docs build`` is
+green on it, strictly (behind ``INVARIANT_TEST_SPHINX_BUILD``); a toy content
+tree at ``docs/conf.py`` is detected as ``sphinx`` and ``init`` puts its docs
+project beside it, ``vars.srcdir: docs``; a starter-shaped ``docs/`` told to
+the adapter is not an ecosystem; each content folder is asked again at the
+offer of a new project and accepted for an existing one; ``init --force``
+over an existing manifest keeps ``docs/``; and this repository resolves
+``docs/`` as its source directory, is not detected as ``sphinx`` and builds
+``docs/`` strictly as before.

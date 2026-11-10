@@ -408,6 +408,16 @@ class TestHazards:
         assert report.record.hazards == ["pytest.import_error_masquerades_as_collection_error"]
 
 
+class TestTheDocsProject:
+    def test_the_adapter_is_told_its_source_directory(self, proj):
+        """ADR-020 D8: the sweep's adapter skips the docs project as the
+        manifest resolves it, never a fixed docs/."""
+        (proj / "docs" / "conf.py").write_text("", encoding="utf-8")
+        (proj / "docs" / "architecture").mkdir()
+        sweep = SweepDomain(manifest(proj), JsonStore(proj / "state"), today=TODAY)
+        assert sweep.adapter.docs_srcdir == (proj / "docs").resolve()
+
+
 # -- status and show --------------------------------------------------------
 
 

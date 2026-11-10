@@ -250,6 +250,12 @@ class TestTheCommands:
         root = tmp_path / "repo"
         git_project(root)
         (root / MANIFEST_RELPATH).unlink()
+        # A new project's docs location (ADR-020 D8), present, so init writes
+        # no starter and no ruleset of its own.
+        (root / "invariant-docs" / "architecture").mkdir(parents=True)
+        (root / "invariant-docs" / "architecture" / "overview.md").write_text(
+            "# Overview\n", encoding="utf-8"
+        )
         commit_all(root, "no manifest yet")
         monkeypatch.chdir(root)
         return root

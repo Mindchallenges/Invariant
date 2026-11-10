@@ -69,6 +69,7 @@ from urllib.parse import unquote
 import yaml
 
 from ..adapters import get_adapter
+from ..adapters.sphinx import HOMES as SPHINX_HOMES
 from ..adapters.sphinx import diagnostics
 from ..core import git, mdconvert
 from ..core import guidelines as guidelines_reader
@@ -499,6 +500,29 @@ _ROLE_LOOK = {
     "bug": ("Bug", "#FFB3B3", "node"),
 }
 _EXTENSION_LOOK = ("#D7D7D7", "node")
+
+
+#: A new project's docs project: its source directory, a folder only invariant
+#: owns, and ``paths.docs`` inside it (ADR-020 D8). The same relative name is
+#: used at the repository root and at a store's root. ``init`` writes both keys
+#: explicitly, so the load-time default, ``docs/architecture``, does not move.
+STARTER_SRCDIR = "invariant-docs"
+STARTER_DOCS = f"{STARTER_SRCDIR}/architecture"
+
+
+def refused_srcdir(docs: str) -> str | None:
+    """The content folder the starter's source directory would be for
+    ``docs`` (``paths.docs``), or ``None``.
+
+    A documentation repository's content lives in these folders, the sphinx
+    adapter's homes below the root (``docs/``, ``doc/``, ``source/`` and their
+    ``source/`` subfolders), so a new project's docs project never takes one
+    (ADR-020 D8). Refused at ``init`` only, never at load: an existing
+    project, invariant among them, keeps its ``docs/``.
+    """
+    parts = PurePosixPath(project_relative(docs) or docs).parts
+    srcdir = PurePosixPath(*parts[:-1]).as_posix() if len(parts) > 1 else ""
+    return srcdir if srcdir and srcdir in SPHINX_HOMES else None
 
 
 class StarterNotWritten(InvariantError):

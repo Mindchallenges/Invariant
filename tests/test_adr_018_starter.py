@@ -2,7 +2,8 @@
 
 Where `paths.docs` resolves to nothing, `init`, interactive or not, writes a
 sphinx-needs docs project in the directory above it (the source directory,
-`docs/` for the default `docs/architecture`): `conf.py`, `index.rst`, a fully
+`invariant-docs/` for a new project's `invariant-docs/architecture`, ADR-020
+D8): `conf.py`, `index.rst`, a fully
 pinned `requirements.txt`, a `.gitignore` holding `.venv`, the architecture
 overview with one element need per source area and the three sections the
 assessment requires, the requirements, decisions and ui pages, the two
@@ -41,21 +42,23 @@ from invariant.core.manifest import DATA_DIR, Manifest
 from invariant.domains import docs as docs_domain
 
 #: Every file the default starter writes, relative to the project root: the
-#: guidelines ruleset with the mandate's two judgement rules since increment 5.
+#: guidelines ruleset with the mandate's two judgement rules since increment 5,
+#: at ADR-012 D3's default path, and the docs project in invariant-docs/
+#: (ADR-020 D8).
 STARTER = sorted(
     [
-        "docs/.gitignore",
-        "docs/architecture/overview.rst",
-        "docs/backlog.rst",
-        "docs/checklist.rst",
-        "docs/conf.py",
-        "docs/decisions/index.rst",
+        "invariant-docs/.gitignore",
+        "invariant-docs/architecture/overview.rst",
+        "invariant-docs/backlog.rst",
+        "invariant-docs/checklist.rst",
+        "invariant-docs/conf.py",
+        "invariant-docs/decisions/index.rst",
         "docs/guidelines/ruleset.yaml",
-        "docs/index.rst",
-        "docs/requirements.rst",
-        "docs/requirements.txt",
-        "docs/rules.rst",
-        "docs/ui.rst",
+        "invariant-docs/index.rst",
+        "invariant-docs/requirements.rst",
+        "invariant-docs/requirements.txt",
+        "invariant-docs/rules.rst",
+        "invariant-docs/ui.rst",
     ]
 )
 
@@ -121,18 +124,22 @@ def run(capsys, *argv: str) -> tuple[int, str]:
     return code, captured.out + captured.err
 
 
+#: The starter's source directory for a new project (ADR-020 D8).
+SRC = "invariant-docs"
+
+
 def written(root: Path) -> list[str]:
-    docs = root / "docs"
     return sorted(
         p.relative_to(root).as_posix()
-        for p in docs.rglob("*")
+        for folder in (root / SRC, root / "docs")
+        for p in folder.rglob("*")
         if p.is_file() and ".venv" not in p.relative_to(root).parts
     )
 
 
 def conf_namespace(root: Path) -> dict:
     """``conf.py`` executed as Sphinx executes it, ``__file__`` set."""
-    return runpy.run_path(str(root / "docs" / "conf.py"))
+    return runpy.run_path(str(root / SRC / "conf.py"))
 
 
 # -- non-interactive init -------------------------------------------------------------
@@ -143,7 +150,7 @@ class TestNonInteractiveInit:
         code, text = run(capsys, "init", "--ecosystem", "python", "--name", "toy")
         assert code == 0, text
         assert written(toy_python) == STARTER
-        assert not (toy_python / "docs" / ".venv").exists()
+        assert not (toy_python / SRC / ".venv").exists()
         assert "invariant docs venv" in text
 
     def test_the_manifest_is_enforced_on_the_starter(self, toy_python, capsys):
@@ -152,8 +159,8 @@ class TestNonInteractiveInit:
         assert m.get("docs.needs.state") == "enforced"
         assert m.get("docs.format") == "sphinx"
         assert m.get("items.backend") == "sphinx_needs"
-        assert m.get("items.path") == "docs/backlog.rst"
-        assert m.get("paths.docs") == "docs/architecture"
+        assert m.get("items.path") == "invariant-docs/backlog.rst"
+        assert m.get("paths.docs") == "invariant-docs/architecture"
 
     def test_dry_run_names_the_same_files_and_writes_nothing(self, toy_python, capsys):
         code, text = run(capsys, "--json", "init", "--ecosystem", "python", "--dry-run")
@@ -163,7 +170,7 @@ class TestNonInteractiveInit:
             path for path in STARTER if any(f"write {path}" in action for action in actions)
         )
         assert named == STARTER
-        assert not (toy_python / "docs").exists()
+        assert not (toy_python / SRC).exists() and not (toy_python / "docs").exists()
         assert any("invariant docs venv" in action for action in actions)
         code, plain = run(capsys, "init", "--ecosystem", "python", "--dry-run")
         assert "invariant docs venv" in plain
@@ -180,7 +187,7 @@ class TestNonInteractiveInit:
         data = json.loads(text)
         assert data["docs_venv"] == {
             "created": False,
-            "srcdir": "docs",
+            "srcdir": SRC,
             "command": "invariant docs venv",
         }
 
@@ -196,7 +203,7 @@ class TestNonInteractiveInit:
             capsys, "item", "new", "bug", "--title", "It breaks", "--field", "severity=high"
         )
         assert code == 0, text
-        backlog = (toy_python / "docs" / "backlog.rst").read_text(encoding="utf-8")
+        backlog = (toy_python / SRC / "backlog.rst").read_text(encoding="utf-8")
         assert ".. bug:: It breaks" in backlog
         assert "severity" in conf_namespace(toy_python)["needs_fields"]
 
@@ -224,7 +231,7 @@ class TestTheStartersFiles:
         assert "design_link" in conf["needs_fields"]
 
     def test_conf_py_uses_no_deprecated_key_of_the_pinned_version(self, root):
-        text = (root / "docs" / "conf.py").read_text(encoding="utf-8")
+        text = (root / SRC / "conf.py").read_text(encoding="utf-8")
         assert "needs_extra_links" not in text
         assert "needs_extra_options" not in text
         assert "needs_statuses" not in text  # D6 item 4: items carry their own
@@ -235,7 +242,7 @@ class TestTheStartersFiles:
     def test_requirements_pin_every_package(self, root):
         lines = [
             line.strip()
-            for line in (root / "docs" / "requirements.txt").read_text(encoding="utf-8").splitlines()
+            for line in (root / SRC / "requirements.txt").read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
         assert lines and all(re.fullmatch(r"[A-Za-z0-9_.\-]+==[0-9][\w.]*", line) for line in lines)
@@ -244,14 +251,14 @@ class TestTheStartersFiles:
 
     def test_the_pins_are_the_shipped_set(self, root):
         shipped = DATA_DIR / "scaffold" / "sphinx" / "requirements.txt"
-        assert (root / "docs" / "requirements.txt").read_bytes() == shipped.read_bytes()
+        assert (root / SRC / "requirements.txt").read_bytes() == shipped.read_bytes()
 
     def test_gitignore_holds_the_environment(self, root):
-        lines = (root / "docs" / ".gitignore").read_text(encoding="utf-8").splitlines()
+        lines = (root / SRC / ".gitignore").read_text(encoding="utf-8").splitlines()
         assert ".venv/" in lines
 
     def test_the_overview_has_one_element_need_per_area(self, root):
-        text = (root / "docs" / "architecture" / "overview.rst").read_text(encoding="utf-8")
+        text = (root / SRC / "architecture" / "overview.rst").read_text(encoding="utf-8")
         assert ".. comp:: alpha" in text and "   :id: COMP_ALPHA" in text
         assert ".. comp:: beta" in text and "   :id: COMP_BETA" in text
         assert "``pkg/alpha``" in text
@@ -262,7 +269,7 @@ class TestTheStartersFiles:
 
     def test_the_index_toctree_names_every_page(self, root):
         links = {link.target for link in RstReader().links(
-            (root / "docs" / "index.rst").read_text(encoding="utf-8")
+            (root / SRC / "index.rst").read_text(encoding="utf-8")
         )}
         assert links == {
             "architecture/overview", "requirements", "decisions/index", "ui",
@@ -271,7 +278,7 @@ class TestTheStartersFiles:
 
     def test_the_generated_pages_carry_the_managed_marker(self, root):
         for name in ("rules.rst", "checklist.rst"):
-            assert (root / "docs" / name).read_text(encoding="utf-8").startswith(
+            assert (root / SRC / name).read_text(encoding="utf-8").startswith(
                 ".. invariant-managed: "
             )
 
@@ -287,7 +294,7 @@ class TestFlutter:
         assert code == 0, text
         assert Manifest.locate(toy_flutter).get("project.ecosystems") == ["flutter"]
         assert written(toy_flutter) == STARTER
-        overview = (toy_flutter / "docs" / "architecture" / "overview.rst").read_text(
+        overview = (toy_flutter / SRC / "architecture" / "overview.rst").read_text(
             encoding="utf-8"
         )
         assert "   :id: COMP_LIB" in overview
@@ -295,11 +302,11 @@ class TestFlutter:
 
 class TestWhereTheStarterIsNotWritten:
     def test_existing_docs_are_left_alone_and_the_project_migrates(self, toy_python, capsys):
-        overview = toy_python / "docs" / "architecture" / "overview.md"
+        overview = toy_python / SRC / "architecture" / "overview.md"
         overview.parent.mkdir(parents=True)
         overview.write_text("# Ours\n", encoding="utf-8")
         run(capsys, "init", "--ecosystem", "python")
-        assert written(toy_python) == ["docs/architecture/overview.md"]
+        assert written(toy_python) == [f"{SRC}/architecture/overview.md"]
         m = Manifest.locate(toy_python)
         assert m.get("docs.needs.state") == "migrating"
         assert m.get("docs.format") == "markdown"
@@ -307,19 +314,19 @@ class TestWhereTheStarterIsNotWritten:
     def test_a_conf_py_already_in_the_source_directory_is_never_overwritten(
         self, toy_python, capsys
     ):
-        conf = toy_python / "docs" / "conf.py"
+        conf = toy_python / SRC / "conf.py"
         conf.parent.mkdir()
         conf.write_text("project = 'theirs'\n", encoding="utf-8")
         code, text = run(capsys, "init", "--ecosystem", "python")
         assert code == 0, text
         assert conf.read_text(encoding="utf-8") == "project = 'theirs'\n"
-        assert written(toy_python) == ["docs/conf.py"]
-        assert "docs/conf.py" in text and "starter" in text
+        assert written(toy_python) == [f"{SRC}/conf.py"]
+        assert f"{SRC}/conf.py" in text and "starter" in text
         assert Manifest.locate(toy_python).get("docs.needs.state") == "migrating"
 
     def test_the_markdown_starter_is_retired(self, toy_python, capsys):
         run(capsys, "init", "--ecosystem", "python")
-        assert not any((toy_python / "docs").rglob("*.md"))
+        assert not any((toy_python / SRC).rglob("*.md"))
         assert not (DATA_DIR / "scaffold" / "architecture-overview.md").exists()
 
 
@@ -349,10 +356,10 @@ class TestInteractiveInit:
         monkeypatch.setattr(docs_domain, "_uv", lambda: "/bin/uv")
         code, text = run(capsys, "init", "--ecosystem", "python")
         assert code == 0, text
-        venv = toy_python / "docs" / ".venv"
+        venv = toy_python / SRC / ".venv"
         assert fake.calls[0] == ["/bin/uv", "venv", str(venv)]
         assert fake.calls[1][:3] == ["/bin/uv", "pip", "sync"]
-        assert docs_domain.venv_state(toy_python / "docs").in_sync
+        assert docs_domain.venv_state(toy_python / SRC).in_sync
         assert "created the docs environment" in text
 
     def test_a_failed_environment_is_reported_not_a_failed_init(
@@ -449,7 +456,7 @@ class TestAreasByElementNeeds:
 class TestMarkdownAdoption:
     @pytest.fixture
     def handbook(self, toy_python, capsys):
-        docs = toy_python / "docs" / "architecture"
+        docs = toy_python / SRC / "architecture"
         docs.mkdir(parents=True)
         (docs / "overview.md").write_text("# Ours\n", encoding="utf-8")
         run(capsys, "init", "--ecosystem", "python")
@@ -492,7 +499,7 @@ class TestTheStarterBuildsStrictly:
         code, text = run(capsys, "init", *argv)
         assert code == 0, text
         assert "created the docs environment" in text, text
-        assert docs_domain.venv_state(root / "docs").in_sync
+        assert docs_domain.venv_state(root / SRC).in_sync
         code, text = run(capsys, "--json", "docs", "build")
         record = json.loads(text)
         assert code == 0 and record["passed"], record
@@ -518,12 +525,12 @@ class TestTheStarterBuildsStrictly:
         manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
         code, text = run(capsys, "guidelines", "render")
         assert code == 0, text
-        rules = (toy_python / "docs" / "rules.rst").read_text(encoding="utf-8")
+        rules = (toy_python / SRC / "rules.rst").read_text(encoding="utf-8")
         assert ":id: RULE_LAYERS_ONLY_THE_CLI_IMPORTS_THE_ORACLE" in rules
         # A path link renders as text; a need id as decided_by (D12), so the
         # decisions it names must be needs of the project for the build to pass.
         assert ":decided_by: DEC_ADR_007_D6" in rules
-        index = toy_python / "docs" / "decisions" / "index.rst"
+        index = toy_python / SRC / "decisions" / "index.rst"
         index.write_text(
             index.read_text(encoding="utf-8")
             + "".join(
@@ -557,12 +564,13 @@ class TestForceKeepsTheMandate:
         m = Manifest.locate(toy_python)
         assert m.get("docs.needs.state") == "enforced"
         assert m.get("items.backend") == "sphinx_needs"
-        assert m.get("items.path") == "docs/backlog.rst"
+        assert m.get("items.path") == "invariant-docs/backlog.rst"
+        assert m.get("paths.docs") == "invariant-docs/architecture"
         assert m.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
         assert written(toy_python) == before
 
     def test_a_migrating_project_stays_as_it_was(self, toy_python, capsys):
-        (toy_python / "docs" / "architecture").mkdir(parents=True)
+        (toy_python / SRC / "architecture").mkdir(parents=True)
         run(capsys, "init", "--ecosystem", "python")
         run(capsys, "init", "--force", "--ecosystem", "python")
         assert Manifest.locate(toy_python).get("docs.needs.state") == "migrating"

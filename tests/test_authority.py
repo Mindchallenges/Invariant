@@ -78,8 +78,8 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
-    (root / "docs" / "architecture").mkdir(parents=True)
-    (root / "docs" / "architecture" / "overview.md").write_text(
+    (root / "invariant-docs" / "architecture").mkdir(parents=True)
+    (root / "invariant-docs" / "architecture" / "overview.md").write_text(
         "# Overview\n\n```mermaid\ngraph TD\n  A-->B\n```\n", encoding="utf-8"
     )
     (root / "app.py").write_text("print(1)\n", encoding="utf-8")
@@ -369,7 +369,7 @@ class TestAskDeliveryAtTheHook(HookHarness):
         """A deny is not softened by an `ask` sitting next to it."""
         self.setup(project, capsys, isolate=True,
                    rules={RULE: "ask", "privacy.clean": "block"})
-        body = self.edit(project / "docs" / "architecture" / "leak.md")
+        body = self.edit(project / "invariant-docs" / "architecture" / "leak.md")
         body["tool_input"]["new_string"] = "reach me at a.person@example.com"
         self.hook("pre-tool-use", body)
         assert self.decision(capsys)["permissionDecision"] == "deny"
@@ -383,8 +383,8 @@ def git_project(root: Path, manifest: dict | None = None) -> Manifest:
     subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
-    (root / "docs" / "architecture").mkdir(parents=True, exist_ok=True)
-    (root / "docs" / "architecture" / "overview.md").write_text(
+    (root / "invariant-docs" / "architecture").mkdir(parents=True, exist_ok=True)
+    (root / "invariant-docs" / "architecture" / "overview.md").write_text(
         "# Overview\n", encoding="utf-8"
     )
     path = root / MANIFEST_RELPATH
@@ -985,7 +985,7 @@ class TestAStandDownHoldsEveryGateReversibly(HookHarness):
         run("standdown", "--reason", "why", "--id", sid)
         capsys.readouterr()
 
-        body = self.edit(project / "docs" / "architecture" / "leak.md")
+        body = self.edit(project / "invariant-docs" / "architecture" / "leak.md")
         body["tool_input"]["new_string"] = "reach me at a.person@example.com"
         self.hook("pre-tool-use", body)
         decision = self.decision(capsys)
@@ -998,7 +998,7 @@ class TestAStandDownHoldsEveryGateReversibly(HookHarness):
             "--include", "privacy.clean", "--id", sid)
         capsys.readouterr()
 
-        body = self.edit(project / "docs" / "architecture" / "leak.md")
+        body = self.edit(project / "invariant-docs" / "architecture" / "leak.md")
         body["tool_input"]["new_string"] = "reach me at a.person@example.com"
         self.hook("pre-tool-use", body)
         assert self.decision(capsys).get("permissionDecision") != "deny"

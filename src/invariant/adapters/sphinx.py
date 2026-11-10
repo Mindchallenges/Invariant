@@ -7,9 +7,10 @@ name, instead of being quietly skipped.
 
 - **Detection** looks for a ``conf.py`` at the root or under ``docs/``,
   ``doc/`` or ``source/`` (each also one ``source/`` deeper), and skips the
-  docs project's source directory (ADR-018 D3): the nearest directory at or
-  above ``paths.docs`` that holds a ``conf.py``. A project whose only Sphinx
-  tree is its docs project is not a ``sphinx`` ecosystem.
+  docs project's source directory as the engine resolved it, handed in as
+  ``docs_srcdir`` (ADR-020 D8), never a fixed ``docs/``. A project whose only
+  Sphinx tree is its docs project is not a ``sphinx`` ecosystem, and a
+  documentation repository whose content is at ``docs/`` is one.
 - **Commands** are strict: ``-E`` re-reads every source, ``-W`` turns a
   warning into a failure, ``-n`` is nitpicky and ``--keep-going`` reports
   every warning before failing. Output goes into the per-run result bundle
@@ -36,13 +37,10 @@ from typing import Any, ClassVar
 
 from .base import Adapter, Hazard, TestResult
 
-#: The default ``paths.docs``, which locates the docs project's source
-#: directory (ADR-018 D3). Spelled here because an adapter imports nothing
-#: from the engine; a test holds it equal to the manifest's default.
-DEFAULT_DOCS = "docs/architecture"
-
-#: Where a documentation repository's ``conf.py`` is looked for, in order.
-_HOMES = ("", "docs", "docs/source", "doc", "doc/source", "source")
+#: Where a documentation repository's ``conf.py`` is looked for, in order:
+#: the root, then the content folders. A new project's docs project is never
+#: one of the folders (ADR-020 D8), which ``init`` reads from here.
+HOMES = ("", "docs", "docs/source", "doc", "doc/source", "source")
 
 _STRICT = "sphinx-build -E -W --keep-going -n"
 _LINKCHECK = (
@@ -214,28 +212,6 @@ def _narrows(name: str, value: ast.expr) -> str | None:
     return f"{name} (not a literal; count unknown)"
 
 
-def docs_project_srcdir(root: Path, docs: str = DEFAULT_DOCS) -> Path | None:
-    """The docs project's source directory (ADR-018 D3), or ``None``.
-
-    The nearest directory at or above ``root / docs`` that holds a
-    ``conf.py``, strictly below ``root``. Until ``docs.needs.srcdir`` is a key
-    (ADR-018 increment 3) this default rule is the only one.
-
-    The root itself is never the docs project's: the starter writes it at
-    ``docs/`` (D3), and a ``conf.py`` at the root is a documentation
-    repository's own content (ADR-015 D1), which ruling 18 keeps apart from
-    the docs project. Reading the rule up to the root would take that
-    content for the docs project and detect nothing.
-    """
-    root = Path(root)
-    current = root / docs
-    while current != root and root in current.parents:
-        if (current / "conf.py").is_file():
-            return current
-        current = current.parent
-    return None
-
-
 class SphinxAdapter(Adapter):
     """A Sphinx project's own content: strict builds, no coverage."""
 
@@ -259,13 +235,18 @@ class SphinxAdapter(Adapter):
     # -- where the tree is ------------------------------------------------
 
     def source_dirs(self, root: Path, *, skip_docs_project: bool = False) -> list[Path]:
-        """Every directory at a known home holding a ``conf.py``, in order."""
+        """Every directory at a known home holding a ``conf.py``, in order;
+        with ``skip_docs_project``, less the docs project's (``docs_srcdir``)."""
         root = Path(root)
-        skipped = docs_project_srcdir(root) if skip_docs_project else None
+        skipped = (
+            Path(self.docs_srcdir).resolve()
+            if skip_docs_project and self.docs_srcdir is not None
+            else None
+        )
         found: list[Path] = []
-        for home in _HOMES:
+        for home in HOMES:
             candidate = root / home if home else root
-            if candidate != skipped and (candidate / "conf.py").is_file():
+            if (candidate / "conf.py").is_file() and candidate.resolve() != skipped:
                 found.append(candidate)
         return found
 

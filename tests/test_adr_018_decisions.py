@@ -770,11 +770,11 @@ class TestStarterRuleset:
         assert set(rules) == {"docs.items-carry-no-design", "docs.decisions-are-declared"}
         for rule in rules.values():
             assert rule["check"]["kind"] == "judgement"
-        assert "docs/backlog.rst" in rules["docs.items-carry-no-design"]["applies_to"]
+        assert "invariant-docs/backlog.rst" in rules["docs.items-carry-no-design"]["applies_to"]
         context = RuleContext(manifest=manifest, cwd=toy_python)
         assert get_rule("guidelines.ruleset_valid").fn(context).ok
         assert get_rule("guidelines.generated_current").fn(context).ok
-        page = (toy_python / "docs/rules.rst").read_text(encoding="utf-8")
+        page = (toy_python / "invariant-docs/rules.rst").read_text(encoding="utf-8")
         assert ":id: RULE_DOCS_ITEMS_CARRY_NO_DESIGN" in page
         assert ":id: RULE_DOCS_DECISIONS_ARE_DECLARED" in page
 

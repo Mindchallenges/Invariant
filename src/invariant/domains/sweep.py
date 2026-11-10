@@ -23,7 +23,7 @@ from datetime import date
 from pathlib import Path
 
 from ..adapters import get_adapter
-from ..core import git
+from ..core import git, needs
 from ..core import sweep as core
 from ..core.errors import LockTimeout, ManifestError, StateError, UsageError
 from ..core.manifest import project_relative
@@ -95,7 +95,9 @@ class SweepDomain:
         # The sweep holds the PRIMARY ecosystem's suite: its flat commands and
         # its adapter (ADR-013 D6). A further ecosystem's whole suite is not
         # swept yet, and the ADR says so rather than this line implying it.
-        self.adapter = adapter or get_adapter(manifest.primary_ecosystem)
+        self.adapter = adapter or get_adapter(
+            manifest.primary_ecosystem, docs_srcdir=needs.srcdir_of(manifest)
+        )
         self.today = today or core.utc_today()
         self.root = Path(manifest.root)
 

@@ -26,8 +26,8 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
-    (root / "docs" / "architecture").mkdir(parents=True)
-    (root / "docs" / "architecture" / "overview.md").write_text(
+    (root / "invariant-docs" / "architecture").mkdir(parents=True)
+    (root / "invariant-docs" / "architecture" / "overview.md").write_text(
         "# Overview\n\n```mermaid\ngraph TD\n  A-->B\n```\n", encoding="utf-8"
     )
     (root / "app.py").write_text("print(1)\n", encoding="utf-8")
@@ -220,7 +220,7 @@ class TestDoctorAndConfig:
         import shutil
 
         run("init", "--ecosystem", "python")
-        shutil.rmtree(project / "docs")
+        shutil.rmtree(project / "invariant-docs")
         assert run("doctor") == 1
         # The row names the remedy. "docs-first is core policy" told a fresh
         # adopter what the rule was and nothing about how to satisfy it, and
@@ -381,7 +381,7 @@ class TestPipelineCommands:
         run("pipeline", "start", "--task", "t")
         assert run("pipeline", "advance", "red") == 1
 
-        doc = project / "docs" / "architecture" / "overview.md"
+        doc = project / "invariant-docs" / "architecture" / "overview.md"
         run("--json", "session", "status")
         session_id = payload(capsys)["session"]["id"]
         from invariant.core.manifest import Manifest
@@ -489,7 +489,7 @@ class TestChecksAndPrivacy:
 
     def test_privacy_scan_finds_and_redacts(self, project, capsys):
         run("init", "--ecosystem", "python")
-        target = project / "docs" / "leak.md"
+        target = project / "invariant-docs" / "leak.md"
         target.write_text("mail a.person@example.com\n", encoding="utf-8")
         assert run("privacy", "scan", str(target)) == 1
         text = out(capsys)
@@ -502,7 +502,7 @@ class TestChecksAndPrivacy:
 
     def test_reveal_is_opt_in(self, project, capsys):
         run("init", "--ecosystem", "python")
-        target = project / "docs" / "leak.md"
+        target = project / "invariant-docs" / "leak.md"
         target.write_text("mail a.person@example.com\n", encoding="utf-8")
         run("privacy", "scan", str(target), "--reveal")
         assert "a.person@example.com" in out(capsys)
@@ -2932,7 +2932,7 @@ class TestTheHookProbeWritesNothing(EditHookHarness):
 
     def writers(self, worktree):
         """Probes that reach a write when nothing stops them."""
-        doc = worktree / "docs" / "architecture" / "overview.md"
+        doc = worktree / "invariant-docs" / "architecture" / "overview.md"
         return {
             "session-end": {"session_id": self.HOST_ID},
             "post-tool-use": {
@@ -3035,14 +3035,14 @@ class TestInitScaffoldsTheArchitectureDoc:
     """
 
     def scaffold(self, project):
-        return project / "docs" / "architecture" / "overview.rst"
+        return project / "invariant-docs" / "architecture" / "overview.rst"
 
     def test_a_fresh_project_gets_a_starter_doc(self, project, capsys):
         import shutil
 
-        shutil.rmtree(project / "docs")
+        shutil.rmtree(project / "invariant-docs")
         assert run("init", "--ecosystem", "python", "--name", "widgets") == 0
-        assert "docs/architecture/overview.rst" in out(capsys)
+        assert "invariant-docs/architecture/overview.rst" in out(capsys)
         body = self.scaffold(project).read_text(encoding="utf-8")
         assert "widgets" in body
         assert "\nLayers\n------\n" in body
@@ -3052,34 +3052,34 @@ class TestInitScaffoldsTheArchitectureDoc:
         assert "docs.read_architecture" in body and "docs.updated" in body
 
     def test_an_existing_docs_directory_is_left_alone(self, project, capsys):
-        before = (project / "docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
+        before = (project / "invariant-docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
         assert run("init", "--ecosystem", "python") == 0
         assert "overview.rst" not in out(capsys)
-        after = (project / "docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
+        after = (project / "invariant-docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
         assert after == before
-        assert not (project / "docs" / "conf.py").exists()
+        assert not (project / "invariant-docs" / "conf.py").exists()
 
     def test_an_empty_docs_directory_counts_as_present(self, project, capsys):
         import shutil
 
-        shutil.rmtree(project / "docs")
-        (project / "docs" / "architecture").mkdir(parents=True)
+        shutil.rmtree(project / "invariant-docs")
+        (project / "invariant-docs" / "architecture").mkdir(parents=True)
         assert run("init", "--ecosystem", "python") == 0
         assert "overview.rst" not in out(capsys)
-        assert list((project / "docs" / "architecture").iterdir()) == []
+        assert list((project / "invariant-docs" / "architecture").iterdir()) == []
 
     def test_dry_run_lists_the_scaffold_and_writes_nothing(self, project, capsys):
         import shutil
 
-        shutil.rmtree(project / "docs")
+        shutil.rmtree(project / "invariant-docs")
         assert run("init", "--dry-run") == 0
-        assert "docs/architecture/overview.rst" in out(capsys)
-        assert not (project / "docs").exists()
+        assert "invariant-docs/architecture/overview.rst" in out(capsys)
+        assert not (project / "invariant-docs").exists()
 
     def test_force_does_not_touch_existing_docs(self, project, capsys):
         import shutil
 
-        shutil.rmtree(project / "docs")
+        shutil.rmtree(project / "invariant-docs")
         run("init", "--ecosystem", "python")
         self.scaffold(project).write_text("Mine\n====\n", encoding="utf-8")
         assert run("init", "--force", "--ecosystem", "python") == 0
@@ -3089,7 +3089,7 @@ class TestInitScaffoldsTheArchitectureDoc:
         """It is committed, and the project's own gate screens it."""
         import shutil
 
-        shutil.rmtree(project / "docs")
+        shutil.rmtree(project / "invariant-docs")
         run("init", "--ecosystem", "python")
         assert self.scaffold(project).is_file()
         assert run("privacy", "scan", str(self.scaffold(project))) == 0

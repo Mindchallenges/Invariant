@@ -137,8 +137,10 @@ Setup
        manifest without --force; prints a diff of what it would change with
        --dry-run.
 
-       Where the docs directory (`paths.docs`, `docs/architecture` by default)
-       does not exist it also writes the docs starter (ADR-018 D11, below). A
+       Where the docs directory (`paths.docs`: `invariant-docs/architecture`
+       for a new project, ADR-020 D8; an existing manifest's own, or
+       `docs/architecture`, under `--force`) does not exist it also writes the
+       docs starter (ADR-018 D11, below). A
        fresh project otherwise began by failing its own docs-first gate with
        nothing to read: `doctor` reported the directory missing and the first
        `pipeline advance` blocked on `docs.read_architecture` — "read the
@@ -341,11 +343,7 @@ Setup
        is said on the report's `home` row. The default holds in every mode:
        a non-interactive init with no flags writes the store project, and
        `--home repo` (or `--set home:location=repo`) the in-repo layout;
-       `--store <path>` answers the store step. In either home a new
-       project's docs project is `invariant-docs/` (`docs.needs.srcdir:
-       invariant-docs`, `paths.docs: invariant-docs/architecture`, written
-       explicitly), never docs/, doc/, source/ or docs/source (ADR-020 D8).
-       Last, `host:install` asks whether to install invariant's hooks and
+       `--store <path>` answers the store step. Last, `host:install` asks whether to install invariant's hooks and
        agents in this project, default no in every mode (ADR-020 D9);
        `--host-install` answers yes. Yes wires `repo` (committed, as above)
        or `local`: `.claude/settings.local.json`, `.claude/hooks/` and
@@ -358,11 +356,32 @@ Setup
        switch, the in-repo layout stays init's default and init installs
        as before.
 
+       Built (ADR-020 D8, its increment 1): a new project's docs folder. With
+       no `.claude/invariant.yaml` yet, `paths.docs` is
+       `invariant-docs/architecture`, in a folder only invariant owns, at the
+       repository root or, when the docs step chose a store, at the store
+       root under the same relative name; `init` writes it and the starter's
+       `docs.needs.srcdir: invariant-docs` explicitly, so the load-time
+       defaults do not move. The docs step's location offer arises where
+       that folder exists, and a `path` or store-relative answer whose source
+       directory would be a content folder (`docs`, `doc`, `source`,
+       `docs/source`, `doc/source`, the `sphinx` adapter's homes) is asked
+       again, naming `invariant-docs` (refused at `init`, never at load;
+       `store migrate`, which refuses the same, is not built yet). `init
+       --force` over an existing manifest keeps that manifest's `paths.docs`,
+       `docs/architecture` where it sets none, so invariant itself keeps
+       `docs/`. Detection and `init_settings` are told the docs project's
+       resolved source directory (`invariant-docs/` for a new project, the
+       existing manifest's `srcdir_of` otherwise), so a documentation
+       repository whose content is at `docs/conf.py` is detected as `sphinx`.
+
        Built (ADR-018 D10, D11, increment 4): the docs starter. `init`,
        interactive or not, writes a sphinx-needs docs project wherever
        `paths.docs` / `records.docs` resolves (the Markdown `overview.md` is
-       retired). Its source directory is the one above `paths.docs` (`docs/`
-       around `docs/architecture`, D3), and it holds, from the templates under
+       retired). Its source directory is the one above `paths.docs`
+       (`invariant-docs/` around a new project's `invariant-docs/architecture`,
+       ADR-020 D8; `docs/` around `docs/architecture`, D3), and it holds, from
+       the templates under
        `data/scaffold/sphinx/`: `conf.py` (sphinx-needs and sphinxcontrib-mermaid;
        `needs_types` from the configuration's need types, the seven baseline
        ones by default; `needs_links` with dang's set plus `amends` and

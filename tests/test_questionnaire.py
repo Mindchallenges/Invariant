@@ -56,11 +56,13 @@ TODAYS_MANIFEST = (
 )
 
 #: What init writes for the same repository, which has no docs: the docs
-#: starter, and the project enforced on it (ADR-018 D10, D11).
+#: starter, and the project enforced on it (ADR-018 D10, D11), in the new
+#: project's invariant-docs/, both keys written explicitly (ADR-020 D8).
 STARTER_MANIFEST = TODAYS_MANIFEST.replace(
     "\n# Everything else",
-    "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: docs\n"
-    "\nitems:\n  backend: sphinx_needs\n  path: docs/backlog.rst\n"
+    "\npaths:\n  docs: invariant-docs/architecture\n"
+    "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: invariant-docs\n"
+    "\nitems:\n  backend: sphinx_needs\n  path: invariant-docs/backlog.rst\n"
     "\nguidelines:\n  ruleset: docs/guidelines/ruleset.yaml\n"
     "\n# Everything else",
 )
@@ -719,8 +721,8 @@ class TestNonInteractiveInit:
         assert configuration(payload)["paths.docs"] == {
             "id": "docs:location",
             "key": "paths.docs",
-            "value": "docs/architecture",
-            "provenance": "default",
+            "value": "invariant-docs/architecture",
+            "provenance": f"repo:{MANIFEST_RELPATH}",
         }
         assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST
 

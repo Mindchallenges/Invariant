@@ -24,7 +24,13 @@ from typing import Any
 from ..core import plan as plan_reader
 from ..core.agents import AgentSource
 from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
-from ..core.manifest import DEFAULTS, MANIFEST_RELPATH, Level, Manifest
+from ..core.manifest import (
+    DEFAULTS,
+    MANIFEST_RELPATH,
+    Level,
+    Manifest,
+    project_relative,
+)
 from ..core.rules import (
     DOCTOR_ROW_RULES,
     HELD_OUT_OF_STANDDOWN,
@@ -736,34 +742,69 @@ def _merge_setting(settings: dict[str, Any], dotted: str, value: Any) -> None:
 
 
 def _init_settings(base: Mapping[str, Any], docs: _InitDocs) -> dict[str, Any]:
-    """``base`` with the docs step's in-repo choices: `paths.docs` for another
-    repo path, `docs.onboarding` for a mode that writes one."""
+    """``base`` with the docs step's in-repo choices: `paths.docs` wherever it
+    is not the load-time default (another repo path, or a new project's
+    `invariant-docs/architecture`, ADR-020 D8), `docs.onboarding` for a mode
+    that writes one."""
     import copy
 
     settings = copy.deepcopy(dict(base))
-    if docs.choice.kind == "path":
+    if _docs_written(docs.choice):
         _merge_setting(settings, "paths.docs", docs.choice.docs)
     if docs.store is None and docs.mode in ("incremental", "all_at_once"):
         _merge_setting(settings, "docs.onboarding", docs.mode)
     return settings
 
 
+def _docs_written(choice) -> bool:
+    """Whether `init` writes ``choice``'s `paths.docs` into the manifest: an
+    in-repo location other than the load-time default. A store's goes into
+    its block (``onboarding.place_in_store``)."""
+    return choice.kind != "store" and choice.docs != DEFAULTS["paths"]["docs"]
+
+
+def _init_docs_home(root: Path, new: bool) -> tuple[str, Path | None]:
+    """``(paths.docs, srcdir)``: where `init` puts the docs, and the docs
+    project's source directory as it resolves, which the adapters skip as
+    never the project's content (ADR-020 D8).
+
+    A new project's are the starter's, ``invariant-docs/architecture`` in
+    ``invariant-docs/``. An existing project's are what its manifest resolves,
+    so `init --force` rewrites the manifest in place (ADR-020 D2); where that
+    manifest does not load, the default `paths.docs` and the default rule.
+    """
+    from ..core import needs
+    from ..domains.docs import STARTER_DOCS, STARTER_SRCDIR
+
+    default = DEFAULTS["paths"]["docs"]
+    if new:
+        return STARTER_DOCS, root / STARTER_SRCDIR
+    try:
+        old = Manifest.locate(root)
+    except InvariantError:
+        return default, needs.resolve_srcdir(root, None, default)
+    docs = project_relative(old.get("paths.docs"), [old.root]) if old.store is None else None
+    return docs or default, needs.srcdir_of(old)
+
+
 def _init_ecosystem_settings(
-    root: Path, ecosystems: Sequence[str]
+    root: Path, ecosystems: Sequence[str], docs_srcdir: Path | None = None
 ) -> tuple[dict[str, Any], list[str]]:
     """What each declared ecosystem's adapter has init write for this project
     (`Adapter.init_settings`), with its notes.
 
     A primary's commands are the flat `commands.*` keys and a further
     ecosystem's are under `commands.<ecosystem>` (ADR-013 D1), so each
-    adapter names its commands bare and they are placed here.
+    adapter names its commands bare and they are placed here. Each adapter
+    is told the docs project's source directory (``docs_srcdir``), never its
+    content.
     """
     from ..adapters import get_adapter
 
     settings: dict[str, Any] = {}
     notes: list[str] = []
     for index, eco in enumerate(dict.fromkeys(ecosystems)):
-        found, said = get_adapter(eco).init_settings(root)
+        found, said = get_adapter(eco, docs_srcdir=docs_srcdir).init_settings(root)
         notes.extend(said)
         for top, value in found.items():
             if top == "commands" and index:
@@ -877,6 +918,9 @@ class _InitDocs:
     store: Any = None
     #: How the gaps are closed; ``None`` when the offer was not made.
     mode: str | None = None
+    #: A new project, with no manifest yet: its docs project is
+    #: ``invariant-docs/``, and a content folder is refused for it (ADR-020 D8).
+    new: bool = True
 
 
 def _init_docs_step(prompter, root: Path, docs: _InitDocs, candidate, project) -> None:
@@ -895,7 +939,7 @@ def _init_docs_step(prompter, root: Path, docs: _InitDocs, candidate, project) -
 
     if (root / docs.choice.docs).exists():
         docs.choice = onboarding.offer_location(
-            prompter, root, docs.choice.docs, _store_refusal(root)
+            prompter, root, docs.choice.docs, _store_refusal(root), new_project=docs.new
         )
     if docs.choice.kind == "store":
         docs.store = onboarding.place_in_store(_store_repo(root), docs.choice, project())
@@ -943,7 +987,7 @@ def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
 
     def candidate(choice):
         draft = asked.draft
-        if choice.kind == "path":
+        if _docs_written(choice):
             draft = draft.placed("paths.docs", choice.docs, "repo")
         try:
             return draft.manifest()
@@ -1020,9 +1064,11 @@ def cmd_init(args) -> int:
             f"{manifest_path.relative_to(root)} already exists; pass --force to "
             f"overwrite, or edit it directly"
         )
-    mandate = _kept_mandate(root) if manifest_path.exists() else {}
+    new = not manifest_path.exists()
+    mandate = {} if new else _kept_mandate(root)
+    docs_location, docs_srcdir = _init_docs_home(root, new)
 
-    ecosystems = [args.ecosystem] if args.ecosystem else detect(root)
+    ecosystems = [args.ecosystem] if args.ecosystem else detect(root, docs_srcdir=docs_srcdir)
     name = args.name or root.name
     profile = args.profile or DEFAULTS["enforcement"]["profile"]
 
@@ -1031,9 +1077,11 @@ def cmd_init(args) -> int:
     # offers a location only where `paths.docs` exists; an absent directory
     # gets the starter as it always has, and the existing one is never
     # written. Nothing but a chosen store is written until the last answer.
+    # A new project's docs location is `invariant-docs/architecture`
+    # (ADR-020 D8); `--force` over an existing manifest keeps its own.
     prompter = _init_prompter(args)
     asker = _questionnaire_prompter(args)
-    docs = _InitDocs(onboarding.DocsChoice("reuse", DEFAULTS["paths"]["docs"]))
+    docs = _InitDocs(onboarding.DocsChoice("reuse", docs_location), new=new)
     asked = None
     if asker is not None:
         base, asked = _init_ask(
@@ -1070,7 +1118,7 @@ def cmd_init(args) -> int:
     # What the adapters need written that their static defaults cannot know
     # (the sphinx source directory), never over an answer given above.
     store = docs.store
-    eco_settings, eco_notes = _init_ecosystem_settings(root, ecosystems)
+    eco_settings, eco_notes = _init_ecosystem_settings(root, ecosystems, docs_srcdir)
     if store is None:
         repo_settings = _under(repo_settings, eco_settings)
     settings = _init_settings(repo_settings, docs)

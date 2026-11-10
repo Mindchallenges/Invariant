@@ -126,6 +126,13 @@ class Reference:
 class Adapter:
     """Base adapter. ``generic`` is this class, unmodified."""
 
+    def __init__(self, *, docs_srcdir: Path | None = None) -> None:
+        #: The source directory of invariant's own docs project, as the engine
+        #: resolved it (``docs.needs.srcdir``, ADR-020 D8), or ``None`` when
+        #: there is none. It is never the project's own content. An adapter
+        #: imports nothing from the engine, so the value is handed in.
+        self.docs_srcdir = docs_srcdir
+
     def self_check(self) -> list[tuple[str, bool, str]]:
         """Is the tooling this adapter depends on reachable FROM HERE?
 

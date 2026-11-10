@@ -293,7 +293,9 @@ Layers
        DOCSD -- "srcdir_of, tree_digest, BuildRecord, read_record: the record it writes" --> CNEEDS
        DOCSD -- "diagnostics: one reading of a Sphinx run" --> SPHINX
        RULES -- "docs.builds_strict, docs.needs_traceable: srcdir_of, tree_digest, read_record, load_needs_json, check" --> CNEEDS
-       CNEEDS -- "docs_project_srcdir: the default of docs.needs.srcdir" --> SPHINX
+       CLI -- "init: srcdir_of, resolve_srcdir: the docs project the adapters skip" --> CNEEDS
+       PIPELINE -- "srcdir_of: the docs project a run's adapter skips" --> CNEEDS
+       SWEEPD -- "srcdir_of: the docs project the sweep's adapter skips" --> CNEEDS
        MANIFEST -. "type_problems, link_rule_problems, resolve_srcdir: the docs.needs load check, imported at call time" .-> CNEEDS
        CNEEDS -. "project_relative, imported at call time" .-> MANIFEST
        RULES -. "docs.assessment, docs.area_documented, imported at call time" .-> DOCSD
@@ -312,7 +314,7 @@ Layers
        CGUIDE -- "id_stem, is_need_id: rule need ids and decided_by" --> CNEEDS
        DOCSD -- "docs.assess, docs.adopt, ADOPT_MODES, path_for, project_relative, glob_matches" --> MANIFEST
        DOCSD -- source_areas --> adapters
-       CLI -- "init: detect, init_settings; doctor's coverage row" --> adapters
+       CLI -- "init: detect, init_settings, each told docs_srcdir; doctor's coverage row" --> adapters
        DOCSD -- tracked_files --> GIT
        CLI -- "init's offers, docs assess --plan" --> CONBOARD
        CLI -- "_init_prompter: a terminal, or nobody" --> CPROMPTS
@@ -499,9 +501,17 @@ source directory would be the root, already holds a ``conf.py``, or holds a file
 the starter would write. The assessment's ``areas`` check reads, in a
 sphinx-needs project, only the title and content of each ``element`` need,
 found by ``core/docformat``'s ``rst_directives``.
-``CNEEDS --> SPHINX`` is the default of ``docs.needs.srcdir``, the increment-2
-rule the adapter already holds (an adapter imports nothing from the engine,
-so the rule stays there). ``MANIFEST -.-> CNEEDS`` is dotted for the reason
+The default of ``docs.needs.srcdir``, the increment-2 rule, is
+``core/needs.default_srcdir``. It lived in the ``sphinx`` adapter while the
+adapter's detection read it against the default ``paths.docs``; since ADR-020
+D8 (increment 1) detection skips the source directory the engine resolved
+instead, handed to every adapter as ``docs_srcdir`` when it is made
+(``adapters.get_adapter``, ``adapters.detect``), so the rule lives with the
+key it defaults and the ``CNEEDS --> SPHINX`` arrow is gone. An adapter still
+imports nothing from the engine: ``init`` (``CLI --> CNEEDS``), a pipeline's
+test run (``PIPELINE --> CNEEDS``) and the sweep (``SWEEPD --> CNEEDS``) resolve
+the directory with ``srcdir_of`` and hand it down, and an adapter told nothing
+skips nothing, never a fixed ``docs/``. ``MANIFEST -.-> CNEEDS`` is dotted for the reason
 ``RULES -.-> DOCSD`` is: ``core/manifest`` asks ``core/needs`` to check the
 ``docs.needs`` block at load, through an import made at call time, because
 ``core/needs`` reads ``project_relative`` back from the manifest
@@ -1957,8 +1967,9 @@ Component responsibilities
    ``docs.needs.require_links`` that ``core/manifest`` calls
    (``type_problems``, ``link_rule_problems``); the docs project's source
    directory (``resolve_srcdir``, ``srcdir_of``, against a session's tree when
-   asked: ``docs.needs.srcdir``, or the increment-2 rule of the ``sphinx``
-   adapter as its default); a built ``needs.json`` read (``parse_needs_json``,
+   asked: ``docs.needs.srcdir``, or its default rule, ``default_srcdir``, the
+   nearest ``conf.py`` at or above ``paths.docs`` strictly below the root,
+   moved here from the ``sphinx`` adapter by ADR-020 D8); a built ``needs.json`` read (``parse_needs_json``,
    ``load_needs_json``: sphinx-needs 8.x and 9.x write ``versions``, the
    current version, ``needs``; link options from ``needs_schema``'s
    ``field_type: links``, or the keys with a ``_back`` twin), each need's file
@@ -2246,7 +2257,10 @@ advance it. They are the only place where "what a session is" is encoded.
    work-item domain writes. The starter (D11) also writes the
    guidelines ruleset with the mandate's two judgement rules where the
    project has none, parsing it against the rule registry through ``core/rules``,
-   imported at call time.
+   imported at call time. A new project's docs project is ``STARTER_SRCDIR``,
+   ``invariant-docs/``, with ``STARTER_DOCS`` its ``paths.docs`` (ADR-020 D8),
+   and ``refused_srcdir`` names the content folder, one of the ``sphinx``
+   adapter's ``HOMES``, a ``paths.docs`` would make its source directory.
 
 .. comp:: ``domains/stats``
    :id: COMP_DOMAINS_STATS
@@ -2727,9 +2741,12 @@ Elements
    :id: COMP_ADAPTERS_SPHINX
 
    **Owns:** a project whose own content is a Sphinx project (ADR-015 D1): its
-   detection, which skips the docs project's source directory (ADR-018 D3), its
-   strict linkcheck test, the reading of a Sphinx run (``diagnostics``), and
-   coverage declared not applicable by name.
+   detection, which skips the docs project's source directory as the engine
+   resolved it and handed it in (``docs_srcdir``, ADR-020 D8), never a fixed
+   ``docs/``; the content folders it looks in (``HOMES``), which ``init``
+   refuses for a new project's docs project; its strict linkcheck test, the
+   reading of a Sphinx run (``diagnostics``), and coverage declared not
+   applicable by name.
 
    **Never does:** run ``conf.py``; it reads it through ``ast``.
 
@@ -3134,7 +3151,9 @@ agent is told to call it.
 .. comp:: ``cli/onboarding``
    :id: COMP_CLI_ONBOARDING
 
-   **Owns:** ``init``'s docs offers and the all-at-once plan (ADR-016 D4, D5).
+   **Owns:** ``init``'s docs offers and the all-at-once plan (ADR-016 D4, D5);
+   for a new project, asking again a location whose docs project would be a
+   content folder (ADR-020 D8, ``domains/docs.refused_srcdir``).
 
    **Never does:** write over an existing docs directory.
 
@@ -3465,11 +3484,16 @@ them, locally (:need:`DEC_ADR_020_D9`). The ``<project>/`` tree above is then
 the in-repo layout a project opts into to share its configuration through
 the repository (teammates, CI, pull-request review). The two homes are
 exclusive, and ``store migrate`` moves everything between them
-(:need:`DEC_ADR_020_D3`). A new project's docs project is ``invariant-docs/``,
-at the repository root or the store root, never ``docs/``
-(:need:`DEC_ADR_020_D8`); invariant itself keeps ``docs/``. Existing projects,
+(:need:`DEC_ADR_020_D3`). Existing projects,
 invariant and Heap among them, are unchanged (:need:`DEC_ADR_020_D2`). The
 switch lands after ADR-014's increments 3 to 7 (:need:`DEC_ADR_020_D7`).
+
+**Built (:need:`ADR-020 <DEC_ADR_020>` increment 1, :need:`DEC_ADR_020_D8`,
+:need:`DEC_ADR_020_I1`).** A new project's docs project is ``invariant-docs/``,
+a folder only invariant owns, at the repository root, or at the store root
+under the same relative name; ``init`` writes ``docs.needs.srcdir:
+invariant-docs`` and ``paths.docs: invariant-docs/architecture`` explicitly, so
+the load-time defaults do not move. invariant itself keeps ``docs/``.
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between

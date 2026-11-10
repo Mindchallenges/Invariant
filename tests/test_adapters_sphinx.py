@@ -20,14 +20,8 @@ from test_rules import ctx_factory, only, repo, write_manifest  # noqa: F401
 
 from invariant.adapters import available, defaults_for, detect, get_adapter
 from invariant.adapters.base import Adapter, TestResult
-from invariant.adapters.sphinx import (
-    DEFAULT_DOCS,
-    SphinxAdapter,
-    conf_facts,
-    diagnostics,
-    docs_project_srcdir,
-)
-from invariant.core.manifest import DEFAULTS
+from invariant.adapters.sphinx import SphinxAdapter, conf_facts, diagnostics
+from invariant.core.needs import default_srcdir
 from invariant.core.rules import evaluate
 from invariant.domains.pipeline import PipelineDomain
 from invariant.domains.session import SessionDomain
@@ -136,11 +130,6 @@ class TestRegistration:
     def test_a_failed_link_is_retried_once_before_it_counts(self):
         assert "-D linkcheck_retries=2" in defaults_for("sphinx")["commands"]["test"]
 
-    def test_the_docs_default_is_the_manifests(self):
-        """Detection reads the default `paths.docs` (ADR-018 D3) without importing
-        the manifest; this holds the two spellings together."""
-        assert DEFAULT_DOCS == DEFAULTS["paths"]["docs"]
-
     def test_coverage_is_declared_not_applicable_with_a_reason(self):
         assert SphinxAdapter.coverage_applicable is False
         assert "no measurable lines" in SphinxAdapter.coverage_reason
@@ -148,7 +137,7 @@ class TestRegistration:
         assert Adapter().claims(Path("a.py"), Path("/nowhere")) is False
 
 
-# -- detection (ADR-015 D1, ADR-018 D3) ----------------------------------------------
+# -- detection (ADR-015 D1, ADR-018 D3, ADR-020 D8) ------------------------------------
 
 
 class TestDetection:
@@ -168,7 +157,8 @@ class TestDetection:
 
     def test_a_starter_shaped_docs_project_is_not_an_ecosystem(self, tmp_path):
         """ADR-018 row 2's proof: a Python project whose only Sphinx tree is its
-        docs project (D3's default srcdir, `docs/`, above `docs/architecture`)."""
+        docs project (D3's default srcdir, `docs/`, above `docs/architecture`),
+        as the engine resolves it and hands it to the adapter (ADR-020 D8)."""
         tree(
             tmp_path,
             {
@@ -180,32 +170,41 @@ class TestDetection:
                 "docs/requirements.txt": "sphinx==9.1.0\n",
             },
         )
-        assert docs_project_srcdir(tmp_path) == tmp_path / "docs"
-        assert not SPHINX.detect(tmp_path)
-        assert detect(tmp_path) == ["python"]
+        srcdir = default_srcdir(tmp_path, "docs/architecture")
+        assert srcdir == tmp_path / "docs"
+        assert not SphinxAdapter(docs_srcdir=srcdir).detect(tmp_path)
+        assert detect(tmp_path, docs_srcdir=srcdir) == ["python"]
 
     def test_the_docs_project_is_the_nearest_conf_py_at_or_above_paths_docs(self, tmp_path):
         tree(tmp_path, {"docs/architecture/conf.py": "", "docs/conf.py": ""})
-        assert docs_project_srcdir(tmp_path) == tmp_path / "docs" / "architecture"
-        assert docs_project_srcdir(tmp_path, "elsewhere/arch") is None
+        assert default_srcdir(tmp_path, "docs/architecture") == tmp_path / "docs" / "architecture"
+        assert default_srcdir(tmp_path, "elsewhere/arch") is None
 
     def test_the_search_never_climbs_above_the_root(self, tmp_path):
         (tmp_path / "conf.py").write_text("", encoding="utf-8")
         inner = tree(tmp_path / "proj", {"README": "x\n"})
-        assert docs_project_srcdir(inner) is None
+        assert default_srcdir(inner, "docs/architecture") is None
 
     def test_the_root_is_never_the_docs_project(self, tmp_path):
         """A root `conf.py` is a documentation repository's own content."""
         tree(tmp_path, {"conf.py": ""})
-        assert docs_project_srcdir(tmp_path) is None
-        assert docs_project_srcdir(tmp_path, ".") is None
+        assert default_srcdir(tmp_path, "docs/architecture") is None
+        assert default_srcdir(tmp_path, ".") is None
 
     def test_content_beside_a_docs_project_is_sphinx(self, tmp_path):
         """A documentation repository: its own content under `source/`, and the
         docs project at `docs/` skipped."""
         tree(tmp_path, {"docs/conf.py": STARTER_CONF, "source/conf.py": ""})
+        told = SphinxAdapter(docs_srcdir=tmp_path / "docs")
+        assert told.detect(tmp_path)
+        assert told.source_dir(tmp_path) == tmp_path / "source"
+
+    def test_untold_nothing_is_skipped(self, tmp_path):
+        """No fixed `docs/` is skipped (ADR-020 D8): a content tree there is
+        the project's own, BUG_118's case b."""
+        tree(tmp_path, {"docs/conf.py": STARTER_CONF})
         assert SPHINX.detect(tmp_path)
-        assert SPHINX.source_dir(tmp_path) == tmp_path / "source"
+        assert SPHINX.source_dir(tmp_path) == tmp_path / "docs"
 
     def test_two_content_trees_are_asked_about_not_guessed(self, tmp_path):
         tree(tmp_path, {"conf.py": "", "source/conf.py": ""})
@@ -217,8 +216,9 @@ class TestDetection:
         """Declared `sphinx` by hand (`init --ecosystem sphinx`): with nothing
         but the skipped tree, that tree is the one the project builds."""
         tree(tmp_path, {"docs/conf.py": ""})
-        assert not SPHINX.detect(tmp_path)
-        assert SPHINX.source_dir(tmp_path) == tmp_path / "docs"
+        told = SphinxAdapter(docs_srcdir=tmp_path / "docs")
+        assert not told.detect(tmp_path)
+        assert told.source_dir(tmp_path) == tmp_path / "docs"
 
 
 # -- reading conf.py --------------------------------------------------------------------
@@ -637,6 +637,39 @@ exit "$SPHINX_EXIT"
         assert "docs/index.rst:4 [ref.doc]" in record["note"]
         assert str(root) not in record["note"]
         assert "linkcheck_anchors = False" in record["note"]
+
+    def test_the_docs_project_is_not_annotated_as_content(self, tmp_path, monkeypatch):
+        """The pipeline hands the adapter the docs project's resolved source
+        directory (here D3's default rule, `docs/`), so only the content's
+        conf.py is read for what it narrows (ADR-020 D8)."""
+        root = tmp_path / "proj"
+        manifest = git_project(
+            root,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["sphinx"]},
+                "vars": {"srcdir": "source"},
+                "commands": {"test": "sh fake-sphinx.sh {srcdir} {result_bundle}/linkcheck"},
+            },
+        )
+        tree(
+            root,
+            {
+                "fake-sphinx.sh": self.FAKE,
+                "source/conf.py": "linkcheck_anchors = False\n",
+                "docs/conf.py": "suppress_warnings = ['x']\n",
+                "docs/architecture/overview.rst": "Overview\n========\n",
+            },
+        )
+        session = SessionDomain(manifest).start("x")
+        pipelines = PipelineDomain(manifest)
+        pipelines.start(session.id, task="t")
+        monkeypatch.setenv("SPHINX_OUT", GREEN_OUT)
+        monkeypatch.setenv("SPHINX_ERR", "")
+        monkeypatch.setenv("SPHINX_EXIT", "0")
+        record = pipelines.run_tests(session.id, cwd=root)
+        assert "linkcheck_anchors = False" in record["note"]
+        assert "suppress_warnings" not in record["note"]
 
     def test_a_green_run_is_trustworthy(self, tmp_path, monkeypatch):
         pipelines, session, root = self.project(tmp_path)

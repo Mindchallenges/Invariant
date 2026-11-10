@@ -43,7 +43,11 @@ from invariant.domains.docs import Area, Assessment, Gap, plan_deliverables
 from invariant.domains.pipeline import PipelineDomain
 from invariant.domains.session import SessionDomain
 
-#: What init writes today for `--ecosystem generic --name toy`, byte for byte.
+#: A new project's docs project (ADR-020 D8).
+SRC = "invariant-docs"
+
+#: What init writes today for `--ecosystem generic --name toy`, byte for byte:
+#: since ADR-020 D8, a new project's `paths.docs` is written explicitly.
 TODAYS_MANIFEST = (
     "version: 1\n"
     "\n"
@@ -54,6 +58,9 @@ TODAYS_MANIFEST = (
     "enforcement:\n"
     "  profile: standard\n"
     "\n"
+    "paths:\n"
+    "  docs: invariant-docs/architecture\n"
+    "\n"
     "# Everything else has a default. 'invariant config show --provenance'\n"
     "# prints the resolved configuration and where each value came from.\n"
 )
@@ -62,8 +69,8 @@ TODAYS_MANIFEST = (
 #: the docs starter, and the project enforced on it (ADR-018 D10, D11).
 STARTER_MANIFEST = TODAYS_MANIFEST.replace(
     "\n# Everything else",
-    "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: docs\n"
-    "\nitems:\n  backend: sphinx_needs\n  path: docs/backlog.rst\n"
+    "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: invariant-docs\n"
+    "\nitems:\n  backend: sphinx_needs\n  path: invariant-docs/backlog.rst\n"
     "\nguidelines:\n  ruleset: docs/guidelines/ruleset.yaml\n"
     "\n# Everything else",
 )
@@ -158,7 +165,7 @@ def toy(tmp_path, monkeypatch):
 @pytest.fixture
 def unrelated(toy):
     """`paths.docs` exists and holds something that is not architecture."""
-    docs = toy / "docs" / "architecture"
+    docs = toy / SRC / "architecture"
     docs.mkdir(parents=True)
     (docs / "notes.txt").write_text("shopping list\n", encoding="utf-8")
     (docs / "photo.md").write_text("# Holiday\n", encoding="utf-8")
@@ -168,7 +175,7 @@ def unrelated(toy):
 @pytest.fixture
 def half(toy):
     """Docs that name alpha and not beta."""
-    docs = toy / "docs" / "architecture"
+    docs = toy / SRC / "architecture"
     docs.mkdir(parents=True)
     (docs / "overview.md").write_text(HALF, encoding="utf-8")
     git(toy, "add", "-A")
@@ -465,12 +472,12 @@ class TestAssessPlan:
         code, text = run(capsys, "--json", "docs", "assess", "--plan")
         assert code == 0, text
         payload = json.loads(text)
-        assert payload["plan"]["deliverables"] == ["Document beta", "Document docs"]
+        assert payload["plan"]["deliverables"] == ["Document beta", "Document invariant-docs"]
         assert payload["plan"]["session"].startswith("document-architecture-")
         assert payload["checks"]["areas"]
 
     def test_a_missing_sections_line_comes_first(self, adopted, capsys):
-        overview = adopted / "docs" / "architecture" / "overview.md"
+        overview = adopted / SRC / "architecture" / "overview.md"
         overview.write_text("# Toy\n\nalpha\n", encoding="utf-8")
         code, text = run(capsys, "docs", "assess", "--plan")
         assert code == 0, text
@@ -481,7 +488,7 @@ class TestAssessPlan:
                 "Compliance checklist"
             ),
             "Document beta",
-            "Document docs",
+            "Document invariant-docs",
         ]
 
     def test_resumed_after_a_stop(self, adopted, capsys, monkeypatch):
@@ -504,8 +511,8 @@ class TestAssessPlan:
         assert len(parked(adopted)) == 1
 
     def test_no_gaps_records_nothing(self, adopted, capsys):
-        overview = adopted / "docs" / "architecture" / "overview.md"
-        overview.write_text(HALF + "\nbeta too, and docs.\n", encoding="utf-8")
+        overview = adopted / SRC / "architecture" / "overview.md"
+        overview.write_text(HALF + "\nbeta too, and invariant-docs.\n", encoding="utf-8")
         code, text = run(capsys, "docs", "assess", "--plan")
         assert code == 0, text
         assert "nothing to plan" in text
@@ -538,22 +545,22 @@ class TestNonInteractiveInit:
         self, toy, capsys, shape
     ):
         if shape != "absent":
-            docs = toy / "docs" / "architecture"
+            docs = toy / SRC / "architecture"
             docs.mkdir(parents=True)
             (docs / "overview.md").write_text(
                 HALF if shape == "half" else "# Holiday\n", encoding="utf-8"
             )
-        before = tree(toy / "docs") if shape != "absent" else None
+        before = tree(toy / SRC) if shape != "absent" else None
         code, text = init(capsys)
         assert code == 0, text
         written = (toy / MANIFEST_RELPATH).read_text(encoding="utf-8")
         if shape == "absent":
             # ADR-018 D11: the docs starter, which documents every area.
             assert written == STARTER_MANIFEST
-            assert (toy / "docs" / "architecture" / "overview.rst").is_file()
+            assert (toy / SRC / "architecture" / "overview.rst").is_file()
         else:
             assert written == TODAYS_MANIFEST
-            assert tree(toy / "docs") == before
+            assert tree(toy / SRC) == before
             assert "beta" in text
         assert "docs assessment:" in text
         assert parked(toy) == []
@@ -561,7 +568,7 @@ class TestNonInteractiveInit:
     @pytest.mark.parametrize("shape", ["absent", "unrelated"])
     def test_json_carries_the_assessment_as_a_field(self, toy, capsys, shape):
         if shape == "unrelated":
-            (toy / "docs" / "architecture").mkdir(parents=True)
+            (toy / SRC / "architecture").mkdir(parents=True)
         code, text = run(
             capsys, "--json", "init", "--ecosystem", "generic", "--name", "toy"
         )
@@ -578,8 +585,8 @@ class TestNonInteractiveInit:
     @pytest.mark.parametrize("shape", ["absent", "half"])
     def test_dry_run_writes_nothing_and_assesses_what_is_there(self, toy, capsys, shape):
         if shape == "half":
-            (toy / "docs" / "architecture").mkdir(parents=True)
-            (toy / "docs" / "architecture" / "overview.md").write_text(HALF, encoding="utf-8")
+            (toy / SRC / "architecture").mkdir(parents=True)
+            (toy / SRC / "architecture" / "overview.md").write_text(HALF, encoding="utf-8")
         before = tree(toy)
         code, text = init(capsys, "--dry-run")
         assert code == 0, text
@@ -638,19 +645,19 @@ class TestInteractiveDetection:
 
 class TestLocationOffer:
     def test_reuse_is_todays_result(self, unrelated, capsys, interactive):
-        before = tree(unrelated / "docs")
+        before = tree(unrelated / SRC)
         scripted = interactive("reuse", "not_now")
         code, text = init(capsys)
         assert code == 0, text
         assert scripted.asked[0][1] == ["reuse", "path", "store"]
         assert any("notes.txt" in said for said in scripted.said)
         assert (unrelated / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
-        assert tree(unrelated / "docs") == before
+        assert tree(unrelated / SRC) == before
 
     def test_another_repo_path_writes_paths_docs_and_a_starter_there(
         self, unrelated, capsys, interactive
     ):
-        before = tree(unrelated / "docs")
+        before = tree(unrelated / SRC)
         interactive("path", "../outside", "/abs", "design/arch", "not_now")
         code, text = init(capsys)
         assert code == 0, text
@@ -663,10 +670,10 @@ class TestLocationOffer:
         assert m.get("docs.needs.srcdir") == "design"
         assert m.get("items.path") == "design/backlog.rst"
         # The mandate's ruleset goes to ADR-012 D3's default path (ADR-018
-        # D8, increment 5); nothing else under docs/ moves.
-        after = tree(unrelated / "docs")
+        # D8, increment 5); nothing under the existing directory moves.
         assert m.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
-        assert after.pop("guidelines/ruleset.yaml") and after == before
+        assert (unrelated / "docs" / "guidelines" / "ruleset.yaml").is_file()
+        assert tree(unrelated / SRC) == before
 
     def test_another_existing_repo_path_is_reused_untouched(
         self, unrelated, capsys, interactive
@@ -681,7 +688,7 @@ class TestLocationOffer:
     def test_a_new_store_leaves_records_docs_store_and_the_directory_unchanged(
         self, unrelated, capsys, interactive
     ):
-        before = tree(unrelated / "docs")
+        before = tree(unrelated / SRC)
         interactive("store", "", "", "not_now")
         code, text = init(capsys)
         assert code == 0, text
@@ -689,16 +696,16 @@ class TestLocationOffer:
         m = Manifest.locate(unrelated)
         assert m.store is not None
         assert m.get("records.docs") == "store"
-        assert m.path_for("docs") == m.store.root / "docs" / "architecture"
+        assert m.path_for("docs") == m.store.root / SRC / "architecture"
         assert m.get("project.ecosystems") == ["generic"]
         assert m.get("enforcement.profile") == "standard"
         # The starter goes where records.docs resolves (ADR-016 ruling G), and
         # the items store with it (ADR-018 D3).
-        assert (m.store.root / "docs" / "architecture" / "overview.rst").is_file()
-        assert (m.store.root / "docs" / "conf.py").is_file()
+        assert (m.store.root / SRC / "architecture" / "overview.rst").is_file()
+        assert (m.store.root / SRC / "conf.py").is_file()
         assert m.get("docs.needs.state") == "enforced"
         assert m.get("records.backlog") == "store"
-        assert tree(unrelated / "docs") == before
+        assert tree(unrelated / SRC) == before
         assert str(m.store.root) in text
         assert "the manifest lives there" in text
 
@@ -721,7 +728,7 @@ class TestLocationOffer:
             ),
             encoding="utf-8",
         )
-        before = tree(unrelated / "docs")
+        before = tree(unrelated / SRC)
         interactive("store", str(store), "notes/arch", "not_now")
         code, text = init(capsys)
         assert code == 0, text
@@ -737,7 +744,7 @@ class TestLocationOffer:
             "docs": STARTER_STORE["docs"],
             "items": STARTER_STORE["items"],
         }
-        assert tree(unrelated / "docs") == before
+        assert tree(unrelated / SRC) == before
 
     def commented_store(self, repo, tmp_path) -> Path:
         from invariant.core.stores import ensure_local_id
@@ -794,9 +801,9 @@ class TestLocationOffer:
         key = Manifest.locate(unrelated).store.key
         assert yaml.safe_load(by_hand["yaml"])["store"]["repos"][key] == {
             "records": {"docs": "store", "backlog": "store"},
-            "paths": {"docs": "docs/architecture"},
-            "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "docs"}},
-            "items": {"backend": "sphinx_needs", "path": "docs/backlog.rst"},
+            "paths": {"docs": "invariant-docs/architecture"},
+            "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "invariant-docs"}},
+            "items": {"backend": "sphinx_needs", "path": "invariant-docs/backlog.rst"},
         }
 
     def test_an_uncommented_store_carries_no_by_hand_field(
@@ -821,7 +828,7 @@ class TestLocationOffer:
         self, tmp_path, capsys, interactive, monkeypatch
     ):
         root = tmp_path / "plain"
-        (root / "docs" / "architecture").mkdir(parents=True)
+        (root / SRC / "architecture").mkdir(parents=True)
         monkeypatch.chdir(root)
         scripted = interactive("reuse", "not_now")
         assert init(capsys)[0] == 0
@@ -842,7 +849,7 @@ class TestLocationOffer:
         assert [keys for _, keys in scripted.asked] == [
             ["not_now", "incremental", "all_at_once"]
         ]
-        assert (toy / "docs" / "architecture" / "overview.rst").is_file()
+        assert (toy / SRC / "architecture" / "overview.rst").is_file()
 
 
 # -- D4.2-3: the assessment and the onboarding offer --------------------------
@@ -888,7 +895,7 @@ class TestOnboardingOffer:
         code, text = init(capsys, "--force")
         assert code == 0, text
         (session,) = parked(half)
-        assert [e["title"] for e in session.plan] == ["Document beta", "Document docs"]
+        assert [e["title"] for e in session.plan] == ["Document beta", "Document invariant-docs"]
         assert f"invariant session resume {session.name}" in text
 
     def test_all_at_once_in_a_store_project_records_the_plan(
@@ -949,8 +956,8 @@ class TestOnboardingOffer:
         assert len(scripted.asked) == 1
 
     def test_no_gaps_no_offer(self, half, capsys, interactive):
-        overview = half / "docs" / "architecture" / "overview.md"
-        overview.write_text(HALF + "\nbeta too, and docs.\n", encoding="utf-8")
+        overview = half / SRC / "architecture" / "overview.md"
+        overview.write_text(HALF + "\nbeta too, and invariant-docs.\n", encoding="utf-8")
         scripted = interactive("reuse")
         assert init(capsys)[0] == 0
         assert len(scripted.asked) == 1

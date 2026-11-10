@@ -258,7 +258,7 @@ def project(tmp_path, monkeypatch):
     from invariant.cli.main import main
 
     root = tmp_path / "proj"
-    (root / "docs" / "architecture").mkdir(parents=True)
+    (root / "invariant-docs" / "architecture").mkdir(parents=True)
     monkeypatch.chdir(root)
     assert main(["init", "--name", "demo"]) == 0
     return root

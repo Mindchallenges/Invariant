@@ -34,7 +34,13 @@ from ..core.stores import (
     link_repo,
     write_store_settings,
 )
-from ..domains.docs import Assessment, plan_deliverables, setting_lines
+from ..domains.docs import (
+    STARTER_SRCDIR,
+    Assessment,
+    plan_deliverables,
+    refused_srcdir,
+    setting_lines,
+)
 from ..domains.session import Session
 from .prompts import Prompter
 
@@ -158,23 +164,43 @@ def describe(directory: Path, spelled: str) -> str:
     return f"paths.docs, {spelled}, exists and holds {len(entries)} file(s): {shown}{more}."
 
 
-def _relative(prompter: Prompter, question: str, default: str, within: str) -> str:
-    """A path inside ``within``, asked until one is given."""
+def _relative(
+    prompter: Prompter, question: str, default: str, within: str, *, new_project: bool = False
+) -> str:
+    """A path inside ``within``, asked until one is given. For a new project,
+    a path that would put the docs project in a content folder is asked
+    again too (ADR-020 D8)."""
     while True:
         answer = prompter.ask(question, default)
         spelled = project_relative(answer) if answer else None
-        if spelled and spelled != "." and not Path(answer).is_absolute():
+        if not spelled or spelled == "." or Path(answer).is_absolute():
+            prompter.say(f"{answer!r} is not a path inside {within}: no '..', not absolute.")
+            continue
+        folder = refused_srcdir(spelled) if new_project else None
+        if folder is None:
             return spelled
-        prompter.say(f"{answer!r} is not a path inside {within}: no '..', not absolute.")
+        prompter.say(
+            f"{answer!r} would put invariant's docs project in {folder}/, a folder a "
+            f"documentation repository keeps its own content in. A new project's docs "
+            f"project goes in {STARTER_SRCDIR}/ or another folder only invariant owns "
+            f"(ADR-020 D8)."
+        )
 
 
 def offer_location(
-    prompter: Prompter, root: Path, docs: str, store_refusal: str | None
+    prompter: Prompter,
+    root: Path,
+    docs: str,
+    store_refusal: str | None,
+    *,
+    new_project: bool = False,
 ) -> DocsChoice:
     """D4.1: reuse the existing `paths.docs`, another repo path, or a store.
 
     ``store_refusal`` says why no store can be offered here, and the offer
-    leaves it out, saying so.
+    leaves it out, saying so. For a ``new_project``, a path whose docs project
+    would be a content folder is refused and asked again (ADR-020 D8); an
+    existing project keeps the location it has.
     """
     prompter.say(describe(root / docs, docs))
     options = [option for option in LOCATIONS if option[0] != "store" or not store_refusal]
@@ -182,7 +208,13 @@ def offer_location(
         prompter.say(f"A store is not offered: {store_refusal}")
     kind = prompter.choose("Where should invariant's architecture docs live?", options, "reuse")
     if kind == "path":
-        chosen = _relative(prompter, "paths.docs, relative to the repository", docs, "the repository")
+        chosen = _relative(
+            prompter,
+            "paths.docs, relative to the repository",
+            docs,
+            "the repository",
+            new_project=new_project,
+        )
         return DocsChoice("reuse", docs) if chosen == docs else DocsChoice("path", chosen)
     if kind == "store":
         store = prompter.ask(
@@ -190,7 +222,9 @@ def offer_location(
             "a store links it, any other creates one there)",
             "",
         )
-        chosen = _relative(prompter, "paths.docs, relative to the store", docs, "the store")
+        chosen = _relative(
+            prompter, "paths.docs, relative to the store", docs, "the store", new_project=new_project
+        )
         return DocsChoice("store", chosen, store)
     return DocsChoice("reuse", docs)
 

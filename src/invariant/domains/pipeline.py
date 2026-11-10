@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import get_adapter
+from ..core import needs
 from ..core.errors import (
     GateFailure,
     InvariantError,
@@ -1301,7 +1302,12 @@ class PipelineDomain:
         pipeline = self.require(session_id)
         selectors = [s for s in (selectors or ()) if s]
         ecosystem = ecosystem_of(self.manifest, selectors)
-        adapter = get_adapter(ecosystem)
+        # The docs project is never the content a run's notes describe
+        # (ADR-020 D8), so the adapter is told where the tree's is.
+        adapter = get_adapter(
+            ecosystem,
+            docs_srcdir=needs.srcdir_of(self.manifest, Path(cwd or self.manifest.root)),
+        )
         command_key = "test_one" if selectors else "test"
         extra = {}
         if selectors:

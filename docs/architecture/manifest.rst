@@ -313,9 +313,11 @@ Every default is the shipped catalogue, which changes no resolved value.
   the baseline whole, so it names every role.
 - **``srcdir``** is the docs project's source directory, read against the
   repository (or the store, under ``records.docs: store``; it is a docs path
-  key). Null is the default rule the ``sphinx`` adapter's detection uses: the
-  nearest directory at or above ``paths.docs`` holding a ``conf.py``, strictly
-  below the root.
+  key). Null is the default rule, ``core/needs.default_srcdir``: the nearest
+  directory at or above ``paths.docs`` holding a ``conf.py``, strictly below
+  the root. ``init`` writes it for a new project, ``invariant-docs`` (ADR-020
+  D8, built in its increment 1), and the ``sphinx`` adapter's detection skips
+  the directory it resolves to.
 - **``require_links``** and **``decision_statuses``** are what
   ``docs.needs_traceable`` holds a built ``needs.json`` to (state_model.md).
 
@@ -494,11 +496,17 @@ defaults do not move (:need:`DEC_ADR_020_D2`): an absent key still means
 changes is what ``init`` writes. Its default home becomes the store, and a
 fresh store project's block sets ``records`` explicitly, every data and
 policy record ``store`` and ``hooks`` and ``agents`` ``local``
-(:need:`DEC_ADR_020_D1`), with ``docs.needs.srcdir: invariant-docs`` and
-``paths.docs: invariant-docs/architecture`` in either home
-(:need:`DEC_ADR_020_D8`). The configuration is in the repository only while
+(:need:`DEC_ADR_020_D1`). The configuration is in the repository only while
 every record is; ``store migrate`` moves everything together
 (:need:`DEC_ADR_020_D3`).
+
+**Built (ADR-020 increment 1, :need:`DEC_ADR_020_D8`).** A new project's
+``init`` writes ``docs.needs.srcdir: invariant-docs`` and ``paths.docs:
+invariant-docs/architecture`` explicitly, in the in-repo manifest or in the
+store's block for the repository, so neither load-time default moves. A
+``paths.docs`` whose source directory would be a content folder (``docs``,
+``doc``, ``source``, ``docs/source``, ``doc/source``) is refused for a new
+project at ``init``'s location offer, never at load.
 
 The store a ``store`` record is read against is the one ``Manifest.locate``
 found for the project ("Finding the project", below). An in-repo project
@@ -2317,17 +2325,16 @@ measure.
 
 - **Detection.** A ``conf.py`` at the root or under ``docs/``, ``doc/`` or ``source/``
   (each also one ``source/`` deeper). The docs project's source directory is
-  skipped (ADR-018 D3): the nearest directory at or above ``paths.docs`` that
-  holds a ``conf.py``, never the repository root itself, because a root
-  ``conf.py`` is a documentation repository's own content and the starter puts
-  the docs project at ``docs/``. Detection reads that rule against the default
-  ``paths.docs``, ``docs/architecture``: an adapter is handed the root alone, so
-  a configured ``paths.docs`` or ``docs.needs.srcdir`` (ADR-018 increment 3,
-  whose default this rule is) does not reach it. So a Python project whose only Sphinx tree is a
-  starter-shaped ``docs/conf.py`` is ``python``, not ``sphinx``, and a
-  documentation repository keeping its content at ``docs/`` is detected only
-  by ``init --ecosystem sphinx``. Two remaining trees are not guessed between:
-  ``init`` writes no ``srcdir`` and its report names both.
+  skipped, as the engine resolved it (``docs.needs.srcdir``, or its default
+  rule) and handed it to the adapter when it was made (``docs_srcdir``,
+  ADR-020 D8, built in its increment 1); an adapter told nothing skips
+  nothing, never a fixed ``docs/``. ``init`` tells it a new project's
+  ``invariant-docs/``, and an existing project's own. So a Python project
+  whose only Sphinx tree is its starter-shaped docs project at ``docs/`` is
+  ``python``, not ``sphinx``, and a documentation repository keeping its
+  content at ``docs/`` is detected as ``sphinx``, its docs project beside it
+  in ``invariant-docs/`` (BUG_118's second cause). Two remaining trees are not
+  guessed between: ``init`` writes no ``srcdir`` and its report names both.
 - **Commands.** ``-E`` re-reads every source, because an incremental build
   validates nothing it skips; ``-W`` turns a warning into a failure; ``-n`` is
   nitpicky; ``--keep-going`` reports every warning before failing. A failed

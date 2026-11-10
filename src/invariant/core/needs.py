@@ -277,22 +277,36 @@ def parse_link_rules(raw: Iterable[Mapping[str, Any]]) -> tuple[LinkRule, ...]:
 # -- the source directory (D3) --------------------------------------------------
 
 
+def default_srcdir(base: Path, docs: str) -> Path | None:
+    """The default of ``docs.needs.srcdir`` (ADR-018 D3, as built in its
+    increment 2): the nearest directory at or above ``base / docs`` that holds
+    a ``conf.py``, strictly below ``base``, or ``None``.
+
+    ``base`` itself is never the docs project's: a ``conf.py`` there is a
+    documentation repository's own content (ADR-015 D1), which ruling 18 of
+    ADR-018 keeps apart from the docs project.
+    """
+    base = Path(base)
+    current = base / docs
+    while current != base and base in current.parents:
+        if (current / "conf.py").is_file():
+            return current
+        current = current.parent
+    return None
+
+
 def resolve_srcdir(base: Path, configured: str | None, docs: str | None) -> Path | None:
     """The docs project's source directory under ``base``, or ``None``.
 
     ``configured`` (``docs.needs.srcdir``) wins, read against ``base`` unless
-    absolute. Otherwise the increment-2 rule (ADR-018 D3, as built): the
-    nearest directory at or above ``base / docs`` holding a ``conf.py``,
-    strictly below ``base``.
+    absolute. Otherwise :func:`default_srcdir` against ``docs``.
     """
-    from ..adapters.sphinx import docs_project_srcdir  # local: adapters import core
-
     base = Path(base)
     if configured is not None:
         return (base / configured).resolve()
     if docs is None:
         return None
-    found = docs_project_srcdir(base, docs)
+    found = default_srcdir(base, docs)
     return None if found is None else found.resolve()
 
 

@@ -45,11 +45,11 @@ def available() -> list[str]:
     return sorted(_REGISTRY)
 
 
-def get_adapter(ecosystem: str) -> Adapter:
-    cls = _REGISTRY.get(ecosystem)
-    if cls is None:
-        return Adapter()
-    return cls()
+def get_adapter(ecosystem: str, *, docs_srcdir: Path | None = None) -> Adapter:
+    """The adapter for ``ecosystem``, ``generic`` for one the library does not
+    know. ``docs_srcdir`` is the docs project's resolved source directory,
+    which is never the project's content (ADR-020 D8)."""
+    return _REGISTRY.get(ecosystem, Adapter)(docs_srcdir=docs_srcdir)
 
 
 def defaults_for(ecosystem: str) -> dict[str, Any]:
@@ -57,10 +57,15 @@ def defaults_for(ecosystem: str) -> dict[str, Any]:
     return dict(getattr(cls, "manifest_defaults", {})) if cls else {}
 
 
-def detect(root: Path) -> list[str]:
-    """Ecosystems whose marker files are present. Ordered, deduped."""
+def detect(root: Path, *, docs_srcdir: Path | None = None) -> list[str]:
+    """Ecosystems whose marker files are present. Ordered, deduped.
+
+    ``docs_srcdir`` is the docs project's resolved source directory, handed
+    to each adapter so that invariant's own docs project is never detected as
+    the project's content (ADR-020 D8)."""
     found: list[str] = []
     for name in ("swift_xcode", "python", "node", "flutter", "dart", "sphinx"):
-        if _REGISTRY[name]().detect(Path(root)) and name not in found:
+        adapter = _REGISTRY[name](docs_srcdir=docs_srcdir)
+        if adapter.detect(Path(root)) and name not in found:
             found.append(name)
     return found or ["generic"]
