@@ -11217,7 +11217,7 @@ is a decision need, linked by id.
 
    **Workaround:** ``invariant init --ecosystem sphinx``.
 
-   **Related:** :need:`DEC_ADR_018_D13` (documentation repositories: invariant's docs project in the store by default, ``records.docs: store``), scheduled for ADR-018 increment 8. That init does not offer to keep invariant's docs project outside such a repository is D13's work and NOT part of this bug, but the two should be built together: once D13's store default holds, ``docs/`` is no longer invariant's docs project in such a repository, which is what cause 2 needs to stop skipping it. :need:`BUG_114 <BUG_114>` is a different defect (the generic adapter's docs area in the assessment). :need:`IDEA_041 <IDEA_041>` is the umbrella for documentation repositories getting gates.
+   **Related:** :need:`DEC_ADR_020_D8` (2026-11-10: a new project's docs project moves to ``invariant-docs/`` and the sphinx adapter skips the resolved ``docs.needs.srcdir``, which removes cause 2 once ADR-020 increment 1 lands; cause 1 stays this bug's), :need:`DEC_ADR_018_D13` (documentation repositories: invariant's docs project in the store by default, ``records.docs: store``), scheduled for ADR-018 increment 8. That init does not offer to keep invariant's docs project outside such a repository is D13's work and NOT part of this bug, but the two should be built together: once D13's store default holds, ``docs/`` is no longer invariant's docs project in such a repository, which is what cause 2 needs to stop skipping it. :need:`BUG_114 <BUG_114>` is a different defect (the generic adapter's docs area in the assessment). :need:`IDEA_041 <IDEA_041>` is the umbrella for documentation repositories getting gates.
 
    **Fix sketch / next step:** Run ``bug-reproducer`` first: two red tests on toy repositories in the adapter tests, (a) root ``conf.py`` plus a Sphinx-only ``pyproject.toml`` asserting ``detect()`` puts ``sphinx`` first, (b) ``docs/conf.py`` asserting ``sphinx`` is detected. The fix is a design call for ``feature-architect`` alongside ADR-018 increment 8: whether a detected Sphinx content tree outranks a Python packaging file (for example when the package declares no importable source beyond Sphinx dependencies, or the ``conf.py`` loads ``sphinx_needs``), and how the skip of the docs project's source directory is resolved against D13's store default rather than the default ``paths.docs``. A second ``conf.py`` still asks rather than guesses (ADR-015 D1).
 
@@ -14432,6 +14432,8 @@ is a decision need, linked by id.
 
    **Context:** Adopting invariant commits its files to the repository it governs: the manifest and host assets under ``.claude/``, and docs and backlog under the configured paths. That is wrong for a repository whose content must stay its own. The user wants invariant on four cloned git repositories that are themselves documentation projects (Sphinx, sphinx-needs), with invariant's own documents kept out of them entirely.
 
+   **Status 2026-11-10: the store is init's default.** The user directed that the store becomes ``init``'s default home for a project's configuration and records, and that committing the configuration into the repository is the opt-in for sharing it (teammates, CI, pull-request review); sharing moves everything, one home at a time. The rulings and the design are :need:`DEC_ADR_020`: :need:`DEC_ADR_020_D1` the default, :need:`DEC_ADR_020_D3` sharing by ``store migrate`` and back, :need:`DEC_ADR_020_D8` invariant's docs project in ``invariant-docs/`` for new projects (removing :need:`BUG_118 <BUG_118>`'s second cause), :need:`DEC_ADR_020_D9` hooks and agents installed only when the user says so, per project, locally in a store project (nothing at user level; this amends ADR-014 D11 and its increment 3), and :need:`DEC_ADR_020_D7` the order: the switch lands after ADR-014's increments 3 to 7. invariant and Heap keep their in-repo layout as their choice to share (:need:`DEC_ADR_020_D2`). :need:`IDEA_048 <IDEA_048>` (a git-ignored ``.claude/``) is merged into this item: the store covers keeping the configuration out of git (:need:`DEC_ADR_020_D6`). The Proposal below is the original filing; where it says "opt in", ADR-020 supersedes it.
+
    **Proposal:** opt in per project to keep its invariant records in a store under ``~/.invariant``, the way a host keeps per-project data under its own home directory. invariant and Heap keep their in-repo layout.
 
    - One folder per project under ``~/.invariant`` (which already holds ``projects.json`` and oracle state), keyed on repo identity, because a path key breaks when the repo moves.
@@ -14492,7 +14494,7 @@ is a decision need, linked by id.
 
    **Why now / why this tier:** The user prioritised this as the next work, to adopt invariant on the four repos. Tier 3 because it redefines where a project's records live across manifest, hosts, gates and landing: effort XL and multi-phase.
 
-   **Related:** ADR-014 (the store, being drafted), ADR-015 and IDEA_041 (docs-repo gates, same adopters), ADR-011 and BUG_040 (cross-project recording), ADR-013 (per-ecosystem commands; the Sphinx build is now IDEA_041's adapter), BUG_032, BUG_072 (exempt stores), installation.md ("Several projects, one machine"), overview.md ("Where things live at rest"), manifest.md ("Declared stores are writable stores", "Resolution order"), state_model.md ("Attribution"), oracle.md (``ProjectIndex``).
+   **Related:** :need:`DEC_ADR_020` (the store as init's default, sharing by commit), :need:`IDEA_048 <IDEA_048>` (merged here), ADR-014 (the store, being drafted), ADR-015 and IDEA_041 (docs-repo gates, same adopters), ADR-011 and BUG_040 (cross-project recording), ADR-013 (per-ecosystem commands; the Sphinx build is now IDEA_041's adapter), BUG_032, BUG_072 (exempt stores), installation.md ("Several projects, one machine"), overview.md ("Where things live at rest"), manifest.md ("Declared stores are writable stores", "Resolution order"), state_model.md ("Attribution"), oracle.md (``ProjectIndex``).
 
 .. idea:: Docs repositories get gates: a Sphinx adapter, commands derived from CI
    :id: IDEA_041
@@ -14834,11 +14836,13 @@ is a decision need, linked by id.
 
 .. idea:: An in-repo project can keep .claude/ machine-local and out of git
    :id: IDEA_048
-   :status: proposed
+   :status: dropped
    :priority: medium
    :effort: L
    :tier: 5
    :area: core/manifest, domains/session, cli (init, doctor), hosts/claude_code
+
+   **Dropped 2026-11-10:** merged into :need:`IDEA_040 <IDEA_040>` by the user's direction. The store, now ``init``'s default home, keeps a project's configuration out of git, so no git-ignored ``.claude/`` mode is built (:need:`DEC_ADR_020_D6`). The body below is kept as filed.
 
    **Context:** An in-repo project must commit ``.claude/invariant.yaml``, and in practice the rest of ``.claude/`` with it. Some users want that directory kept local, out of git entirely, and invariant does not allow it. Every session runs in its own git worktree (``session isolate``), and a worktree holds only committed files. An untracked or git-ignored manifest is therefore absent there, and ``Manifest.locate`` finds no project. Some commands also refuse outright until the manifest is committed: ``docs assess --plan`` is refused "until the base carries the manifest: in an in-repo project, ``.claude/invariant.yaml`` committed at HEAD" (:need:`COMP_CMD_SETUP`).
 
@@ -14879,3 +14883,9 @@ is a decision need, linked by id.
    **Why now / why this tier:** Medium value. It removes a hard adoption blocker for users who will not commit tool config, and it is far smaller than the home store. Effort L, because it crosses init, isolate, the base-branch readers, doctor and the host assets. Tier 5: distinctive but not on the frozen critical path, and IDEA_040 remains the route for repositories that must carry nothing at all.
 
    **Related:** :need:`IDEA_040 <IDEA_040>` and ADR-014 (the heavier route: records in a home store, nothing in the repo). :need:`BUG_116 <BUG_116>` (init's ``.gitignore`` line names the wrong state root; this idea writes another ``.gitignore`` line in the same code, so it should build on the fix). :need:`BUG_063 <BUG_063>` (``session merge`` reads ``privacy.allow`` from the manifest the merge replaces; same reader). :need:`BUG_032 <BUG_032>` and :need:`BUG_072 <BUG_072>` (exempt stores under isolation).
+
+   .. invariant-history:
+      - from: proposed
+        to: dropped
+        reason: 'Merged into IDEA_040 (2026-11-10, user''s direction): the store, init''s default home under ADR-020, keeps the configuration out of git (DEC_ADR_020_D6)'
+        forced: false

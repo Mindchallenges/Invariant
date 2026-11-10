@@ -3402,7 +3402,9 @@ per repository:
      config.yaml               the user level of the config, when written:
                                defaults, repos, store_naming (ADR-014 D3)
      linked-repos.txt          every linked identity and local ID, one per
-                               line, for a user-level hook shim (ADR-014 D11)
+                               line, written for ADR-014 D11's user-level hook
+                               shim, which ADR-020 D9 replaced; removed with
+                               ADR-014 increment 3
      stores/<name>/            a store, a git repository, when created by
                                `store init` without a path (ADR-014 D2)
      projects.json             the oracle's project index; one entry per state root
@@ -3440,12 +3442,34 @@ every project's own settings, in-repo projects included, and are named by
 ``config show`` and ``doctor``; its ``repos`` map takes a repo's identity to its
 store. ``invariant store init`` and ``store link`` write it, with the index
 ``linked-repos.txt`` beside it. The state root does not move: runtime state
-stays in the repo's git common directory. In-repo stays the default, and an
-in-repo project resolves as before. ``core/home`` resolves the home for the
-manifest and the oracle alike.
+stays in the repo's git common directory. In-repo stays ``init``'s default
+until ADR-020's switch lands (below), and an in-repo project resolves as
+before. ``core/home`` resolves the home for the manifest and the oracle
+alike.
 
-**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>`).** The home gains ``host/<host>/``, the
-user-level host wiring (D11, increment 3).
+**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D11, amended by
+:need:`DEC_ADR_020_D9`).** Nothing of a host is ever installed in the home.
+Hooks and agents are installed only when the user says so, per project:
+committed under ``.claude/`` (``records.hooks``/``agents: repo``, the tree
+above), or, ``local``, in the same ``.claude/`` with the hook entries in
+``settings.local.json`` and every path listed in ``.git/info/exclude``, so
+nothing is committed and the shared ``.gitignore`` is untouched (increment
+3).
+
+**Accepted, not yet built (:need:`ADR-020 <DEC_ADR_020>`).** The store
+becomes ``init``'s default home for a project's configuration and records
+(:need:`DEC_ADR_020_D1`): a fresh ``init`` in a git repository makes a store
+project with every record in the store, commits nothing and edits no
+``.gitignore``; its hooks and agents exist only if the user chose to install
+them, locally (:need:`DEC_ADR_020_D9`). The ``<project>/`` tree above is then
+the in-repo layout a project opts into to share its configuration through
+the repository (teammates, CI, pull-request review). The two homes are
+exclusive, and ``store migrate`` moves everything between them
+(:need:`DEC_ADR_020_D3`). A new project's docs project is ``invariant-docs/``,
+at the repository root or the store root, never ``docs/``
+(:need:`DEC_ADR_020_D8`); invariant itself keeps ``docs/``. Existing projects,
+invariant and Heap among them, are unchanged (:need:`DEC_ADR_020_D2`). The
+switch lands after ADR-014's increments 3 to 7 (:need:`DEC_ADR_020_D7`).
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between

@@ -322,6 +322,42 @@ Setup
        non-interactive report, 2 the interactive core, 3 builds the scripted
        flags, and 4 the advanced step and the catalogue at the levels.
 
+       Accepted, not yet built (ADR-020 D1, D4, D8, D9; its switch increment,
+       after ADR-014 increments 3 to 7). The store becomes init's default
+       home. A new first core section, `home`, asks `home:location`: `store`
+       (the default: a store on this machine, created at ADR-014 D2's
+       default path or linked where the path holds one; nothing of
+       invariant's is committed) or `repo` (the in-repo layout above, chosen
+       to share the configuration with teammates, CI and pull-request
+       review). Under `store`, init writes a store project: the
+       configuration in the store, `records` set to `store` for every data
+       and policy record and `local` for `hooks` and `agents`, and the docs
+       starter in the store; it commits nothing and writes no .gitignore
+       line. The level question then offers `user`, `store` and
+       `store-repo`, default `store-repo`. Outside a git repository, or below
+       its top level, `store` is not offered and the home is `repo`; in a
+       documentation repository whose root conf.py would read
+       invariant-docs/ without excluding it, `repo` is not offered; either
+       is said on the report's `home` row. The default holds in every mode:
+       a non-interactive init with no flags writes the store project, and
+       `--home repo` (or `--set home:location=repo`) the in-repo layout;
+       `--store <path>` answers the store step. In either home a new
+       project's docs project is `invariant-docs/` (`docs.needs.srcdir:
+       invariant-docs`, `paths.docs: invariant-docs/architecture`, written
+       explicitly), never docs/, doc/, source/ or docs/source (ADR-020 D8).
+       Last, `host:install` asks whether to install invariant's hooks and
+       agents in this project, default no in every mode (ADR-020 D9);
+       `--host-install` answers yes. Yes wires `repo` (committed, as above)
+       or `local`: `.claude/settings.local.json`, `.claude/hooks/` and
+       `.claude/agents/`, each listed in `.git/info/exclude`, with a receipt
+       in the state root. Nothing is ever installed at user level. The
+       configuration report opens with a `home` row, names the other route
+       (`init --home repo`, later `store migrate --to repo`) and, with no
+       install, `invariant hooks install` and `invariant agents install`;
+       `--json` carries `home`: {"location", "store", "reason"}. Until the
+       switch, the in-repo layout stays init's default and init installs
+       as before.
+
        Built (ADR-018 D10, D11, increment 4): the docs starter. `init`,
        interactive or not, writes a sphinx-needs docs project wherever
        `paths.docs` / `records.docs` resolves (the Markdown `overview.md` is
@@ -428,9 +464,26 @@ Setup
        offering `invariant store link --update`.
 
        Accepted, not yet built. ADR-014 D8 names an active
-       `privacy.store.scan` exception; D11 adds rows for the user-level install
-       (`permissions.additionalDirectories` and the install receipt). Increment
-       3 builds the D11 rows and increment 6 the D8 row.
+       `privacy.store.scan` exception; D11, as amended by ADR-020 D9, adds a
+       `host wiring` row: where the project is wired (`repo`, `local` or
+       not installed, which passes, naming `hooks install` and `agents
+       install`), failing on a receipt entry missing from the files or a
+       `local` path missing from .git/info/exclude. Increment 3 builds the
+       D11 row and increment 6 the D8 row.
+       ADR-020 D5 adds `config home`, which informs and never fails: the
+       in-repo manifest, committed and shared; or the store, its path, that
+       a fresh clone or CI is unconfigured until it links the store, "this
+       machine only" with no store remote, and `store migrate --to repo` as
+       the way to share. It warns on an in-repo manifest that is untracked
+       or git-ignored (no session worktree holds it; `store migrate --to
+       store` keeps the configuration out of git, ADR-020 D6) and on two
+       homes, an in-repo manifest beside a user-level link or a store
+       listing the repository, naming the one `Manifest.locate` uses.
+       ADR-020 D5 also adds `docs folder`, present only in a documentation
+       repository whose own conf.py would read invariant-docs/: it passes
+       when that conf.py excludes the folder, and otherwise warns, naming
+       the exact exclude_patterns line to add (invariant never edits it)
+       and that the docs stay in the store until then.
        ADR-015 D2 makes the command rows follow the lanes the project's sessions
        can run: a command is required when a selectable lane carries a gate that
        runs it, each row names that lane and gate, and `commands.build`, which no
@@ -785,8 +838,9 @@ Setup
        Link the repository to the store at PATH from the user level: the
        repos: entry in ~/.invariant/config.yaml, the repository's invariant.id
        in its local git config (written even when it has a remote, D4), and
-       the linked-identity index ~/.invariant/linked-repos.txt, which a
-       user-level hook shim reads (D11). Nothing is written to the repository's
+       the linked-identity index ~/.invariant/linked-repos.txt, written for
+       D11's user-level hook shim (ADR-020 D9 replaces that shim, and
+       increment 3 removes the index). Nothing is written to the repository's
        tracked files, and the other keys of the user config are kept. Refused,
        writing nothing to the user level, when the store does not list the
        repository under store.repos (the refusal names the line to add) or the
@@ -799,7 +853,31 @@ Setup
        identity and its source, the store, the level that named it and the
        records it holds; exit 1 otherwise, saying why (an in-repo project, no
        project, a refused link). --quiet prints nothing and only answers: the
-       guard a user-level agent runs first (D11).
+       guard a user-level agent was to run first (D11; with ADR-020 D9 no
+       agent is installed at user level, and it stays a status query).
+
+   invariant store migrate --to repo|store [--records <type>,...] [--store <path>]
+       Accepted, not yet built (ADR-014 D12, increment 7, with ADR-020 D3).
+       Move a project's records between the repository and a store, with
+       their history, as its own session lane landed through ADR-014 D6. The
+       configuration has one home, and it is in the repository only while
+       every record is: `--to repo` with no subset moves everything (the
+       configuration, docs, backlog, memory and the rest), writing
+       .claude/invariant.yaml with the keys the store's level and this
+       repository's block set, so `config show` resolves the same values,
+       then removes the repository from the store and the user-level link;
+       that is how a project shares its configuration. `--to store` always
+       moves the configuration, writing the repository's block and linking
+       it. invariant-docs/ has the same relative path in both homes, so the
+       docs move is a plain move. Installed host wiring converts between
+       `local` and `repo`. Refused, exit 2, with nothing written: outside a
+       project or below the top level; a store behind or diverged;
+       uncommitted changes or another session's docs-lock unit on a path it
+       would change; `--to repo` in an in-repo project, over any existing
+       target path, or in a documentation repository whose root conf.py
+       would read invariant-docs/ without excluding it (naming the line);
+       `--to store` in a store project, with .claude/invariant.yaml
+       uncommitted at HEAD, or into a store already listing the repository.
 
    invariant docs assess [--json]
        Print the assessment of the architecture docs (ADR-016 D1 to D3,

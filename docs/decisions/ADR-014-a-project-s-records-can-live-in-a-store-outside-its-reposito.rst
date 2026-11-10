@@ -18,6 +18,14 @@ ADR-014 — A project's records can live in a store outside its repository
      widens D9's interim refusal to ``guidelines.baseline`` (D9), and reads
      ``store_naming`` from the user level only (D2): a store's own setting has
      nothing to read it, since the store does not exist when its name is chosen.
+   - **Amended 2026-11-10 by** :need:`ADR-020 <DEC_ADR_020>`, ruled by the
+     user. The store becomes ``init``'s default home (ADR-020 D1), which
+     amends ruling 1's "In-repo stays the default" as init's default only;
+     the load-time defaults do not move. Ruling 17's user-level wiring is
+     replaced: nothing is installed at user level, ``init`` asks per project,
+     and a store project is wired locally (ADR-020 D9). D1's ``hooks`` and
+     ``agents`` locations, D11 and increment 3 below are amended in place to
+     that design, and D12 gains the configuration's move (ADR-020 D3).
    - **Date:** 2026-11-05
    - **Supersedes:** nothing. Amends ``docs/architecture/overview.md``
      ("Where things live at rest"), ``docs/architecture/manifest.md`` ("Resolution
@@ -165,7 +173,10 @@ Rulings (user, 2026-11-05)
 
 .. _adr-014-ruling-17:
 
-17. **Host wiring at user level (the draft's Q3 and Q4, same day).** ``invariant host install --scope user`` may edit the user's Claude Code settings (hooks
+17. **Host wiring at user level (the draft's Q3 and Q4, same day).
+    Replaced 2026-11-10 by ADR-020 ruling 8:** nothing is installed at user
+    level, and D11 is amended to a per-project install. The ruling as given:
+    ``invariant host install --scope user`` may edit the user's Claude Code settings (hooks
     and ``permissions.additionalDirectories``) and may install guarded
     user-level agents. ``invariant host uninstall --scope user`` removes exactly
     what was added, and nothing else. An in-repo project (invariant, Heap)
@@ -253,8 +264,12 @@ Decisions
         memory: store       # paths.memory, paths.memory_index
         reports: store      # paths.reports
         sweeps: store       # paths.sweeps
-        hooks: user         # repo | user: where the host adapter wires hooks (D11)
-        agents: user        # repo | user: where it installs agents (D11)
+        hooks: local        # repo | local: where the host adapter wires hooks (D11)
+        agents: local       # repo | local: where it installs agents (D11)
+
+   ``user`` for ``hooks`` and ``agents`` is retired by ADR-020 D9 (amended
+   2026-11-10): ``local`` is the project's own ``.claude/``, uncommitted and
+   hidden through ``.git/info/exclude``.
 
    - **The manifest is not a key.** Its location is answered by the config
      levels (D3): a project "moves its manifest" by having no repo level.
@@ -863,65 +878,64 @@ Decisions
      init, doctor and uninstall, ``cli/conformance``, ``hosts/claude_code`` uninstall)
      follow the loaded manifest's location (read).
 
-.. dec:: Hosts: a neutral seam; Claude Code wires from user level, first
+.. dec:: Hosts: a neutral seam; Claude Code wires each project locally, only when asked
    :id: DEC_ADR_014_D11
    :status: accepted
    :part_of: DEC_ADR_014
-   :affects: COMP_CORE_MANIFEST, COMP_MANIFEST_FILE
+   :affects: COMP_CORE_MANIFEST, COMP_MANIFEST_FILE, COMP_HOSTS_CLAUDE_CODE
+
+   **Amended 2026-11-10 by** :need:`DEC_ADR_020_D9` **(ADR-020 ruling 8).**
+   The user-level design this decision first held (ruling 17: a user-level
+   shim in the user's Claude Code settings, guarded user-level agents, a
+   linked-identity index) is replaced. Nothing is installed at user level.
+   ``init`` asks per project whether to install hooks and agents, default
+   no, and a store project is wired inside its own directory. The design
+   below is the amended one.
 
    ``core/manifest`` and the store know nothing about hosts (ruling 12). The host
-   adapter interface gains ``wiring_plan(scope)``, with scope ``repo`` or ``user``, read
-   from ``records.hooks`` and ``records.agents``. Each adapter decides what wiring
-   from outside the repo means for its host. Only ``hosts/`` writes host files, and
-   it reaches the engine only through the CLI, the rule BUG_010 recorded.
+   adapter interface gains ``wiring_plan(location)``, with location ``repo`` or
+   ``local``, read from ``records.hooks`` and ``records.agents``. Each adapter
+   decides what each location means for its host. Only ``hosts/`` writes host
+   files, and it reaches the engine only through the CLI, the rule BUG_010
+   recorded.
 
    **Claude Code, first:**
 
-   - **Hooks.** ``invariant host install --scope user`` adds six entries to the
-     user's settings. Each runs one shim, ``~/.invariant/host/claude_code/hook.sh <event>``. The shim walks up from ``$CLAUDE_PROJECT_DIR`` to the first ``.git``.
-     If that level has ``.claude/invariant.yaml``, it answers ``{}``, because the
-     repo's own shim fires there and an in-repo project must never fire twice
-     (ruling 17). It reads the identity (D4) and looks it up in a
-     plain-text index of linked identities, which ``store link`` keeps beside the
-     user config. If the identity is not there, or the level has no pointer, it
-     answers ``{}``. Only a linked repo reaches ``invariant hook``. Why each part:
+   - **``repo``** is today's committed wiring: ``.claude/settings.json``,
+     ``.claude/hooks/`` and ``.claude/agents/``. In-repo projects keep it.
+   - **``local``** wires the same project directory with nothing committed:
+     hook entries in ``.claude/settings.local.json`` (Claude Code's personal,
+     per-project settings file), shims in ``.claude/hooks/``, agents in
+     ``.claude/agents/``, each path added to ``.git/info/exclude``. That file
+     is in the git common directory: every worktree of the clone shares it,
+     a clone never copies it, and it is not tracked. The shared
+     ``.gitignore`` is never edited. The store's main checkout is added to
+     ``permissions.additionalDirectories`` in ``settings.local.json``.
+   - **One firing.** A project is wired in one place, its own ``.claude/``,
+     so no check against double firing is needed.
+   - **Worktrees.** ``session isolate`` renders the local wiring into a new
+     session worktree when the main checkout has it installed, through the
+     same install plan; the exclude lines already cover it.
+   - **Instructions.** Under ``records.agents: local`` the managed
+     guidelines block is not written into a tracked ``CLAUDE.md``. The
+     ``always`` rules reach the agent through the hook context.
+   - **Install and uninstall are exact inverses.** The install writes a
+     receipt, ``<state root>/host/claude_code/installed.json``, listing each
+     settings entry it added verbatim, each exclude line it added and each
+     agent file with its hash. Uninstall removes exactly the receipt's
+     entries and lines, leaving every other setting and exclude line as the
+     user has it. An agent file whose hash no longer matches was edited by
+     the user, so it is left in place and named. A second install adds
+     nothing already in the receipt. ``doctor`` reports a receipt entry
+     missing from the files, and a ``local`` path missing from
+     ``.git/info/exclude``.
+   - **The linked-identity index** (``~/.invariant/linked-repos.txt``)
+     existed for the user-level shim and has no reader under this design;
+     increment 3 removes it.
 
-     - Run: an unmodified ``invariant hook`` outside any project answers with a
-       visible "enforcement is OFF" context, and costs about 0.24 s. A bash walk
-       of the same shape cost about 26 ms.
-     - Run: Claude Code deduplicates identical hook commands only. The in-repo
-       check is what keeps invariant and Heap at one firing each.
-     - Run: ``CLAUDE_PROJECT_DIR`` is set for user-level hooks, and names the
-       worktree inside one.
-
-   - **Agents.** A Claude Code subagent is visible to the whole user or to one
-     project, with nothing in between. Ruled (17): render at user level with
-     a short guarded description, "only in a repository linked to an invariant
-     store", plus a first step that runs ``invariant store status --quiet`` and
-     stops if it fails. Move the long relay instructions (about 8.9k characters
-     across the four agents, measured) into the SessionStart context, which only
-     a linked repo receives. A repo's own agent of the same name still wins
-     (documented host behaviour, read, not run), so in invariant and Heap only
-     their own agents answer; increment 3 runs this. The alternative, a plugin passed
-     at launch, was run: it namespaces the names (``invprobe:probe-architect``), and
-     a plain ``claude`` would then have the gates and no agents. That is rejected
-     as the only route.
-   - **Permissions and instructions.** The store's main checkout sits outside
-     the project directory. ``host install --scope user`` adds it to
-     ``permissions.additionalDirectories`` (ruling 17), and ``doctor`` checks it
-     (reasoned). Under ``records.agents: user`` the managed guidelines block is not written into the repo's
-     ``CLAUDE.md``. The ``always`` rules reach the agent through the hook context.
-   - **Install and uninstall are exact inverses** (ruling 17). ``host install --scope user`` is the only command that edits the user's Claude Code
-     settings, and it changes only the hook entries, the
-     ``additionalDirectories`` entries and the agent files named above.
-     *Recommended:* it writes a receipt beside the shim,
-     ``~/.invariant/host/claude_code/installed.json``, listing each settings entry
-     it added verbatim and each agent file with its hash. ``uninstall --scope user`` removes exactly the receipt's entries, leaving every other setting as
-     the user has it. An agent file whose hash no longer matches was edited by
-     the user, so it is left in place and named, not deleted. A second install
-     adds nothing already in the receipt. ``doctor`` reports a receipt entry that
-     is missing from the settings, or a settings entry pointing at the shim that
-     the receipt does not list.
+   Run on 2026-11-05 for the replaced design and still true: Claude Code
+   deduplicates identical hook commands only, and ``CLAUDE_PROJECT_DIR`` names
+   the worktree inside one. The local design has not been run.
 
 .. dec:: Migration: one command each way, history kept
    :id: DEC_ADR_014_D12
@@ -978,20 +992,23 @@ after increment 2.
 |           |                                 | the repo sets winning over |
 |           |                                 | it.                        |
 +-----------+---------------------------------+----------------------------+
-| 3         | D11 for Claude Code: user-level | A real session in that     |
-|           | shim, guarded agents,           | repo. invariant and Heap   |
-|           | permissions, the install        | each firing once, and      |
-|           | receipt, doctor rows.           | answered by their own      |
-|           |                                 | agents only. An unlinked   |
-|           |                                 | repo with empty output.    |
-|           |                                 | ``uninstall --scope user`` |
-|           |                                 | after                      |
-|           |                                 | ``install --scope user``   |
-|           |                                 | leaving the user's         |
-|           |                                 | settings byte for byte as  |
-|           |                                 | before, and an agent file  |
-|           |                                 | edited after install left  |
-|           |                                 | in place and named.        |
+| 3         | D11 for Claude Code, as amended | In a store project with    |
+|           | by ADR-020 D9 (2026-11-10):     | ``local`` wiring:          |
+|           | ``records.hooks`` / ``agents``  | ``git status`` empty after |
+|           | ``local`` (``user`` retired),   | install; a host in the     |
+|           | ``.claude/settings.local.json``,| main checkout and one in a |
+|           | shims and agents under          | session worktree each      |
+|           | ``.claude/``, the               | firing once. Uninstall     |
+|           | ``.git/info/exclude`` lines,    | leaving                    |
+|           | permissions, the install        | ``settings.local.json``    |
+|           | receipt, isolate rendering into | and ``.git/info/exclude``  |
+|           | worktrees, doctor rows;         | byte for byte as before,   |
+|           | ``linked-repos.txt`` removed.   | and an agent file edited   |
+|           |                                 | after install left in      |
+|           |                                 | place and named. A scratch |
+|           |                                 | ``HOME`` with no setting   |
+|           |                                 | written. invariant and     |
+|           |                                 | Heap unchanged.            |
 +-----------+---------------------------------+----------------------------+
 | 4         | D5 (legs, areas and per-file    | Two sessions on one store: |
 |           | units, the global order, the    | reading the same area, the |
@@ -1061,7 +1078,7 @@ after increment 2.
        RULES["core/rules: changed set per leg"] --> LOC
        RULES --> GIT
        ORACLE["oracle/index, scan, gates"] --> LOC
-       HOSTS["hosts/claude_code: wiring_plan(scope)"] --> CLI
+       HOSTS["hosts/claude_code: wiring_plan(repo or local)"] --> CLI
        STORE[("store: a git repository")] -. git hooks call .-> CLI
 
 Alternatives rejected
@@ -1108,6 +1125,11 @@ Alternatives rejected
 | Agents scoped to a launch only   | D11: a plain ``claude`` would    |
 |                                  | have the gates and no agents.    |
 +----------------------------------+----------------------------------+
+| User-level hooks, shim and       | Replaced 2026-11-10 by ADR-020   |
+| agents (this record's D11 as     | ruling 8: never install          |
+| first accepted)                  | globally; the user decides per   |
+|                                  | project.                         |
++----------------------------------+----------------------------------+
 | Pull in the SessionStart hook    | Its 15 seconds must never wait   |
 |                                  | on the network.                  |
 +----------------------------------+----------------------------------+
@@ -1124,11 +1146,15 @@ Consequences
 - An in-repo project resolves exactly as before, except for user defaults the
   user chooses to write, which sit below its own settings and are named by
   ``config show`` and ``doctor`` (D3, ruling 19).
-- A store project's repo carries nothing of invariant's, or only the pointer
-  if one is chosen. Its git directory carries the identity ID and the
-  runtime state, and neither is tracked.
-- Every Claude Code session on the machine runs a small shell walk per hook
-  event, and sees four short guarded agent descriptions. ``host uninstall --scope user`` takes all of it back out.
+- A store project's repo commits nothing of invariant's, or only the pointer
+  if one is chosen. Its git directory carries the identity ID, the runtime
+  state and, when the user installed the wiring, the exclude lines; none is
+  tracked.
+- Amended 2026-11-10 (ADR-020 D9): no Claude Code session outside a wired
+  project sees anything of invariant's. A project the user chose to wire
+  carries its hooks and agents in its own ``.claude/``, and uninstall takes
+  exactly those back out. (As first accepted, every session on the machine
+  ran a user-level shell walk per hook event.)
 - Sessions on one store take turns at each area of the docs: one reads,
   designs and writes an area at a time, sessions on different areas run side
   by side, and their code work runs in parallel afterwards. A session

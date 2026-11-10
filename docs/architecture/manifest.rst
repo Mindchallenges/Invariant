@@ -475,7 +475,11 @@ Refused at load, each with its reason, rather than loaded to do nothing:
 - a value outside the record's locations (``repo`` or ``store``; ``repo`` or
   ``user`` for ``hooks`` and ``agents``);
 - ``user`` for ``hooks`` or ``agents``, until D11 wires a host from outside the
-  repository (increment 3);
+  repository (increment 3). **Accepted, not yet built
+  (:need:`DEC_ADR_020_D9`):** D11 is amended, ``user`` is retired and the
+  locations of ``hooks`` and ``agents`` become ``repo`` or ``local`` (the
+  project's own ``.claude/``, uncommitted, listed in ``.git/info/exclude``);
+  ``local`` is refused until increment 3 builds it;
 - ``store`` for ``guidelines``, until the gates read each record from its own
   tree (D9, increment 4); otherwise a baseline left behind would make
   ``guidelines.baseline_only_shrinks`` admit every entry;
@@ -483,6 +487,18 @@ Refused at load, each with its reason, rather than loaded to do nothing:
 - ``items.exempt: false`` with ``records.backlog: store`` (D10): a backlog in a
   store is written in the store's main checkout, which no session branch
   reviews.
+
+**Accepted, not yet built (:need:`ADR-020 <DEC_ADR_020>`).** These load-time
+defaults do not move (:need:`DEC_ADR_020_D2`): an absent key still means
+``repo``, and ``paths.docs`` still defaults to ``docs/architecture``. What
+changes is what ``init`` writes. Its default home becomes the store, and a
+fresh store project's block sets ``records`` explicitly, every data and
+policy record ``store`` and ``hooks`` and ``agents`` ``local``
+(:need:`DEC_ADR_020_D1`), with ``docs.needs.srcdir: invariant-docs`` and
+``paths.docs: invariant-docs/architecture`` in either home
+(:need:`DEC_ADR_020_D8`). The configuration is in the repository only while
+every record is; ``store migrate`` moves everything together
+(:need:`DEC_ADR_020_D3`).
 
 The store a ``store`` record is read against is the one ``Manifest.locate``
 found for the project ("Finding the project", below). An in-repo project

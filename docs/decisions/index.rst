@@ -27,3 +27,4 @@ renumbered, and a superseded one stays, linked through ``supersedes``.
    ADR-017-init-asks-the-configuration-as-a-questionnaire-and-invariant
    ADR-018-architecture-and-design-live-only-in-a-strict-building-sphin
    ADR-019-dart-and-flutter-get-an-adapter
+   ADR-020-the-store-is-init-s-default-home-committing-the-configuratio
