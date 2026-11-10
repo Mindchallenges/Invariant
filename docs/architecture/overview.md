@@ -70,6 +70,7 @@ graph TD
         CSTORES["stores (ADR-014 D2)"]
         CDOCFMT["docformat (ADR-016 D1): markdown, rst"]
         CNEEDS["needs (ADR-018 D2, D3, D5, D6)"]
+        CMDCONV["mdconvert (ADR-018 D14)"]
         CQUEST["questionnaire (ADR-017 D1, D2)"]
     end
 
@@ -297,6 +298,9 @@ graph TD
     DOCSD -- "render_rule_needs, render_checklist: the starter's two generated pages" --> CGUIDE
     CLI -- "init: plan_starter, write_starter, sync_venv" --> DOCSD
     CLI -- "docs decision new: new_decision" --> DOCSD
+    CLI -- "docs migrate adr, prose: migrate_adr, migrate_prose" --> DOCSD
+    DOCSD -- "convert_adr, convert_prose: pandoc's tree rewritten, pandoc handed in" --> CMDCONV
+    WORKITEM -- "item migrate: srcdir_of, ITEMS_PAGE" --> CNEEDS
     DOCSD -. "all_rules: the starter ruleset's parse, imported at call time" .-> RULES
     RULES -- "docs.design_home, items.decisions_linked, docs.decisions_recorded: prefixes_of, cited_ids, latest_record" --> CNEEDS
     SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
@@ -513,6 +517,18 @@ so the rule stays there). `MANIFEST -.-> CNEEDS` is dotted for the reason
 `core/needs` reads `project_relative` back from the manifest
 (`CNEEDS -.-> MANIFEST`, also made at call time). Neither module imports the
 other at import time, so the pair is no import cycle.
+
+The migration (ADR-018 D14, increment 6) adds `CMDCONV`, `core/mdconvert`.
+`CLI --> DOCSD` gains `docs migrate adr` and `docs migrate prose`, and
+`DOCSD --> CMDCONV` is the conversion: the domain finds the pandoc that
+`pypandoc_binary` installs in the docs environment, as it finds that
+environment's `sphinx-build`, and hands it to `core/mdconvert` as a
+callable, with the `link(url)` callable that knows the docs project's
+pages. So the module itself runs nothing and reads no file. `item migrate`
+rides the existing `CLI --> WORKITEM` arrow, and the existing `WORKITEM -->
+ITEMS` now also carries `STORES`, the backends by name, and `differences`,
+the read-back. The new `WORKITEM --> CNEEDS` is the default target, the docs
+project's items page.
 
 `CONBOARD` is `cli/onboarding` (ADR-016 D4, D5, increment 2): `init`'s
 docs offers and the all-at-once plan, in the CLI layer because it joins
@@ -1586,6 +1602,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
 | `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); reStructuredText as `sphinx` (`RstReader`, ADR-018 increment 2): section titles under an underline, or between an overline and a matching underline, starting in the first column after a blank line unless an overline insets them, an adornment shorter than its title kept from four characters, as docutils keeps it; links from `:doc:` and `toctree` entries (`Link.document`: a document name without its suffix), `:download:`, the `include`, `literalinclude`, `image` and `figure` arguments, embedded hyperlink targets and target definitions, `:ref:` read as the label it is, not a file; literal blocks, code directives (`code-block`, `mermaid`, `math` and their kin), doctest blocks, inline literals and comments skipped; `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `rst_directives` (ADR-018 increment 4), each rST directive's name, argument, options and content, for the element needs; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
 | `needs` | The docs project's needs (ADR-018 increment 3): the seven roles and their default types, the item types' prefixes following `items.id_prefix` (`default_types`, `types_of`, `type_of_role`); what a need id is (`NEED_ID`, `is_need_id`) and the part after its prefix (`id_stem`, increment 4); the load check of `docs.needs.types` and `docs.needs.require_links` that `core/manifest` calls (`type_problems`, `link_rule_problems`); the docs project's source directory (`resolve_srcdir`, `srcdir_of`, against a session's tree when asked: `docs.needs.srcdir`, or the increment-2 rule of the `sphinx` adapter as its default); a built `needs.json` read (`parse_needs_json`, `load_needs_json`: sphinx-needs 8.x and 9.x write `versions`, the current version, `needs`; link options from `needs_schema`'s `field_type: links`, or the keys with a `_back` twin), each need's file and line; the check against the types, the required-link rules and `docs.needs.decision_statuses` (`check`, `Problem`), an external need held to nothing and a role with no needs no failure; counts by role and type (`classify`); the strict build's record (`BuildRecord`, `record_relpath`, `read_record`) keyed by the source tree's digest (`tree_digest`: every file's path and bytes, hidden directories and `_build` left out), and the last one recorded that kept a `needs.json` (`latest_record`, increment 5); for D8 and D9 (increment 5), the default refused homes (`DEFAULT_REFUSED_PATHS`), the prefixes of a set of roles' types (`prefixes_of`) and the need ids a text cites with one, whole tokens only (`cited_ids`) | Run a build or any command; parse rST; write the record (`domains/docs` does) |
+| `mdconvert` | Markdown converted to reStructuredText (ADR-018 D14, increment 6) through pandoc's JSON tree, pandoc handed in as a callable (`Pandoc`): the tree read (`-t json`), rewritten, and written (`-f json -t rst`); a link mapped by the caller's `link(url)` (`Target`) to `:need:` or `:doc:`, kept, or refused; raw HTML and a refused link leaving the smallest block holding it as `.. invariant-unconverted::` (`UNCONVERTED`) with its Markdown, an HTML comment kept as an rST comment, `mermaid` and `plantuml` blocks as their directives, section ids dropped; a prose page (`convert_prose`) and a decision record (`convert_adr`): the record need holding the metadata, its status and `amends`/`supersedes` read from it, each `D<k>` heading a need `part_of` it, deeper headings rubrics, each ruling under its `adr-<nnn>-ruling-<k>` label (`Converted`) | Run pandoc, read or write a file, decide what a link names (the caller's `link` does), or invent an element need |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 | `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9); judging an answer (increment 2): its kind read (`parse_answer`, `Refused`), its choices, path rule and command shape checked (`command_problem`, `command_problems`, the one shape check `doctor` reads, ruling 13) and the configuration it produces validated through a `Draft` of the levels; the nearest level that may hold an answer (`route`, D4); the write plan, changed answers only, the inherited value removing a key (`plan`, `Answer`, `LevelWrite`, `WritePlan`, D5, ruling 12) | Prompt for anything; write any level; run a command; import above `core` |
 
@@ -1618,6 +1635,11 @@ record and run nothing (the paragraph after the diagram's docs arrows).
 element-need areas and adoption's Markdown limits; `domains/guidelines`
 writing `rules.rst` from `core/guidelines`' pure `render_rule_needs`, and
 the ruleset load refusing two rule ids that give one need id.
+**Built (increment 6):** `core/mdconvert` (the row above); `domains/docs`'
+`migrate_adr` and `migrate_prose` (`docs migrate adr`, `docs migrate
+prose`), with the docs environment's pandoc; `domains/workitem`'s
+`migrate` (`item migrate`) over `core/items`' `STORES` and `differences`;
+and the `sphinx_needs` residue's escape, which makes it lossless.
 
 ### `domains/`
 
@@ -1663,6 +1685,11 @@ advance it. They are the only place where "what a session is" is encoded.
   D8, increment 5): a blocking verdict refuses the write, a warning is kept
   on `warnings` for the CLI to print, and `transition --force --reason`
   passes it.
+  It migrates (`migrate`, ADR-018 D14, increment 6): every item of the
+  store and its closed store moved into another backend's stores, made on
+  a staged copy and read back by `core/items.differences` before anything is
+  written; with a closed store named, an item in a terminal state of its
+  machine goes there. The source store and the manifest are not written.
 - **`guidelines`** — the effects of the project's guidelines ruleset (ADR-012
   D12). Not an FSM. Today it renders the human checklist and the managed
   `guidelines/index` block in each instruction file (`guidelines render`),
@@ -1719,7 +1746,12 @@ advance it. They are the only place where "what a session is" is encoded.
   (ADR-018 D7, increment 5) is its fourth write: `new_decision` mints the
   next record page under `<srcdir>/decisions/`, numbered past every page
   there (read by `core/docformat.rst_directives`), and lists it in
-  `decisions/index.rst`'s toctree. The starter (D11) also writes the
+  `decisions/index.rst`'s toctree. The migration (D14, increment 6) is its
+  fifth: `migrate_adr` and `migrate_prose` convert Markdown through
+  `core/mdconvert` with the pandoc of the docs environment (`pandoc_of`,
+  `pandoc_call`), refuse a spent record number or an existing page before
+  anything is written, and list each page in the nearest toctree; the
+  Markdown is never deleted. The starter (D11) also writes the
   guidelines ruleset with the mandate's two judgement rules where the
   project has none, parsing it against the rule registry through `core/rules`,
   imported at call time.

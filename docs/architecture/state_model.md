@@ -2021,8 +2021,10 @@ closed store in the same transition is the other half of IDEA_019. Its
 manifest key now exists: `items.closed_path`, unset by default so the markdown
 backend grows no archive, landed with BUG_074 (c), and today it is READ — id
 minting and `item new`'s explicit-id check both count the ids retired there
-(manifest.md, "The ids a store has spent, and the closed store"). Nothing
-writes it. Retiring on close stays deferred because none of what would make it
+(manifest.md, "The ids a store has spent, and the closed store"). No
+transition writes it; `item migrate --closed-path` (ADR-018 D14) fills a new
+one, once, with the items in a terminal state, reading each item's machine
+for which states those are. Retiring on close stays deferred because none of what would make it
 safe exists yet: a move touches two files, so it is not one atomic outcome
 without a recovery story for a write that lands in one and not the other; the
 closed file has its own layout, and placing an entry there is the placement

@@ -954,16 +954,56 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
                              and `session decisions add`. `--json` carries
                              `id`, `number`, `status`, `path`, `index` and
                              `dry_run`.
-    Accepted, not yet built (ADR-018 D14, increment 6). The `docs` group
-    gains:
-      docs migrate adr <files>, docs migrate prose <files>
-                             Markdown ADRs to record pages and Markdown
-                             architecture pages to rST, through pandoc in
-                             the docs environment, leaving an
-                             `.. invariant-unconverted::` directive, which
-                             fails the strict build, wherever conversion
-                             fails (increment 6).
-    This file gains their sections when they are built.
+    Built (ADR-018 D14, increment 6):
+      docs migrate adr <files>... [--from <reader>] [--dry-run]
+      docs migrate prose <files>... [--into <dir>] [--from <reader>] [--dry-run]
+                             Markdown into the docs project through the
+                             pandoc `pypandoc_binary==1.17` installs in
+                             `<srcdir>/.venv` (refused, naming that line and
+                             `invariant docs venv`, when the environment
+                             lacks it or is out of sync). pandoc reads the
+                             Markdown (`gfm` unless `--from` names another
+                             reader) into its tree, `core/mdconvert`
+                             rewrites it, and pandoc writes the rST. A link
+                             to another record's file becomes `:need:` to its
+                             record need; one to a page of the docs project
+                             (in the batch, or there already) becomes
+                             `:doc:`, its anchor dropped and said; an
+                             external URL stays. Raw HTML, an in-page
+                             anchor, and a link to anything else are not
+                             converted: the smallest block holding one is
+                             left as `.. invariant-unconverted:: <reason>`
+                             with its Markdown inside, which nothing
+                             registers, so the strict build fails on it. An
+                             HTML comment becomes an rST comment; a
+                             `mermaid` or `plantuml` block its directive.
+                             `adr`: each file becomes
+                             `<srcdir>/decisions/ADR-<nnn>-<slug>.rst`,
+                             keeping its number, the record a need
+                             (`DEC_ADR_<nnn>`, its status the first word of
+                             `Status:`, one of
+                             `docs.needs.decision_statuses`; `amends` and
+                             `supersedes` read from the metadata) holding
+                             the metadata list, each `D<k>` heading a need
+                             `DEC_ADR_<nnn>_D<k>` `part_of` it, and each
+                             ruling under a "Rulings" heading its own
+                             paragraph under `adr-<nnn>-ruling-<k>`; listed
+                             in `decisions/index.rst` in number order. A
+                             number already spent there, or carried by two
+                             files, is refused. `prose`: each file becomes
+                             its `.rst` beside it, or under `--into`, inside
+                             the docs project and never over a page, listed
+                             in the nearest `index.rst` at or above it. A
+                             page under `paths.docs` owes its element needs,
+                             which the converter never writes. Every file is
+                             converted before anything is written, so a
+                             refusal writes nothing; the Markdown is never
+                             deleted (the migration session does that).
+                             The output names, per page, the needs, each
+                             construct left unconverted, the notes and the
+                             index; `--json` carries `pages` (`source`,
+                             `path`, `needs`, `unconverted`, `notes`,
+                             `index`, `element_owed`) and `dry_run`.
     Built (D11, increment 4): `docs adopt` of Markdown docs is limited to
     copy mode into a migrating project, which the migration then converts
     (`docs adopt`, above).
@@ -1599,15 +1639,29 @@ invariant item transition <id> <status> [--reason <text>] [--force]
     in one command and one write (state_model.md, "An already-fixed bug
     closes through a ruling").
 invariant item residue <id> [--add <text> | --clear <text>]
+invariant item migrate --to markdown|json|sphinx_needs [--path <p>]
+                       [--closed-path <p>] [--dry-run]
 ```
 
 **Built (ADR-018 increment 1).** On `sphinx_needs`, `transition` persists
 its history rows in an `.. invariant-history:` comment block, so `show` reads
 them back on that backend too (BUG_073).
 
-**Accepted, not yet built (ADR-018).** `invariant item migrate --to
-sphinx_needs` moves every item, open and closed, with its id, fields, body
-and history, and writes nothing when a read-back differs (D14, increment 6).
+**Built (ADR-018 D14, increment 6).** `item migrate` moves every item, from
+the configured store and its closed store (`items.closed_path`), into the
+named backend, with its id, fields, residue, body and history. `--path` is
+the target store, which for `sphinx_needs` defaults to the docs project's
+`backlog.rst`. With `--closed-path`, an item in a terminal state of its
+machine goes there instead; a closed store no item goes to is not written.
+The move is made on a staged copy of the target and read back by a fresh
+backend. Every item must read back exactly (`core/items.differences`), or
+nothing is written and each difference is named by item and field. Items
+the target already holds are kept, and an id it holds is refused. The source
+store and the manifest are left alone. The output names the switch
+(`items.backend`, `items.path`, `items.closed_path`), which the migration
+session makes, deleting the source in the same session. `--json` carries
+`backend`, `path`, `closed_path`, `open`, `closed`, `kept`, `settings` and
+`dry_run`.
 
 **Built (ADR-018 D8, increment 5).** `item new` (its title, body and
 fields), `item transition` (its reason and ruling) and `item residue --add`

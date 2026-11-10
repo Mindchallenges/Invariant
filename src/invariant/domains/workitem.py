@@ -7,12 +7,17 @@ what a status means.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
+from ..core import needs
 from ..core.errors import GateFailure, TransitionError, UsageError
 from ..core.git import resolve_commit
-from ..core.items import Item, backend_for
+from ..core.items import STORES, Item, NullBackend, backend_for, differences
 from ..core.machines import load_item_machine
 from ..core.rules import Evaluated, RuleContext, evaluate
 
@@ -68,6 +73,52 @@ def _refuse_edge(machine, source: str, target: str, via: str | None) -> None:
             f"\"<who, date>\" and --evidence <commit> to record {source} -> "
             f"{via} -> {target} on that ruling"
         ) from None
+
+
+#: How many read-back differences a refused migration names before the count.
+_NAMED = 20
+
+
+@dataclass(frozen=True)
+class Migration:
+    """What ``item migrate`` moved, or would (ADR-018 D14): the target
+    backend and its stores, the ids written to each, and how many items the
+    target held already and keeps."""
+
+    backend: str
+    path: Path
+    closed_path: Path | None
+    open: tuple[str, ...]
+    closed: tuple[str, ...]
+    kept: int
+    dry_run: bool
+
+
+def _staged(real: Path, stage: Path) -> Path:
+    """A copy of ``real`` (a file, or a markdown store's directory) at ``stage``."""
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    if real.is_dir():
+        shutil.copytree(real, stage)
+    elif real.is_file():
+        shutil.copyfile(real, stage)
+    return stage
+
+
+def _publish(stage: Path, real: Path) -> None:
+    """Write a staged store over the real one: a file replaced whole, a
+    directory's files copied in, each through a temporary beside it."""
+    if stage.is_dir():
+        for path in sorted(p for p in stage.rglob("*") if p.is_file()):
+            _replace(path, real / path.relative_to(stage))
+    elif stage.is_file():
+        _replace(stage, real)
+
+
+def _replace(source: Path, real: Path) -> None:
+    real.parent.mkdir(parents=True, exist_ok=True)
+    temporary = real.with_name(f".{real.name}.migrating")
+    shutil.copyfile(source, temporary)
+    os.replace(temporary, real)
 
 
 class WorkItemDomain:
@@ -348,6 +399,176 @@ class WorkItemDomain:
             )
         self.backend.save(item)
         return item
+
+    # -- migration (ADR-018 D14) ------------------------------------------
+
+    def migrate(
+        self,
+        to: str,
+        path: Path | None,
+        closed_path: Path | None = None,
+        dry_run: bool = False,
+    ) -> Migration:
+        """Move every item, open and closed, into the ``to`` backend.
+
+        The items are read from the configured store and from its closed
+        store (``items.closed_path``) when one is declared. With
+        ``closed_path``, an item in a terminal state of its machine goes
+        there; otherwise every item goes to ``path``. ``path`` defaults, for
+        ``sphinx_needs``, to the docs project's items page.
+
+        Nothing is written until the whole move has been made on a staged
+        copy of the target and read back: every item's type, title, status,
+        fields, residue, history and body must read back exactly as they were
+        read, or the move is refused, naming each difference, and nothing is
+        written. Items the target holds already are kept; one whose id the
+        move would bring again is refused. The source store is never written,
+        and the manifest is not changed: the switch is the migration
+        session's last step.
+        """
+        if to not in STORES:
+            raise UsageError(
+                f"item migrate moves items to a store; {to!r} is not a backend that "
+                f"stores them (one of {', '.join(STORES)})"
+            )
+        if isinstance(self.backend, NullBackend):
+            raise UsageError(
+                "the work-item domain is disabled (items.backend is 'none'): there "
+                "are no items to migrate"
+            )
+        path = self._target_path(to, path)
+        closed_path = Path(closed_path).resolve() if closed_path is not None else None
+        if closed_path is not None and closed_path == path:
+            raise UsageError(
+                f"--closed-path names the open store ({_shown(path, self.manifest.root)}); "
+                "the closed store is another file"
+            )
+        source = self._source_stores()
+        for target in filter(None, (path, closed_path)):
+            if any(target == Path(store.path).resolve() for store in source):
+                raise UsageError(
+                    f"{_shown(target, self.manifest.root)} is a source store of "
+                    "this migration; migrate into another path"
+                )
+        moved = self._source_items(source)
+        prefix = self.manifest.get("items.id_prefix", "") or ""
+        strategy = self.manifest.get("items.id_strategy", "numeric") or "numeric"
+        cls = STORES[to]
+        with tempfile.TemporaryDirectory(prefix="invariant-migrate-") as tmp:
+            stage_open = _staged(path, Path(tmp) / "open" / path.name)
+            stage_closed = (
+                _staged(closed_path, Path(tmp) / "closed" / closed_path.name)
+                if closed_path is not None
+                else None
+            )
+            stores = [cls(stage_open, prefix, strategy)]
+            if stage_closed is not None:
+                stores.append(cls(stage_closed, prefix, strategy))
+            held = {i.id for store in stores for i in store.load_all()}
+            clash = sorted(i.id for i in moved if i.id in held)
+            if clash:
+                raise UsageError(
+                    f"{', '.join(clash)}: already in the target; an id is never "
+                    "spent twice. Nothing was written."
+                )
+            opened: list[str] = []
+            closed: list[str] = []
+            for item in moved:
+                into_closed = stage_closed is not None and self._closed(item)
+                store = stores[1] if into_closed else stores[0]
+                try:
+                    store.add(Item.from_dict(item.to_dict()))
+                except UsageError as exc:
+                    raise UsageError(
+                        f"{item.id} cannot be stored by {to}: {exc}. Nothing was written."
+                    ) from exc
+                (closed if into_closed else opened).append(item.id)
+            self._read_back(cls, stores, moved, prefix, strategy, to)
+            if not dry_run:
+                _publish(stage_open, path)
+                if stage_closed is not None and closed:
+                    _publish(stage_closed, closed_path)
+        return Migration(
+            backend=to,
+            path=path,
+            closed_path=closed_path,
+            open=tuple(opened),
+            closed=tuple(closed),
+            kept=len(held),
+            dry_run=dry_run,
+        )
+
+    def _target_path(self, to: str, path: Path | None) -> Path:
+        if path is not None:
+            return Path(path).resolve()
+        srcdir = needs.srcdir_of(self.manifest) if to == "sphinx_needs" else None
+        if srcdir is None:
+            raise UsageError(
+                f"name the {to} store to migrate into with --path"
+                + (
+                    " (with no docs project there is no items page to default to)"
+                    if to == "sphinx_needs"
+                    else ""
+                )
+            )
+        return (srcdir / needs.ITEMS_PAGE).resolve()
+
+    def _source_stores(self) -> list:
+        stores = [self.backend]
+        closed = self.manifest.get("items.closed_path")
+        if closed:
+            backend = self.backend
+            stores.append(
+                type(backend)(
+                    (self.manifest.root / closed).resolve(),
+                    backend.id_prefix,
+                    backend.id_strategy,
+                )
+            )
+        return stores
+
+    def _source_items(self, stores: list) -> list[Item]:
+        items: list[Item] = []
+        seen: dict[str, Path] = {}
+        for store in stores:
+            if store is not stores[0] and not Path(store.path).exists():
+                raise UsageError(
+                    f"items.closed_path names {_shown(store.path, self.manifest.root)}, "
+                    "which does not exist; its items cannot be read, so none is migrated"
+                )
+            for item in store.load_all():
+                if item.id in seen:
+                    raise UsageError(
+                        f"{item.id} is in both {_shown(seen[item.id], self.manifest.root)} "
+                        f"and {_shown(store.path, self.manifest.root)}; settle which one "
+                        "holds it before migrating"
+                    )
+                seen[item.id] = store.path
+                items.append(item)
+        return items
+
+    def _closed(self, item: Item) -> bool:
+        return item.status in self.machine(item.type).terminal
+
+    def _read_back(self, cls, stores, moved, prefix, strategy, to) -> None:
+        back: dict[str, Item] = {}
+        for store in stores:
+            for item in cls(store.path, prefix, strategy).load_all():
+                back[item.id] = item
+        problems = []
+        for item in moved:
+            named = differences(item, back.get(item.id))
+            if named:
+                problems.append(f"{item.id}: {', '.join(named)}")
+        if problems:
+            shown = problems[:_NAMED]
+            more = len(problems) - len(shown)
+            raise UsageError(
+                f"{len(problems)} item(s) would read back differently from {to}, so "
+                "nothing was written:\n"
+                + "\n".join(f"  {line}" for line in shown)
+                + (f"\n  ... and {more} more" if more else "")
+            )
 
     def open_table(self) -> str:
         """A compact table of everything still open, for a report footer."""

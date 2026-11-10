@@ -347,13 +347,12 @@ class _Entry:
         return self.value("id") or ""
 
     def item(self) -> Item:
-        residue = self.value("residue") or ""
         return Item(
             id=self.id,
             type=self.type,
             title=self.title,
             status=self.value("status") or "",
-            residue=[r.strip() for r in residue.split(";") if r.strip()],
+            residue=_residue_list(self.value("residue") or ""),
             fields={o.name: o.value for o in self.options if o.name not in _RESERVED},
             history=[dict(row) for row in self.history],
             body=self.body,
@@ -611,8 +610,44 @@ def _wanted_options(item: Item) -> dict[str, str | None]:
     for key, value in item.fields.items():
         if key not in _RESERVED:
             wanted[key] = _one_line(str(value))
-    wanted["residue"] = _one_line("; ".join(item.residue)) or None
+    wanted["residue"] = _one_line(_residue_text(item.residue)) or None
     return wanted
+
+
+def _residue_text(residue: list[str]) -> str:
+    """The residue as one option: entries joined by ``; ``, each escaped.
+
+    An entry's own ``;`` is written ``\\;`` and its ``\\`` as ``\\\\``, so an
+    entry holding a semicolon reads back as one entry, not two (ADR-018
+    increment 6: eleven items of this repository's backlog carry one).
+    """
+    return "; ".join(r.replace("\\", "\\\\").replace(";", "\\;") for r in residue)
+
+
+def _residue_list(text: str) -> list[str]:
+    """The entries of a residue option: split on each unescaped ``;``.
+
+    ``\\;`` and ``\\\\`` are the only escapes; any other backslash is kept as
+    written, so a residue written before the escape existed reads as it
+    always has.
+    """
+    entries: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and text[index + 1 : index + 2] in ("\\", ";"):
+            current.append(text[index + 1])
+            index += 2
+            continue
+        if char == ";":
+            entries.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    entries.append("".join(current))
+    return [entry.strip() for entry in entries if entry.strip()]
 
 
 def _apply(lines: list[str], edits: list[tuple[int, int, list[str]]], eol: str) -> str:
@@ -965,6 +1000,36 @@ class NullBackend:
 # -- selection ---------------------------------------------------------
 
 
+#: The file-backed stores by ``items.backend`` name.
+STORES: dict[str, type[_Store]] = {
+    "markdown": MarkdownBackend,
+    "json": JsonBackend,
+    "sphinx_needs": SphinxNeedsBackend,
+}
+
+
+def differences(want: Item, got: Item | None) -> list[str]:
+    """What of ``want`` would read back differently as ``got``: each part
+    named (``title``, ``field <name>``, ``history``), empty when none.
+
+    A read-back compares values exactly, so a value a store cannot hold as
+    given (a number where it writes text, a line break in an option) is a
+    difference, never normalised away.
+    """
+    if got is None:
+        return ["not found"]
+    named = [
+        part
+        for part in ("type", "title", "status", "residue")
+        if getattr(want, part) != getattr(got, part)
+    ]
+    for key in dict.fromkeys([*want.fields, *got.fields]):
+        if key not in want.fields or key not in got.fields or want.fields[key] != got.fields[key]:
+            named.append(f"field {key}")
+    named += [part for part in ("history", "body") if getattr(want, part) != getattr(got, part)]
+    return named
+
+
 def backend_for(manifest) -> Backend:
     name = manifest.get("items.backend", "markdown")
     prefix = manifest.get("items.id_prefix", "") or ""
@@ -974,9 +1039,8 @@ def backend_for(manifest) -> Backend:
     path = (manifest.root / (manifest.get("items.path") or "docs/backlog")).resolve()
     closed = manifest.get("items.closed_path")
     closed_path = (manifest.root / closed).resolve() if closed else None
-    stores = {"markdown": MarkdownBackend, "json": JsonBackend, "sphinx_needs": SphinxNeedsBackend}
-    if name in stores:
-        return stores[name](path, prefix, strategy, closed_path)
+    if name in STORES:
+        return STORES[name](path, prefix, strategy, closed_path)
     raise UsageError(f"unknown work-item backend {name!r}")
 
 

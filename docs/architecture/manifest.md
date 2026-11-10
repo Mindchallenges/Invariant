@@ -2239,9 +2239,12 @@ again. A declared closed store that does not exist is an **error**, not an
 empty store: read as empty, a mistyped path would let minting hand out a retired
 id with nothing to say the scan saw nothing.
 
-Nothing writes the closed store yet. Reading it is the whole of what the key
-does today; `item list`, `show` and `transition` still read the open store
-alone, and the store is not one of the declared writable stores above.
+No transition writes the closed store. The one writer is `item migrate
+--closed-path` (ADR-018 D14, increment 6), which fills a new closed store,
+in any backend, with the items in a terminal state, and reads the source's
+closed store as well as its open one. Otherwise reading it is the whole of
+what the key does; `item list`, `show` and `transition` still read the open
+store alone, and the store is not one of the declared writable stores above.
 Retiring an entry into it on a closing transition is still deferred — see the
 state model, "Retirement is deferred" — and when it lands the key joins
 `items.path` as a declared store.
@@ -2322,6 +2325,12 @@ things:
 - **Unclassified** — any other line at the option column (an inline role,
   stray prose). It joins no value and is preserved verbatim by every save,
   and so is a deeper line continuing it.
+
+**Residue is one option, and lossless** (ADR-018 increment 6). Its entries
+are joined by `; `, and an entry's own `;` is written `\;` and its `\` as
+`\\`, so an entry holding a semicolon reads back as one entry. Those two are
+the only escapes, and any other backslash reads as written, so a residue
+written before the escape existed reads as it always has.
 
 Lines are split on CRLF, a lone CR and LF, and each keeps its own terminator
 on write, so a CR-only file stays CR-only and a file with mixed endings keeps

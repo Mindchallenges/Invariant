@@ -1849,6 +1849,71 @@ def cmd_docs_decision_new(args) -> int:
     return emit(args, payload, text)
 
 
+def cmd_docs_migrate(args) -> int:
+    """Convert Markdown ADRs to record pages, or Markdown prose to rST pages,
+    through the docs environment's pandoc (ADR-018 D14). Each page names
+    what it still owes: its unconverted constructs, which fail the strict
+    build, and the needs the converter does not invent."""
+    from ..domains.docs import migrate_adr, migrate_prose
+
+    ctx = Context()
+    root = Path(ctx.manifest.root).resolve()
+    files = [(ctx.cwd / f).resolve() for f in args.files]
+    if args.migrate_kind == "adr":
+        pages = migrate_adr(ctx.manifest, files, dry_run=args.dry_run, reader=args.reader)
+    else:
+        into = None if args.into is None else (ctx.cwd / args.into).resolve()
+        pages = migrate_prose(
+            ctx.manifest, files, into=into, dry_run=args.dry_run, reader=args.reader
+        )
+    verb = "would write" if args.dry_run else "wrote"
+    lines = []
+    for page in pages:
+        index = None if page.index is None else _spelled_under(root, page.index)
+        held = (
+            f": {page.needs[0]} and {len(page.needs) - 1} decision need(s)"
+            if page.needs
+            else ""
+        )
+        lines.append(f"{verb} {page.rel}{held} (from {page.source})")
+        if page.unconverted:
+            lines.append(
+                f"  {len(page.unconverted)} construct(s) left as .. invariant-unconverted::"
+                " — the strict build fails on each until it is rewritten:"
+            )
+            lines += [f"    {reason}" for reason in page.unconverted]
+        if index:
+            lines.append(f"  {'would list' if args.dry_run else 'listed'} it in {index}")
+        lines += [f"  note: {note}" for note in page.notes]
+        if page.element_owed:
+            lines.append(
+                "  its element needs are a deliverable: the converter invents none, "
+                "because what is an element is a design judgement"
+            )
+    links = ctx.manifest.get("docs.needs.require_links") or []
+    owed = ", ".join(f"{r.get('from')} -> {r.get('to')}" for r in links) or "none"
+    lines.append(
+        f"next: link the needs as docs.needs.require_links asks ({owed}), run "
+        "'invariant docs build', and delete each Markdown source in the same session"
+    )
+    payload = {
+        "pages": [
+            {
+                "source": page.source,
+                "path": page.rel,
+                "needs": list(page.needs),
+                "unconverted": list(page.unconverted),
+                "notes": list(page.notes),
+                "index": None if page.index is None else _spelled_under(root, page.index),
+                "element_owed": page.element_owed,
+            }
+            for page in pages
+        ],
+        "dry_run": bool(args.dry_run),
+    }
+    return emit(args, payload, "\n".join(lines))
+
+
 def cmd_session_decisions(args) -> int:
     """The decisions this session made (ADR-018 D9): add, resolve, remove, show.
 
@@ -4382,6 +4447,59 @@ def cmd_item_residue(args) -> int:
     return emit(args, item.to_dict(), f"{item.id} residue:\n{text}")
 
 
+def cmd_item_migrate(args) -> int:
+    """Move every item into another backend, read back before it is written
+    (ADR-018 D14). The source store and the manifest are left as they are:
+    the output names the settings the migration session switches last."""
+    ctx = Context()
+    root = Path(ctx.manifest.root).resolve()
+
+    def given(value):
+        return None if value is None else (ctx.cwd / value).resolve()
+
+    done = ctx.items.migrate(
+        args.to, given(args.path), closed_path=given(args.closed_path), dry_run=args.dry_run
+    )
+    path = _spelled_under(root, done.path)
+    closed = None if done.closed_path is None else _spelled_under(root, done.closed_path)
+    settings = {"items.backend": done.backend, "items.path": path}
+    if closed is not None and done.closed:
+        settings["items.closed_path"] = closed
+    source = ctx.manifest.get("items.path") or "docs/backlog"
+    count = len(done.open) + len(done.closed)
+    stores = f"{len(done.open)} into {path}"
+    if done.closed:
+        stores += f", {len(done.closed)} closed into {closed}"
+    elif closed is not None:
+        stores += f"; no item is closed, so {closed} is not written"
+    lines = [
+        (
+            f"{'would migrate' if args.dry_run else 'migrated'} {count} item(s) from "
+            f"{ctx.manifest.get('items.backend', 'markdown')} ({source}) to "
+            f"{done.backend}: {stores}; every one read back field for field and "
+            f"history row for row"
+        )
+    ]
+    if done.kept:
+        lines.append(f"  the target held {done.kept} item(s) already, kept as they were")
+    lines.append(
+        "  the source store and the manifest are unchanged. The switch, when the "
+        "migration session makes it (delete the source store in the same session):"
+    )
+    lines += [f"    {key}: {value}" for key, value in settings.items()]
+    payload = {
+        "backend": done.backend,
+        "path": path,
+        "closed_path": closed,
+        "open": list(done.open),
+        "closed": list(done.closed),
+        "kept": done.kept,
+        "settings": settings,
+        "dry_run": done.dry_run,
+    }
+    return emit(args, payload, "\n".join(lines))
+
+
 # -- memory ------------------------------------------------------------
 
 
@@ -6613,6 +6731,25 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("title", help="the record's title, one line")
     q.add_argument("--dry-run", action="store_true", help="say what it would write")
     q.set_defaults(func=cmd_docs_decision_new)
+    migrate = p.add_parser(
+        "migrate", help="convert Markdown into the docs project through pandoc (ADR-018 D14)"
+    ).add_subparsers(dest="migrate_kind", required=True)
+    for kind, said in (
+        ("adr", "Markdown ADRs to record pages of decision needs under <srcdir>/decisions/"),
+        ("prose", "Markdown pages to rST pages, beside each source or under --into"),
+    ):
+        q = migrate.add_parser(kind, help=said)
+        q.add_argument("files", nargs="+", help="the Markdown files")
+        if kind == "prose":
+            q.add_argument("--into", help="a directory in the docs project to write the pages in")
+        q.add_argument(
+            "--from",
+            dest="reader",
+            default="gfm",
+            help="pandoc's reader for the Markdown (default gfm)",
+        )
+        q.add_argument("--dry-run", action="store_true", help="convert; write nothing")
+        q.set_defaults(func=cmd_docs_migrate)
 
     p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
     q = p.add_parser("init", help="create a store for this repository and link it")
@@ -6928,6 +7065,23 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--add")
     q.add_argument("--clear")
     q.set_defaults(func=cmd_item_residue)
+
+    q = item.add_parser(
+        "migrate",
+        help="move every item, open and closed, into another backend (ADR-018 D14)",
+    )
+    q.add_argument("--to", required=True, choices=["markdown", "json", "sphinx_needs"])
+    q.add_argument(
+        "--path",
+        help="the target store; for sphinx_needs, default the docs project's backlog.rst",
+    )
+    q.add_argument(
+        "--closed-path",
+        dest="closed_path",
+        help="where items in a terminal state go; without it, every item goes to --path",
+    )
+    q.add_argument("--dry-run", action="store_true", help="migrate and read back; write nothing")
+    q.set_defaults(func=cmd_item_migrate)
 
     # memory
     memory = sub.add_parser("memory").add_subparsers(dest="sub", required=True)

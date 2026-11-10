@@ -1016,6 +1016,124 @@ of a project `init` made enforced, `invariant override docs.design_home
 migrating: each warns. Behind `INVARIANT_TEST_SPHINX_BUILD`, a minted record
 page building strictly in the starter's pinned environment.
 
+### As built: increment 6 (2026-11-10)
+
+D14's three commands, as the architecture docs describe them (cli.md, the
+`docs` group and "Work items"; manifest.md, "The `sphinx_needs` round trip"
+and "The ids a store has spent, and the closed store"; overview.md,
+`core/mdconvert`, `core/items`, `domains/docs` and `domains/workitem`). Where
+the build settles what the text left open:
+
+- **`item migrate --to <backend> [--path] [--closed-path] [--dry-run]`.**
+  The target is any file-backed backend (`markdown`, `json`,
+  `sphinx_needs`), and the source is the configured store and, when
+  `items.closed_path` is set, its closed store too. `--path` defaults, for
+  `sphinx_needs`, to the docs project's items page (`<srcdir>/backlog.rst`,
+  the starter's); every other target names it. With `--closed-path`, an item
+  in a terminal state of its own machine goes there (`fixed` is not
+  terminal); without it every item goes to `--path`, as a project with no
+  closed store keeps them now. A closed store no item goes to is not
+  written, so the switch never names an empty file.
+- **The read-back.** The whole move is made on a staged copy of the target
+  stores and read back by a fresh backend before anything is written: type,
+  title, status, every field, residue, history and body must read back
+  exactly (`core/items.differences`). Nothing is normalised: a number where
+  `sphinx_needs` writes text, or a line break in an option, is a difference
+  that refuses the move, naming the item and the field. Items the target
+  holds already are kept; an id the move would bring again is refused. The
+  source store and the manifest are never written: the output names the
+  settings the migration session switches last, and the session deletes the
+  source, as D14 says.
+- **The `sphinx_needs` residue is lossless.** It is one option, entries
+  joined by `; `, so an entry holding a `;` read back as two: eleven of this
+  repository's items carry one. An entry's `;` is now written `\;` and its
+  `\` as `\\`; any other backslash reads as written, so every existing
+  residue reads as before. Checked under the strict build (below).
+- **Item bodies are kept as written** (D14: "keeps its ... body"), so a
+  Markdown body moves into an rST directive as Markdown. Run on a copy of
+  this repository's backlog in the starter's pinned environment, the strict
+  build fails on the bodies with 162 docutils diagnostics (123 warnings, 39
+  errors: unclosed inline markup, unexpected indentation, Markdown fences).
+  Converting bodies would contradict the read-back D14 asks for, so it is
+  not done here. Increment 7 owes the choice (Open questions, below).
+- **pandoc, pinned in the docs environment.** The pin is
+  `pypandoc_binary==1.17` (pandoc 3.9), found at
+  `.venv/lib/python*/site-packages/pypandoc/files/pandoc`. It is not in the
+  starter's `requirements.txt`: a project that starts enforced never
+  migrates, and the binary is large. A migration in an environment without
+  it is refused, naming the line to add and `invariant docs venv`; an
+  environment out of sync is refused as `docs build` refuses it.
+- **The converter works on pandoc's tree.** pandoc reads the Markdown (`gfm`
+  by default; `--from` names another reader) into its JSON tree,
+  `core/mdconvert` rewrites the tree, and pandoc writes the rST. The rewrite
+  is pure and testable without pandoc. pandoc writes a raw block and the
+  block after it on adjacent lines, which ends a directive "without a blank
+  line" under `-W`, so every raw block carries a closing marker line that is
+  turned back into a blank line after pandoc writes.
+- **Links.** A link to another record's Markdown file (`ADR-<n>…`) becomes
+  `:need:` to its record need. A link to a page of the docs project, one in
+  the same batch or one there already (as `.rst`, or as a document the
+  project reads), becomes `:doc:`. An external URL stays. An anchor is
+  dropped and said. Anything else is not converted: an in-page anchor (a
+  Markdown heading's anchor has no Sphinx label), a file that is not a page,
+  or a page outside the docs project or not converted yet. So architecture
+  pages are converted before the records that link to them.
+- **What is left unconverted.** Raw HTML, inline or block, and a link that
+  cannot be converted. The smallest block holding it (a paragraph, a list
+  item's paragraph, a table, a heading) becomes `.. invariant-unconverted::
+  <reason>`, holding the block's Markdown as pandoc writes it back. A block
+  that is one HTML comment becomes an rST comment, so a privacy exemption
+  marker keeps covering its block (ADR-001 D24). A `mermaid` code block
+  becomes `.. mermaid::`, a `plantuml` or `uml` one `.. uml::`. Section ids
+  are dropped: pandoc writes them as labels, labels are global in a Sphinx
+  project, and every record has a "Context".
+- **A record page** is named as `docs decision new` names one,
+  `ADR-<nnn>-<slug of the title>.rst`, keeping the record's number, with the
+  label `adr-<nnn>` and the record's heading. The record need holds the
+  metadata list. Its status is the first word of `Status:`, lower-cased, and
+  must be one of `docs.needs.decision_statuses`, or the record is refused.
+  Its links: a metadata sentence saying "amends" or "supersedes" links every
+  ADR it names, in its text or as a link's target. The first sentence under
+  `Supersedes:` supersedes, and every sentence under `Amends:` amends.
+  "Amended by" and "Superseded by" are the other record's links and are not
+  written. Every heading `D<k>` followed by a dash, colon or full stop
+  becomes the need `<prefix>ADR_<nnn>_D<k>`, `part_of` the record, in its
+  status, and replaces the heading; a deeper heading inside it becomes a
+  rubric, because a section cannot open inside a directive. Under a heading
+  starting "Ruling", each numbered item, and each bullet opening with a
+  letter and a full stop (`A.`), is its own one-item list under the label
+  `adr-<nnn>-ruling-<k>`. A key used twice is labelled once. Prose citing a
+  ruling is left as written. A record whose decisions are not `D<k>`
+  headings (ADR-001's are table rows) converts to its record need alone, and
+  its decisions are a deliverable. The pages are listed in
+  `decisions/index.rst` in number order. A number a page there already spends,
+  or one two files of the batch carry, is refused, and every file is
+  converted before anything is written.
+- **A prose page** is written beside its source as `.rst`, or under
+  `--into`. It must lie in the docs project and is never written over.
+  It is listed in the toctree of the nearest `index.rst` at or above it;
+  with none, a note says to list it. A page under `paths.docs` is reported
+  as owing its element needs, which the converter never writes (D14).
+
+Converting all nineteen of this repository's records as a smoke run gave
+ADR-018 its record and D1 to D14 and ADR-001 its record alone, and left four
+constructs: `<format>` in ADR-016 and `<name>` in ADR-008, which a Markdown
+reader takes as HTML tags (GitHub renders them as nothing), and two links in
+ADR-009 to `oracle-panel.md`, which is not a page yet.
+
+The proofs: a copy of this repository's backlog (163 items now, 161 when this
+record was written) migrated to `sphinx_needs` with a closed store, and read
+back field for field and history row for row; any-to-any moves, a read-back
+that differs and an id clash each writing nothing; with a stand-in for
+pandoc, the tree rewrite, the record page, the rulings and the links. Behind
+`INVARIANT_TEST_SPHINX_BUILD` (the starter's pins, sphinx-needs 9.2.0, with
+`pypandoc_binary` in the same environment), the following hold. A copy of
+ADR-016 converted leaves exactly its `<format>`. With that one construct
+rewritten in the copy, it converts with D1 to D9 as needs `part_of`
+`DEC_ADR_016` and builds strictly. A paragraph of raw HTML, migrated as
+prose, fails the build on `invariant-unconverted`, by file and line. And an
+item whose residue holds a `;` builds strictly.
+
 ## Alternatives rejected
 
 | Alternative | Why not |
@@ -1050,6 +1168,18 @@ page building strictly in the starter's pinned environment.
 
 ## Open questions
 
-None. Every input was ruled (rulings 1 to 19). The one question the design
-surfaced, the level floor, was ruled as ruling 19. Every other default is
-marked *recommended*.
+None for the record as accepted. Every input was ruled (rulings 1 to 19).
+The one question the design surfaced, the level floor, was ruled as ruling
+19. Every other default is marked *recommended*.
+
+Raised by increment 6, owed before increment 7's backlog builds strictly:
+**item bodies are Markdown.** `item migrate` keeps them as written, as D14
+says, and the strict build fails on them (162 diagnostics on this
+repository's backlog). The options are these:
+
+- (a) `item migrate` converts a body through the same converter when the
+  backend's format changes. The read-back then compares the converted body.
+- (b) The bodies move as written, and the migration session rewrites the
+  failing ones by hand.
+- (c) Each Markdown body is wrapped in a literal block. That builds, but it
+  renders as code, and the body read back is no longer the body.

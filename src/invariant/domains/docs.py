@@ -42,6 +42,12 @@ for the source tree's digest, which ``docs.builds_strict`` and
 ``docs.needs_traceable`` read (``core/needs`` holds the record's shape).
 ``doctor``'s ``docs venv``, ``plantuml`` and ``docs mandate`` rows are
 answered here too.
+
+The migration (ADR-018 D14) writes too: :func:`migrate_adr` and
+:func:`migrate_prose` convert Markdown into record pages and rST pages
+through ``core/mdconvert``, with the pandoc ``pypandoc_binary`` installs in
+the docs environment (:func:`pandoc_of`), refusing before anything is
+written, and never deleting the Markdown.
 """
 
 from __future__ import annotations
@@ -63,7 +69,7 @@ import yaml
 
 from ..adapters import get_adapter
 from ..adapters.sphinx import diagnostics
-from ..core import git
+from ..core import git, mdconvert
 from ..core import guidelines as guidelines_reader
 from ..core import needs as needs_reader
 from ..core.docformat import (
@@ -676,7 +682,7 @@ def write_starter(starter: Starter) -> list[Path]:
 
 
 #: The items store's page in the source directory (``items.path``).
-_BACKLOG = "backlog.rst"
+_BACKLOG = needs_reader.ITEMS_PAGE
 
 
 def _template(name: str, fill: Mapping[str, str], heading: str | None = None) -> str:
@@ -812,20 +818,14 @@ def new_decision(
     decisions = srcdir / "decisions"
     index = decisions / "index.rst"
     spelled = _spelled(manifest.root, srcdir)
-    if not index.is_file():
-        raise UsageError(
-            f"no {spelled}/decisions/index.rst: the record pages are listed in its "
-            f"toctree. Create it, with a title, and list decisions/index in the "
-            f"root toctree; then run this again."
-        )
+    _require_index(index, spelled)
     types = needs_reader.types_of(manifest)
     kind = needs_reader.type_of_role(types, "decision")
     prefixes = needs_reader.prefixes_of(types, ("decision",))
     number = _next_record(decisions, prefixes)
     need_id = f"{kind.prefix}ADR_{number:03d}"
     status = str((manifest.get("docs.needs.decision_statuses") or ["proposed"])[0])
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:_SLUG_MAX].strip("-")
-    stem = f"ADR-{number:03d}" + (f"-{slug}" if slug else "")
+    stem = _record_stem(number, title)
     path = decisions / f"{stem}.rst"
     text = _record_page(
         number, title, kind.directive, need_id, status,
@@ -847,16 +847,28 @@ def new_decision(
     )
 
 
+def _record_stem(number: int, title: str) -> str:
+    """A record page's file name without its suffix: ``ADR-<nnn>-<slug>``."""
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:_SLUG_MAX].strip("-")
+    return f"ADR-{number:03d}" + (f"-{slug}" if slug else "")
+
+
 def _next_record(decisions: Path, prefixes: Sequence[str]) -> int:
     """One past the highest record number any page under ``decisions`` spends."""
-    numbers = [0]
+    return max(_spent_records(decisions, prefixes) | {0}) + 1
+
+
+def _spent_records(decisions: Path, prefixes: Sequence[str]) -> set[int]:
+    """Every record number a page under ``decisions`` spends, by its file
+    name or by a decision type's ``<prefix>ADR_<n>`` need id."""
+    numbers: set[int] = set()
     ids = re.compile(
         r"^(?:" + "|".join(re.escape(p) for p in prefixes) + r")ADR_(\d+)$"
     ) if prefixes else None
     for page in sorted(decisions.rglob("*.rst")):
         named = _RECORD_FILE.match(page.name)
         if named:
-            numbers.append(int(named.group(1)))
+            numbers.add(int(named.group(1)))
         if ids is None:
             continue
         try:
@@ -866,8 +878,17 @@ def _next_record(decisions: Path, prefixes: Sequence[str]) -> int:
         for directive in rst_directives(text):
             found = ids.match(directive.options.get("id", "").strip())
             if found:
-                numbers.append(int(found.group(1)))
-    return max(numbers) + 1
+                numbers.add(int(found.group(1)))
+    return numbers
+
+
+def _require_index(index: Path, spelled: str) -> None:
+    if not index.is_file():
+        raise UsageError(
+            f"no {spelled}/decisions/index.rst: the record pages are listed in its "
+            f"toctree. Create it, with a title, and list decisions/index in the "
+            f"root toctree; then run this again."
+        )
 
 
 def _record_page(
@@ -924,6 +945,336 @@ def _listed(index: str, entry: str) -> str | None:
         added.insert(0, "")
     lines[last + 1:last + 1] = added
     return "\n".join(lines) + "\n"
+
+
+# -- migration: Markdown to the docs project (ADR-018 D14) ------------------------
+
+#: The converter's pin, the line a docs environment's requirements.txt gains
+#: for the migration: pandoc in the environment, never in the engine (D14).
+PANDOC_PIN = "pypandoc_binary==1.17"
+#: Where ``pypandoc_binary`` puts its pandoc, under the environment.
+_PANDOC_GLOBS = (
+    "lib/python*/site-packages/pypandoc/files/pandoc",
+    "Lib/site-packages/pypandoc/files/pandoc.exe",
+)
+
+
+def pandoc_of(srcdir: Path) -> Path:
+    """The pandoc ``pypandoc_binary`` installed in ``<srcdir>/.venv``.
+
+    The environment must be in sync with ``requirements.txt``, as for a
+    build; with no pandoc in it, the refusal names the pin to add.
+    """
+    env = venv_state(srcdir)
+    if not env.in_sync:
+        raise UsageError(f"the migration runs the docs environment's pandoc: {env.describe()}")
+    for pattern in _PANDOC_GLOBS:
+        found = sorted(env.venv.glob(pattern))
+        if found:
+            return found[0]
+    raise UsageError(
+        f"no pandoc in {env.venv}: the migration converts with the pandoc "
+        f"pypandoc_binary installs. Add the line '{PANDOC_PIN}' to "
+        f"{srcdir / REQUIREMENTS}, run 'invariant docs venv', then run this again."
+    )
+
+
+def pandoc_call(binary: Path) -> mdconvert.Pandoc:
+    """``pandoc(args, text)``: the binary run on ``text``, its output, or a
+    refusal naming the exit status and what pandoc said. A seam: the suite
+    replaces it."""
+
+    def call(args: Sequence[str], text: str) -> str:
+        done = subprocess.run(
+            [str(binary), *args],
+            input=text,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            said = (done.stderr or done.stdout or "").strip()
+            raise UsageError(f"pandoc {' '.join(args)} failed (exit {done.returncode}): {said}")
+        return done.stdout
+
+    return call
+
+
+@dataclass(frozen=True)
+class MigratedPage:
+    """One page ``docs migrate`` wrote (or would): its Markdown source, the
+    page, the needs it holds, each construct left unconverted, the notes,
+    the index whose toctree lists it, and whether its element needs are owed
+    (a page under ``paths.docs``: the converter never invents one, D14)."""
+
+    source: str
+    path: Path
+    rel: str
+    text: str
+    needs: tuple[str, ...]
+    unconverted: tuple[str, ...]
+    notes: tuple[str, ...]
+    index: Path | None
+    element_owed: bool
+
+
+def _sources(files: Sequence[Path]) -> list[Path]:
+    sources = []
+    for file in files:
+        path = Path(file).resolve()
+        if not path.is_file():
+            raise UsageError(f"{file}: no such file; nothing was written")
+        sources.append(path)
+    return sources
+
+
+def _under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _linker(
+    source: Path, srcdir: Path, prefix: str, batch: Mapping[Path, str]
+) -> mdconvert.Link:
+    """How a link in ``source`` is converted (D14): another record becomes its
+    record need, a page of the docs project (converted in this batch, or
+    there already) a document reference; an external URL stays. Anything
+    else is not converted: an in-page anchor (a Markdown heading's anchor
+    has no Sphinx label), a file that is no page, a page outside the docs
+    project or not written yet."""
+
+    def link(url: str) -> mdconvert.Target:
+        if not url or _EXTERNAL.match(url):
+            return mdconvert.Target()
+        path, _, anchor = url.partition("#")
+        if not path:
+            return mdconvert.Target(
+                problem=f"an in-page anchor ({url}): a Markdown heading's anchor has "
+                "no Sphinx label; write a :ref: to a label"
+            )
+        target = (source.parent / unquote(path)).resolve()
+        note = f"the anchor #{anchor} of {path} was dropped" if anchor else None
+        record = re.match(r"^ADR-0*(\d+)\b", target.name)
+        if record and target.suffix in (".md", ".rst"):
+            return mdconvert.Target("need", f"{prefix}ADR_{int(record.group(1)):03d}", note=note)
+        if target in batch:
+            return mdconvert.Target("doc", batch[target], note=note)
+        page = target.with_suffix(".rst").is_file() or target.is_file()
+        if target.suffix in (".md", ".rst") and _under(target, srcdir) and page:
+            docname = target.relative_to(srcdir).with_suffix("").as_posix()
+            return mdconvert.Target("doc", f"/{docname}", note=note)
+        return mdconvert.Target(
+            problem=f"a link to {path}, which is not a page of the docs project"
+        )
+
+    return link
+
+
+def migrate_adr(
+    manifest: Manifest,
+    files: Sequence[Path],
+    *,
+    dry_run: bool = False,
+    pandoc: mdconvert.Pandoc | None = None,
+    reader: str = mdconvert.READER,
+) -> list[MigratedPage]:
+    """Convert Markdown ADRs into record pages under ``<srcdir>/decisions/`` (D7, D14).
+
+    Each keeps its number: the page is ``ADR-<nnn>-<slug>.rst``, the record
+    the ``decision`` role's first type, and every ``D<k>`` heading a need
+    ``part_of`` it. A number any page there spends already, or one two files
+    of the batch carry, is refused; so is a record ``core/mdconvert``
+    refuses. Every file is converted before anything is written, so a
+    refusal writes nothing. The pages are listed in ``decisions/index.rst``
+    in number order. The Markdown is never deleted: the session does that.
+    """
+    srcdir = docs_project(manifest)
+    decisions = srcdir / "decisions"
+    index = decisions / "index.rst"
+    root = Path(manifest.root).resolve()
+    _require_index(index, _spelled(manifest.root, srcdir))
+    sources = _sources(files)
+    types = needs_reader.types_of(manifest)
+    kind = needs_reader.type_of_role(types, "decision")
+    statuses = tuple(
+        manifest.get("docs.needs.decision_statuses") or needs_reader.DEFAULT_DECISION_STATUSES
+    )
+    spent = _spent_records(decisions, needs_reader.prefixes_of(types, ("decision",)))
+    call = pandoc or pandoc_call(pandoc_of(srcdir))
+    converted: list[tuple[Path, mdconvert.Converted]] = []
+    for source in sources:
+        named = re.match(r"^ADR-0*(\d+)", source.name)
+        converted.append(
+            (
+                source,
+                mdconvert.convert_adr(
+                    source.read_text(encoding="utf-8"),
+                    number=int(named.group(1)) if named else None,
+                    directive=kind.directive,
+                    prefix=kind.prefix,
+                    statuses=statuses,
+                    pandoc=call,
+                    link=_linker(source, srcdir, kind.prefix, {}),
+                    reader=reader,
+                ),
+            )
+        )
+    seen: dict[int, Path] = {}
+    for source, done in converted:
+        if done.number in spent:
+            raise UsageError(
+                f"ADR-{done.number:03d} ({_spelled(root, source)}): the number is spent "
+                f"already under {_spelled(root, decisions)}; a record is never renumbered "
+                "or written over. Nothing was written."
+            )
+        if done.number in seen:
+            raise UsageError(
+                f"ADR-{done.number:03d} is in the batch twice ({_spelled(root, seen[done.number])} "
+                f"and {_spelled(root, source)}). Nothing was written."
+            )
+        seen[done.number] = source
+    pages = []
+    listing = index.read_text(encoding="utf-8")
+    listed_any = False
+    for source, done in sorted(converted, key=lambda pair: pair[1].number):
+        stem = _record_stem(done.number, done.title)
+        path = decisions / f"{stem}.rst"
+        listed = _listed(listing, stem)
+        if listed is not None:
+            listing, listed_any = listed, True
+        pages.append(
+            MigratedPage(
+                source=_spelled(root, source),
+                path=path,
+                rel=_spelled(root, path),
+                text=done.text,
+                needs=done.needs,
+                unconverted=done.unconverted,
+                notes=done.notes,
+                index=index if listed is not None else None,
+                element_owed=False,
+            )
+        )
+    if not dry_run:
+        for page in pages:
+            page.path.write_text(page.text, encoding="utf-8")
+        if listed_any:
+            index.write_text(listing, encoding="utf-8")
+    return pages
+
+
+def _nearest_index(page: Path, srcdir: Path) -> Path | None:
+    """The ``index.rst`` at or above ``page``'s directory, inside the docs project."""
+    directory = page.parent
+    while True:
+        candidate = directory / "index.rst"
+        if candidate.is_file() and candidate != page:
+            return candidate
+        if directory == srcdir or directory == directory.parent:
+            return None
+        directory = directory.parent
+
+
+def migrate_prose(
+    manifest: Manifest,
+    files: Sequence[Path],
+    *,
+    into: Path | None = None,
+    dry_run: bool = False,
+    pandoc: mdconvert.Pandoc | None = None,
+    reader: str = mdconvert.READER,
+) -> list[MigratedPage]:
+    """Convert Markdown pages to rST pages of the docs project (D14).
+
+    Each page is written beside its source with the suffix ``.rst``, or
+    under ``into`` by its name, and must lie in the docs project; an
+    existing page is never written over. Links between the pages of the
+    batch become document references. Each page is listed in the toctree of
+    the nearest ``index.rst`` at or above it; with none, a note says to list
+    it. Element needs are not invented: a page under ``paths.docs`` owes
+    them, written as a deliverable (D14).
+    """
+    srcdir = docs_project(manifest)
+    root = Path(manifest.root).resolve()
+    sources = _sources(files)
+    target_dir = Path(into).resolve() if into is not None else None
+    plan: dict[Path, Path] = {}
+    for source in sources:
+        out = (target_dir / f"{source.stem}.rst") if target_dir else source.with_suffix(".rst")
+        if not _under(out, srcdir):
+            raise UsageError(
+                f"{_spelled(root, out)} would lie outside the docs project "
+                f"({_spelled(root, srcdir)}); name a directory in it with --into. "
+                "Nothing was written."
+            )
+        if out in plan.values():
+            raise UsageError(
+                f"{_spelled(root, out)} would be written twice, from two sources in "
+                "the batch; convert them apart. Nothing was written."
+            )
+        if out.exists():
+            raise UsageError(
+                f"{_spelled(root, out)} exists; a page is never written over. "
+                "Nothing was written."
+            )
+        plan[source] = out
+    batch = {
+        source: "/" + out.relative_to(srcdir).with_suffix("").as_posix()
+        for source, out in plan.items()
+    }
+    call = pandoc or pandoc_call(pandoc_of(srcdir))
+    prefix = needs_reader.type_of_role(needs_reader.types_of(manifest), "decision").prefix
+    try:
+        architecture = manifest.path_for("docs")
+    except InvariantError:
+        architecture = None
+    indexes: dict[Path, str] = {}
+    pages = []
+    for source, out in plan.items():
+        done = mdconvert.convert_prose(
+            source.read_text(encoding="utf-8"),
+            pandoc=call,
+            link=_linker(source, srcdir, prefix, batch),
+            reader=reader,
+        )
+        notes = list(done.notes)
+        index = _nearest_index(out, srcdir)
+        if index is None:
+            notes.append(
+                f"no index.rst at or above it: list {batch[source].lstrip('/')} in a "
+                "toctree, or the strict build fails on it"
+            )
+        else:
+            entry = out.relative_to(index.parent).with_suffix("").as_posix()
+            text = indexes.get(index) or index.read_text(encoding="utf-8")
+            listed = _listed(text, entry)
+            if listed is None:
+                index = None
+            else:
+                indexes[index] = listed
+        pages.append(
+            MigratedPage(
+                source=_spelled(root, source),
+                path=out,
+                rel=_spelled(root, out),
+                text=done.text,
+                needs=(),
+                unconverted=done.unconverted,
+                notes=tuple(notes),
+                index=index,
+                element_owed=architecture is not None and _under(out, architecture),
+            )
+        )
+    if not dry_run:
+        for page in pages:
+            page.path.parent.mkdir(parents=True, exist_ok=True)
+            page.path.write_text(page.text, encoding="utf-8")
+        for index, text in indexes.items():
+            index.write_text(text, encoding="utf-8")
+    return pages
 
 
 # -- adoption: in place or by copy (ADR-016 D7, D8) --------------------------

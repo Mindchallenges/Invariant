@@ -66,6 +66,10 @@ DEFAULT_REQUIRE_LINKS = (
 #: The two states of a project (D10).
 STATES = ("migrating", "enforced")
 
+#: The page under the source directory holding the work items, as the
+#: starter writes it (D11) and ``item migrate`` defaults to (D14).
+ITEMS_PAGE = "backlog.rst"
+
 PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*_$")
 #: A need id: a prefix (:data:`PREFIX`) and at least one more character. The
 #: starter's ``needs_id_regex`` is this pattern, and it is how a ruleset's
