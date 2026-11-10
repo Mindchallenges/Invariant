@@ -1,11 +1,12 @@
 # ADR-018 — Architecture and design live only in a strict-building sphinx-needs project, in every managed project
 
-- **Status:** Accepted (2026-11-09). Nineteen rulings were made by the user
-  on 2026-11-08 (IDEA_045, rulings 1 to 10) and 2026-11-09 (rulings 11 to
+- **Status:** Accepted (2026-11-09). Twenty rulings were made by the user
+  on 2026-11-08 (IDEA_045, rulings 1 to 10), 2026-11-09 (rulings 11 to
   18, the answers to IDEA_045's open questions; ruling 19, the one question
-  the design check raised) and are recorded below as decided. Each
-  decision gives the design that carries out its ruling. Any choice beyond
-  a ruling is marked *recommended*. No question is open.
+  the design check raised) and 2026-11-10 (ruling 20, the question
+  increment 6 raised, which amends D14) and are recorded below as decided.
+  Each decision gives the design that carries out its ruling. Any choice
+  beyond a ruling is marked *recommended*. No question is open.
 - **Date:** 2026-11-09
 - **Supersedes:** nothing. Amends
   [ADR-016](ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md)
@@ -125,6 +126,21 @@ implemented.
     ADR-001 D25 for these rules only. (Chosen over no floor with a failing
     `doctor` row, and over a floor lowerable with a reason in the
     manifest.)
+
+### Ruling (user, 2026-11-10: raised by increment 6)
+
+20. **Item bodies are converted.** Item bodies are Markdown, and moved as
+    written they fail the strict build (162 diagnostics on this
+    repository's backlog, increment 6). `item migrate` converts each body
+    from Markdown to rST with the converter `docs migrate` uses
+    (`core/mdconvert` and the docs environment's pandoc) when the target
+    backend's body format differs from the source's, and the read-back
+    compares the converted body. Anything it cannot convert is left as
+    `.. invariant-unconverted::`, so the build fails visibly. This amends
+    D14's "keeps its ... body". (Chosen over moving the bodies as written
+    and rewriting the failing ones by hand, and over wrapping each body in
+    a literal block, which builds but renders as code and does not read
+    back as the body.)
 
 ### What was run to write this
 
@@ -615,9 +631,13 @@ Ruling 13. The mechanical parts are engine commands that work on any
 project. The judgement parts are a session's deliverables.
 
 - **`invariant item migrate --to sphinx_needs`** (generic, any backend to
-  any backend): every item, open and closed, keeps its id, fields, body
-  and history (after BUG_073). Closed items go to `items.closed_path`. It
-  refuses if a read-back differs, and writes nothing then.
+  any backend): every item, open and closed, keeps its id, fields and
+  history (after BUG_073), and its body: as written when both backends
+  hold the same markup, converted from Markdown to rST by the converter
+  below when they do not (ruling 20, amending "keeps its ... body").
+  Closed items go to `items.closed_path`. It refuses if a read-back of the
+  body as converted, or of anything else, differs, and writes nothing
+  then.
 - **`invariant docs migrate adr <files>`**: each Markdown ADR becomes a
   record page (D7). The record and each `### D<k>` heading become decision
   needs, and the prose is converted with pandoc, pinned in the docs
@@ -1049,7 +1069,8 @@ the build settles what the text left open:
   repository's items carry one. An entry's `;` is now written `\;` and its
   `\` as `\\`; any other backslash reads as written, so every existing
   residue reads as before. Checked under the strict build (below).
-- **Item bodies are kept as written** (D14: "keeps its ... body"), so a
+- **Item bodies are kept as written** (D14 as it then read: "keeps its ...
+  body"; ruling 20 has since amended it, "As built: ruling 20" below), so a
   Markdown body moves into an rST directive as Markdown. Run on a copy of
   this repository's backlog in the starter's pinned environment, the strict
   build fails on the bodies with 162 docutils diagnostics (123 warnings, 39
@@ -1134,6 +1155,77 @@ rewritten in the copy, it converts with D1 to D9 as needs `part_of`
 prose, fails the build on `invariant-unconverted`, by file and line. And an
 item whose residue holds a `;` builds strictly.
 
+### As built: ruling 20 (2026-11-10)
+
+`item migrate` converts item bodies, as the architecture docs describe it
+(cli.md, "Work items"; manifest.md, "Backends for work items"; overview.md,
+`core/items`, `core/mdconvert`, `domains/docs` and `domains/workitem`).
+Where the build settles what the ruling left open:
+
+- **A body format is the backend's.** `markdown` and `json` hold Markdown,
+  `sphinx_needs` rST (`core/items`' `body_format`). JSON's bodies are the
+  text `item new --body` is given, as the markdown backend's are, so a move
+  between those two stays byte for byte, as increment 6 proved it.
+- **Only Markdown to rST converts.** The same format on both sides moves as
+  written, byte for byte, and pandoc is never run. An empty body is never
+  converted.
+- **rST to Markdown is refused** (`sphinx_needs` to `markdown` or `json`)
+  when any item carries a body, naming the items, and nothing is written.
+  The converter is one way, ruling 20 names that way only, and a body moved
+  as written would put rST in a Markdown store, the mislabelling ruling 20
+  rejected in the other direction; a later Markdown-to-rST move would then
+  convert rST as Markdown. Items with no body move. This is the
+  conservative choice, and the first to be reopened if a project needs to
+  move back.
+- **The converter is `docs migrate`'s.** `domains/docs.item_body_converter`
+  resolves the docs project, its pandoc (refused before anything is
+  written, naming `pypandoc_binary==1.17` and `invariant docs venv`, as
+  `docs migrate` refuses; with no docs project, naming that) and the
+  decision prefix, and converts each body through
+  `core/mdconvert.convert_prose`. A link is mapped by `docs migrate`'s
+  rules, read against the directory the item's store sits in, plus one:
+  a link to an item's own file in a markdown store (`<id>.md`) becomes
+  `:need:` to that item, as a link to a record becomes its record need.
+  About two hundred of this repository's item links are of that kind. `item
+  migrate --from <reader>` names pandoc's reader, as `docs migrate` does.
+- **A body is converted as nested text** (`convert_prose(..., nested=True)`):
+  it stands inside a directive, where a section and a transition cannot
+  open. A heading becomes a rubric, as a deeper heading inside a decision
+  need already does. A horizontal rule has no form there and is left
+  `invariant-unconverted`; the same holds now inside a record's decision
+  needs.
+- **The read-back** compares every item with its body as converted, newlines
+  at either end dropped, as the backend stores it. A body pandoc writes
+  with a leading indent (a block quote first) would read back differently
+  and refuse the move by name; none of this repository's does.
+- **Each construct left unconverted is named** by item, target store, line
+  and reason (`Migration.unconverted`; `--json`'s `unconverted`), read from
+  the staged store before anything is written, including one inside a list
+  item. The converter's notes (an anchor dropped) are named by item.
+
+The proof, behind `INVARIANT_TEST_SPHINX_BUILD` (the starter's pins,
+sphinx-needs 9.2.0, `pypandoc_binary` 1.17): a copy of this repository's
+backlog (163 items) migrated into a migrating toy project's starter, with
+`DEC_ADR_001` to `DEC_ADR_019` minted first as increment 7 converts the
+records first, converted with the real pandoc, read back, and built
+strictly. The build fails with 51 diagnostics, every one an
+`invariant-unconverted` construct, and they are exactly the 51 the migration
+named, in 33 items: 38 links to architecture pages the toy project has not
+converted (`oracle.md` 12, `cli.md` 9, `state_model.md` 7, `manifest.md` 6,
+`oracle-panel.md` 2; `overview.md`, which the starter has, converted), 3
+links to `guide/oracle-web.md`, 7 horizontal rules (all in BUG_016), and 5
+raw HTML constructs (`<id>` in BUG_003, `<message>` and `<abs>` in BUG_067,
+`<record>`/`<line>`/`<col>` and `<head prefix>` in BUG_090), placeholders
+written without backticks that a Markdown reader takes as tags. In this
+repository the 41 links name files under `docs/`, so they convert to `:doc:`
+references once those pages are pages of the docs project, which increment
+7 makes them before it moves the items; the twelve others are rewritten by
+hand.
+With the stand-in pandoc: a same-format move running no pandoc, `json`
+bodies converted, rST to Markdown refused by item and an item with no body
+moving, an unconverted construct named by line, and a missing pandoc and a
+missing docs project each refused with nothing written.
+
 ## Alternatives rejected
 
 | Alternative | Why not |
@@ -1168,18 +1260,7 @@ item whose residue holds a `;` builds strictly.
 
 ## Open questions
 
-None for the record as accepted. Every input was ruled (rulings 1 to 19).
-The one question the design surfaced, the level floor, was ruled as ruling
-19. Every other default is marked *recommended*.
-
-Raised by increment 6, owed before increment 7's backlog builds strictly:
-**item bodies are Markdown.** `item migrate` keeps them as written, as D14
-says, and the strict build fails on them (162 diagnostics on this
-repository's backlog). The options are these:
-
-- (a) `item migrate` converts a body through the same converter when the
-  backend's format changes. The read-back then compares the converted body.
-- (b) The bodies move as written, and the migration session rewrites the
-  failing ones by hand.
-- (c) Each Markdown body is wrapped in a literal block. That builds, but it
-  renders as code, and the body read back is no longer the body.
+None. Every input was ruled (rulings 1 to 20). The one question the design
+surfaced, the level floor, was ruled as ruling 19, and the one increment 6
+raised, item bodies, as ruling 20 (option (a) of the three it set out;
+"As built: ruling 20"). Every other default is marked *recommended*.

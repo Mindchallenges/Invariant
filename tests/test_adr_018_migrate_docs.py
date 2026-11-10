@@ -273,6 +273,18 @@ class TestProse:
         ]
         assert mdconvert.plain(inlines) == '"q" x+1 altem'
 
+    def test_nested_text_takes_rubrics_and_leaves_a_rule(self):
+        tree = doc(header(2, "Symptom"), para("Text."), {"t": "HorizontalRule"}, para("More."))
+        fake = FakePandoc({"md": tree})
+        done = mdconvert.convert_prose("md", pandoc=fake, link=linker({}), nested=True)
+        assert ".. rubric:: Symptom" in done.text
+        assert "Symptom\n-------" not in done.text
+        assert done.unconverted == (mdconvert.NESTED_RULE,)
+        assert f".. invariant-unconverted:: {mdconvert.NESTED_RULE}" in done.text
+        # A page is not nested: the heading stays a section and the rule a transition.
+        page = mdconvert.convert_prose("md", pandoc=FakePandoc({"md": tree}), link=linker({}))
+        assert "rubric" not in page.text and page.unconverted == ()
+
     def test_pandoc_reader_is_configurable(self):
         fake = FakePandoc({"md": doc(para("x"))})
         mdconvert.convert_prose("md", pandoc=fake, link=linker({}), reader="markdown")

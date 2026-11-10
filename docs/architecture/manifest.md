@@ -2198,12 +2198,17 @@ D5; built in increment 3).
 The item model is fixed; storage is pluggable, so a project keeps whatever
 format it already uses.
 
-| Backend | Stores as | Notes |
-|---|---|---|
-| `markdown` | One file per item, frontmatter fields | Default; git-native, no tooling |
-| `sphinx_needs` | Directives in a reStructuredText file | For projects already rendering a needs graph |
-| `json` | One JSON document | For machine consumption |
-| `none` | Nothing | Work-item domain disabled |
+| Backend | Stores as | Body written in | Notes |
+|---|---|---|---|
+| `markdown` | One file per item, frontmatter fields | Markdown | Default; git-native, no tooling |
+| `sphinx_needs` | Directives in a reStructuredText file | rST | For projects already rendering a needs graph |
+| `json` | One JSON document | Markdown | For machine consumption |
+| `none` | Nothing | — | Work-item domain disabled |
+
+The body format is the backend's own (`body_format`, ADR-018 ruling 20).
+`item migrate` compares the two: the same format moves a body as written,
+Markdown to rST converts it through the docs environment's pandoc, and rST
+to Markdown is refused for any item carrying a body (cli.md, "Work items").
 
 A backend implements read, write, list, transition-persist, `add` (a new item,
 with an optional placement it honours or refuses) and `taken_ids` (every id it
@@ -2242,7 +2247,8 @@ id with nothing to say the scan saw nothing.
 No transition writes the closed store. The one writer is `item migrate
 --closed-path` (ADR-018 D14, increment 6), which fills a new closed store,
 in any backend, with the items in a terminal state, and reads the source's
-closed store as well as its open one. Otherwise reading it is the whole of
+closed store as well as its open one. Their bodies are converted as the
+open store's are (ruling 20). Otherwise reading it is the whole of
 what the key does; `item list`, `show` and `transition` still read the open
 store alone, and the store is not one of the declared writable stores above.
 Retiring an entry into it on a closing transition is still deferred — see the

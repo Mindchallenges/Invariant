@@ -55,6 +55,12 @@ class Backend(Protocol):
     def next_id(self, item_type: str, title: str = "") -> str: ...
 
 
+#: The markup an item body is written in: what ``item migrate`` compares to
+#: decide whether a body is converted (ADR-018 ruling 20).
+BODY_MARKDOWN = "markdown"
+BODY_RST = "rst"
+
+
 class _Store:
     """What every file-backed store shares: the id scan and adding a new item.
 
@@ -67,6 +73,9 @@ class _Store:
 
     #: The placement option a caller named, if this format has none to offer.
     _no_placement = ""
+    #: The markup of a body this store holds (:data:`BODY_MARKDOWN`,
+    #: :data:`BODY_RST`).
+    body_format = BODY_MARKDOWN
 
     def __init__(
         self,
@@ -209,7 +218,11 @@ class MarkdownBackend(_Store):
 
 
 class JsonBackend(_Store):
-    """One document. For machine consumption rather than human editing."""
+    """One document. For machine consumption rather than human editing.
+
+    Its bodies are Markdown, the text ``item new --body`` is given, as the
+    markdown backend's are, so a move between the two is byte for byte.
+    """
 
     _no_placement = "a JSON document has no sections"
 
@@ -697,7 +710,11 @@ class SphinxNeedsBackend(_Store):
     body read excludes it, so the body round-trips. A transition rewrites the
     block's span, and a re-dump of unchanged rows is the same bytes, so the
     diff of a transition is its status line plus the rows it added.
+
+    A body is reStructuredText, the directive's content (ADR-018 ruling 20).
     """
+
+    body_format = BODY_RST
 
     def _read(self) -> str:
         if not self.path.is_file():

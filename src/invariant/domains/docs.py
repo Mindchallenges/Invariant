@@ -47,7 +47,8 @@ The migration (ADR-018 D14) writes too: :func:`migrate_adr` and
 :func:`migrate_prose` convert Markdown into record pages and rST pages
 through ``core/mdconvert``, with the pandoc ``pypandoc_binary`` installs in
 the docs environment (:func:`pandoc_of`), refusing before anything is
-written, and never deleting the Markdown.
+written, and never deleting the Markdown. ``item migrate`` converts item
+bodies by the same converter (:func:`item_body_converter`, ruling 20).
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -1037,14 +1038,20 @@ def _under(path: Path, root: Path) -> bool:
 
 
 def _linker(
-    source: Path, srcdir: Path, prefix: str, batch: Mapping[Path, str]
+    base: Path,
+    srcdir: Path,
+    prefix: str,
+    batch: Mapping[Path, str],
+    items: Mapping[Path, str] | None = None,
 ) -> mdconvert.Link:
-    """How a link in ``source`` is converted (D14): another record becomes its
-    record need, a page of the docs project (converted in this batch, or
-    there already) a document reference; an external URL stays. Anything
-    else is not converted: an in-page anchor (a Markdown heading's anchor
-    has no Sphinx label), a file that is no page, a page outside the docs
-    project or not written yet."""
+    """How a link written in the directory ``base`` is converted (D14):
+    another record becomes its record need, an item's own file (``items``,
+    by path) its item need (ruling 20), a page of the docs project
+    (converted in this batch, or there already) a document reference; an
+    external URL stays. Anything else is not converted: an in-page anchor (a
+    Markdown heading's anchor has no Sphinx label), a file that is no page, a
+    page outside the docs project or not written yet."""
+    items = items or {}
 
     def link(url: str) -> mdconvert.Target:
         if not url or _EXTERNAL.match(url):
@@ -1055,11 +1062,13 @@ def _linker(
                 problem=f"an in-page anchor ({url}): a Markdown heading's anchor has "
                 "no Sphinx label; write a :ref: to a label"
             )
-        target = (source.parent / unquote(path)).resolve()
+        target = (base / unquote(path)).resolve()
         note = f"the anchor #{anchor} of {path} was dropped" if anchor else None
         record = re.match(r"^ADR-0*(\d+)\b", target.name)
         if record and target.suffix in (".md", ".rst"):
             return mdconvert.Target("need", f"{prefix}ADR_{int(record.group(1)):03d}", note=note)
+        if target in items:
+            return mdconvert.Target("need", items[target], note=note)
         if target in batch:
             return mdconvert.Target("doc", batch[target], note=note)
         page = target.with_suffix(".rst").is_file() or target.is_file()
@@ -1117,7 +1126,7 @@ def migrate_adr(
                     prefix=kind.prefix,
                     statuses=statuses,
                     pandoc=call,
-                    link=_linker(source, srcdir, kind.prefix, {}),
+                    link=_linker(source.parent, srcdir, kind.prefix, {}),
                     reader=reader,
                 ),
             )
@@ -1237,7 +1246,7 @@ def migrate_prose(
         done = mdconvert.convert_prose(
             source.read_text(encoding="utf-8"),
             pandoc=call,
-            link=_linker(source, srcdir, prefix, batch),
+            link=_linker(source.parent, srcdir, prefix, batch),
             reader=reader,
         )
         notes = list(done.notes)
@@ -1275,6 +1284,69 @@ def migrate_prose(
         for index, text in indexes.items():
             index.write_text(text, encoding="utf-8")
     return pages
+
+
+# -- item bodies: Markdown to rST for item migrate (ADR-018 ruling 20) --------------
+
+#: A body and the directory its links are read against, converted.
+BodyConverter = Callable[[str, Path], mdconvert.Converted]
+
+
+def item_body_converter(
+    manifest: Manifest,
+    *,
+    items: Mapping[Path, str] | None = None,
+    pandoc: mdconvert.Pandoc | None = None,
+    reader: str = mdconvert.READER,
+) -> BodyConverter:
+    """``convert(body, base)``: a Markdown item body as rST, by the converter
+    ``docs migrate`` uses (ruling 20).
+
+    The pandoc is the docs environment's, refused here, before anything is
+    written, when the project has no docs project, or its environment is out
+    of sync or lacks ``pypandoc_binary`` (:func:`pandoc_of`). A link is
+    mapped as a page's is (:func:`_linker`), read against ``base``, the
+    directory the item's store sits in; a link to an item's own file
+    (``items``, by path) becomes its need.
+    """
+    srcdir = docs_project(manifest)
+    call = pandoc or pandoc_call(pandoc_of(srcdir))
+    prefix = needs_reader.type_of_role(needs_reader.types_of(manifest), "decision").prefix
+
+    def convert(body: str, base: Path) -> mdconvert.Converted:
+        return mdconvert.convert_prose(
+            body,
+            pandoc=call,
+            link=_linker(base, srcdir, prefix, {}, items),
+            reader=reader,
+            nested=True,
+        )
+
+    return convert
+
+
+#: A construct left unconverted, opening its line or a list item on it.
+_UNCONVERTED_LINE = re.compile(
+    r"^\s*(?:(?:[-*+]|\d+[.)]|#\.)\s+)*\.\.\s+" + re.escape(mdconvert.UNCONVERTED) + r"::(.*)$"
+)
+
+
+def unconverted_in(text: str) -> list[tuple[str, int, str]]:
+    """Each ``.. invariant-unconverted::`` in an rST items store, a list
+    item's included: the id of the need above it, its 1-based line, and its
+    reason. One above every need is named with an empty id."""
+    owners = sorted(
+        (directive.line, directive.options["id"])
+        for directive in rst_directives(text)
+        if "id" in directive.options
+    )
+    found = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        match = _UNCONVERTED_LINE.match(line)
+        if match:
+            owner = next((oid for at, oid in reversed(owners) if at < number), "")
+            found.append((owner, number, match.group(1).strip()))
+    return found
 
 
 # -- adoption: in place or by copy (ADR-016 D7, D8) --------------------------

@@ -43,6 +43,10 @@ from .errors import UsageError
 UNCONVERTED = "invariant-unconverted"
 #: pandoc's reader for the Markdown, unless the caller names another.
 READER = "gfm"
+#: Why a horizontal rule inside a directive is left: a section and a
+#: transition cannot open there, and a heading has a rubric but a rule has
+#: nothing.
+NESTED_RULE = "a horizontal rule, which cannot stand inside a directive"
 #: Code-block languages that are diagrams, and the directive each becomes.
 DIAGRAMS = {"mermaid": "mermaid", "plantuml": "uml", "uml": "uml"}
 
@@ -180,6 +184,8 @@ class _Rewrite:
             return {"t": kind, "c": self.blocks(c, nested)}
         if kind == "Div":
             return {"t": kind, "c": [c[0], self.blocks(c[1], nested)]}
+        if kind == "HorizontalRule" and nested:
+            return self.leave(block, [NESTED_RULE])
         if kind == "CodeBlock":
             (_, classes, _), text = c
             directive = next((DIAGRAMS[k] for k in classes if k in DIAGRAMS), None)
@@ -256,12 +262,22 @@ def _tree(markdown: str, pandoc: Pandoc, reader: str) -> dict:
 
 
 def convert_prose(
-    markdown: str, *, pandoc: Pandoc, link: Link, reader: str = READER
+    markdown: str,
+    *,
+    pandoc: Pandoc,
+    link: Link,
+    reader: str = READER,
+    nested: bool = False,
 ) -> Converted:
-    """A Markdown page as an rST page, through pandoc's tree."""
+    """A Markdown page as an rST page, through pandoc's tree.
+
+    ``nested`` converts text that will stand inside a directive, as an item
+    body does (ADR-018 ruling 20): a heading becomes a rubric, and a
+    horizontal rule, which has no form there, is left unconverted.
+    """
     tree = _tree(markdown, pandoc, reader)
     rewrite = _Rewrite(link, pandoc, reader, tree.get("pandoc-api-version"))
-    text = rewrite.rst(rewrite.blocks(tree["blocks"]))
+    text = rewrite.rst(rewrite.blocks(tree["blocks"], nested=nested))
     return Converted(
         text=text.rstrip("\n") + "\n",
         unconverted=tuple(rewrite.unconverted),

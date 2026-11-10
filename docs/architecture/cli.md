@@ -1640,7 +1640,7 @@ invariant item transition <id> <status> [--reason <text>] [--force]
     closes through a ruling").
 invariant item residue <id> [--add <text> | --clear <text>]
 invariant item migrate --to markdown|json|sphinx_needs [--path <p>]
-                       [--closed-path <p>] [--dry-run]
+                       [--closed-path <p>] [--from <reader>] [--dry-run]
 ```
 
 **Built (ADR-018 increment 1).** On `sphinx_needs`, `transition` persists
@@ -1660,8 +1660,24 @@ the target already holds are kept, and an id it holds is refused. The source
 store and the manifest are left alone. The output names the switch
 (`items.backend`, `items.path`, `items.closed_path`), which the migration
 session makes, deleting the source in the same session. `--json` carries
-`backend`, `path`, `closed_path`, `open`, `closed`, `kept`, `settings` and
-`dry_run`.
+`backend`, `path`, `closed_path`, `open`, `closed`, `kept`, `settings`,
+`dry_run`, `converted`, `unconverted` and `notes`.
+
+**Built (ADR-018 ruling 20).** A body moves as written, byte for byte and
+without pandoc, when both backends hold the same markup (`markdown` and
+`json` hold Markdown, `sphinx_needs` rST). From Markdown to rST each body is
+converted by `docs migrate`'s converter, with the docs environment's pandoc
+(refused before anything is written, naming `pypandoc_binary==1.17` and
+`invariant docs venv`, or naming the missing docs project) and `--from`'s
+reader (`gfm` by default), as text standing inside a directive: a heading
+becomes a rubric, and a horizontal rule is left unconverted. Links follow
+`docs migrate`'s rules, read against the store's directory, and a link to
+an item's own file in a markdown store becomes `:need:` to that item. The
+read-back compares the body as converted. Each construct left as `..
+invariant-unconverted::` is named by target store, line, item and reason
+(`unconverted`: `id`, `path`, `line`, `reason`), and each note by item. rST
+to Markdown has no converter: a move that would need one, any item carrying
+a body, is refused, naming the items, and writes nothing.
 
 **Built (ADR-018 D8, increment 5).** `item new` (its title, body and
 fields), `item transition` (its reason and ruling) and `item residue --add`

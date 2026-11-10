@@ -4458,7 +4458,11 @@ def cmd_item_migrate(args) -> int:
         return None if value is None else (ctx.cwd / value).resolve()
 
     done = ctx.items.migrate(
-        args.to, given(args.path), closed_path=given(args.closed_path), dry_run=args.dry_run
+        args.to,
+        given(args.path),
+        closed_path=given(args.closed_path),
+        dry_run=args.dry_run,
+        reader=args.reader,
     )
     path = _spelled_under(root, done.path)
     closed = None if done.closed_path is None else _spelled_under(root, done.closed_path)
@@ -4480,6 +4484,23 @@ def cmd_item_migrate(args) -> int:
             f"history row for row"
         )
     ]
+    unconverted = [
+        {"id": u.id, "path": _spelled_under(root, u.path), "line": u.line, "reason": u.reason}
+        for u in done.unconverted
+    ]
+    if done.converted:
+        lines.append(
+            f"  {len(done.converted)} body(ies) converted from Markdown to rST "
+            "(ADR-018 ruling 20), read back as converted; "
+            + (
+                f"{len(unconverted)} construct(s) left as .. invariant-unconverted::, "
+                "which fail the strict build until rewritten:"
+                if unconverted
+                else "no construct left unconverted"
+            )
+        )
+        lines += [f"    {u['path']}:{u['line']}  {u['id']}  {u['reason']}" for u in unconverted]
+        lines += [f"    note: {note}" for note in done.notes]
     if done.kept:
         lines.append(f"  the target held {done.kept} item(s) already, kept as they were")
     lines.append(
@@ -4496,6 +4517,9 @@ def cmd_item_migrate(args) -> int:
         "kept": done.kept,
         "settings": settings,
         "dry_run": done.dry_run,
+        "converted": list(done.converted),
+        "unconverted": unconverted,
+        "notes": list(done.notes),
     }
     return emit(args, payload, "\n".join(lines))
 
@@ -7079,6 +7103,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--closed-path",
         dest="closed_path",
         help="where items in a terminal state go; without it, every item goes to --path",
+    )
+    q.add_argument(
+        "--from",
+        dest="reader",
+        default="gfm",
+        help="pandoc's reader for Markdown bodies converted to rST (default gfm)",
     )
     q.add_argument("--dry-run", action="store_true", help="migrate and read back; write nothing")
     q.set_defaults(func=cmd_item_migrate)

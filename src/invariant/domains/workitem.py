@@ -14,12 +14,21 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..core import needs
+from ..core import mdconvert, needs
 from ..core.errors import GateFailure, TransitionError, UsageError
 from ..core.git import resolve_commit
-from ..core.items import STORES, Item, NullBackend, backend_for, differences
+from ..core.items import (
+    BODY_MARKDOWN,
+    BODY_RST,
+    STORES,
+    Item,
+    NullBackend,
+    backend_for,
+    differences,
+)
 from ..core.machines import load_item_machine
 from ..core.rules import Evaluated, RuleContext, evaluate
+from . import docs as docs_domain
 
 ITEM_TYPES = ("idea", "bug")
 
@@ -78,12 +87,27 @@ def _refuse_edge(machine, source: str, target: str, via: str | None) -> None:
 #: How many read-back differences a refused migration names before the count.
 _NAMED = 20
 
+#: A body format as a sentence names it.
+_FORMAT_NAMES = {BODY_MARKDOWN: "Markdown", BODY_RST: "rST"}
+
+
+@dataclass(frozen=True)
+class Unconverted:
+    """A construct a converted body left as ``.. invariant-unconverted::``:
+    the item, the target store and the line it is written on, and why."""
+
+    id: str
+    path: Path
+    line: int
+    reason: str
+
 
 @dataclass(frozen=True)
 class Migration:
     """What ``item migrate`` moved, or would (ADR-018 D14): the target
     backend and its stores, the ids written to each, and how many items the
-    target held already and keeps."""
+    target held already and keeps; with ruling 20, the ids whose bodies were
+    converted, each construct left unconverted, and the converter's notes."""
 
     backend: str
     path: Path
@@ -92,6 +116,9 @@ class Migration:
     closed: tuple[str, ...]
     kept: int
     dry_run: bool
+    converted: tuple[str, ...] = ()
+    unconverted: tuple[Unconverted, ...] = ()
+    notes: tuple[str, ...] = ()
 
 
 def _staged(real: Path, stage: Path) -> Path:
@@ -408,6 +435,8 @@ class WorkItemDomain:
         path: Path | None,
         closed_path: Path | None = None,
         dry_run: bool = False,
+        pandoc: mdconvert.Pandoc | None = None,
+        reader: str = mdconvert.READER,
     ) -> Migration:
         """Move every item, open and closed, into the ``to`` backend.
 
@@ -425,6 +454,13 @@ class WorkItemDomain:
         move would bring again is refused. The source store is never written,
         and the manifest is not changed: the switch is the migration
         session's last step.
+
+        A body moves as written when both backends hold the same markup.
+        From Markdown to rST it is converted by ``docs migrate``'s converter,
+        through the docs environment's pandoc (``pandoc`` stands in for it,
+        ``reader`` is pandoc's Markdown reader), and the read-back compares
+        the converted body (ADR-018 ruling 20). rST to Markdown has no
+        converter: a move that would need one is refused.
         """
         if to not in STORES:
             raise UsageError(
@@ -450,7 +486,7 @@ class WorkItemDomain:
                     f"{_shown(target, self.manifest.root)} is a source store of "
                     "this migration; migrate into another path"
                 )
-        moved = self._source_items(source)
+        moved, origin = self._source_items(source)
         prefix = self.manifest.get("items.id_prefix", "") or ""
         strategy = self.manifest.get("items.id_strategy", "numeric") or "numeric"
         cls = STORES[to]
@@ -471,6 +507,7 @@ class WorkItemDomain:
                     f"{', '.join(clash)}: already in the target; an id is never "
                     "spent twice. Nothing was written."
                 )
+            moved, converted, notes = self._bodies(moved, origin, cls, pandoc, reader)
             opened: list[str] = []
             closed: list[str] = []
             for item in moved:
@@ -484,6 +521,9 @@ class WorkItemDomain:
                     ) from exc
                 (closed if into_closed else opened).append(item.id)
             self._read_back(cls, stores, moved, prefix, strategy, to)
+            unconverted = self._unconverted(
+                converted, ((stage_open, path), (stage_closed, closed_path))
+            )
             if not dry_run:
                 _publish(stage_open, path)
                 if stage_closed is not None and closed:
@@ -496,7 +536,75 @@ class WorkItemDomain:
             closed=tuple(closed),
             kept=len(held),
             dry_run=dry_run,
+            converted=converted,
+            unconverted=unconverted,
+            notes=notes,
         )
+
+    def _bodies(
+        self, moved: list[Item], origin: dict[str, Path], cls, pandoc, reader
+    ) -> tuple[list[Item], tuple[str, ...], tuple[str, ...]]:
+        """The items as the target holds them: each body as written when the
+        two backends' markup agrees, converted Markdown to rST when it does
+        not (ruling 20), and the move refused when it would need rST to
+        Markdown. An empty body is never converted."""
+        source_format = type(self.backend).body_format
+        bodied = [item for item in moved if item.body.strip()]
+        if source_format == cls.body_format or not bodied:
+            return moved, (), ()
+        if (source_format, cls.body_format) != (BODY_MARKDOWN, BODY_RST):
+            named = ", ".join(item.id for item in bodied[:_NAMED])
+            more = len(bodied) - min(len(bodied), _NAMED)
+            raise UsageError(
+                f"the source holds bodies as {_FORMAT_NAMES[source_format]} and the "
+                f"target as {_FORMAT_NAMES[cls.body_format]}; item migrate converts "
+                f"Markdown to rST only (ADR-018 ruling 20), and {len(bodied)} item(s) "
+                f"carry a body: {named}"
+                + (f" and {more} more" if more else "")
+                + ". Nothing was written."
+            )
+        files = {
+            (store / f"{item.id}.md").resolve(): item.id
+            for item in moved
+            if (store := origin[item.id]).is_dir()
+        }
+        convert = docs_domain.item_body_converter(
+            self.manifest, items=files, pandoc=pandoc, reader=reader
+        )
+        out: list[Item] = []
+        converted: list[str] = []
+        notes: list[str] = []
+        for item in moved:
+            if not item.body.strip():
+                out.append(item)
+                continue
+            store = origin[item.id]
+            done = convert(item.body, store if store.is_dir() else store.parent)
+            moved_item = Item.from_dict(item.to_dict())
+            moved_item.body = done.text.strip("\n")
+            out.append(moved_item)
+            converted.append(item.id)
+            notes += [f"{item.id}: {note}" for note in done.notes]
+        return out, tuple(converted), tuple(notes)
+
+    @staticmethod
+    def _unconverted(converted, stages) -> tuple[Unconverted, ...]:
+        """Each construct the converted bodies left unconverted, by the line
+        it is written on in the target store."""
+        if not converted:
+            return ()
+        ids = set(converted)
+        found = []
+        for stage, real in stages:
+            if stage is None or not stage.is_file():
+                continue
+            text = stage.read_text(encoding="utf-8")
+            found += [
+                Unconverted(item_id, real, line, reason)
+                for item_id, line, reason in docs_domain.unconverted_in(text)
+                if item_id in ids
+            ]
+        return tuple(found)
 
     def _target_path(self, to: str, path: Path | None) -> Path:
         if path is not None:
@@ -527,7 +635,8 @@ class WorkItemDomain:
             )
         return stores
 
-    def _source_items(self, stores: list) -> list[Item]:
+    def _source_items(self, stores: list) -> tuple[list[Item], dict[str, Path]]:
+        """Every item of the source stores, and the store each is read from."""
         items: list[Item] = []
         seen: dict[str, Path] = {}
         for store in stores:
@@ -543,9 +652,9 @@ class WorkItemDomain:
                         f"and {_shown(store.path, self.manifest.root)}; settle which one "
                         "holds it before migrating"
                     )
-                seen[item.id] = store.path
+                seen[item.id] = Path(store.path).resolve()
                 items.append(item)
-        return items
+        return items, seen
 
     def _closed(self, item: Item) -> bool:
         return item.status in self.machine(item.type).terminal
