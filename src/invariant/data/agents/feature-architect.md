@@ -110,6 +110,7 @@ Produce a design plan with the following sections (this becomes section `DESIGN`
    - `[NEW]` — newly created
 7. **Test plan** — for each touched source file, list the test file the project's conventions pair with it, the test cases you will add, and how they get the file to the configured coverage floor.
 8. **Docs to update** — the exact architecture-doc files under `paths.docs` and which diagram blocks change.
+9. **Decisions** — end the design phase by declaring every decision it made on the session: `invariant session decisions add <DEC_id>` for one already a need (`invariant docs decision new "<title>"` mints a record page), or `invariant session decisions add --draft "<one line>"` for one not yet written as a need. A draft holds the landing (`docs.decisions_recorded`) until `invariant session decisions resolve <n> <DEC_id>` names its need.
 
 If the task signal is ambiguous, choose the simplest reasonable interpretation and state it. Do not stall on clarification — the parent agent runs in auto mode.
 
@@ -400,6 +401,11 @@ DESIGN
     - tests/ManagementViewModelTests.<ext>          +N tests → 91%
   Docs to update:
     - <paths.docs>/views doc (add DetailsSheet to view graph)
+
+DECISIONS: (exactly what `invariant session decisions add` recorded)
+  - DEC_ADR_<nnn>_D<k>   <one line>
+  - draft 2              <one line>  (resolve before landing)
+  (or "none")
 
 BOY-SCOUT REFACTORS (pre-existing violations fixed in touched files)
   - ManagementViewModels.<ext>  ungated debug affordance → guarded per checklist

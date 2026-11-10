@@ -1,5 +1,5 @@
 ---
-# invariant-managed: source=48ee4502253b5de8 overlay=none body=83084144aa43f640
+# invariant-managed: source=70c0fa3a932905cc overlay=none body=9ef02fe4aadb8544
 name: feature-architect
 description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's guidelines: the engine's ruleset, or the compliance checklist where there is none), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase.
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -105,6 +105,7 @@ Produce a design plan with the following sections (this becomes section `DESIGN`
    - `[NEW]` — newly created
 7. **Test plan** — for each touched source file, list the test file the project's conventions pair with it, the test cases you will add, and how they get the file to the configured coverage floor.
 8. **Docs to update** — the exact architecture-doc files under `paths.docs` and which diagram blocks change.
+9. **Decisions** — end the design phase by declaring every decision it made on the session: `invariant session decisions add <DEC_id>` for one already a need (`invariant docs decision new "<title>"` mints a record page), or `invariant session decisions add --draft "<one line>"` for one not yet written as a need. A draft holds the landing (`docs.decisions_recorded`) until `invariant session decisions resolve <n> <DEC_id>` names its need.
 
 If the task signal is ambiguous, choose the simplest reasonable interpretation and state it. Do not stall on clarification — the parent agent runs in auto mode.
 
@@ -388,6 +389,11 @@ DESIGN
     - tests/ManagementViewModelTests.<ext>          +N tests → 91%
   Docs to update:
     - <paths.docs>/views doc (add DetailsSheet to view graph)
+
+DECISIONS: (exactly what `invariant session decisions add` recorded)
+  - DEC_ADR_<nnn>_D<k>   <one line>
+  - draft 2              <one line>  (resolve before landing)
+  (or "none")
 
 BOY-SCOUT REFACTORS (pre-existing violations fixed in touched files)
   - ManagementViewModels.<ext>  ungated debug affordance → guarded per checklist

@@ -40,7 +40,8 @@ from invariant.core.docformat import RstReader
 from invariant.core.manifest import DATA_DIR, Manifest
 from invariant.domains import docs as docs_domain
 
-#: Every file the default starter writes, relative to the project root.
+#: Every file the default starter writes, relative to the project root: the
+#: guidelines ruleset with the mandate's two judgement rules since increment 5.
 STARTER = sorted(
     [
         "docs/.gitignore",
@@ -49,6 +50,7 @@ STARTER = sorted(
         "docs/checklist.rst",
         "docs/conf.py",
         "docs/decisions/index.rst",
+        "docs/guidelines/ruleset.yaml",
         "docs/index.rst",
         "docs/requirements.rst",
         "docs/requirements.txt",
@@ -506,8 +508,9 @@ class TestTheStarterBuildsStrictly:
     def test_the_rendered_guidelines_pages_build_too(self, toy_python, capsys, monkeypatch):
         self.init_and_build(toy_python, capsys, monkeypatch, "--ecosystem", "python")
         ruleset = Path(__file__).resolve().parent.parent / "docs" / "guidelines" / "ruleset.yaml"
+        # The starter wrote one with the mandate's two rules; this
+        # repository's replaces it, links to Markdown files included.
         target = toy_python / "docs" / "guidelines" / "ruleset.yaml"
-        target.parent.mkdir()
         shutil.copy(ruleset, target)
         manifest = toy_python / ".claude" / "invariant.yaml"
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
@@ -544,6 +547,7 @@ class TestForceKeepsTheMandate:
         assert m.get("docs.needs.state") == "enforced"
         assert m.get("items.backend") == "sphinx_needs"
         assert m.get("items.path") == "docs/backlog.rst"
+        assert m.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
         assert written(toy_python) == before
 
     def test_a_migrating_project_stays_as_it_was(self, toy_python, capsys):

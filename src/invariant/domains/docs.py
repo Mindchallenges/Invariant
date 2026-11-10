@@ -54,7 +54,7 @@ import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
@@ -512,9 +512,18 @@ class Starter:
     srcdir: Path
     files: tuple[tuple[str, str], ...]
     settings: dict[str, Any]
+    #: The guidelines ruleset the starter writes, ``(path relative to base,
+    #: text)``, carrying the mandate's two judgement rules (ADR-018 D8, D9);
+    #: ``None`` where the project has a ruleset, which is never rewritten.
+    ruleset: tuple[str, str] | None = None
+    #: Why no ruleset is written, with what to add by hand, or ``None``.
+    note: str | None = None
 
     def paths(self) -> list[Path]:
-        return [self.srcdir / rel for rel, _text in self.files]
+        written = [self.srcdir / rel for rel, _text in self.files]
+        if self.ruleset is not None:
+            written.append(self.base / self.ruleset[0])
+        return written
 
 
 def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> Starter:
@@ -549,6 +558,9 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
     types = needs_reader.types_of(manifest)
     element = needs_reader.type_of_role(types, "element")
     rule = needs_reader.type_of_role(types, "rule")
+    backlog = f"{spelled}/{_BACKLOG}"
+    ruleset, parsed, note = _starter_ruleset(manifest, Path(base), backlog)
+    source = None if ruleset is None else ruleset[0]
     areas, _gaps = _assessed_areas(manifest, manifest.get("docs.assess")["areas"])
     fill = {
         "project": json.dumps(project),
@@ -576,10 +588,10 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
         (
             guidelines_reader.RULES_PAGE,
             guidelines_reader.render_rule_needs(
-                None, source=None, directive=rule.directive, prefix=rule.prefix
+                parsed, source=source, directive=rule.directive, prefix=rule.prefix
             ),
         ),
-        ("checklist.rst", guidelines_reader.render_checklist(None, "sphinx", source=None)),
+        ("checklist.rst", guidelines_reader.render_checklist(parsed, "sphinx", source=source)),
         (_BACKLOG, _template("backlog.rst", fill)),
     ]
     there = [name for name, _text in files if (srcdir / name).exists()]
@@ -592,16 +604,71 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
         )
     settings = {
         "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": spelled}},
-        "items": {"backend": "sphinx_needs", "path": f"{spelled}/{_BACKLOG}"},
+        "items": {"backend": "sphinx_needs", "path": backlog},
     }
-    return Starter(base=Path(base), srcdir=srcdir, files=tuple(files), settings=settings)
+    if ruleset is not None:
+        settings["guidelines"] = {"ruleset": ruleset[0]}
+    return Starter(
+        base=Path(base),
+        srcdir=srcdir,
+        files=tuple(files),
+        settings=settings,
+        ruleset=ruleset,
+        note=note,
+    )
+
+
+#: Where the starter writes the guidelines ruleset: ADR-012 D3's default path.
+STARTER_RULESET = "docs/guidelines/ruleset.yaml"
+#: The mandate's two judgement rules (ADR-018 D8, D9), as the starter writes them.
+MANDATE_GUIDELINES = ("docs.items-carry-no-design", "docs.decisions-are-declared")
+
+
+def _starter_ruleset(
+    manifest: Manifest, base: Path, backlog: str
+) -> tuple[tuple[str, str] | None, Any, str | None]:
+    """The ruleset the starter writes, its parse, and a note where it writes none.
+
+    Written at ADR-012 D3's default path where the project configures no
+    ruleset and nothing is there. A configured ruleset is the project's and is
+    never rewritten: unless it holds both rules already, the note gives them
+    to add by hand. So does a store project, whose ruleset is its records'.
+    """
+    from ..core.rules import all_rules  # local: core/rules imports this domain
+
+    text = _template("../guidelines/ruleset.yaml", {"items": f"      - {backlog}"})
+    configured = manifest.get("guidelines.ruleset")
+    by_hand = (
+        "\n  add the docs mandate's two judgement rules to it by hand (ADR-018 "
+        "D8, D9), with a `docs` section:\n"
+        + "\n".join(
+            f"    {line}" for line in text.split("rules:\n", 1)[1].splitlines()
+        )
+    )
+    if configured is not None:
+        path = manifest.root / str(configured)
+        held = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if all(rule_id in held for rule_id in MANDATE_GUIDELINES):
+            return None, None, None
+        return None, None, f"The guidelines ruleset {configured} is the project's own" + by_hand
+    if Path(base).resolve() != manifest.root.resolve():
+        return None, None, "No guidelines ruleset was written into the store" + by_hand
+    if (base / STARTER_RULESET).exists():
+        return None, None, (
+            f"{STARTER_RULESET} exists and guidelines.ruleset is not set, so no "
+            f"ruleset was written; set guidelines.ruleset to it" + by_hand
+        )
+    parsed = guidelines_reader.parse(text, registered=[r.id for r in all_rules()])
+    return (STARTER_RULESET, text), parsed, None
 
 
 def write_starter(starter: Starter) -> list[Path]:
     """Write the starter's files; the paths written."""
     written = []
-    for rel, text in starter.files:
-        path = starter.srcdir / rel
+    entries = [(starter.srcdir / rel, text) for rel, text in starter.files]
+    if starter.ruleset is not None:
+        entries.append((starter.base / starter.ruleset[0], starter.ruleset[1]))
+    for path, text in entries:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         written.append(path)
@@ -694,6 +761,169 @@ def _extra_sections(required: Sequence[str]) -> str:
     return "".join(
         f"\n{heading}\n{'-' * len(heading)}\n\nWrite this section.\n" for heading in extra
     )
+
+
+# -- a decision record (ADR-018 D7) -------------------------------------------
+
+#: A record page's file name: ``ADR-<n>`` then a slug, or nothing.
+_RECORD_FILE = re.compile(r"^ADR-(\d+)(?:-.*)?\.rst$")
+#: How long a record page's slug may be.
+_SLUG_MAX = 60
+
+
+@dataclass(frozen=True)
+class DecisionPage:
+    """What ``docs decision new`` writes (or would): the record page, its
+    need, and the index whose toctree lists it (``None`` when that toctree
+    globs, and lists it already)."""
+
+    path: Path
+    rel: str
+    need_id: str
+    number: int
+    status: str
+    index: Path | None
+    text: str
+
+
+def new_decision(
+    manifest: Manifest,
+    title: str,
+    *,
+    today: date | None = None,
+    dry_run: bool = False,
+) -> DecisionPage:
+    """Mint the next decision record page under ``<srcdir>/decisions/`` (D7).
+
+    The number follows every record page already there, read by the rST
+    reader so a page written since the last build counts: the highest
+    ``ADR-<n>`` file name or ``<prefix>ADR_<n>`` need id of a decision type,
+    plus one. The record is a need of the ``decision`` role's first type,
+    in ``docs.needs.decision_statuses``' first status, and the page is
+    appended to ``decisions/index.rst``'s toctree. Refused, writing nothing,
+    for a title that is not one line, no docs project, or no index page.
+    """
+    if not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title:
+        raise UsageError(
+            f"a decision record's title is one line of text, got {title!r}"
+        )
+    title = title.strip()
+    srcdir = docs_project(manifest)
+    decisions = srcdir / "decisions"
+    index = decisions / "index.rst"
+    spelled = _spelled(manifest.root, srcdir)
+    if not index.is_file():
+        raise UsageError(
+            f"no {spelled}/decisions/index.rst: the record pages are listed in its "
+            f"toctree. Create it, with a title, and list decisions/index in the "
+            f"root toctree; then run this again."
+        )
+    types = needs_reader.types_of(manifest)
+    kind = needs_reader.type_of_role(types, "decision")
+    prefixes = needs_reader.prefixes_of(types, ("decision",))
+    number = _next_record(decisions, prefixes)
+    need_id = f"{kind.prefix}ADR_{number:03d}"
+    status = str((manifest.get("docs.needs.decision_statuses") or ["proposed"])[0])
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:_SLUG_MAX].strip("-")
+    stem = f"ADR-{number:03d}" + (f"-{slug}" if slug else "")
+    path = decisions / f"{stem}.rst"
+    text = _record_page(
+        number, title, kind.directive, need_id, status,
+        today or datetime.now().astimezone().date(),
+    )
+    listed = _listed(index.read_text(encoding="utf-8"), stem)
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+        if listed is not None:
+            index.write_text(listed, encoding="utf-8")
+    return DecisionPage(
+        path=path,
+        rel=_spelled(manifest.root, path),
+        need_id=need_id,
+        number=number,
+        status=status,
+        index=index if listed is not None else None,
+        text=text,
+    )
+
+
+def _next_record(decisions: Path, prefixes: Sequence[str]) -> int:
+    """One past the highest record number any page under ``decisions`` spends."""
+    numbers = [0]
+    ids = re.compile(
+        r"^(?:" + "|".join(re.escape(p) for p in prefixes) + r")ADR_(\d+)$"
+    ) if prefixes else None
+    for page in sorted(decisions.rglob("*.rst")):
+        named = _RECORD_FILE.match(page.name)
+        if named:
+            numbers.append(int(named.group(1)))
+        if ids is None:
+            continue
+        try:
+            text = page.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for directive in rst_directives(text):
+            found = ids.match(directive.options.get("id", "").strip())
+            if found:
+                numbers.append(int(found.group(1)))
+    return max(numbers) + 1
+
+
+def _record_page(
+    number: int, title: str, directive: str, need_id: str, status: str, day: date
+) -> str:
+    heading = f"ADR-{number:03d} — {title}"
+    return (
+        f".. _adr-{number:03d}:\n"
+        f"\n"
+        f"{heading}\n"
+        f"{'=' * len(heading)}\n"
+        f"\n"
+        f".. {directive}:: {title}\n"
+        f"   :id: {need_id}\n"
+        f"   :status: {status}\n"
+        f"\n"
+        f"   {status.capitalize()} on {day.isoformat()}. Write the context, then the\n"
+        f"   rulings in the user's words, each under its own label\n"
+        f"   (``.. _adr-{number:03d}-ruling-1:``). Each decision is its own\n"
+        f"   ``{directive}`` need, ``{need_id}_D1`` onward, ``part_of`` this\n"
+        f"   record and linked to the elements it shapes.\n"
+    )
+
+
+def _listed(index: str, entry: str) -> str | None:
+    """``index`` with ``entry`` appended to its last toctree, or a toctree
+    added; ``None`` when a toctree globs, which lists the page already."""
+    lines = index.splitlines()
+    starts = [n for n, line in enumerate(lines) if line.strip() == ".. toctree::"]
+    if not starts:
+        tail = "" if index.endswith("\n") or not index else "\n"
+        return f"{index}{tail}\n.. toctree::\n   :maxdepth: 1\n\n   {entry}\n"
+    for start in starts:
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        for line in lines[start + 1:]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            if line.strip() == ":glob:":
+                return None
+    start = starts[-1]
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    last, inner = start, None
+    for n in range(start + 1, len(lines)):
+        line = lines[n]
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        if line.strip():
+            last = n
+            if inner is None:
+                inner = len(line) - len(line.lstrip())
+    pad = " " * (inner if inner is not None else indent + 3)
+    added = [f"{pad}{entry}"]
+    if last == start or lines[last].strip().startswith(":"):
+        added.insert(0, "")
+    lines[last + 1:last + 1] = added
+    return "\n".join(lines) + "\n"
 
 
 # -- adoption: in place or by copy (ADR-016 D7, D8) --------------------------

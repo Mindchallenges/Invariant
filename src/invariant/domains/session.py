@@ -167,6 +167,12 @@ class Session(PreservesUnknownKeys):
     #: transition's recorded duration — an edit to the record of what a state
     #: cost, made by an operation that is not a transition at all.
     plan_touched: float = 0.0
+    #: The decisions this session made (ADR-018 D9), in the order declared:
+    #: ``[{"n": int, "id": str | None, "draft": str | None}]``. An entry with
+    #: no ``id`` is a draft, which ``docs.decisions_recorded`` holds at the
+    #: landing until ``session decisions resolve`` names the need it became.
+    #: A field for the reasons ``plan`` is one.
+    decisions: list[dict] = field(default_factory=list)
     push_count: int = 0
     history: list[dict] = field(default_factory=list)
     #: Overrides that have been SPENT — a forced transition, a structural edge
@@ -1249,6 +1255,77 @@ class SessionDomain:
         session.plan = [e for e in session.plan if e.get("n") != n]
         self._touch_plan(session, self.clock())
         return session
+
+    # -- the declared decisions (ADR-018 D9) ------------------------------
+
+    def decisions_add(
+        self, session_id: str, need_id: str | None = None, draft: str | None = None
+    ) -> Session:
+        """Declare a decision: the id of its need, or a one-line draft."""
+        session = self.require(session_id)
+        if (need_id is None) == (draft is None):
+            raise UsageError(
+                "declare a decision by the id of its need or by --draft \"<one "
+                "line>\", one of the two"
+            )
+        entry = {"n": self._next_decision(session), "id": None, "draft": None}
+        if need_id is not None:
+            entry["id"] = self._decision_id(need_id)
+        else:
+            self._reject_if_not_a_deliverable(draft)
+            entry["draft"] = draft.strip()
+        session.decisions.append(entry)
+        self._save(session)
+        return session
+
+    def decisions_resolve(self, session_id: str, n: int, need_id: str) -> Session:
+        """Name the need draft ``n`` became; the draft's text is kept."""
+        session = self.require(session_id)
+        entry = self._decision_entry(session, n)
+        entry["id"] = self._decision_id(need_id)
+        self._save(session)
+        return session
+
+    def decisions_remove(self, session_id: str, n: int) -> Session:
+        """Drop a declared decision. Its number is retired, never reissued."""
+        session = self.require(session_id)
+        self._decision_entry(session, n)
+        session.decisions = [e for e in session.decisions if e.get("n") != n]
+        self._save(session)
+        return session
+
+    def _decision_id(self, need_id: str) -> str:
+        """``need_id``, refused unless it is a need id of a decision type."""
+        from ..core import needs
+
+        need_id = need_id.strip()
+        prefixes = needs.prefixes_of(needs.types_of(self.manifest), ("decision",))
+        if not needs.is_need_id(need_id) or not need_id.startswith(prefixes):
+            raise UsageError(
+                f"{need_id!r} is not the id of a decision need: one starts with "
+                f"{', '.join(prefixes)} (docs.needs.types). Mint one with "
+                f"'invariant docs decision new \"<title>\"', or declare a draft "
+                f"with --draft."
+            )
+        return need_id
+
+    @staticmethod
+    def _next_decision(session: Session) -> int:
+        """``max + 1``, as a plan numbers its deliverables (``core/plan.next_n``)."""
+        numbers = [e.get("n") for e in session.decisions if isinstance(e, dict)]
+        return max([n for n in numbers if isinstance(n, int)], default=0) + 1
+
+    def _decision_entry(self, session: Session, n: int) -> dict:
+        for entry in session.decisions:
+            if isinstance(entry, dict) and entry.get("n") == n:
+                return entry
+        known = ", ".join(
+            str(e.get("n")) for e in session.decisions if isinstance(e, dict)
+        )
+        raise UsageError(
+            f"no decision {n} in session {session.name}; this session has "
+            f"{known or 'no decision declared'}"
+        )
 
     def _plan_entry(self, session: Session, n: int) -> dict:
         """The RAW stored entry, so a caller can change it.

@@ -296,6 +296,11 @@ graph TD
     DOCSD -- "headings, links: the reader for docs.format; detect_format; rst_directives, the element needs" --> CDOCFMT
     DOCSD -- "render_rule_needs, render_checklist: the starter's two generated pages" --> CGUIDE
     CLI -- "init: plan_starter, write_starter, sync_venv" --> DOCSD
+    CLI -- "docs decision new: new_decision" --> DOCSD
+    DOCSD -. "all_rules: the starter ruleset's parse, imported at call time" .-> RULES
+    RULES -- "docs.design_home, items.decisions_linked, docs.decisions_recorded: prefixes_of, cited_ids, latest_record" --> CNEEDS
+    SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
+    WORKITEM -- "items.decisions_linked before an item write" --> RULES
     CGUIDE -- "id_stem, is_need_id: rule need ids and decided_by" --> CNEEDS
     DOCSD -- "docs.assess, docs.adopt, ADOPT_MODES, path_for, project_relative, glob_matches" --> MANIFEST
     DOCSD -- source_areas --> adapters
@@ -1580,7 +1585,7 @@ the CLI would have traded a documentation edit for an architecture violation.
 | `verdicts` | The judgement verdict (ADR-012 D5, A4 increment 1, DN-1): `VerdictRecord` and `Citation`, the record `evidence["verdicts"]` holds (rule, status, citations with each file's blob, tests, na condition, note, ruleset, state, surface; no clock time; `agent`, the acting agent the host stamps, and `token`, the submission's, each written only when set and both dropped by `resubmitted`, A4 increment 8); a submission read into `Submitted` and `Cited` with every shape problem named (`parse_entry`, `parse_submission`); one pure check per D5 predicate, P1 to P6, each answering `Problem`s with the predicate and the fix, P5 accepting an `na` on a mechanical condition only when the engine's `NaAnswer` holds (A4 increment 2); `check` over one entry and `check_all` over a submission, one rule answered twice refused; each refused line as a `Refusal` naming its predicate, entry and rule apart from the prose, and `PREDICATES`, every name a refusal gives (A4 increment 7); for `guidelines.verdicts_complete` (A4 increment 3), the owed rules (`owed`, over `not_owed`, the one reading of why a rule is or is not owed), a record read back as a submission (`resubmitted`) and each owed rule's `Standing` (`standings`: current, missing, stale, or answered by the engine's N/A, a pass or fail on it set aside); for `guidelines verdicts show` (A4 increment 4), the recorded verdicts on rules no longer owed (`unowed`) | Read a file, call `git`, read the clock or scan for privacy itself: the bytes, the added lines, the test runs, the pin, the scan and the engine's answer to a mechanical N/A condition arrive as `Facts`. Evaluate an N/A condition itself (`core/findings` does). Record a verdict (`domains/pipeline` does). Read the note or the agent to decide anything (D5 item 6, D1 item 2) |
 | `agents` | The host-neutral agent source (ADR-012 D8, A6 increment 2): the model (`AgentSource`, `Section`), the frontmatter of `name`, `description` and `capabilities` (read, edit, shell, dispatch), the whole-line section anchors an overlay targets, and `parse`, which refuses a source whole naming every problem (`AgentSourceError`); `model`, `tools` and `roles` refused by name. The tier vocabulary (`TIERS`, A7 increment 1, ADR-012 D9): `light`, `standard` and `deep`, read as the optional frontmatter `tier` and refused naming the three. The overlay (A6 increment 3): `merge` applies a versioned YAML overlay's `append`, `insert_after`, `replace` and `description_append` operations in order, and refuses it whole, each problem with its fix (`OverlayError`, `OverlayProblem`); `tier` in an overlay is refused, naming `agents.tiers` as the route | Rank or compare tiers; know a host or its tool names; read a file (the caller hands it the text, the overlay's too); render a host's file (that is `hosts/`); decide where an overlay may live or scan it for privacy (the host's plan does) |
 | `docformat` | One reader per `docs.format` (ADR-016 D1, ruling 5): the file suffixes a doc carries, its headings and its links with their 1-based lines, fenced code skipped. Markdown in increment 1 (ATX and setext headings, inline and reference links, code spans skipped); reStructuredText as `sphinx` (`RstReader`, ADR-018 increment 2): section titles under an underline, or between an overline and a matching underline, starting in the first column after a blank line unless an overline insets them, an adornment shorter than its title kept from four characters, as docutils keeps it; links from `:doc:` and `toctree` entries (`Link.document`: a document name without its suffix), `:download:`, the `include`, `literalinclude`, `image` and `figure` arguments, embedded hyperlink targets and target definitions, `:ref:` read as the label it is, not a file; literal blocks, code directives (`code-block`, `mermaid`, `math` and their kin), doctest blocks, inline literals and comments skipped; `reader_for` answers `None` for a format without one; `normalise_heading`, whitespace collapsed and case folded; `rst_directives` (ADR-018 increment 4), each rST directive's name, argument, options and content, for the element needs; `detect_format` (increment 4), the format most of a set of file names carry, `.rst` as `sphinx`, a tie to the name sorting first, for `docs adopt` | Read a file; decide what a gap is (`domains/docs` does) |
-| `needs` | The docs project's needs (ADR-018 increment 3): the seven roles and their default types, the item types' prefixes following `items.id_prefix` (`default_types`, `types_of`, `type_of_role`); what a need id is (`NEED_ID`, `is_need_id`) and the part after its prefix (`id_stem`, increment 4); the load check of `docs.needs.types` and `docs.needs.require_links` that `core/manifest` calls (`type_problems`, `link_rule_problems`); the docs project's source directory (`resolve_srcdir`, `srcdir_of`, against a session's tree when asked: `docs.needs.srcdir`, or the increment-2 rule of the `sphinx` adapter as its default); a built `needs.json` read (`parse_needs_json`, `load_needs_json`: sphinx-needs 8.x and 9.x write `versions`, the current version, `needs`; link options from `needs_schema`'s `field_type: links`, or the keys with a `_back` twin), each need's file and line; the check against the types, the required-link rules and `docs.needs.decision_statuses` (`check`, `Problem`), an external need held to nothing and a role with no needs no failure; counts by role and type (`classify`); the strict build's record (`BuildRecord`, `record_relpath`, `read_record`) keyed by the source tree's digest (`tree_digest`: every file's path and bytes, hidden directories and `_build` left out) | Run a build or any command; parse rST; write the record (`domains/docs` does) |
+| `needs` | The docs project's needs (ADR-018 increment 3): the seven roles and their default types, the item types' prefixes following `items.id_prefix` (`default_types`, `types_of`, `type_of_role`); what a need id is (`NEED_ID`, `is_need_id`) and the part after its prefix (`id_stem`, increment 4); the load check of `docs.needs.types` and `docs.needs.require_links` that `core/manifest` calls (`type_problems`, `link_rule_problems`); the docs project's source directory (`resolve_srcdir`, `srcdir_of`, against a session's tree when asked: `docs.needs.srcdir`, or the increment-2 rule of the `sphinx` adapter as its default); a built `needs.json` read (`parse_needs_json`, `load_needs_json`: sphinx-needs 8.x and 9.x write `versions`, the current version, `needs`; link options from `needs_schema`'s `field_type: links`, or the keys with a `_back` twin), each need's file and line; the check against the types, the required-link rules and `docs.needs.decision_statuses` (`check`, `Problem`), an external need held to nothing and a role with no needs no failure; counts by role and type (`classify`); the strict build's record (`BuildRecord`, `record_relpath`, `read_record`) keyed by the source tree's digest (`tree_digest`: every file's path and bytes, hidden directories and `_build` left out), and the last one recorded that kept a `needs.json` (`latest_record`, increment 5); for D8 and D9 (increment 5), the default refused homes (`DEFAULT_REFUSED_PATHS`), the prefixes of a set of roles' types (`prefixes_of`) and the need ids a text cites with one, whole tokens only (`cited_ids`) | Run a build or any command; parse rST; write the record (`domains/docs` does) |
 | `sweep` | The sweep record (version 1) and its file name; the short hash every persisted hash is written as, and the prefix match a reader compares a recorded head by (BUG_090); where the records live (`directory_of`) and the cadence and grace (`cadence_of`); reading committed records from a git ref, and the last one on a branch (`last_on`); the finding keys; the diff against the last sweep (new, still broken, recovered, floor drops); settling new reds by their re-runs (flaky, the cap of 20); the dedup against open items; a record's age and whether it is overdue (ADR-010) | Run anything; file or commit anything; decide which file the floor holds (that is `core/rules`' `sweep_below_floor`) |
 | `questionnaire` | The configuration questionnaire (ADR-017 D1, D2, increment 1): the shipped catalogue (`data/questionnaire/catalogue.yaml`) and its check at load (`load_catalogue`, `Catalogue`, `Entry`, `Section`); each question resolved against a project (`resolve`, `Question`): its default and provenance as `config show` reads them, its current value at the target level, the levels allowed to hold its key (`allowed_levels`, `targets`, `default_target`) and its choices; the commands and docs steps expanded into the questions they ask; the non-interactive `init` report (`core_report`, `render_report`, D9); judging an answer (increment 2): its kind read (`parse_answer`, `Refused`), its choices, path rule and command shape checked (`command_problem`, `command_problems`, the one shape check `doctor` reads, ruling 13) and the configuration it produces validated through a `Draft` of the levels; the nearest level that may hold an answer (`route`, D4); the write plan, changed answers only, the inherited value removing a key (`plan`, `Answer`, `LevelWrite`, `WritePlan`, D5, ruling 12) | Prompt for anything; write any level; run a command; import above `core` |
 
@@ -1593,7 +1598,13 @@ rules, which read recorded builds and run nothing; `core/manifest` gains
 `domains/guidelines` writes `rules.rst` from a pure renderer in
 `core/guidelines`; `domains/session` records declared decisions. The layering
 is unchanged: `core/machines` names the new gates and never imports
-`core/rules`. **Built (increment 1):** `core/items`' `SphinxNeedsBackend`
+`core/rules`. **Built (increment 5):** `domains/docs`' `new_decision`
+(`docs decision new`) and the starter's ruleset; in `core/rules`
+`docs.design_home`, `items.decisions_linked`, `docs.decisions_recorded` and
+`docs.mandate_kept`, read from `core/needs`' `prefixes_of`, `cited_ids` and
+`latest_record` and the recorded builds; `domains/session`'s declared
+decisions; `domains/workitem` asking `items.decisions_linked` before an item
+write; and `core/manifest`'s `docs.needs.refused_paths` and the block floor. **Built (increment 1):** `core/items`' `SphinxNeedsBackend`
 persists history, as an `.. invariant-history:` comment in the directive body
 (BUG_073; manifest.md, "The `sphinx_needs` round trip"). **Built (increment
 2):** `core/docformat`'s rST reader (the row above), and ADR-015 D1's
@@ -1618,7 +1629,11 @@ advance it. They are the only place where "what a session is" is encoded.
   sessions coexist on one machine, so this is the only domain with genuine
   cross-process concurrency, mediated by the locked registry. A session can
   be started parked (`start(parked=True)`, ADR-016 ruling 9): no host bound,
-  a fresh identifier, recorded as put down so `resume` picks it up.
+  a fresh identifier, recorded as put down so `resume` picks it up. It keeps
+  the decisions a session declares (`decisions_add`, `decisions_resolve`,
+  `decisions_remove`, ADR-018 D9, increment 5), an id checked against the
+  decision types' prefixes through `core/needs`; `docs.decisions_recorded`
+  reads them at the landing.
 - **`pipeline`** — one task's progress through the configured methodology.
   Scoped to a session; a session runs pipelines in sequence. Its evidence
   holds the judgement verdicts too (`record_verdicts`, append-only, refusing
@@ -1643,7 +1658,11 @@ advance it. They are the only place where "what a session is" is encoded.
   them, including a ruled transition whose rows record who ruled and on which
   commit; and what `item new` may set — an explicit id it checks is unspent,
   and the item's own keys it refuses (BUG_074). Persisted through
-  `core/items` into whichever backend the project uses.
+  `core/items` into whichever backend the project uses. Before any write
+  saves, it asks `items.decisions_linked` of the text the write adds (ADR-018
+  D8, increment 5): a blocking verdict refuses the write, a warning is kept
+  on `warnings` for the CLI to print, and `transition --force --reason`
+  passes it.
 - **`guidelines`** — the effects of the project's guidelines ruleset (ADR-012
   D12). Not an FSM. Today it renders the human checklist and the managed
   `guidelines/index` block in each instruction file (`guidelines render`),
@@ -1696,7 +1715,14 @@ advance it. They are the only place where "what a session is" is encoded.
   keeps) or refuses; `copy_adoption` copies and writes the receipt,
   `.invariant-adoption.yaml`, in the docs location; `adoption_drift` reads
   the receipt back into a `Drift`, or `None` unless `docs.adopt.mode` is
-  `copy`. It writes no configuration: the CLI does.
+  `copy`. It writes no configuration: the CLI does. A decision record
+  (ADR-018 D7, increment 5) is its fourth write: `new_decision` mints the
+  next record page under `<srcdir>/decisions/`, numbered past every page
+  there (read by `core/docformat.rst_directives`), and lists it in
+  `decisions/index.rst`'s toctree. The starter (D11) also writes the
+  guidelines ruleset with the mandate's two judgement rules where the
+  project has none, parsing it against the rule registry through `core/rules`,
+  imported at call time.
 - **`stats`** — what a session took and what it cost. Not an FSM either, for
   the same reason `memorystore` is not: there is no lifecycle to advance, but
   there is a store with invariants over it and operations that repair them.

@@ -2194,6 +2194,386 @@ def _docs_needs_traceable(ctx: RuleContext) -> Verdict:
     )
 
 
+# -- the refused homes, the cited ids and the switch (ADR-018 D8, D9, D10) ----
+
+
+#: The suffixes a Markdown file carries, for the refused homes (D8).
+_MARKDOWN = (".md", ".markdown")
+
+
+def _generated_files(ctx: RuleContext) -> set[str]:
+    """The generated files invariant declares, project-relative: never refused
+    as a home, since only their command writes them (D8)."""
+    found: set[str] = set()
+    try:
+        configured = ctx.manifest.get("guidelines.ruleset")
+        source = guidelines_relpath(ctx, configured) if configured else None
+        checklist = _checklist_relpath(ctx, source)
+    except (InvariantError, OSError, ValueError):
+        checklist = None
+    if checklist:
+        found.add(checklist)
+    named = ctx.manifest.get("guidelines.instruction_files")
+    for entry in ctx.host_instruction_files if named is None else named:
+        rel = guidelines_relpath(ctx, entry)
+        if rel:
+            found.add(rel)
+    return found
+
+
+def _srcdir_relative(ctx: RuleContext, tree: Path) -> str | None:
+    """The docs project's source directory, project-relative, or ``None``."""
+    from . import needs  # local: one reader of the docs project's needs
+
+    srcdir = needs.srcdir_of(ctx.manifest, tree)
+    if srcdir is None:
+        return None
+    try:
+        return srcdir.resolve().relative_to(tree.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _refused_home(ctx: RuleContext, forms: Sequence[str], tree: Path) -> str | None:
+    """Why ``forms`` (one path's project-relative spellings) is a refused home
+    for design (D8), or ``None`` when it is not one."""
+    from . import needs  # local: one reader of the docs project's needs
+
+    configured = ctx.manifest.get("docs.needs.refused_paths")
+    globs = needs.DEFAULT_REFUSED_PATHS if configured is None else tuple(configured)
+    docs = _docs_relative(ctx.manifest, ctx.cwd)
+    srcdir = _srcdir_relative(ctx, tree)
+    homes = [h for h in (docs.as_posix() if docs else None,
+                         f"{srcdir}/decisions" if srcdir else None) if h]
+    for rel in forms:
+        for glob in globs:
+            if glob_matches(rel, project_relative(glob)):
+                return f"it matches docs.needs.refused_paths {glob!r}"
+        if PurePosixPath(rel).suffix.lower() in _MARKDOWN:
+            for home in homes:
+                if rel.startswith(home.rstrip("/") + "/"):
+                    return f"it is Markdown under {home}/, where design is written as needs"
+    return None
+
+
+@rule(
+    "docs.design_home",
+    summary="Design is written as needs in the docs project, never in a refused home.",
+    events=("pre-tool-use",),
+)
+def _docs_design_home(ctx: RuleContext) -> Verdict:
+    """ADR-018 D8: a write to a refused home is refused, naming the fix.
+
+    Warns while the project migrates (ruling 4) and blocks when enforced, by
+    level alone; the verdict is the same in both states.
+    """
+    if not ctx.is_edit:
+        return Verdict.na(_NOT_AN_EDIT)
+    target = ctx.target_path
+    if target is None:
+        return Verdict.na("no file path in this call")
+    if _is_outside_project(ctx, target):
+        return Verdict.na("path is outside this project")
+    forms = _project_relative_forms(ctx, target)
+    tree = _session_tree(ctx)
+    why = _refused_home(ctx, forms, tree)
+    if why is None:
+        return Verdict.clean("not a refused home for design")
+    # Asked only of a refused path, and once: resolving the generated files
+    # costs git calls this hook would otherwise pay on every edit.
+    generated = _generated_files(ctx)
+    if any(rel in generated for rel in forms):
+        return Verdict.na("a generated file invariant declares; its command writes it")
+    srcdir = _srcdir_relative(ctx, tree)
+    page = f"{srcdir}/" if srcdir else "the docs project"
+    return Verdict.fail(
+        f"{forms[0]} is not a home for design: {why} (ADR-018 D8)",
+        detail="Architecture and design live only as needs in the docs project, "
+        "each decision a need with an id. A user guide, a report under "
+        "paths.reports and memory are written freely.",
+        fixes=(
+            'a decision: invariant docs decision new "<title>"',
+            f"other design: write it as a need on the page it belongs on under {page}",
+        ),
+    )
+
+
+def _held(ctx: RuleContext, tree: Path, *, green_for_tree: bool) -> tuple[set[str] | None, str]:
+    """The need ids a recorded build holds, and what was read, or ``None`` and
+    why none could be.
+
+    ``green_for_tree`` asks for the green record of the tree as it stands (the
+    landing, D9); otherwise that record, else the last one recorded (a write,
+    D8: the tree it lands in has not been built yet).
+    """
+    from . import needs  # local: one reader of the docs project's needs
+
+    srcdir = needs.srcdir_of(ctx.manifest, tree)
+    if srcdir is None:
+        return None, "there is no docs project (no conf.py at or above paths.docs)"
+    digest = needs.tree_digest(srcdir)
+    record = needs.read_record(ctx.manifest.state_root, digest)
+    if green_for_tree:
+        if record is None or not record.passed:
+            return None, f"no green docs build is recorded at {digest[:12]}"
+    elif record is None or not record.needs_json:
+        record = needs.latest_record(ctx.manifest.state_root)
+        if record is None:
+            return None, "no docs build is recorded"
+    if not record.needs_json:
+        return None, f"the build at {record.digest[:12]} kept no needs.json"
+    try:
+        read = needs.load_needs_json(Path(record.needs_json))
+    except needs.NeedsJsonError as exc:
+        return None, str(exc)
+    return {n.id for n in read.needs}, f"the build at {record.digest[:12]}"
+
+
+def _design_prefixes(ctx: RuleContext, roles: Iterable[str]) -> tuple[str, ...]:
+    from . import needs  # local: one reader of the docs project's needs
+
+    return needs.prefixes_of(needs.types_of(ctx.manifest), roles)
+
+
+def _unheld_verdict(
+    ids: Sequence[str], held: set[str] | None, why: str, *, what: str
+) -> Verdict:
+    """The verdict over ``ids`` cited in ``what``: each must be a held need."""
+    missing = list(ids) if held is None else [i for i in ids if i not in held]
+    if not missing:
+        return Verdict.clean(f"{len(ids)} cited id(s), each a need {why}")
+    shown = ", ".join(missing[:_DOCS_NAMED]) + (
+        f" and {len(missing) - _DOCS_NAMED} more" if len(missing) > _DOCS_NAMED else ""
+    )
+    return Verdict.fail(
+        (
+            f"{what} names {shown}, and {why}"
+            if held is None
+            else f"{what} names {shown}, which {why} does not hold"
+        ),
+        detail="An item keeps the problem, the evidence and the status; a ruling "
+        "is a decision need, linked by an id the build holds (ADR-018 D8).",
+        fixes=(
+            'invariant docs decision new "<title>"',
+            "invariant docs build",
+        ),
+    )
+
+
+def _edit_texts(ctx: RuleContext) -> list[str]:
+    """The text an edit tool call writes: what it would add, nothing it keeps."""
+    tool_input = ctx.tool_input
+    texts = [tool_input.get(key) for key in ("content", "new_string", "new_source")]
+    for edit in tool_input.get("edits") or ():
+        if isinstance(edit, Mapping):
+            texts.append(edit.get("new_string"))
+    return [str(t) for t in texts if t]
+
+
+def _items_stores(ctx: RuleContext) -> list[str]:
+    stores = []
+    for key in ("items.path", "items.closed_path"):
+        value = ctx.manifest.get(key)
+        if value:
+            rel = project_relative(str(value))
+            if rel:
+                stores.append(rel)
+    return stores
+
+
+def _in_store(rel: str, stores: Sequence[str]) -> bool:
+    return any(rel == s or rel.startswith(s.rstrip("/") + "/") for s in stores)
+
+
+@rule(
+    "items.decisions_linked",
+    summary="An item names only decisions, requirements, screens and rules that exist as needs.",
+    events=("pre-tool-use",),
+)
+def _items_decisions_linked(ctx: RuleContext) -> Verdict:
+    """ADR-018 D8, ruling 12: every design id an item names is a held need.
+
+    Three callers: an edit tool writing an items store (the hook), an
+    ``invariant item`` write (``extra["item_text"]``, from
+    ``domains/workitem``), and the landing, over the lines the session added
+    to the items stores.
+    """
+    prefixes = _design_prefixes(ctx, ("decision", "requirement", "ui", "rule"))
+    if "item_text" in ctx.extra:
+        ids = _cited(str(ctx.extra["item_text"]), prefixes)
+        if not ids:
+            return Verdict.na("the item names no decision, requirement, ui or rule id")
+        held, why = _held(ctx, _session_tree(ctx), green_for_tree=False)
+        return _unheld_verdict(ids, held, why, what=f"the item {ctx.extra.get('item_id', '')}".rstrip())
+    stores = _items_stores(ctx)
+    if ctx.payload:
+        if not ctx.is_edit:
+            return Verdict.na(_NOT_AN_EDIT)
+        target = ctx.target_path
+        if target is None or _is_outside_project(ctx, target):
+            return Verdict.na("not a write to this project's items")
+        forms = _project_relative_forms(ctx, target)
+        if not any(_in_store(rel, stores) for rel in forms):
+            return Verdict.na("not a write to the items store")
+        ids = _cited("\n".join(_edit_texts(ctx)), prefixes)
+        if not ids:
+            return Verdict.na("the write names no decision, requirement, ui or rule id")
+        held, why = _held(ctx, _session_tree(ctx), green_for_tree=False)
+        return _unheld_verdict(ids, held, why, what=f"this write to {forms[0]}")
+    # The landing: the lines the session added to the items stores. The tree
+    # is resolved here and in the branches above only once it is needed: it
+    # costs git calls the hook would otherwise pay on every edit.
+    tree = _session_tree(ctx)
+    touched = _changed_set(ctx)
+    changed = [p.as_posix() for p in touched.paths if _in_store(p.as_posix(), stores)]
+    if not changed:
+        if not touched.paths and not touched.answerable:
+            return _unestablished_changed_set(touched)
+        return Verdict.na("the change touches no item")
+    added = git.changed_lines(tree, touched.base) if touched.base else None
+    texts = []
+    for rel in changed:
+        if added is not None:
+            lines = added.get(rel)
+            if lines is None:
+                continue
+            try:
+                body = (tree / rel).read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if lines.whole:
+                texts += body
+            else:
+                texts += [body[n - 1] for n in sorted(lines.lines) if 0 < n <= len(body)]
+        else:
+            try:
+                texts.append((tree / rel).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+    ids = _cited("\n".join(texts), prefixes)
+    if not ids:
+        return Verdict.na("the changed items name no decision, requirement, ui or rule id")
+    held, why = _held(ctx, tree, green_for_tree=False)
+    return _unheld_verdict(ids, held, why, what="the items this change touched")
+
+
+def _cited(text: str, prefixes: Sequence[str]) -> list[str]:
+    from . import needs  # local: one reader of the docs project's needs
+
+    return needs.cited_ids(text, prefixes)
+
+
+def _session_commit_messages(ctx: RuleContext, tree: Path) -> str:
+    """The messages of the session's own commits, from its base."""
+    base = str((ctx.session or {}).get("base") or "")
+    if not base:
+        return ""
+    return git.commit_messages(tree, base) or ""
+
+
+@rule(
+    "docs.decisions_recorded",
+    summary="Every decision a session made is a need before it lands.",
+    events=(),
+)
+def _docs_decisions_recorded(ctx: RuleContext) -> Verdict:
+    """ADR-018 D9: the session's declared decisions are needs at the landing.
+
+    Each entry of ``session decisions`` is a draft (blocks, naming the
+    command that makes it a need) or an id the green build of the tree in
+    hand must hold; so is each decision id the session's plan and commits
+    cite.
+    """
+    if ctx.session is None:
+        return Verdict.na("no session: nothing declared")
+    entries = [e for e in (ctx.session.get("decisions") or []) if isinstance(e, Mapping)]
+    tree = _session_tree(ctx)
+    prefixes = _design_prefixes(ctx, ("decision",))
+    cited_by = "\n".join(
+        [e["title"] for e in plan_reader.entries(ctx.session.get("plan") or [])]
+        + [_session_commit_messages(ctx, tree)]
+    )
+    declared = [str(e["id"]) for e in entries if e.get("id")]
+    ids = list(dict.fromkeys(declared + _cited(cited_by, prefixes)))
+    drafts = [e for e in entries if not e.get("id")]
+    if not ids and not drafts:
+        return Verdict.na("the session declared no decision and cites none")
+    problems = [
+        f"draft {e.get('n')}: {e.get('draft') or '(no text)'}" for e in drafts
+    ]
+    held, why = _held(ctx, tree, green_for_tree=True) if ids else (set(), "")
+    missing = [i for i in ids if held is None or i not in held]
+    problems += [f"{i}: not a need in the green build" for i in missing]
+    if not problems:
+        return Verdict.clean(f"{len(ids)} decision(s), each a need {why}")
+    fixes = []
+    if drafts:
+        # `<n>` is the draft's number as the detail names it ("draft 1: ...").
+        fixes += [
+            'invariant docs decision new "<title>"',
+            "invariant session decisions resolve <n> <DEC_id>",
+        ]
+    if missing:
+        fixes.append("invariant docs build")
+    return Verdict.fail(
+        f"{len(drafts)} draft decision(s) and {len(missing)} id(s) not held"
+        + (f" ({why})" if held is None and missing else ""),
+        detail="; ".join(problems[:_DOCS_NAMED])
+        + (f"; and {len(problems) - _DOCS_NAMED} more" if len(problems) > _DOCS_NAMED else ""),
+        fixes=tuple(fixes),
+    )
+
+
+@rule(
+    "docs.mandate_kept",
+    summary="A change does not move docs.needs.state back from enforced.",
+    events=(),
+)
+def _docs_mandate_kept(ctx: RuleContext) -> Verdict:
+    """ADR-018 D10: an enforced project stays enforced, but by a reasoned route.
+
+    Compares the repository manifest's ``docs.needs.state`` at the session's
+    base with the tree in hand. Blocks in every profile and state; passes
+    only with ``pipeline advance --force --reason``.
+    """
+    base = str((ctx.session or {}).get("base") or "")
+    if not base:
+        return Verdict.na("no base to compare the manifest with")
+    tree = _session_tree(ctx)
+    before_text = git.file_at(tree, base, MANIFEST_RELPATH)
+    if before_text is None:
+        return Verdict.na(f"no manifest at {base} to compare with")
+
+    def state_of(text: str | None) -> str:
+        try:
+            doc = yaml.safe_load(text or "") or {}
+        except yaml.YAMLError:
+            return "unreadable"
+        docs = doc.get("docs") if isinstance(doc, Mapping) else None
+        block = docs.get("needs") if isinstance(docs, Mapping) else None
+        state = block.get("state") if isinstance(block, Mapping) else None
+        return str(state or "migrating")
+
+    # Checked, and nothing moved back: a pass rather than a skip, since the
+    # rule blocks in every profile and a block-level skip on every landing of
+    # every migrating project would be news that is not news.
+    if state_of(before_text) != "enforced":
+        return Verdict.clean(f"docs.needs.state at {base} is not enforced; nothing to keep")
+    try:
+        now_text = (tree / MANIFEST_RELPATH).read_text(encoding="utf-8")
+    except OSError:
+        now_text = None
+    now = state_of(now_text) if now_text is not None else "absent"
+    if now == "enforced":
+        return Verdict.clean("docs.needs.state stays enforced")
+    return Verdict.fail(
+        f"this change moves docs.needs.state from enforced to {now}",
+        detail="The mandate is not optional (ADR-018 ruling 1). A project leaves "
+        "it only by a recorded, reasoned route (D10).",
+        fixes=("invariant pipeline advance <state> --force --reason '<why>'",),
+    )
+
+
 # -- guidelines rules --------------------------------------------------
 
 

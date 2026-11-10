@@ -363,9 +363,12 @@ def test_the_clean_landing_carries_every_landing_gate(shipped):
         "agents.review_agent_ran",
         "coverage.meets_floor",
         "docs.builds_strict",
+        "docs.decisions_recorded",
         "docs.diagrams_current",
+        "docs.mandate_kept",
         "docs.needs_traceable",
         "docs.updated",
+        "items.decisions_linked",
         "privacy.clean",
         "test.all_pass",
     ]

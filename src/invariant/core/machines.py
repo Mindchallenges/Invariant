@@ -65,6 +65,12 @@ DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
             # whose docs are not yet sphinx (D10).
             "docs.builds_strict",
             "docs.needs_traceable",
+            # The session's declared decisions are needs, the items it changed
+            # name only held design ids, and the switch is not walked back
+            # (ADR-018 D8, D9, D10). Each N/A where it has nothing to judge.
+            "docs.decisions_recorded",
+            "items.decisions_linked",
+            "docs.mandate_kept",
         ]
     },
 }

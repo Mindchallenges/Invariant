@@ -906,6 +906,116 @@ refused at load. The existing init proofs (ADR-016's offers, ADR-017's
 report) stand where the docs exist, and change only where the starter
 replaced the Markdown one.
 
+### As built: increment 5 (2026-11-10)
+
+D7's `docs decision new`, D8, D9, D10's switch and ruling 19's floor, as
+the architecture docs describe them (cli.md, the `docs` group, `session
+decisions` and "Work items"; manifest.md, `docs.needs.refused_paths` and "An
+override either takes effect or says it did not"; state_model.md, the docs
+gates; overview.md, `core/needs`, `core/rules`, `domains/docs`,
+`domains/session` and `domains/workitem`). Where the build settles what the
+text left open:
+
+- **A record page** is `<srcdir>/decisions/ADR-<nnn>-<slug>.rst`, the slug
+  the title lower-cased with every run of other characters as `-`. It holds
+  the label `adr-<nnn>`, the title `ADR-<nnn> — <title>`, and one need, the
+  record, of the `decision` role's first type, in the first of
+  `docs.needs.decision_statuses`, with a paragraph naming what to write next.
+  The next number is one past the highest any `.rst` under `decisions/`
+  spends, by file name (`ADR-<n>`) or by a need id `<prefix>ADR_<n>` of any
+  decision type, read with `core/docformat`'s `rst_directives`. A record is
+  never deleted (a superseded one stays, linked, D7), so the pages are the
+  whole record of spent numbers, as the two stores are for items. The page
+  is appended to the last toctree of
+  `decisions/index.rst`, which gains one if it has none; a toctree with
+  `:glob:` lists it already and is left alone, since an explicit entry
+  beside a glob would be listed twice. With no `decisions/index.rst` the
+  command is refused, naming it, because a page in no toctree fails the
+  strict build. The record need is a decision like any other, so
+  `docs.needs_traceable` holds it to `require_links`; the command's output
+  names the rules it owes.
+- **`docs.design_home`** reads `docs.needs.refused_paths` (null: D8's three
+  globs; a list replaces them whole, as `types` does) and refuses, beside
+  them and whatever the list says, any `.md` or `.markdown` file under
+  `paths.docs` or `<srcdir>/decisions/`. The generated files invariant
+  declares, the checklist and the instruction files, are never refused.
+  Like the isolation rules, it screens the edit tools only (BUG_020's
+  stated limit).
+- **What "held" means for an item.** `items.decisions_linked` reads the
+  recorded build of the tree as it stands, else the last build recorded
+  under the state root that kept a `needs.json` (by its `at`), because an
+  item is written into a tree that has not been built yet. With no record it
+  refuses, naming `invariant docs build`. An id is a whole token carrying a
+  prefix of a `decision`, `requirement`, `ui` or `rule` type and ending on a
+  letter or a digit, so prose naming the pattern (`DEC_ADR_<nnn>`) is no id.
+  It runs at three places: the hook, on what an edit tool writes into
+  `items.path` or `items.closed_path`; `invariant item new`, `transition`
+  (its reason and ruling) and `residue --add`, in `domains/workitem`, before
+  anything is saved, where `item transition --force --reason` passes it as
+  the recorded route; and the landing, over the lines the session added to
+  those stores (`core/git.changed_lines`).
+- **`session decisions`** has `add <DEC_id>`, `add --draft "<one line>"`,
+  `resolve <n> <DEC_id>` (the draft's text is kept beside the id), `remove
+  <n>` and `show`, numbered as a plan is. An id must be a need id with a
+  decision type's prefix.
+- **`docs.decisions_recorded`** reads the declared entries and the decision
+  ids the plan's deliverables and the session's own commit messages
+  (`<base>..HEAD`) cite. The items it changed are `items.decisions_linked`'s,
+  so no id is reported twice. Every id must be held by the green record of
+  the tree as it stands. It is N/A with no session and with nothing declared
+  or cited.
+- **The switch is a sixth rule, `docs.mandate_kept`.** It compares
+  `docs.needs.state` in the repository's manifest at the session's base with
+  the tree in hand; an absent key reads as `migrating`. Any other change
+  passes, checked, rather than skipping, so a migrating project's landing
+  does not show a skipped block-level gate every time; with no base to
+  compare it is N/A. It blocks in every profile, and its floor holds in every state, because the change it
+  refuses leaves the project migrating, where the other rules' floor no
+  longer applies (a level lowering it in the same change would otherwise
+  pass it). A store's manifest is not compared: that is ADR-014 D9's store
+  leg (increment 8).
+- **The floor** (ruling 19) is checked at load, once `docs.needs` has: any
+  level below `block` (`ask`, `warn`, `off`) on one of the five rules in an
+  enforced project, or on `docs.mandate_kept` anywhere, is refused, naming
+  ruling 1, the level that set it and the three recorded routes. The two
+  environment escapes are not refusals: `INVARIANT_PROFILE` does not lower a
+  floored rule, and `INVARIANT_DISABLE` naming one is ignored with a note on
+  stderr, for the reason a mistyped token there is not a refusal (BUG_050):
+  it is reached by somebody already blocked.
+- **The starter's ruleset.** `init` writes `docs/guidelines/ruleset.yaml`
+  (ADR-012 D3's default) with a `docs` section and the two judgement rules,
+  both `warn` and in the `review` phase: `docs.items-carry-no-design` applies
+  to the items store, `docs.decisions-are-declared` to every path. It sets
+  `guidelines.ruleset`, and renders `rules.rst` and `checklist.rst` from it,
+  so `guidelines.generated_current` is quiet on a fresh starter. A ruleset
+  the project configures is never rewritten, and neither is a file already
+  at that path, or a store's: `init` then prints the two rules to add by
+  hand, unless the configured ruleset holds both already. `init --force`
+  over an enforced manifest keeps `guidelines.ruleset` with the keys it
+  already kept (increment 4).
+- **The design agent** is `feature-architect`, the bugfix lane's design step
+  too (`agents.roles.design`). Its design phase ends with `session decisions
+  add`, and its report gains the `DECISIONS:` block.
+- **Migrating.** Every rule here warns, and a level may lower the five
+  freely. invariant itself warns on a write to `docs/adr/` or to Markdown
+  under `docs/architecture/`, which is its debt until increment 7 (ruling 4).
+  This record is written as Markdown under that warning, as its own
+  "format" note says.
+
+The proofs, on increment 3's enforced toy project with its stand-in
+`sphinx-build`: `docs decision new` minting `DEC_ADR_001`, numbering past a
+page written by hand, listing each page and leaving a globbing toctree
+alone; a write to `docs/adr/ADR-002.md` refused naming `docs decision new`,
+and a Markdown guide page and a report under `paths.reports` written freely;
+an item edit, an `item new`, a `transition` and a `residue --add` naming an
+unknown `DEC_` refused, nothing saved; a session with a draft blocked at the
+landing until it is a need the green build holds; `enforcement.rules:
+{docs.builds_strict: warn}` refused at load naming ruling 1; through the hook
+of a project `init` made enforced, `invariant override docs.design_home
+--reason` passing one write and the next refused. The same toy project
+migrating: each warns. Behind `INVARIANT_TEST_SPHINX_BUILD`, a minted record
+page building strictly in the starter's pinned environment.
+
 ## Alternatives rejected
 
 | Alternative | Why not |

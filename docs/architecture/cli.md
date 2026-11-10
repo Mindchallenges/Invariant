@@ -931,13 +931,31 @@ invariant docs adopt <source> --mode in_place|copy [--force] [--dry-run] [--json
                              not built again unless `--force`; a red one is.
                              Exit 0 when green, 1 when not. `--json` carries
                              the record and `built`.
-    Accepted, not yet built (ADR-018 D7, D11, D14). The `docs` group
+    Built (ADR-018 D7, increment 5):
+      docs decision new "<title>" [--dry-run]
+                             mint the next decision record page,
+                             `<srcdir>/decisions/ADR-<nnn>-<slug>.rst`: the
+                             label `adr-<nnn>`, the title, and one need, the
+                             record, of the `decision` role's first type
+                             (`.. dec::`, id `DEC_ADR_<nnn>`) in the first
+                             of `docs.needs.decision_statuses`. The number is
+                             one past the highest any `.rst` there spends,
+                             by file name or by a decision type's
+                             `<prefix>ADR_<n>` need id, read by the rST
+                             reader, so a page written since the last build
+                             counts. The page is appended to the last
+                             toctree of `decisions/index.rst` (one is added
+                             if there is none; a `:glob:` toctree is left
+                             alone). Refused, writing nothing, for a title
+                             that is not one line, no docs project, or no
+                             `decisions/index.rst`. The output names what the
+                             record owes next: its decisions as needs linked
+                             as `docs.needs.require_links` asks, `docs build`,
+                             and `session decisions add`. `--json` carries
+                             `id`, `number`, `status`, `path`, `index` and
+                             `dry_run`.
+    Accepted, not yet built (ADR-018 D14, increment 6). The `docs` group
     gains:
-      docs decision new "<title>"
-                             mint the next decision record page under
-                             `<srcdir>/decisions/` with its `DEC_ADR_<nnn>`
-                             need, numbered after the record pages already
-                             there, ids never reused (increment 5).
       docs migrate adr <files>, docs migrate prose <files>
                              Markdown ADRs to record pages and Markdown
                              architecture pages to rST, through pandoc in
@@ -1425,12 +1443,21 @@ invariant session plan add "<deliverable>" | done <n> | reopen <n>
     to decide whether a run commits and stops or commits and finishes the
     session. See state_model.md, "How a session lands".
 
-    Accepted, not yet built (ADR-018 D9, increment 5). `invariant session
-    decisions add <DEC_id>` or `add --draft "<one line>"` declares a
-    decision on the session record. The landing gate
-    `docs.decisions_recorded` blocks while an entry is a draft or names an
-    id the session's green `docs build` does not hold, and the decision ids
-    a plan deliverable cites are held to the same check.
+invariant session decisions add <DEC_id> | add --draft "<one line>"
+                         | resolve <n> <DEC_id> | remove <n> | show
+                                                  [--id <id>] [--json]
+    Built (ADR-018 D9, increment 5). The decisions this session made, on
+    the session record (`decisions`: `{n, id, draft}` each), numbered as a
+    plan is. `add` takes the id of a need of a decision type (its prefix,
+    `DEC_` by default) or `--draft`, one of the two; `resolve` names the need
+    a draft became and keeps its text; every action prints the whole list,
+    and `--json` carries `decisions` and `drafts`. The design agents end
+    their design phase with it and list what they recorded in their report's
+    `DECISIONS:` block. The landing gate `docs.decisions_recorded` blocks
+    while an entry is a draft or names an id the green `docs build` of the
+    tree does not hold, and holds the decision ids the plan's deliverables
+    and the session's commit messages cite to the same check
+    (state_model.md).
 
 invariant session sync [--id <id>]
     Rebase this session's branch onto its base. What
@@ -1581,10 +1608,16 @@ them back on that backend too (BUG_073).
 **Accepted, not yet built (ADR-018).** `invariant item migrate --to
 sphinx_needs` moves every item, open and closed, with its id, fields, body
 and history, and writes nothing when a read-back differs (D14, increment 6).
-An item write naming a decision, requirement, ui or rule need id (`DEC_`,
-`REQ_`, `UI_` or `RULE_` by default) the last recorded build does not hold
-is refused, `items.decisions_linked` (D8, increment 5); it warns while the
-project is migrating.
+
+**Built (ADR-018 D8, increment 5).** `item new` (its title, body and
+fields), `item transition` (its reason and ruling) and `item residue --add`
+are refused, writing nothing and exiting 1 with the verdict, when the text
+names a decision, requirement, ui or rule need id (`DEC_`, `REQ_`, `UI_` or
+`RULE_` by default) that the recorded build of the tree, or else the last
+build recorded, does not hold, or when no build is recorded at all:
+`items.decisions_linked`. While the project migrates the write goes through
+and the verdict is printed on stderr as a warning. `item transition --force
+--reason` passes it, the recorded route.
 
 `item show` prints the history, one row per line, with its reason, `forced`,
 the ruling and the evidence commit, and marks a row recorded on a ruling

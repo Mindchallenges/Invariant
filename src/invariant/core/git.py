@@ -642,6 +642,13 @@ def commits_ahead(cwd: Path, branch: str, upstream: str) -> int | None:
     return int(out)
 
 
+def commit_messages(cwd: Path, base: str, tip: str = "HEAD") -> str | None:
+    """Every message of the commits on ``tip`` since ``base``, joined, or
+    ``None`` when git cannot say (an unknown base, an unreadable repository)."""
+    code, out, _err = _run(["log", "--format=%B", f"{base}..{tip}"], cwd)
+    return out if code == 0 else None
+
+
 def last_commit_message(cwd: Path) -> str:
     return _run(["log", "-1", "--format=%B"], cwd)[1]
 

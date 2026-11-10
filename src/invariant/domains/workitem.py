@@ -18,6 +18,9 @@ from ..core.rules import Evaluated, RuleContext, evaluate
 
 ITEM_TYPES = ("idea", "bug")
 
+#: The rule an item write is checked by (ADR-018 D8).
+LINKED_RULE = "items.decisions_linked"
+
 #: The item's own keys that ``item new --field`` must not set, and where each
 #: one is set instead. ``id`` is absent: an explicit id is honoured.
 _SET_ELSEWHERE = {
@@ -71,6 +74,43 @@ class WorkItemDomain:
     def __init__(self, manifest) -> None:
         self.manifest = manifest
         self.backend = backend_for(manifest)
+        #: What ``items.decisions_linked`` said of the last write without
+        #: refusing it (ADR-018 D8): a warning while the project migrates. The
+        #: CLI prints them.
+        self.warnings: list[Evaluated] = []
+
+    def _check_links(
+        self, item_id: str, *texts: str | None, cwd: Path | None = None, force: bool = False
+    ) -> None:
+        """Refuse a write naming a design id no recorded build holds (D8).
+
+        ``items.decisions_linked``, asked with the text the write adds; a
+        blocking verdict refuses the write before anything is saved, and a
+        warning is kept on :attr:`warnings`.
+        """
+        text = "\n".join(t for t in texts if t)
+        self.warnings = []
+        if not text:
+            return
+        ctx = RuleContext(
+            manifest=self.manifest,
+            cwd=Path(cwd or Path.cwd()),
+            extra={"item_text": text, "item_id": item_id},
+        )
+        verdicts = evaluate([LINKED_RULE], ctx)
+        blocking = [v for v in verdicts if v.blocks]
+        if blocking and force:
+            # `item transition --force --reason`: the reasoned route, recorded
+            # on the history row the transition writes.
+            self.warnings = blocking
+            return
+        if blocking:
+            raise GateFailure(
+                f"{item_id or 'the item'} names a design id no recorded docs build "
+                f"holds; nothing was written",
+                verdicts=blocking,
+            )
+        self.warnings = [v for v in verdicts if v.warns]
 
     def machine(self, item_type: str):
         if item_type not in ITEM_TYPES:
@@ -137,6 +177,9 @@ class WorkItemDomain:
         if not title.strip():
             raise UsageError("an item needs a title")
         explicit = fields.pop("id", None)
+        self._check_links(
+            str(explicit or ""), title, body, *(str(v) for v in fields.values())
+        )
         item = Item(
             id=(
                 self._unspent(str(explicit))
@@ -201,6 +244,7 @@ class WorkItemDomain:
         item = self.get(item_id)
         machine = self.machine(item.type)
         provenance = self._provenance(ruling, evidence)
+        self._check_links(item.id, reason, ruling, cwd=cwd, force=bool(force and reason))
 
         path = [target]
         structural_override = False
@@ -287,6 +331,7 @@ class WorkItemDomain:
 
     def add_residue(self, item_id: str, text: str) -> Item:
         item = self.get(item_id)
+        self._check_links(item.id, text)
         if text not in item.residue:
             item.residue.append(text)
         self.backend.save(item)

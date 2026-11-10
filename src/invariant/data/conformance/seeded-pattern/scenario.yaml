@@ -92,6 +92,9 @@ expect:
       docs.diagrams_current: pass
       docs.builds_strict: skip
       docs.needs_traceable: skip
+      docs.decisions_recorded: skip
+      items.decisions_linked: skip
+      docs.mandate_kept: pass
       agents.design_agent_ran: pass
       agents.review_agent_ran: pass
       agents.rendered_current: warn

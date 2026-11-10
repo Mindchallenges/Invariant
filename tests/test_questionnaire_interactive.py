@@ -63,6 +63,9 @@ ACCEPTED_MANIFEST = (
     "items:\n"
     "  backend: sphinx_needs\n"
     "  path: docs/backlog.rst\n"
+    "\n"
+    "guidelines:\n"
+    "  ruleset: docs/guidelines/ruleset.yaml\n"
     "\n" + INIT_COMMENT
 )
 

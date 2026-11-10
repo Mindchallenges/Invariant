@@ -606,3 +606,63 @@ def read_record(state_root: Path, digest: str) -> BuildRecord | None:
         return BuildRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def latest_record(state_root: Path) -> BuildRecord | None:
+    """The last build recorded under ``state_root`` that kept a needs.json,
+    whatever its digest: what an item write is checked against (D8), since
+    the tree it is written into has not been built yet."""
+    directory = Path(state_root) / RECORDS_DIR
+    try:
+        names = [p for p in directory.glob("*.json") if not p.name.endswith(".needs.json")]
+    except OSError:
+        return None
+    found: list[BuildRecord] = []
+    for path in names:
+        try:
+            record = BuildRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if record.needs_json and Path(record.needs_json).is_file():
+            found.append(record)
+    return max(found, key=lambda r: r.at, default=None)
+
+
+# -- the refused homes and the decision ids (D8, D9) ---------------------------
+
+#: The globs no design is written under (D8, `docs.needs.refused_paths`'s
+#: default). Markdown under ``paths.docs`` or ``<srcdir>/decisions`` is refused
+#: beside these whatever the setting says: those are the needs' own homes.
+DEFAULT_REFUSED_PATHS = ("docs/adr/**", "**/ADR-*.md", "**/adr-*.md")
+
+#: The roles whose needs an item or a session may cite by id (D8): what a
+#: decision needs, never an element or an item.
+DESIGN_ROLES = ("decision", "requirement", "ui", "rule")
+
+
+def prefixes_of(types: Sequence[NeedType], roles: Iterable[str]) -> tuple[str, ...]:
+    """The prefixes of every type mapped to one of ``roles``, longest first,
+    so a regex alternation tries ``DEC_ADR_`` before ``DEC_``."""
+    wanted = set(roles)
+    return tuple(
+        sorted({t.prefix for t in types if t.role in wanted}, key=lambda p: (-len(p), p))
+    )
+
+
+def cited_ids(text: str, prefixes: Sequence[str]) -> list[str]:
+    """Every need id in ``text`` carrying one of ``prefixes``, in order, once.
+
+    A whole token: not inside a longer word, and ending on a letter or a
+    digit, so a pattern written in prose (``DEC_ADR_<nnn>``) is no id.
+    """
+    if not prefixes or not text:
+        return []
+    alternation = "|".join(re.escape(p) for p in prefixes)
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_])(?:{alternation})[A-Z0-9_]*[A-Z0-9](?![A-Za-z0-9_])"
+    )
+    seen: dict[str, None] = {}
+    for match in pattern.finditer(text):
+        if NEED_ID.match(match.group(0)):
+            seen.setdefault(match.group(0), None)
+    return list(seen)

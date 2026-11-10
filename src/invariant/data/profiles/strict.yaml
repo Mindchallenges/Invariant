@@ -47,6 +47,14 @@ rules:
   # project's load raises both to block (D10).
   docs.builds_strict: warn
   docs.needs_traceable: warn
+  # The refused homes and the declared decisions (ADR-018 D8, D9): warn while
+  # migrating, raised to block, with a floor, when enforced (ruling 19).
+  docs.design_home: warn
+  docs.decisions_recorded: warn
+  items.decisions_linked: warn
+  # A change moving docs.needs.state back from enforced (D10): blocks in every
+  # profile and state, and passes only with --force --reason.
+  docs.mandate_kept: block
   # The incremental docs path (ADR-016 D6): each touched source area no
   # architecture doc names is owed. Injected at the landing only under
   # docs.onboarding: incremental. Warns in loose and standard, blocks in strict.

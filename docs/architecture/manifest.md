@@ -291,6 +291,7 @@ docs:
       - {from: bug, to: element}
       # - {from: rule, to: decision, via: [decided_by]}   # only through those options
     decision_statuses: [proposed, accepted, superseded, rejected]
+    refused_paths: null           # null: docs/adr/**, **/ADR-*.md, **/adr-*.md; a list replaces them
 ```
 
 - **`state`** reads `migrating` where absent, so upgrading invariant blocks
@@ -330,13 +331,20 @@ from its profile (provenance `profile:<name> (docs.needs.state: enforced)`),
 and a level may still set them until increment 5's floor. `paths.docs` keeps
 its meaning: the architecture pages.
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D8, D9, D13).** `docs.needs` gains
-`refused_paths` (increment 5), and for a documentation repository `home` and
-`external` (increment 8). `enforcement.rules` gains `docs.design_home`,
-`docs.decisions_recorded` and `items.decisions_linked`, which warn while
-migrating and block when enforced, and all five rules gain the floor of
-`block` in an enforced project (see "An override either takes effect or says
-it did not"), increment 5.
+**Built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) increment 5; D8, D9, D10).** `docs.needs.refused_paths`
+is the globs `docs.design_home` refuses a write under (state_model.md):
+null is D8's three, `docs/adr/**`, `**/ADR-*.md` and `**/adr-*.md`, and a
+list replaces them whole. Markdown under `paths.docs` or
+`<srcdir>/decisions/` is refused beside them whatever the list says. A value
+that is not a list of one-line globs is refused at load.
+`enforcement.rules` gains `docs.design_home`, `docs.decisions_recorded` and
+`items.decisions_linked`, `warn` in every profile and raised to `block` by an
+enforced load with the two build rules, and `docs.mandate_kept`, `block` in
+every profile. All six carry the floor of `block` (see "An override either
+takes effect or says it did not").
+
+**Accepted, not yet built (ADR-018 D13, increment 8).** For a documentation
+repository `docs.needs` gains `home` and `external`.
 
 **Built ([ADR-016](../adr/ADR-016-the-architecture-docs-are-assessed-and-init-offers-to-reuse-relocate-or-write-them.md) D9, increment 1).** `docs.assess` configures the
 docs assessment (`invariant docs assess`, cli.md), and `enforcement.rules`
@@ -1677,14 +1685,20 @@ that takes none (increment 4).
 The rule ids in `enforcement.rules` are checked against the registry, and a key
 naming nothing is a **refusal at load** carrying the nearest real id.
 
-**Accepted, not yet built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D1, ruling 19, increment 5).** In a project
+**Built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D1, ruling 19, increment 5).** In a project
 whose `docs.needs.state` is `enforced`, `docs.builds_strict`,
 `docs.needs_traceable`, `docs.design_home`, `docs.decisions_recorded` and
-`items.decisions_linked` have a floor of `block`: a profile or an
-`enforcement.rules` entry setting one lower is refused at load, naming
-ruling 1. This removes ADR-001 D25's permanent route for those rules only;
-`invariant override`, `pipeline advance --force --reason`, `invariant
-standdown` and `invariant uninstall` stand.
+`items.decisions_linked` have a floor of `block`, and `docs.mandate_kept`
+has it in every project, because the change it refuses leaves the project
+migrating. A level at any config level setting one lower (`ask`, `warn` or
+`off`) is refused at load, once `docs.needs` itself has loaded, naming ruling 1,
+the level that set it and the routes that remain. This removes ADR-001
+D25's permanent route for those rules only; `invariant override`,
+`pipeline advance --force --reason`, `invariant standdown` and `invariant
+uninstall` stand. Neither environment escape is a refusal: `INVARIANT_PROFILE`
+does not lower a floored rule, and `INVARIANT_DISABLE` naming one is ignored
+with a note on stderr, for the reason below. A migrating project loads any
+level for the five, as before.
 
 Only the *value* used to be parsed. `rule_level()` answers `warn` for any id it
 does not hold, so `privacy_clean: off` written beside a real `privacy.clean`

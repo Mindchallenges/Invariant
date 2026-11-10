@@ -61,6 +61,7 @@ STARTER_MANIFEST = TODAYS_MANIFEST.replace(
     "\n# Everything else",
     "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: docs\n"
     "\nitems:\n  backend: sphinx_needs\n  path: docs/backlog.rst\n"
+    "\nguidelines:\n  ruleset: docs/guidelines/ruleset.yaml\n"
     "\n# Everything else",
 )
 

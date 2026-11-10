@@ -1113,6 +1113,8 @@ def cmd_init(args) -> int:
         if args.dry_run or (prompter is None and asker is None):
             actions.append(_venv_deferred(root, starter))
     notes_after = [starter_note] if starter_note else []
+    if starter is not None and starter.note:
+        notes_after.append(starter.note)
 
     if args.dry_run:
         resolved = _init_resolved(root, manifest_path, body, written=False)
@@ -1307,7 +1309,12 @@ def _kept_mandate(root: Path) -> dict[str, Any]:
     items = {"backend": old.get("items.backend"), "path": old.get("items.path")}
     if old.get("items.closed_path") is not None:
         items["closed_path"] = old.get("items.closed_path")
-    return {"docs": {"format": old.get("docs.format"), "needs": needs}, "items": items}
+    kept = {"docs": {"format": old.get("docs.format"), "needs": needs}, "items": items}
+    # The ruleset carrying the mandate's two judgement rules (ADR-018 D8, D9)
+    # is kept with them, so the pages rendered from it stay current.
+    if old.get("guidelines.ruleset") is not None:
+        kept["guidelines"] = {"ruleset": old.get("guidelines.ruleset")}
+    return kept
 
 
 def _venv_deferred(root: Path, starter) -> str:
@@ -1798,6 +1805,102 @@ def cmd_docs_build(args) -> int:
         )
     emit(args, payload, text)
     return EXIT_OK if record.passed else 1
+
+
+def cmd_docs_decision_new(args) -> int:
+    """Mint the next decision record page (ADR-018 D7).
+
+    The page holds one need, the record, in the first decision status; the
+    decisions it records are written on it as needs, each linked to what it
+    shapes, and the strict build is what checks them.
+    """
+    from ..domains.docs import new_decision
+
+    ctx = Context()
+    page = new_decision(ctx.manifest, args.title, dry_run=args.dry_run)
+    index = None if page.index is None else _spelled_under(ctx.manifest.root, page.index)
+    payload = {
+        "id": page.need_id,
+        "number": page.number,
+        "status": page.status,
+        "path": page.rel,
+        "index": index,
+        "dry_run": bool(args.dry_run),
+    }
+    verb = "would write" if args.dry_run else "wrote"
+    links = ctx.manifest.get("docs.needs.require_links") or []
+    owed = ", ".join(f"{r.get('from')} -> {r.get('to')}" for r in links) or "none"
+    text = "\n".join(
+        [
+            f"{verb} {page.rel}: {page.need_id} ({page.status})",
+            (
+                f"  {'would list' if args.dry_run else 'listed'} it in {index}"
+                if index
+                else "  its index's toctree globs, and lists it already"
+            ),
+            (
+                f"  next: write each decision on it as a need, {page.need_id}_D1 "
+                f"onward, linked as docs.needs.require_links asks ({owed}); then "
+                f"'invariant docs build', and declare it: 'invariant session "
+                f"decisions add {page.need_id}'"
+            ),
+        ]
+    )
+    return emit(args, payload, text)
+
+
+def cmd_session_decisions(args) -> int:
+    """The decisions this session made (ADR-018 D9): add, resolve, remove, show.
+
+    Shaped as ``session plan`` is: nested actions, every one printing the
+    whole list and the same JSON document.
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    action = args.decisions_action
+    if action == "add":
+        if args.need_id is None and args.draft is None:
+            raise UsageError(
+                "name the decision's need id, or give --draft \"<one line>\""
+            )
+        session = ctx.sessions.decisions_add(
+            session.id, need_id=args.need_id, draft=args.draft
+        )
+    elif action == "resolve":
+        session = ctx.sessions.decisions_resolve(session.id, args.n, args.need_id)
+    elif action == "remove":
+        session = ctx.sessions.decisions_remove(session.id, args.n)
+    entries = [dict(e) for e in session.decisions if isinstance(e, dict)]
+    drafts = sum(1 for e in entries if not e.get("id"))
+    lines = [
+        (
+            f"decisions for session {session.id} ({session.name}) — "
+            f"{len(entries)} declared, {drafts} draft(s)"
+        )
+    ]
+    for entry in entries:
+        if entry.get("id"):
+            was = f"  (was: {entry['draft']})" if entry.get("draft") else ""
+            lines.append(f"  {entry.get('n')}  {entry['id']}{was}")
+        else:
+            lines.append(f"  {entry.get('n')}  draft: {entry.get('draft')}")
+    if drafts:
+        lines.append(
+            "  a draft holds the landing (docs.decisions_recorded): mint its record "
+            "with 'invariant docs decision new', then 'invariant session decisions "
+            "resolve <n> <DEC_id>'"
+        )
+    elif not entries:
+        lines.append(
+            "  declare one: invariant session decisions add <DEC_id> | --draft \"<one line>\""
+        )
+    payload = {
+        "session": session.id,
+        "name": session.name,
+        "decisions": entries,
+        "drafts": drafts,
+    }
+    return emit(args, payload, "\n".join(lines))
 
 
 def cmd_docs_adopt(args) -> int:
@@ -4167,15 +4270,28 @@ def _item_fields(pairs: list[str]) -> dict[str, str]:
 def cmd_item_new(args) -> int:
     ctx = Context()
     fields = _item_fields(args.field or [])
-    item = ctx.items.new(
-        args.type,
-        args.title,
-        fields=fields,
-        body=args.body or "",
-        section=args.section,
-        after=args.after,
-    )
+    items = ctx.items
+    try:
+        item = items.new(
+            args.type,
+            args.title,
+            fields=fields,
+            body=args.body or "",
+            section=args.section,
+            after=args.after,
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        raise
+    _item_warnings(items)
     return emit(args, item.to_dict(), f"{item.id}  {item.status}  {item.title}")
+
+
+def _item_warnings(items) -> None:
+    """What ``items.decisions_linked`` warned of an item write (ADR-018 D8),
+    on stderr, so ``--json`` output stays one document."""
+    for verdict in items.warnings:
+        print(verdict.render(), file=sys.stderr)
 
 
 def cmd_item_list(args) -> int:
@@ -4208,10 +4324,11 @@ def cmd_item_show(args) -> int:
 
 def cmd_item_transition(args) -> int:
     ctx = Context()
+    items = ctx.items
     try:
         # The verdicts are reported by the failure path below; a clean
         # transition has nothing to say about them.
-        item, _verdicts = ctx.items.transition(
+        item, _verdicts = items.transition(
             args.id,
             args.status,
             reason=args.reason,
@@ -4223,6 +4340,7 @@ def cmd_item_transition(args) -> int:
     except GateFailure as exc:
         report_verdicts(exc.verdicts, args)
         raise
+    _item_warnings(items)
     text = f"{item.id} -> {item.status}"
     if len(item.history) > 1 and item.history[-2].get("intermediate"):
         text += f"  (through {item.history[-2]['to']}, recorded on the ruling)"
@@ -4249,7 +4367,13 @@ def _history_line(row: dict) -> str:
 def cmd_item_residue(args) -> int:
     ctx = Context()
     if args.add:
-        item = ctx.items.add_residue(args.id, args.add)
+        items = ctx.items
+        try:
+            item = items.add_residue(args.id, args.add)
+        except GateFailure as exc:
+            report_verdicts(exc.verdicts, args)
+            raise
+        _item_warnings(items)
     elif args.clear:
         item = ctx.items.clear_residue(args.id, args.clear)
     else:
@@ -6480,6 +6604,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="build again even when this tree is already recorded green",
     )
     q.set_defaults(func=cmd_docs_build)
+    decision = p.add_parser(
+        "decision", help="the docs project's decision records (ADR-018 D7)"
+    ).add_subparsers(dest="decision_action", required=True)
+    q = decision.add_parser(
+        "new", help="mint the next decision record page under <srcdir>/decisions/"
+    )
+    q.add_argument("title", help="the record's title, one line")
+    q.add_argument("--dry-run", action="store_true", help="say what it would write")
+    q.set_defaults(func=cmd_docs_decision_new)
 
     p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
     q = p.add_parser("init", help="create a store for this repository and link it")
@@ -6639,6 +6772,33 @@ def build_parser() -> argparse.ArgumentParser:
         "show", help="the plan, and what is next on it", parents=[session_arg]
     )
     q.set_defaults(func=cmd_session_plan)
+
+    # The decisions this session made (ADR-018 D9), shaped as `plan` is.
+    decisions = session.add_parser(
+        "decisions", help="the decisions this session made, as needs or drafts"
+    ).add_subparsers(dest="decisions_action", required=True)
+    q = decisions.add_parser(
+        "add", help="declare a decision: its need's id, or --draft", parents=[session_arg]
+    )
+    q.add_argument("need_id", nargs="?", help="the decision need's id (DEC_...)")
+    q.add_argument("--draft", help="a decision not yet a need, in one line")
+    q.set_defaults(func=cmd_session_decisions)
+    q = decisions.add_parser(
+        "resolve", help="name the need a draft became", parents=[session_arg]
+    )
+    q.add_argument("n", type=int)
+    q.add_argument("need_id")
+    q.set_defaults(func=cmd_session_decisions)
+    q = decisions.add_parser(
+        "remove", help="drop a declared decision; its number is retired",
+        parents=[session_arg],
+    )
+    q.add_argument("n", type=int)
+    q.set_defaults(func=cmd_session_decisions)
+    q = decisions.add_parser(
+        "show", help="the declared decisions and their drafts", parents=[session_arg]
+    )
+    q.set_defaults(func=cmd_session_decisions)
 
     q = session.add_parser(
         "sync", help="rebase this session's branch onto its base", parents=[session_arg]

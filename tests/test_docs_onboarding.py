@@ -64,6 +64,7 @@ STARTER_MANIFEST = TODAYS_MANIFEST.replace(
     "\n# Everything else",
     "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: docs\n"
     "\nitems:\n  backend: sphinx_needs\n  path: docs/backlog.rst\n"
+    "\nguidelines:\n  ruleset: docs/guidelines/ruleset.yaml\n"
     "\n# Everything else",
 )
 
@@ -661,7 +662,11 @@ class TestLocationOffer:
         assert (unrelated / "design" / "conf.py").is_file()
         assert m.get("docs.needs.srcdir") == "design"
         assert m.get("items.path") == "design/backlog.rst"
-        assert tree(unrelated / "docs") == before
+        # The mandate's ruleset goes to ADR-012 D3's default path (ADR-018
+        # D8, increment 5); nothing else under docs/ moves.
+        after = tree(unrelated / "docs")
+        assert m.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
+        assert after.pop("guidelines/ruleset.yaml") and after == before
 
     def test_another_existing_repo_path_is_reused_untouched(
         self, unrelated, capsys, interactive

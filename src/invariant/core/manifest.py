@@ -226,10 +226,13 @@ DEFAULTS: dict[str, Any] = {
         # types following `items.id_prefix`; a list replaces them whole.
         # `srcdir` null means the nearest directory at or above `paths.docs`
         # holding a conf.py, below the root.
+        # `refused_paths` null means D8's default globs (core/needs,
+        # `DEFAULT_REFUSED_PATHS`); a list replaces them whole.
         "needs": {
             "state": "migrating",
             "types": None,
             "srcdir": None,
+            "refused_paths": None,
             "require_links": [
                 {"from": "decision", "to": "element"},
                 {"from": "bug", "to": "element"},
@@ -478,10 +481,25 @@ _DOCS_KEYS = (
     "needs",
 )
 #: The `docs.needs` keys this build reads (ADR-018 increment 3).
-_NEEDS_KEYS = ("state", "types", "srcdir", "require_links", "decision_statuses")
-#: The rules whose level follows `docs.needs.state` (ADR-018 D5, D6, D10):
-#: the profile's `warn` while migrating, `block` when enforced.
-MANDATE_RULES = ("docs.builds_strict", "docs.needs_traceable")
+_NEEDS_KEYS = (
+    "state", "types", "srcdir", "require_links", "decision_statuses", "refused_paths",
+)
+#: The rules whose level follows `docs.needs.state` (ADR-018 D5, D6, D8, D9,
+#: D10): the profile's `warn` while migrating, `block` when enforced, and in
+#: an enforced project never lower (ruling 19, the floor): a level setting one
+#: below `block` is refused at load, naming ruling 1.
+MANDATE_RULES = (
+    "docs.builds_strict",
+    "docs.needs_traceable",
+    "docs.design_home",
+    "docs.decisions_recorded",
+    "items.decisions_linked",
+)
+#: The rule refusing a change that moves `docs.needs.state` back from
+#: `enforced` (ADR-018 D10). It blocks in every profile and has the floor in
+#: every state, because the change it judges is one that leaves the project
+#: migrating, where the mandate rules' own floor no longer holds.
+MANDATE_KEPT = "docs.mandate_kept"
 ONBOARDING_MODES = ("off", "incremental", "all_at_once")
 #: The `docs.adopt` keys and modes (ADR-016 D7, D9); null is no adoption.
 _ADOPT_KEYS = ("mode", "source")
@@ -762,7 +780,8 @@ class Manifest:
             f"profile:{profile_name}",
         )
         # An enforced project's docs rules block from its profile (ADR-018
-        # D10); a level may still set them, until increment 5's floor.
+        # D10); a level setting one lower is refused at load by ruling 19's
+        # floor (`_validate_floor`).
         if _highest(levels, "docs", "needs", "state") == "enforced":
             _merge(
                 data,
@@ -859,8 +878,13 @@ class Manifest:
                 node[leaf] = joined
 
     def _apply_env(self, env: Mapping[str, str]) -> None:
+        floored = self._floored()
         if profile := env.get("INVARIANT_PROFILE"):
-            rules = _load_profile(profile)
+            rules = {
+                rule_id: level
+                for rule_id, level in _load_profile(profile).items()
+                if rule_id not in floored
+            }
             self.data["enforcement"]["profile"] = profile
             self.data["enforcement"]["rules"].update(rules)
             self.provenance["enforcement.profile"] = "env:INVARIANT_PROFILE"
@@ -888,8 +912,60 @@ class Manifest:
                         file=sys.stderr,
                     )
                     continue
+                if rule_id in floored:
+                    # The floor of ruling 19, held for the escape hatch too,
+                    # and not by refusing the load: the hatch is reached by
+                    # somebody already blocked. The recorded routes remain.
+                    print(
+                        f"invariant: INVARIANT_DISABLE names {rule_id!r}, which "
+                        f"cannot be set below block here (ADR-018 ruling 1, "
+                        f"ruling 19). It was ignored; to pass one change, use "
+                        f"'invariant override', 'pipeline advance --force "
+                        f"--reason' or 'invariant standdown'.",
+                        file=sys.stderr,
+                    )
+                    continue
                 self.data["enforcement"]["rules"][rule_id] = Level.OFF.value
                 self.provenance[f"enforcement.rules.{rule_id}"] = "env:INVARIANT_DISABLE"
+
+    def _floored(self) -> tuple[str, ...]:
+        """The rules no level may set below `block` here (ADR-018 ruling 19).
+
+        The mandate's rules in an enforced project, and `docs.mandate_kept`
+        in every project: the change it refuses leaves the project migrating.
+        """
+        docs = self.data.get("docs")
+        needs = docs.get("needs") if isinstance(docs, Mapping) else None
+        state = needs.get("state") if isinstance(needs, Mapping) else None
+        return (*MANDATE_RULES, MANDATE_KEPT) if state == "enforced" else (MANDATE_KEPT,)
+
+    def _validate_floor(self) -> None:
+        """Refuse a level below `block` on a floored rule, naming ruling 1.
+
+        ADR-001 D25's permanent route is removed for these rules alone; the
+        temporary, recorded ones stand, and the refusal names them.
+        """
+        rules = self.data["enforcement"]["rules"]
+        for rule_id in self._floored():
+            level = Level.parse(rules.get(rule_id, "block"))
+            if level is Level.BLOCK:
+                continue
+            source = self.provenance.get(f"enforcement.rules.{rule_id}", "default")
+            why = (
+                "the docs mandate is not optional (ADR-018 ruling 1): in an "
+                "enforced project its rules cannot be set below block (ruling 19)"
+                if rule_id != MANDATE_KEPT
+                else "moving docs.needs.state back from enforced passes only "
+                "with a reason (ADR-018 ruling 1, D10), so this rule cannot be "
+                "set below block (ruling 19)"
+            )
+            raise ManifestError(
+                f"enforcement.rules.{rule_id} is {level.value} (from {source}), but "
+                f"{why}. Remove the entry. To pass one change, use the recorded "
+                f"routes: 'invariant override {rule_id} --reason <why>', "
+                f"'invariant pipeline advance <state> --force --reason <why>' or "
+                f"'invariant standdown'."
+            )
 
     def validate(self) -> None:
         if int(self.data.get("version", 1)) != 1:
@@ -960,6 +1036,7 @@ class Manifest:
         self._validate_guidelines()
         self._validate_docs()
         self._validate_docs_needs()
+        self._validate_floor()
         self._validate_docs_assess()
         self._validate_docs_adopt()
         self._validate_agents()
@@ -1356,6 +1433,15 @@ class Manifest:
             raise ManifestError(
                 f"docs.needs.decision_statuses must be a non-empty list of one-line "
                 f"statuses, got {statuses!r}"
+            )
+        refused = section.get("refused_paths")
+        if refused is not None and (
+            not isinstance(refused, list)
+            or not all(isinstance(g, str) and _is_one_line(g) for g in refused)
+        ):
+            raise ManifestError(
+                f"docs.needs.refused_paths must be a list of one-line globs, "
+                f"got {refused!r}"
             )
         srcdir = section.get("srcdir")
         if srcdir is not None and not _is_one_line(srcdir):

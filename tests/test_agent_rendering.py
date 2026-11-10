@@ -338,6 +338,36 @@ A7_2 = {
 }
 
 
+#: ADR-018 increment 5: the design agent's design phase ends by declaring its
+#: decisions, and its report gains the `DECISIONS:` block (D9).
+ADR_018_5 = {
+    "feature-architect": (
+        (
+            (
+                "8. **Docs to update** — the exact architecture-doc files under `paths.docs` and which diagram blocks change.\n"
+            ),
+            (
+                "8. **Docs to update** — the exact architecture-doc files under `paths.docs` and which diagram blocks change.\n"
+                "9. **Decisions** — end the design phase by declaring every decision it made on the session: `invariant session decisions add <DEC_id>` for one already a need (`invariant docs decision new \"<title>\"` mints a record page), or `invariant session decisions add --draft \"<one line>\"` for one not yet written as a need. A draft holds the landing (`docs.decisions_recorded`) until `invariant session decisions resolve <n> <DEC_id>` names its need.\n"
+            ),
+        ),
+        (
+            (
+                "    - <paths.docs>/views doc (add DetailsSheet to view graph)\n\n"
+                "BOY-SCOUT REFACTORS"
+            ),
+            (
+                "    - <paths.docs>/views doc (add DetailsSheet to view graph)\n\n"
+                "DECISIONS: (exactly what `invariant session decisions add` recorded)\n"
+                "  - DEC_ADR_<nnn>_D<k>   <one line>\n"
+                "  - draft 2              <one line>  (resolve before landing)\n"
+                "  (or \"none\")\n\n"
+                "BOY-SCOUT REFACTORS"
+            ),
+        ),
+    ),
+}
+
 #: The sections each shipped agent offers an overlay, in order. A rename here
 #: breaks every overlay that names the old id, so it is pinned.
 ANCHORS = {
@@ -433,7 +463,12 @@ def expected_render(name):
     close = lines.index("---", 1)
     front = [line for line in lines[1:close] if not line.startswith("model:")]
     text = "\n".join([lines[0], *front, *lines[close:]])
-    for old, new in (*NEUTRALISED.get(name, ()), *A6_5.get(name, ()), *A7_2.get(name, ())):
+    for old, new in (
+        *NEUTRALISED.get(name, ()),
+        *A6_5.get(name, ()),
+        *A7_2.get(name, ()),
+        *ADR_018_5.get(name, ()),
+    ):
         assert text.count(old) == 1, f"{name}: the rewrite no longer matches {old!r}"
         text = text.replace(old, new)
     return text

@@ -250,6 +250,12 @@ same no-migration contract. Its `consumed` key (IDEA_008) is under it too, one
 level down: an entry without the key is unconsumed, so every entry written
 before it existed reads exactly as it did.
 
+`decisions` is the sixth (ADR-018 D9, increment 5), under the same contract:
+the decisions the session made, `{"n", "id", "draft"}` per `session
+decisions` entry, numbered as the plan is. An entry with no `id` is a draft.
+`docs.decisions_recorded` reads it at the landing (the docs gates, below),
+and a record written before it existed reads as declaring nothing.
+
 Three properties of that set are decisions rather than shape.
 
 **A deliverable's number is never reused.** `plan_add` takes `max(existing) + 1`
@@ -1295,7 +1301,8 @@ Shipped methodologies:
 pair of gates the engine injects into whichever methodology is configured:
 `docs.read_architecture` leaving the design state, `docs.updated` entering the
 landing state (with `docs.diagrams_current`, and ADR-018's
-`docs.builds_strict` and `docs.needs_traceable` beside it). A methodology cannot opt out of it; a project can only retune
+`docs.builds_strict`, `docs.needs_traceable`, `docs.decisions_recorded`,
+`items.decisions_linked` and `docs.mandate_kept` beside it). A methodology cannot opt out of it; a project can only retune
 the gates' level, and even that is discouraged.
 
 Details that are load-bearing rather than incidental:
@@ -1539,21 +1546,61 @@ held to nothing, and a role with no needs is not a failure.
 
 Both are `warn` in every profile. An enforced project's load raises both to
 `block` (manifest.md), so the same toy project warns while migrating on
-`sphinx` and blocks when enforced. The floor that stops a level lowering them
-again is increment 5.
+`sphinx` and blocks when enforced, and since increment 5 no level lowers
+them again (ruling 19's floor, below).
 
-**Accepted, not yet built (ADR-018 D8, D9, D10, increment 5).** Three more
-rules. `docs.decisions_recorded` is a landing entry gate over the decisions
-a session declared (`session decisions`): a draft, or an id the green build
-does not hold, blocks. `docs.design_home` is a pre-tool-use rule on the edit
-tools refusing a write to `docs.needs.refused_paths`, and
-`items.decisions_linked` refuses an item write naming an unheld decision,
-requirement, ui or rule id and runs again at the landing over the items the
-session changed. While `docs.needs.state` is `migrating` each of them warns;
-when `enforced` each blocks and no level lowers it, nor
-`docs.builds_strict` and `docs.needs_traceable`. A change moving the key back
-from `enforced` is refused at its landing and passes only with `pipeline
-advance --force --reason`.
+**Built ([ADR-018](../adr/ADR-018-architecture-and-design-live-only-in-a-strict-building-sphinx-needs-project.md) D8, D9, D10, increment 5).** Four more
+rules, none of which runs a command:
+
+- **`docs.design_home`**, a pre-tool-use rule on the edit tools. A write to a
+  refused home for design is refused, naming `invariant docs decision new`
+  and the docs project's pages: a path under `docs.needs.refused_paths` (null:
+  `docs/adr/**`, `**/ADR-*.md`, `**/adr-*.md`), or any Markdown file under
+  `paths.docs` or `<srcdir>/decisions/`. A user guide elsewhere, a report
+  under `paths.reports`, memory, and the generated files invariant declares
+  (the checklist, the instruction files) are written freely.
+- **`items.decisions_linked`**, at the hook on what an edit tool writes into
+  `items.path` or `items.closed_path`, in `domains/workitem` on what an
+  `invariant item` write adds, and at the landing entry over the lines the
+  session added to those stores. Every need id it names with a `decision`,
+  `requirement`, `ui` or `rule` type's prefix must be held by the recorded
+  build of the tree, or else by the last build recorded; with none recorded,
+  it fails naming `invariant docs build`.
+- **`docs.decisions_recorded`**, at the landing entry: each entry of `session
+  decisions` that is still a draft fails, naming `docs decision new` and
+  `session decisions resolve <n>`, and so does each declared id, or decision
+  id the plan's deliverables or the session's commit messages cite, that the
+  green record of the tree as it stands does not hold. N/A with no session
+  and with nothing declared or cited.
+- **`docs.mandate_kept`**, at the landing entry: a change moving
+  `docs.needs.state` in the repository's manifest from `enforced` at the
+  session's base to anything else (an absent key is `migrating`) fails, and
+  passes only with `pipeline advance --force --reason`. Any other change
+  passes, checked, rather than skipping: a block-level skip on every landing
+  of every migrating project would be news that is not news. N/A only with no
+  base or no manifest there to compare.
+
+The first three warn in every profile and an enforced load raises them to
+`block` with the two build rules. `docs.mandate_kept` blocks in every
+profile. Ruling 19's floor holds the five in an enforced project, and
+`docs.mandate_kept` in every project, at `block`: a lower level is refused at
+load (manifest.md), so the reasoned routes are the only ones left:
+`invariant override` at the hook, `--force --reason` at the landing, and
+`standdown`. The same toy project migrating warns on each of them.
+
+```mermaid
+graph LR
+    EDIT["edit tool call"] --> HOME["docs.design_home: refused_paths, Markdown under paths.docs or decisions/"]
+    EDIT --> LINK["items.decisions_linked: ids in what it writes to an items store"]
+    ITEM["invariant item new, transition, residue"] --> LINK
+    LINK --> HELD["held: the tree's recorded build, else the last one"]
+    LAND2["landing entry, every lane"] --> LINK
+    LAND2 --> REC2["docs.decisions_recorded: session decisions, plan and commit ids"]
+    LAND2 --> KEPT["docs.mandate_kept: docs.needs.state at base vs tree"]
+    REC2 --> GREEN["the green record of the tree as it stands"]
+    REC2 -- "a draft" --> DRAFT["fail: docs decision new, session decisions resolve"]
+    KEPT -- "enforced to anything else" --> FORCE["fail: --force --reason only"]
+```
 
 ```mermaid
 graph LR
