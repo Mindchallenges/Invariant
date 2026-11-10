@@ -11221,6 +11221,100 @@ is a decision need, linked by id.
 
    **Fix sketch / next step:** Run ``bug-reproducer`` first: two red tests on toy repositories in the adapter tests, (a) root ``conf.py`` plus a Sphinx-only ``pyproject.toml`` asserting ``detect()`` puts ``sphinx`` first, (b) ``docs/conf.py`` asserting ``sphinx`` is detected. The fix is a design call for ``feature-architect`` alongside ADR-018 increment 8: whether a detected Sphinx content tree outranks a Python packaging file (for example when the package declares no importable source beyond Sphinx dependencies, or the ``conf.py`` loads ``sphinx_needs``), and how the skip of the docs project's source directory is resolved against D13's store default rather than the default ``paths.docs``. A second ``conf.py`` still asks rather than guesses (ADR-015 D1).
 
+.. bug:: A privacy exemption marker stops covering its code block once docs migrate converts the page to rST
+   :id: BUG_119
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/privacy, core/mdconvert (docs migrate, item migrate)
+   :affects: COMP_CORE_PRIVACY, COMP_CORE_MDCONVERT, COMP_DOMAINS_DOCS, COMP_CMD_SETUP, COMP_CMD_ITEMS
+   :decided_by: DEC_ADR_001_D24, DEC_ADR_018_D14
+   :batch: docs-migrate-output
+
+   **Symptom:** After ``invariant docs migrate prose``, ``docs migrate adr`` or ``item migrate`` converts Markdown to rST, a privacy exemption marker that stood on its own line before a fenced code block no longer covers that block. The block's contents become ``privacy.clean`` findings. In ADR-018 increment 7 (439f86b, 2026-11-10) this produced 12 findings on invariant's own migrated backlog and docs that would have blocked the landing; two blocks (in the bodies of BUG_053 and BUG_055) were rewritten by hand as line blocks to get past it.
+
+   **Expected:** A marker that exempted a block in the Markdown source still exempts the same content after the conversion (:need:`ADR-001 D24 <DEC_ADR_001_D24>`: a marker that owns its line is block-scoped), so a migration neither creates landing blockers nor silently drops an exemption.
+
+   **Repro:** A Markdown page holding an own-line exemption marker (HTML comment) followed by a fenced code block whose content the privacy scan flags. Convert it with ``invariant docs migrate prose`` (or as an item body through ``item migrate --to sphinx_needs``), then run ``invariant privacy scan`` on the output: the block's lines are findings. The same scan on the Markdown source is clean.
+
+   **Suspected cause:** ``core/mdconvert`` keeps the HTML-comment marker as an rST comment (as designed), but in rST the marker comment, the ``::`` paragraph that introduces the literal block, and the indented literal block are three separate blocks. ``core/privacy``'s block rule (``_exempt_lines``) exempts only the block right after the marker, which is now the ``::`` line, so the literal block itself is uncovered.
+
+   **Affected:** :need:`COMP_CORE_PRIVACY` (the exemption marker and how far it reaches) and :need:`COMP_CORE_MDCONVERT` (an HTML comment kept as an rST comment), reached through :need:`COMP_DOMAINS_DOCS` and :need:`COMP_CMD_SETUP` (``docs migrate``) and :need:`COMP_CMD_ITEMS` (``item migrate``). Affects every project migrating Markdown that carries privacy markers (:need:`ADR-018 D14 <DEC_ADR_018_D14>`).
+
+   **Fix sketch / next step:** ``bug-reproducer`` first: a unit test converting a marker plus fenced block through ``convert_prose`` with a stub pandoc (or a captured tree) and scanning the result, asserting the block's lines are exempt; red today. Two fix options for ``feature-architect``: (a) ``core/privacy`` treats a lone ``::`` line, or a directive line, as joining the block after it, so the rST shape is one exempt unit wherever it comes from (also covers hand-written rST); (b) the converter writes a literal block that follows a marker as a line block, keeping the scan unchanged. (a) touches the ADR-001 D24 rule's wording and wants a ruling; (b) is local to the converter but leaves hand-written rST with the same trap. Related: BUG_045 (the marker made block-scoped), IDEA_002 (reporting what a marker suppressed).
+
+   **Batch:** docs-migrate-output — defects where ``docs migrate`` / ``item migrate`` writes rST that the landing gates or the build do not accept as-is, so the migration session fixes it by hand. Diagnosis method shared: migrate a toy Markdown project and check the output against the privacy scan, the strict build and the toctrees. Members: this bug, then the duplicate-toctree-entry bug.
+
+.. bug:: docs migrate prose lists a page twice: it appends to the index's last toctree when another toctree already lists it
+   :id: BUG_120
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: domains/docs (docs migrate prose)
+   :affects: COMP_DOMAINS_DOCS, COMP_CMD_SETUP
+   :decided_by: DEC_ADR_018_D14
+   :batch: docs-migrate-output
+
+   **Symptom:** ``invariant docs migrate prose <files>`` adds each converted page to the last toctree of the nearest ``index.rst`` even when another toctree in that same index already lists the page, so the index ends up with the page listed twice. In ADR-018 increment 7 (439f86b, 2026-11-10) five duplicate entries were removed by hand.
+
+   **Expected:** A page already listed by any toctree in the index is left where it is; migrate appends it only when no toctree in the index lists it, and re-running migrate is idempotent on the index.
+
+   **Repro:** A docs project whose ``index.rst`` has two toctrees, the first listing ``architecture/overview``; migrate ``architecture/overview.md`` with ``invariant docs migrate prose``. The last toctree gains ``architecture/overview`` while the first still lists it.
+
+   **Suspected cause:** The toctree helper in ``domains/docs`` (``index`` with ``entry`` appended to its last toctree) checks only the last toctree for an existing entry, or none, before appending.
+
+   **Affected:** :need:`COMP_DOMAINS_DOCS` (the migrate writes into the index) and :need:`COMP_CMD_SETUP` (the ``docs migrate`` command), per :need:`ADR-018 D14 <DEC_ADR_018_D14>`.
+
+   **Fix sketch / next step:** ``bug-reproducer`` first: a unit test on the toctree-append helper with a two-toctree index whose first toctree already lists the entry, asserting the index is unchanged; red today. The fix reads every toctree in the index before appending. Low impact: Sphinx tolerates the duplicate (at worst a warning), but it is hand cleanup per migration.
+
+   **Batch:** docs-migrate-output (second member, after the privacy-marker bug; see its preamble).
+
+.. bug:: The Sphinx starter's conf.py uses re.M, so every project init creates starts with a ruff FURB167 finding
+   :id: BUG_121
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: data/scaffold (init)
+   :affects: COMP_DATA_SCAFFOLD, COMP_CMD_SETUP
+   :decided_by: DEC_ADR_018_D11
+
+   **Symptom:** Every project created by ``invariant init`` gets a ``docs/conf.py`` from the Sphinx starter that uses the ``re.M`` flag alias, which ruff reports as FURB167. A project linting with ruff starts with a finding it did not write. invariant's own ``docs/conf.py`` was fixed by hand to ``re.MULTILINE`` in ADR-018 increment 7 (439f86b, 2026-11-10); the template still has ``re.M``.
+
+   **Expected:** The starter's ``conf.py`` is lint-clean under ruff's defaults, so init adds no lint finding to a new project.
+
+   **Repro:** ``src/invariant/data/scaffold/sphinx/conf.py`` (the item-field scan's ``re.findall``) uses ``re.M``; run ``ruff check --select FURB167`` on it, or on the ``conf.py`` of any project ``invariant init`` wrote.
+
+   **Suspected cause:** Template written with the short flag alias; known (the copy in invariant's own docs project was corrected), not propagated back to the template.
+
+   **Affected:** :need:`COMP_DATA_SCAFFOLD` (the docs starter's templates, :need:`ADR-018 D11 <DEC_ADR_018_D11>`), written by ``init`` in :need:`COMP_CMD_SETUP`.
+
+   **Fix sketch / next step:** ``bug-reproducer`` first: a test that runs the starter's ``conf.py`` through ruff (or asserts no ``re.M`` / short-flag use, if ruff in the suite is unwanted); red today. Fix: ``re.MULTILINE`` in the template. Projects already initialised keep the finding until fixed by hand.
+
+   **Batch:** unbatched — no open batch shares the mechanism (a starter template's lint).
+
+.. bug:: The quickstart guide still says init writes docs/architecture/overview.md, the retired Markdown starter
+   :id: BUG_122
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: user guide (init, starter)
+   :affects: COMP_CMD_SETUP, COMP_DATA_SCAFFOLD
+   :decided_by: DEC_ADR_018_D11
+
+   **Symptom:** The user guide ``docs/guide/quickstart.md`` still says ``invariant init`` writes ``docs/architecture/overview.md`` (the retired Markdown starter): the table of files init writes (around line 28) and the docs-read step (around line 101, with the ``--force --reason`` example after it naming ``overview.md``). Since ADR-018 increment 4 (6267443) init writes the Sphinx-needs starter (``conf.py``, ``index.rst``, ``architecture/overview.rst`` and the rest). A new user following the guide looks for a file that is not there.
+
+   **Expected:** The quickstart describes what init writes today: the Sphinx-needs starter under the docs location, its ``architecture/overview.rst``, and the strict build (``invariant docs build``) the docs owe.
+
+   **Repro:** Read ``docs/guide/quickstart.md`` against the files ``invariant init`` writes in an empty project.
+
+   **Suspected cause:** The guide was outside increment 4's and increment 7's touched set; increment 7 rewrote links into converted Markdown files but not prose describing the starter.
+
+   **Affected:** the user guide, describing ``init`` (:need:`COMP_CMD_SETUP`) and the starter (:need:`COMP_DATA_SCAFFOLD`, :need:`ADR-018 D11 <DEC_ADR_018_D11>`; ADR-016's Markdown ``overview.md`` retired).
+
+   **Fix sketch / next step:** A docs-only change; no failing test to write, so ``bug-reproducer`` confirms by reading the guide against init's output and can record the defect as actual. Fix: rewrite the two passages (and the example reason string) for the Sphinx-needs starter; check the rest of ``docs/guide/`` for other ``overview.md`` mentions in the same pass.
+
+   **Batch:** unbatched — a stale user-facing doc; no open batch shares the mechanism.
+
 .. idea:: The links pattern's TLD-like suffix rule drops a punycode IDN top-level domain
    :id: IDEA_001
    :status: done
