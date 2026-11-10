@@ -11193,6 +11193,34 @@ is a decision need, linked by id.
 
    **Related:** BUG_018 (node coverage parser absent; same adapter, different method — coverage, not test counts), BUG_038 (mechanism sibling), BUG_029 (the guard that turns ``failed=None`` into a refusal — correct, not to be relaxed), ADR-013 (second-ecosystem commands, ``commands.node.*``), IDEA_038.
 
+.. bug:: A Sphinx-needs documentation repository is detected as Python, not Sphinx
+   :id: BUG_118
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: adapters (detection), cli (init)
+   :affects: COMP_ADAPTERS_BASE, COMP_ADAPTERS_PYTHON, COMP_ADAPTERS_SPHINX
+   :decided_by: DEC_ADR_015_D1, DEC_ADR_018_D13
+
+   **Symptom:** Running ``invariant init`` in a documentation repository whose own content is a Sphinx-needs project detects the ecosystem as ``python``, not ``sphinx``. The manifest gets Python's commands and adapter, so the repository's build, linkcheck and needs runs are not its gates. Reported by the user 2026-11-10.
+
+   **Expected:** A repository whose own content is a Sphinx project is detected as ``sphinx`` (a documentation repository, :need:`ADR-015 D1 <DEC_ADR_015_D1>`, :need:`ADR-018 D13 <DEC_ADR_018_D13>`) without the user naming the ecosystem by hand, whether its ``conf.py`` sits at the root or under ``docs/``, and whether or not it also carries a ``pyproject.toml`` or ``setup.py`` used only to install Sphinx and its extensions.
+
+   **Repro:** The user's repository layout is unknown (where ``conf.py`` sits, whether it has ``pyproject.toml``); repro owed. Two toy repositories should each show one cause: (a) a root ``conf.py`` with ``sphinx_needs`` in its extensions plus a root ``pyproject.toml`` declaring only Sphinx dependencies; (b) the content at ``docs/conf.py``, with or without a ``pyproject.toml``. Run ``invariant init`` (or ``adapters.detect``) in each: (a) yields ``python`` first, so primary; (b) does not yield ``sphinx`` at all. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** Two, found by reading the code (not yet proven).
+
+   1. ``detect()`` in ``src/invariant/adapters/__init__.py`` checks in a fixed order (``swift_xcode``, ``python``, ``node``, ``flutter``, ``dart``, ``sphinx``) and the first match is the primary. The python adapter (``adapters/python_.py``) matches on a root ``pyproject.toml`` or ``setup.py``, which a documentation repository often has only to install Sphinx, so ``python`` wins even when ``sphinx`` is also detected.
+   2. ``adapters/sphinx.py`` ``detect()`` calls ``source_dirs(skip_docs_project=True)``, which skips a ``conf.py`` at the location invariant reserves for its own docs project (``docs/``, from the default ``paths.docs``, ADR-018 D3). A documentation repository with its content at ``docs/`` is therefore never detected as ``sphinx``. ADR-018 "As built: increment 2" records this ("detected only by ``init --ecosystem sphinx``"), but no item was filed for it.
+
+   **Affected:** the detection order in ``adapters/`` (:need:`COMP_ADAPTERS_BASE`, the adapter interface and registry), the python adapter's detection (:need:`COMP_ADAPTERS_PYTHON`) and the sphinx adapter's detection (:need:`COMP_ADAPTERS_SPHINX`), all in ``docs/architecture/overview.rst``; the ecosystem selection in ``invariant init``.
+
+   **Workaround:** ``invariant init --ecosystem sphinx``.
+
+   **Related:** :need:`DEC_ADR_018_D13` (documentation repositories: invariant's docs project in the store by default, ``records.docs: store``), scheduled for ADR-018 increment 8. That init does not offer to keep invariant's docs project outside such a repository is D13's work and NOT part of this bug, but the two should be built together: once D13's store default holds, ``docs/`` is no longer invariant's docs project in such a repository, which is what cause 2 needs to stop skipping it. :need:`BUG_114 <BUG_114>` is a different defect (the generic adapter's docs area in the assessment). :need:`IDEA_041 <IDEA_041>` is the umbrella for documentation repositories getting gates.
+
+   **Fix sketch / next step:** Run ``bug-reproducer`` first: two red tests on toy repositories in the adapter tests, (a) root ``conf.py`` plus a Sphinx-only ``pyproject.toml`` asserting ``detect()`` puts ``sphinx`` first, (b) ``docs/conf.py`` asserting ``sphinx`` is detected. The fix is a design call for ``feature-architect`` alongside ADR-018 increment 8: whether a detected Sphinx content tree outranks a Python packaging file (for example when the package declares no importable source beyond Sphinx dependencies, or the ``conf.py`` loads ``sphinx_needs``), and how the skip of the docs project's source directory is resolved against D13's store default rather than the default ``paths.docs``. A second ``conf.py`` still asks rather than guesses (ADR-015 D1).
+
 .. idea:: The links pattern's TLD-like suffix rule drops a punycode IDN top-level domain
    :id: IDEA_001
    :status: done
