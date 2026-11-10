@@ -43,10 +43,6 @@ include = ["src/invariant", "docs", "tests", "README.md"]
 # the dashboard's tests rather than skipping them, and uv.lock pins it for the
 # same reason: a floating TUI toolkit would move what those tests measure.
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.16", "textual>=8.0"]
-# Sphinx renders docs/ (architecture docs, ADRs, audit reports) as one site.
-# Pinned through uv.lock for the same reason ruff is: a floating doc toolchain
-# moves the build baseline without anyone changing a line of source.
-docs = ["sphinx>=8.0", "myst-parser>=4.0", "sphinxcontrib-mermaid>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

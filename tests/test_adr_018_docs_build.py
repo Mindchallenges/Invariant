@@ -415,15 +415,21 @@ class TestMigrating:
         assert verdicts(ctx(toy, wt))[STRICT].verdict.skipped
 
 
-def test_this_repository_is_migrating_on_markdown_and_na(monkeypatch):
-    """Increment 3's last proof: invariant itself, unchanged and N/A."""
+def test_this_repository_is_enforced_on_sphinx(monkeypatch):
+    """Increment 7: invariant itself is a docs project, enforced.
+
+    The two gates block here now; whether they pass is the landing's
+    question, answered from a recorded build, so this only checks what the
+    manifest makes of them.
+    """
     root = Path(__file__).resolve().parents[1]
     manifest = Manifest.locate(root)
-    assert manifest.get("docs.needs.state") == "migrating"
-    assert manifest.get("docs.format") == "markdown"
-    context = RuleContext(manifest=manifest, cwd=root, session=None)
-    for result in evaluate([STRICT, TRACE], context):
-        assert result.verdict.skipped and not result.blocks
+    assert manifest.get("docs.needs.state") == "enforced"
+    assert manifest.get("docs.format") == "sphinx"
+    for rule in (STRICT, TRACE):
+        assert manifest.rule_level(rule) is Level.BLOCK
+    assert (root / "docs/conf.py").is_file()
+    assert "pypandoc_binary==1.17" in (root / "docs/requirements.txt").read_text(encoding="utf-8")
 
 
 # -- D4: the environment ------------------------------------------------------

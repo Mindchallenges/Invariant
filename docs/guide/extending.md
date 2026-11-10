@@ -58,7 +58,7 @@ The rules:
 - **An id that matches a shipped machine shadows it.** Forking `tdd` to drop
   one state never means forking the library.
 
-The complete format is in [state_model.md](../architecture/state_model.md#declarative-fsm-format),
+The complete format is in [the state model page](../architecture/state_model.rst), under "Declarative FSM format",
 and the shipped machines under `src/invariant/data/machines/` are the examples
 to copy from.
 
@@ -102,7 +102,7 @@ shipped ones — `python_.py`, `node.py`, `swift_xcode.py`, `dart.py` (which
 also holds `flutter`, ADR-019), `sphinx.py` (a documentation repository,
 coverage declared not applicable, ADR-015 D1) — are the templates,
 and the interface is documented in
-[manifest.md § Adapters](../architecture/manifest.md#adapters). Tests live in
+[the manifest page](../architecture/manifest.rst), under "Adapters". Tests live in
 `tests/test_adapters.py`; the coverage floor applies to the adapter too.
 
 ## A work-item backend

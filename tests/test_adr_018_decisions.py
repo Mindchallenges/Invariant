@@ -832,25 +832,30 @@ def test_the_design_agent_declares_its_decisions():
     assert "DECISIONS:" in source
 
 
-def test_this_repository_still_loads_and_warns(monkeypatch):
-    """invariant itself is migrating on Markdown: everything here warns."""
+def test_this_repository_is_enforced_and_blocks(monkeypatch):
+    """invariant itself migrated (increment 7): the mandate's rules block here."""
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(root)
     manifest = Manifest.locate(root)
-    assert manifest.get("docs.needs.state") == "migrating"
+    assert manifest.get("docs.needs.state") == "enforced"
+    assert manifest.get("docs.format") == "sphinx"
+    assert manifest.get("items.backend") == "sphinx_needs"
     for rule in FLOORED:
-        assert manifest.rule_level(rule) is Level.WARN
+        assert manifest.rule_level(rule) is Level.BLOCK
     assert manifest.rule_level(KEPT) is Level.BLOCK
     context = RuleContext(
         manifest=manifest,
         cwd=root,
         payload=write_call(root / "docs/adr/ADR-020-x.md"),
     )
-    assert one(context, HOME).warns
+    assert one(context, HOME).blocks
+    context.payload = write_call(root / "docs/architecture/new.md")
+    assert one(context, HOME).blocks
     context.payload = write_call(root / "docs/reports/x.md")
     assert one(context, HOME).verdict.ok
+    context.payload = write_call(root / "docs/guide/x.md")
+    assert one(context, HOME).verdict.ok
     assert one(RuleContext(manifest=manifest, cwd=root), KEPT).verdict.ok
-
 
 
 # -- the edges of each new path ------------------------------------------------------

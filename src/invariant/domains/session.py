@@ -1897,7 +1897,7 @@ class SessionDomain:
         a different direction:
 
         * **The binding is live** — ``host_session_id`` set and ``host_ended``
-          false, which is what `docs/architecture/state_model.md` "Host
+          false, which is what `docs/architecture/state_model.rst` "Host
           binding" defines as live, ``SessionEnd`` being what marks it spent.
           Alone this is far too broad: a session torn down the documented way
           is bound to the very host session running the teardown, so every

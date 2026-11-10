@@ -75,7 +75,7 @@ whose absence leaves the "temporarily" half of the position unexpressible.
 ## Part 1 — Where authority is taken
 
 **AUTH-01 (high) — A blocking hook verdict cannot be overridden in band, and
-never asks the operator.** Filed as [BUG_049](../backlog/BUG_049.md).
+never asks the operator.** Filed as {need}`BUG_049`.
 
 Seven rules evaluate at `pre-tool-use` and five at `stop`. A blocking verdict
 there returns `permissionDecision: "deny"` or `decision: "block"` and there is
@@ -102,7 +102,7 @@ Three details make it worse than a missing feature:
   the rule's logic" — is the seam where that choice belongs.
 
 **AUTH-02 (medium) — An enforcement override naming an unknown rule is accepted
-and silently discarded.** Filed as [BUG_050](../backlog/BUG_050.md).
+and silently discarded.** Filed as {need}`BUG_050`.
 
 Verified by execution. `Manifest.validate()` iterates `enforcement.rules` and
 parses each *value*; the *key* is never checked against the registry, and
@@ -122,7 +122,7 @@ uses to exercise authority — which is the one place where a silent no-op costs
 the most.
 
 **AUTH-03 (medium) — `assets install` destroys the local edits it has already
-identified as local edits.** Filed as [BUG_051](../backlog/BUG_051.md).
+identified as local edits.** Filed as {need}`BUG_051`.
 
 `ClaudeCodeHost._stale_for` distinguishes `(edited locally)` from
 `(installed from an older version)` — it knows which divergences are the
@@ -135,7 +135,7 @@ destructive one.
 ## Part 2 — Where authority is unexpressible
 
 **AUTH-04 (medium) — There is no stand-down switch.** Filed as
-[IDEA_003](../backlog/IDEA_003.md).
+{need}`IDEA_003`.
 
 The position has two halves and only the permanent one is implementable today.
 `loose` is not off — it still blocks `session.no_edit_in_main_checkout` and
@@ -150,7 +150,7 @@ exceptions gets the whole tool switched off."* A stand-down is the supported,
 recorded version of what an operator improvises instead.
 
 **AUTH-05 (low) — There is no uninstall.** Filed as
-[IDEA_004](../backlog/IDEA_004.md).
+{need}`IDEA_004`.
 
 Adoption is one command. Withdrawal means deleting each shim by hand and
 hand-editing the host settings file that `_wire_settings` merged its entries

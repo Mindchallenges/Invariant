@@ -2,7 +2,7 @@
 
 How to install invariant, adopt it in any repository, and work with it day to
 day. The guide assumes nothing about this repository; the
-[architecture documents](../architecture/overview.md) are the reference it
+[architecture documents](../architecture/overview.rst) are the reference it
 points into.
 
 ```{toctree}

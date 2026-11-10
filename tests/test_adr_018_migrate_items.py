@@ -22,10 +22,7 @@ built strictly, is proven behind ``INVARIANT_TEST_SPHINX_BUILD``.
 
 from __future__ import annotations
 
-import glob
-import hashlib
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -646,120 +643,36 @@ class TestCli:
         assert "would migrate 4 item(s)" in capsys.readouterr().out
 
 
-# -- the proof: this repository's backlog, on a copy ------------------------------
+# -- the proof: this repository's backlog, migrated (increment 7) ------------------
 
 
-def test_this_repositorys_backlog_migrates_and_reads_back_on_a_copy(tmp_path):
-    source = REPO / "docs" / "backlog"
-    files = sorted(source.glob("*.md"))
-    assert len(files) >= 161
-    manifest = project(tmp_path, {"backend": "markdown", "path": "backlog"}, docs=True)
-    shutil.copytree(source, manifest.root / "backlog")
-    expected = MarkdownBackend(manifest.root / "backlog").load_all()
-    assert len(expected) == len(files)
-
-    domain = WorkItemDomain(manifest)
-    done = domain.migrate(
+def test_this_repositorys_backlog_is_needs_and_moves_as_written(tmp_path):
+    """Increment 7 moved the backlog to docs/backlog.rst; a copy moves again
+    between two sphinx_needs stores as written and reads back exactly."""
+    source = REPO / "docs" / "backlog.rst"
+    expected = SphinxNeedsBackend(source).load_all()
+    assert len(expected) >= 163
+    assert not (REPO / "docs" / "backlog").exists()
+    for item in expected:
+        if item.type == "bug":
+            assert item.fields.get("affects"), f"{item.id} links no element"
+    manifest = project(tmp_path, {"backend": "sphinx_needs", "path": "docs/backlog.rst"}, docs=True)
+    shutil.copyfile(source, manifest.root / "docs/backlog.rst")
+    done = WorkItemDomain(manifest).migrate(
         "sphinx_needs",
-        manifest.root / "docs/backlog.rst",
+        manifest.root / "docs/moved.rst",
         closed_path=manifest.root / "docs/closed.rst",
         pandoc=Echo(),
     )
-    assert len(done.open) + len(done.closed) == len(files)
+    assert len(done.open) + len(done.closed) == len(expected)
     assert done.closed, "the backlog holds closed items"
-
     back = {
         i.id: i
         for path in (done.path, done.closed_path)
         for i in SphinxNeedsBackend(path).load_all()
     }
-    assert len(back) == len(files)
     rows = 0
     for item in expected:
-        got = back[item.id]
-        assert differences(item, got) == [], item.id
-        assert got.fields == item.fields
-        assert got.history == item.history
-        rows += len(got.history)
+        assert differences(item, back[item.id]) == [], item.id
+        rows += len(item.history)
     assert rows > 200
-    terminal = {"done", "dropped", "closed", "not_reproducible", "wont_fix"}
-    assert {i.status for i in SphinxNeedsBackend(done.closed_path).load_all()} <= terminal
-    # The repository's own backlog is untouched by the proof.
-    assert not (REPO / "docs" / "backlog.rst").exists()
-
-
-# -- the proof in a real pinned environment: converted, built strictly ---------------
-
-
-def _real_env() -> Path | None:
-    built = os.environ.get("INVARIANT_TEST_SPHINX_BUILD")
-    return Path(built).resolve().parent.parent if built else None
-
-
-def _real_pandoc() -> list[str]:
-    env = _real_env()
-    if env is None:
-        return []
-    return glob.glob(str(env / "lib" / "python*" / "site-packages" / "pypandoc" / "files" / "pandoc"))
-
-
-@pytest.mark.skipif(
-    not _real_pandoc(),
-    reason="set INVARIANT_TEST_SPHINX_BUILD to a pinned sphinx-build (sphinx-needs 9.2, "
-    "the starter's) whose environment carries pypandoc_binary",
-)
-def test_this_repositorys_backlog_converts_and_builds_but_for_what_is_named(
-    tmp_path, monkeypatch, capsys
-):
-    from test_adr_018_starter import repo
-
-    root = repo(
-        tmp_path / "toy",
-        {"pyproject.toml": '[project]\nname = "toy"\nversion = "0"\n', "pkg/__init__.py": ""},
-    )
-    monkeypatch.chdir(root)
-    assert main(["init", "--ecosystem", "python"]) == 0
-    env = _real_env()
-    venv = root / "docs" / ".venv"
-    (venv / "bin").mkdir(parents=True, exist_ok=True)
-    (venv / "bin" / "sphinx-build").symlink_to(os.environ["INVARIANT_TEST_SPHINX_BUILD"])
-    (venv / "lib").symlink_to(env / "lib")
-    digest = hashlib.sha256((root / "docs/requirements.txt").read_bytes()).hexdigest()
-    (venv / docs_domain.VENV_HASH).write_text(digest + "\n", encoding="utf-8")
-    # The records the bodies link to, as increment 7 converts them first.
-    records = {int(p.name[4:7]) for p in (REPO / "docs/adr").glob("ADR-*.md")}
-    for n in range(1, max(records) + 1):
-        assert main(["docs", "decision", "new", f"Record {n}"]) == 0
-    # The copy sits where this repository keeps its backlog, beside the
-    # docs project's pages, and the project is migrating onto it.
-    shutil.copytree(REPO / "docs" / "backlog", root / "docs" / "backlog")
-    path = root / MANIFEST_RELPATH
-    config = yaml.safe_load(path.read_text(encoding="utf-8"))
-    config["items"] = {**config.get("items", {}), "backend": "markdown", "path": "docs/backlog"}
-    config["docs"]["needs"]["state"] = "migrating"
-    path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    capsys.readouterr()
-
-    assert main(["--json", "item", "migrate", "--to", "sphinx_needs"]) == 0
-    moved = json.loads(capsys.readouterr().out)
-    assert moved["converted"], "this repository's items carry bodies"
-    named = {(u["path"], u["line"]) for u in moved["unconverted"]}
-    assert len(named) == len(moved["unconverted"])
-
-    code = main(["--json", "docs", "build"])
-    record = json.loads(capsys.readouterr().out)
-    failures = record["diagnostics"]
-    # What increment 7 starts from, kept beside the run.
-    (tmp_path / "unconverted.json").write_text(
-        json.dumps({"unconverted": moved["unconverted"], "diagnostics": failures}, indent=1),
-        encoding="utf-8",
-    )
-    if not failures:
-        assert code == 0 and not moved["unconverted"]
-        return
-    # Every failure is a construct the migration named, by item and line,
-    # and every construct it named fails the build.
-    assert code == 1
-    for line in failures:
-        assert 'Unknown directive type "invariant-unconverted"' in line, line
-    assert {line.split(" ", 1)[0] for line in failures} == {f"{p}:{n}" for p, n in named}

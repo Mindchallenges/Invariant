@@ -39,6 +39,9 @@ LAYERS = ("core", "domains", "adapters", "hosts")
 ORACLE_RULE = "layers.only-the-cli-imports-the-oracle"
 HOSTS_RULE = "layers.oracle-never-imports-hosts"
 CONDUCT_RULE = "conduct.interview-when-input-is-needed"
+#: The docs mandate's two judgement rules (ADR-018 D8, D9), which the
+#: migration wrote into this ruleset (increment 7).
+DOCS_RULES = ("docs.items-carry-no-design", "docs.decisions-are-declared")
 
 
 def repo_context(files=None) -> RuleContext:
@@ -64,11 +67,11 @@ class TestThisRepositorysRuleset:
         verdict = verdict_of("guidelines.ruleset_valid", repo_context())
         assert verdict.ok and not verdict.skipped, verdict.message
 
-    def test_it_holds_the_two_layering_rules_and_the_conduct_rule(self):
+    def test_it_holds_the_layering_conduct_and_docs_rules(self):
         ruleset, failure = load_ruleset(repo_context())
         assert failure is None
         ids = [rule.id for rule in ruleset.rules]
-        assert ids == [ORACLE_RULE, HOSTS_RULE, CONDUCT_RULE]
+        assert ids == [ORACLE_RULE, HOSTS_RULE, CONDUCT_RULE, *DOCS_RULES]
 
     def test_the_layering_rules_are_blocking_import_boundaries(self):
         ruleset, _ = load_ruleset(repo_context())

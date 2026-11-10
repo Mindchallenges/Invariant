@@ -10,7 +10,7 @@ Let's Encrypt certificate Tailscale issues, so the phone's browser shows it as
 secure.
 
 This page sets it up end to end. The decisions behind it are in ADR-008, and
-the design is in [the oracle's architecture page](../architecture/oracle.md).
+the design is in [the oracle's architecture page](../architecture/oracle.rst).
 
 ## What is changing
 
@@ -48,7 +48,7 @@ Still to come:
   you press the button.
 
 The page still never answers a permission prompt. The design is in
-[the control panel's design page](../architecture/oracle-panel.md). This
+[the control panel's design page](../architecture/oracle-panel.rst). This
 guide is updated as each part ships.
 
 ## What you need

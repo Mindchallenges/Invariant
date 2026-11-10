@@ -1,0 +1,3383 @@
+State model
+===========
+
+The five domains, their state machines, and the storage layout. This is the
+specification the engine is implemented against.
+
+Three of the five are genuine finite state machines. ``memory`` and ``stats`` are
+not — each is a store with invariants over it and operations that repair them
+— and they belong here for the same reason the machines do: what they hold
+drifts silently, and drift is undetectable without a script that checks it.
+
+Declarative FSM format
+----------------------
+
+A state machine is a YAML file. The same schema serves methodologies, session
+lifecycle, and work-item lifecycles, so there is one loader and one validator.
+
+.. code:: yaml
+
+   id: tdd
+   kind: pipeline
+   description: Test-driven development with a docs-first design phase.
+
+   initial: designing
+   terminal: [committed, abandoned]
+
+   states:
+     designing:
+       description: Understand the change against the architecture docs.
+       roles: [design]          # the docs-first read gate attaches here
+       next: [red, abandoned]
+     red:
+       description: A failing test that fails on the reported symptom.
+       next: [green, abandoned]
+     green:
+       description: Minimum change that makes the failing test pass.
+       entry_gates: [test.new_test_fails]
+       next: [refactor, reviewing, abandoned]
+     refactor:
+       description: Clean up under a green suite.
+       entry_gates: [test.all_pass]
+       next: [reviewing, red, abandoned]
+     reviewing:
+       description: Review, coverage, docs, and privacy before committing.
+       roles: [review]
+       entry_gates: [test.all_pass]
+       next: [committed, red, refactor, abandoned]
+     committed:
+       description: Work is committed locally. Pushing is a session-level event.
+       roles: [landing]         # docs.updated and the agent-role gates attach here
+       entry_gates: [test.all_pass, coverage.meets_floor, privacy.clean]
+     abandoned:
+       roles: [abandon]         # reaching it is ungated
+
+Every state, edge, gate and role above is quoted from the shipped ``tdd.yaml``;
+only the descriptions are abridged, and the three ``#`` notes are added here. The
+structure is the part a reader checks against the engine, so the structure is
+the part that is verbatim. Note what it does **not** contain: no
+``docs.updated``, no ``agents.*``. Those attach centrally
+from the ``design`` and ``landing`` roles, so forking a methodology cannot silently
+drop them — a rule the suite pins, and a rule an inline example that declared
+them would teach people to break.
+
+**A gate belongs to the outcome it protects, not to the state whose work
+precedes it.** Almost every gate above is an ENTRY gate, and that is the
+correction rather than a stylistic preference. Written as exit gates they fired
+on every edge out of the state, and a state's edges do not all go the same
+place: ``reviewing`` advertises four successors, two of which are retreats. A
+review that discovered more TDD was owed was refused the retreat by
+``coverage.meets_floor`` and ``agents.review_agent_ran`` — gates that exist to
+permit *shipping* — so the choice was to satisfy ship gates on a change the
+reviewer had just judged unfinished, or to do the work in the wrong state. Both
+routes ended at ``--force`` (BUG_037).
+
+Read the machine as preconditions and it comes out right on its own: you may
+not start making a test pass until it has failed (``green``), may not clean up
+except under a green suite (``refactor``), may not land without coverage, docs
+and privacy (``committed``). The retreats then carry what their *destination*
+needs, which is usually nothing, and always something the session can actually
+produce from where it stands.
+
+Two roles exist to carry this. **``landing``** marks the state a finished change
+lands in, and is where the gates a methodology cannot opt out of are injected —
+a pipeline machine that declares a ``review`` state and no ``landing`` state is
+refused at load, because a role nothing carries injects nothing and the
+omission would otherwise be invisible. **``abandon``** marks a state whose meaning
+is that the work is being dropped; an edge into one takes only that state's own
+entry gates, since the exit gates of the state being left all exist to protect
+an outcome and this is the edge with no outcome to protect. Holding it to them
+made finishing the precondition of stopping.
+
+The remaining exit gate is the docs-first read, and it stays one for the reason
+below: a pipeline starts in its design state, so as an entry gate there it
+could never fail.
+
+Fields:
+
+- **``initial``** — the state a fresh instance starts in.
+- **``terminal``** — states from which no transition is required; reaching one
+  completes the machine.
+- **``next``** — the whitelist of legal successors. A transition to anything not
+  listed is rejected by the engine regardless of enforcement level; this is
+  structural validity, not policy.
+- **``entry_gates``** / **``exit_gates``** — rule ids that must return clean before
+  the state is entered or left. Whether a failing gate *blocks* or merely
+  *warns* is policy, resolved from the manifest at evaluation time. Prefer
+  entry gates: see the note above on which of the two a given obligation
+  actually is.
+- **``red_phase``** — optional; which of this machine's states does
+  proof-of-red. Only a machine declaring ``test.new_test_fails`` needs it, and
+  only when that state is not literally called ``red``.
+
+``red_phase`` exists because a rule cannot carry a state name that only one
+machine has. ``test.new_test_fails`` selects its evidence by the phase a run was
+recorded in, was written against ``tdd`` — which has a ``red`` state — and is
+declared by ``bugfix``, which runs ``triaging → reproducing → fixing`` and has no
+legal transition to any state called ``red``. Its own exit gate was therefore
+satisfiable only by recording a run under a phase name the machine cannot
+produce, which writes into durable evidence that the run happened in a state
+the pipeline was never in (BUG_030). Renaming ``reproducing`` was rejected: the
+state is named for what it proves, and a machine's vocabulary is not a
+string comparison's to set. The rule now asks the machine, and a new
+methodology answers the question by existing.
+
+A gate names a rule id. The rule's implementation lives in ``core/rules``, which
+is the escape hatch for logic YAML cannot express (D5).
+
+Domain: session
+---------------
+
+.. comp:: The session machine
+   :id: COMP_MACHINE_SESSION
+   :part_of: COMP_DOMAINS_SESSION
+
+   ``data/machines/session.yaml``: a session's states and edges, from its first
+   edit to its landing and teardown, which ``domains/session`` advances.
+
+
+Governs isolation and the push barrier. This is the domain with real
+cross-process concurrency — several sessions may run against one checkout.
+
+**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D5, D6).** In a store project a session
+record carries legs: its repo worktree and branch, plus the store's main
+checkout, where the docs are written under a lock taken per area, or per file
+outside every declared area. The store leg records each lock span (its lease,
+its unit, and the shas at which it was acquired and released), and the session
+gains a landing record. The store leg lands
+when the session releases its units, which is always before the repo's merge;
+a failed repo merge leaves the session half-landed, a recorded and resumable
+state, never rolled back (ruling 8). The first build is
+one repo per session plus its store; more repo legs are designed for and built
+later (ruling 6). The existing ``worktree``, ``branch`` and ``base`` fields read the
+first repo leg, so records written before this change still load. Increment 4
+builds the legs and the lock, increment 5 the landing record and resume.
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> registered
+       registered --> isolated: isolate (worktree + branch)
+       isolated --> working: first edit (an edit tool lands in its own worktree)
+       working --> working: commit (local, granular)
+       working --> reviewed: review gate passes
+       reviewed --> merged: rebase + fast-forward merge
+       merged --> pushed: push (once, at teardown)
+       pushed --> torn_down: remove worktree
+       torn_down --> [*]
+       registered --> abandoned
+       isolated --> abandoned
+       working --> abandoned
+       abandoned --> [*]
+
+Invariants this domain enforces:
+
++--------------------------------------+-----------------------------+---------+
+| Rule id                              | Meaning                     | Default |
++======================================+=============================+=========+
+| ``session.isolated_before_edit``     | No file edit while in       | block   |
+|                                      | ``registered`` — isolate    |         |
+|                                      | first                       |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.no_edit_in_main_checkout`` | Edits land in the session   | block   |
+|                                      | worktree, never the shared  |         |
+|                                      | checkout                    |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.push_enabled``             | Publishing is a session     | block   |
+|                                      | step at all                 |         |
+|                                      | (``session.push``, off by   |         |
+|                                      | default)                    |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.push_barrier``             | At most one push per        | block   |
+|                                      | session, and only from      |         |
+|                                      | ``merged``                  |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.ff_merge_target``          | A fast-forward merge must   | block   |
+|                                      | be run from the main        |         |
+|                                      | checkout, not inside the    |         |
+|                                      | worktree                    |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.own_file_set_only``        | Commits touch only files    | warn    |
+|                                      | this session declared       |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.deliverables_complete``    | A session lands only once   | block   |
+|                                      | the deliverables it         |         |
+|                                      | recorded are done           |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.branch_is_current``        | A session branch has not    | warn    |
+|                                      | fallen behind the base it   |         |
+|                                      | will merge into             |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.named_after_isolating``    | Session has a task-derived  | warn    |
+|                                      | name and color              |         |
++--------------------------------------+-----------------------------+---------+
+| ``session.teardown_complete``        | Worktree removed after push | warn    |
++--------------------------------------+-----------------------------+---------+
+
+The one edge a hook walks: the first edit
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``isolated --> working`` is fired by the work itself, not by a command. Every
+other edge is walked by a verb somebody runs; this one was drawn as automatic
+from the start and, until BUG_062, nothing fired it — so a session sat in
+``isolated`` through every commit it made, ``session review`` refused it from
+there, and every session that ever merged had either had ``session transition working`` typed by hand or been forced past the edge. The decision (2026-10-20)
+was to implement the trigger rather than redraw the edge as manual, because a
+state that records nothing about progress is an instrument that reads the
+same whatever happened.
+
+What fires it, exactly: the **PostToolUse of an edit tool** (``Edit``, ``Write``,
+``MultiEdit``, ``NotebookEdit``) whose destination path lies inside a session's
+own worktree. The host adapter reports only *where the bytes landed and who it
+is*; ``SessionDomain.advance_on_edit`` makes every judgement, and advances only
+when all of these hold:
+
++----------------------------------+----------------------------------+
+| Condition                        | Why                              |
++==================================+==================================+
+| The writer is **identified** —   | An edit aimed at the shared      |
+| ``Resolution.proven``, so not    | checkout resolves to "the only   |
+| the ``origin`` guess             | session left standing", which    |
+|                                  | names a session without          |
+|                                  | identifying one (the BUG_028     |
+|                                  | distinction)                     |
++----------------------------------+----------------------------------+
+| That session is in               | ``working --> working`` is the   |
+| **``isolated``**                 | commit loop, not an edit         |
+|                                  | counter, and a row per edit      |
+|                                  | would stamp the heartbeat the    |
+|                                  | next transition's ``elapsed`` is |
+|                                  | measured from; an edit after     |
+|                                  | ``reviewed`` must not quietly    |
+|                                  | retreat the session              |
++----------------------------------+----------------------------------+
+| The path is inside **that        | An edit into a peer's worktree   |
+| session's own** worktree         | is nobody's first edit: the      |
+|                                  | writer did not edit its own      |
+|                                  | tree, and the owner did not edit |
+|                                  | at all                           |
++----------------------------------+----------------------------------+
+| The path is **not exempt** —     | The exemption exists because     |
+| ``session.exempt_paths``, the    | writing those is not work on the |
+| work-item store, the report      | branch, so writing one is not    |
+| store                            | the session starting its work.   |
+|                                  | Asked through                    |
+|                                  | ``core.rules.is_exempt_path``,   |
+|                                  | the isolation rules' own helper  |
++----------------------------------+----------------------------------+
+
+Three properties are decisions rather than consequences:
+
+- **Only a completed call.** PostToolUse fires after the tool has run, so an
+  edit refused at pre-tool-use — or one a rule is still deciding — advances
+  nothing; that is the same reason ``_bind_by_successful_edit`` lives there.
+  Pre-tool-use stays a question that does not change the world.
+- **A shell write does not fire it.** A command line names no destination a
+  hook can trust, and recovering one by parsing it is a guess about where
+  bytes landed — the reason BUG_027 fixed ``privacy.clean`` by reading staged
+  content rather than by widening a list of command shapes. A session that
+  edits only through the shell still reaches ``working`` by
+  ``invariant session transition working``, which remains the generic route.
+- **Never forced, never raised.** The edge goes through ``_advance`` like any
+  other, so a project whose session machine gates it, or lacks it, keeps the
+  session where it was; and the hook absorbs a store failure rather than fail
+  a tool call that has already run (BUG_001's posture).
+
+No migration. A record already sitting in ``isolated`` — with commits, as every
+session before this fix did — advances on its next qualifying edit, and until
+then reads as it always did. Two hooks racing on a session's first two edits
+can each write the row. That duplicated ``isolated -> working`` row is not the
+worst case, though it was long documented as one on the argument that an owner
+is one writer. It is not. The session record takes no lock, and each of its
+saves writes back the whole record its caller loaded earlier, so a parallel hook
+can lose what another process just wrote: a plan entry, a declared file, a
+binding (Storage layout, "Concurrency"). BUG_107 disproved the argument for the
+pipeline record and closed it there; the session record is still open.
+
+What the record carries beyond the state
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Four fields exist so that a session can outlive the agent-host session that
+started it. None of them needs a migration, in either direction: every field
+has a default, so a document written before they existed loads with an empty
+plan, no recorded hosts and a zero resume count and behaves exactly as it did
+— and a document carrying them is written back INTACT by a build that has
+never heard of them, which is the half that had to be added (BUG_061, and the
+round-trip contract under Storage layout below).
+
++-------------------+--------------------------------------------------+--------------------------------------+
+| Field             | Holds                                            | Read by                              |
++===================+==================================================+======================================+
+| ``plan``          | The deliverable set this session owes, in the    | ``core/plan``, through four derived  |
+|                   | order it was recorded:                           | properties on the record             |
+|                   | ``{"n", "title", "done", "done_at"}`` per entry  |                                      |
++-------------------+--------------------------------------------------+--------------------------------------+
+| ``plan_touched``  | When the plan last MOVED                         | the resumable ordering, and          |
+|                   |                                                  | ``session.work_would_be_stranded``'s |
+|                   |                                                  | staleness check                      |
++-------------------+--------------------------------------------------+--------------------------------------+
+| ``resumed_count`` | How many host sessions picked this one up        | the report                           |
++-------------------+--------------------------------------------------+--------------------------------------+
+| ``hosts``         | Every host session bound to it BEFORE the        | provenance                           |
+|                   | current one, oldest first                        |                                      |
++-------------------+--------------------------------------------------+--------------------------------------+
+| ``handoffs``      | What it told the NEXT host session:              | the greeting and                     |
+|                   | ``{"note", "name", "at", "state"}`` per          | ``invariant context``, when nothing  |
+|                   | ``session handoff``, plus                        | is bound                             |
+|                   | ``"consumed": {"at", "how", "session", "host"}`` |                                      |
+|                   | once the note was claimed or dismissed           |                                      |
++-------------------+--------------------------------------------------+--------------------------------------+
+
+``handoffs`` is the fifth, added with ``session handoff`` (ADR-005) and under the
+same no-migration contract. Its ``consumed`` key (IDEA_008) is under it too, one
+level down: an entry without the key is unconsumed, so every entry written
+before it existed reads exactly as it did.
+
+``decisions`` is the sixth (ADR-018 D9, increment 5), under the same contract:
+the decisions the session made, ``{"n", "id", "draft"}`` per ``session decisions`` entry, numbered as the plan is. An entry with no ``id`` is a draft.
+``docs.decisions_recorded`` reads it at the landing (the docs gates, below),
+and a record written before it existed reads as declaring nothing.
+
+Three properties of that set are decisions rather than shape.
+
+**A deliverable's number is never reused.** ``plan_add`` takes ``max(existing) + 1``
+rather than ``len + 1``, so ``plan done 3`` means the same thing after a
+``plan remove`` as it did before one. The cost is gaps in the sequence, which are
+cheap and visible; the alternative costs a command that acts on the wrong entry
+and looks like it worked.
+
+**``plan_reopen`` and ``plan_remove`` exist from day one.** ``session files add``
+shipped without a ``remove``, and the result was a declared set with no way back
+— a path nobody could delete blocking the review boundary until the missing
+command was written (BUG_057). A ``done`` that cannot be undone is that defect one
+field over, against a gate that blocks a turn.
+
+**``plan_touched`` is deliberately not ``heartbeat``.** The heartbeat anchors the
+per-transition ``elapsed`` telemetry below, so stamping it on a checklist edit
+would shorten the next transition's recorded duration by however long the edit
+happened to be after the last one: a plan edit silently rewriting the record of
+what a *state* cost.
+
+There is a second reason, and it is what makes the field load-bearing rather
+than merely tidy. ``session.work_would_be_stranded`` refuses on a **cold** plan,
+and a ``block`` must be clearable by the commands its own fixes name. ``plan_done``,
+``plan_remove`` and ``plan_reopen`` each stamp ``plan_touched``; had the plan reused
+``heartbeat``, the one way to clear that gate would have been to stamp the anchor
+of the ``elapsed`` measurement — a gate satisfiable only by corrupting a number.
+The staleness reading is ``max(plan_touched, heartbeat)``, so a session moving
+through its lifecycle counts as alive without touching its checklist, and **both
+clocks at zero reads as fresh**: every record written before the field existed
+carries ``0.0``, and failing on missing data would fire a blocking gate on all of
+them at once, at ``stop``, the surface with the least room to be wrong.
+
+The two gates the plan arms, and why they are duals
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The plan exists so a session can outlive its host. That model breaks both
+closeout questions unless they are asked as a pair:
+
++------------------------------------+----------------------+----------------------+
+| Gate                               | Fires at             | Asks                 |
++====================================+======================+======================+
+| ``session.work_would_be_stranded`` | ``stop``, every turn | are these commits    |
+|                                    |                      | abandoned, or        |
+|                                    |                      | parked?              |
++------------------------------------+----------------------+----------------------+
+| ``session.deliverables_complete``  | entering             | did the session      |
+|                                    | ``reviewed`` and     | finish what it said  |
+|                                    | ``merged``           | it was for?          |
++------------------------------------+----------------------+----------------------+
+
+**``work_would_be_stranded`` abstains exactly where ``deliverables_complete`` has
+something to hold.** An open plan that moved recently is ``clean`` at the closeout
+— the work is parked against a recorded promise, and under the multi-host model
+that is the *resting* state at the end of every increment, not a defect. The
+same open plan is a refusal at the landing boundary, because merging is the
+claim that the session is over. Cold is the one case the closeout still refuses
+on: the threshold is ``session.plan_stale_days``, drawing the line between "paused
+over a weekend" and "abandoned". Reversed, the two would fight — a gate firing
+on every parked turn is a gate that teaches people to ignore it, and a merge
+that lands a half-done checklist is the thing the checklist was written to stop.
+
+An **empty** plan is ``na`` at both, deliberately, and ``na`` rather than ``clean``:
+an empty plan is not "the plan is finished", it is "no plan was made". ``clean``
+would be a vacuous green on a gate guarding the merge, and ``fail`` would make a
+checklist mandatory for every one-line chore — a gate legitimate work must
+override routinely is what teaches people to reach for ``--force``. The skip names
+``invariant session plan add``, the command that would arm it, rather than "not
+applicable here" (BUG_027).
+
+``session.deliverables_complete`` is an **entry** gate on both ``reviewed`` and
+``merged``. Both, because ``reviewed`` can be re-entered from ``working`` and the
+merge is the irreversible step, so guarding only the reviewable step guards
+nothing once the work moves on from it — the same argument ``pipeline.complete``
+carries in the machine file. *Entry* rather than exit, so the
+``reviewed -> working`` retreat stays walkable: a session that discovers more is
+owed must be able to go back and do it without first satisfying the gate that
+says it is all done (BUG_037).
+
+``session.branch_is_current`` is the third, and the one that is ``warn`` in every
+profile. The model has always said "rebase onto the local base after every
+commit"; nothing owned it, so a branch discovered it was behind at the
+fast-forward merge — the one step where the fix costs a rebase of work already
+declared done. It stays advisory because a stale branch costs a rebase and never
+data, and a ``block`` whose trigger is *somebody else's commit* is one the person
+holding it cannot prevent. It reads ``commits_ahead(root, base, branch)``: the
+same helper as the closeout rule with the arguments the other way round, which
+is the whole rule.
+
+The fixes all three name — ``invariant session plan add|done|remove|show`` and
+``invariant session sync`` — are the CLI surface over the plan; the rules landed
+with the domain that answers them and the commands followed one increment
+later. A fix naming a command that does not exist yet was a forward reference
+on purpose: the alternative was a gate that refuses and suggests nothing.
+
+The reference is closed, and what keeps it closed is a test rather than a
+memory. A ``fixes`` line is a string literal, so a renamed subcommand breaks it
+silently and the only reader who finds out is somebody already stopped at a
+blocking gate. ``tests/test_cli.py`` reads every ``invariant …`` command named in
+``core/rules`` and in ``domains/session`` and puts it through the real argument
+parser, so a fix that cannot be run is a failing test.
+
+The plan is a **field, not a file**. It is per-session, it is read on the same
+turn as the state it qualifies, and it is small, so a second document under
+"Storage layout" would buy a second thing to keep consistent and a second thing
+to lose. That section is unchanged by this: the layout is per-session JSON plus
+the locked registry, and the plan is part of the per-session JSON.
+
+``session.ff_merge_target`` deserves its comment: merging a branch while standing
+inside that branch's own worktree merges it into itself and the follow-up push
+pushes an unchanged target. Both commands exit zero. The failure is invisible
+without a check, which is exactly the class of problem this library exists for.
+
+Both it and ``session.own_file_set_only`` ask git a question, and "git could not
+answer" is not an answer: the underlying helpers (``in_linked_worktree``,
+``staged_files``) return ``None`` on an unreadable repository and the rules FAIL on
+it, in the same do-not-relax convention as ``branch_files`` and ``unpushed_files``.
+They used to default to ``False``/``[]``, which read as "running from the main
+checkout" and "0 staged file(s), all declared" — a clean pass exactly when
+nothing had been checked (AUD-07).
+
+**The machine's gates hold on every route.** ``SessionDomain._advance`` — the
+one function every session transition passes through, whether it was reached
+by ``session review``, ``session merge``, ``session isolate``, or the generic
+``session transition`` — evaluates the exit gates of the state being left and
+the entry gates of the state being entered, exactly as ``PipelineDomain.advance``
+always has. The gates used to be read by two hardcoded CLI call sites only, so
+``session transition reviewed`` then ``merged`` walked the lifecycle with zero
+gates, ``session.named_after_isolating`` was a gate no code path evaluated, and
+``session.push_enabled`` lived a second life as a hardcoded ``if`` inside the push
+command (AUD-05). Three consequences of the one-route design:
+
+- **An entry gate runs while the record still reads the previous state.** A
+  rule attached as an entry gate must not abstain on the source state —
+  ``session.named_after_isolating`` abstained on ``registered`` and so could never
+  fire on the only edge it guards (AUD-14).
+- **A forced transition past a blocking gate records the override** — which
+  gates were forced, and why — on the session record, next to the structural
+  overrides. Silent is not an option the API has.
+- **Commands with an irreversible step ask first.** ``session merge`` and
+  ``session push`` evaluate the same gate list through ``SessionDomain. pending_gates`` *before* touching git, because refusing the transition after
+  the merge or push has run would leave git and the record disagreeing. The
+  pre-flight and the transition read one list from the machine, so they cannot
+  drift.
+
+The rules that also fire from the pre-tool-use hook on raw git commands
+(``session.ff_merge_target``, ``session.push_barrier``) are told which question
+they are being asked: a transition *entering* ``merged`` or ``pushed`` carries the
+``merging`` / ``pushing`` context, so those gates judge the machine transition
+rather than parsing an empty command string and abstaining.
+
+The two override lists
+~~~~~~~~~~~~~~~~~~~~~~
+
+The session record carries two, and the difference between them is tense.
+
++-----------------------+----------------------+----------------------------------------+
+| Field                 | Holds                | Written by                             |
++=======================+======================+========================================+
+| ``overrides``         | overrides that have  | a forced transition, a structural edge |
+|                       | been **spent**       | walked deliberately, a one-shot token  |
+|                       |                      | consumed at a hook                     |
++-----------------------+----------------------+----------------------------------------+
+| ``pending_overrides`` | grants nothing has   | ``invariant override <rule> --reason`` |
+|                       | spent **yet**        |                                        |
++-----------------------+----------------------+----------------------------------------+
+| ``standdown``         | enforcement held for | ``invariant standdown --reason`` — see |
+|                       | an **interval**      | below                                  |
++-----------------------+----------------------+----------------------------------------+
+
+``overrides`` is the audit trail and has always existed. ``pending_overrides`` is
+the half that was missing, and it exists because of where the gates that stop
+an agent actually live. Every gate the CLI evaluates could already be passed
+with ``--force --reason``; twelve rules are evaluated by *hooks*, and a blocking
+verdict there was final — no flag, no marker, no prompt, no recorded exception
+(BUG_049). A hook fires on a tool call, which carries no argument the operator
+can add and no environment a running host will re-read, so the appeal has to be
+something written down **before** the call and found by it.
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> granted: invariant override <rule> --reason
+       granted --> granted: a call that rule did not stop
+       granted --> spent: the call it was granted for
+       granted --> withdrawn: invariant override <rule> --clear
+       spent --> [*]
+       withdrawn --> [*]
+
+The self-loop is the property worth stating: a grant is consumed only where the
+verdict **actually stops the call**. A token burnt by a rule that was passing
+anyway would be gone at the moment the operator needed it. Consumption happens
+in the host adapter, at the delivery surface, and never inside
+``core.rules.evaluate`` — a rule is a question about the world, and asking it must
+not change the world.
+
+Spending one appends to ``overrides`` with the rule, the reason and the surface
+that spent it, so the compliance record shows a gate passed deliberately rather
+than a gate that quietly did not fire. An unspent grant prints in
+``session status``, because a held override is enforcement the operator turned off
+and may well have forgotten.
+
+A grant may name a guideline instead of a rule (ADR-012 ruling 4). It is held
+and spent in the same shape, with the guideline id as its ``rule``, and the gate
+it passes is the guideline's family gate: ``guidelines.mechanical_clean`` for a
+pattern, boundary or cochange guideline (A3 increment 7), and
+``guidelines.verdicts_complete`` for a judgement guideline, whose missing, stale
+or failing verdict it passes, a warn guideline's included (A4 increment 5,
+DN-9). Each gate reads only the grants of its own kind, names them with their
+reasons, and carries what each passed in ``Verdict.overridden``; the CLI's
+``pipeline advance`` is the one surface that spends a guideline grant, and only
+where the gate stops work and passed because of the grant. The self-loop holds
+across pipelines: a guideline grant nothing spent stays in ``pending_overrides``
+for the rest of the session. Where the family gate warns, as both do in ``loose``
+and ``standard``, nothing spends it, so it holds until ``--clear``; ``session status``
+names it and its gate, and every evaluation of the gate names it.
+
+Standing enforcement down
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``Session.standdown`` is the third of these fields and the only one that is a
+state rather than a list. It answers the want the other two cannot: *stop
+asking for the next while*.
+
+None of the routes that looked like this were it. ``loose`` is an observation
+mode and still blocks ``session.no_edit_in_main_checkout`` and ``privacy.clean``,
+correctly. ``INVARIANT_DISABLE`` takes exact ids with no wildcard and no ``all``,
+and an environment variable does not reach a hook mid-session anyway — the hook
+subprocess inherits what the host was launched with. What was left was editing
+committed project policy for the duration of one task, which either lands in a
+commit by accident or quietly becomes the project's real policy (IDEA_003).
+
+Three properties are what make it a control rather than a hole:
+
+- **Expiry is derived, not stored.** ``core.rules.standdown_in_force`` recomputes
+  on every evaluation whether the hold still applies, from the pipeline the
+  scope names. Nothing has to run for it to lapse, which matters because an
+  expiry that depends on a later command running is an expiry that does not
+  happen. The default scope is the shortest useful one — the current pipeline,
+  or, where none is running yet, the next one to start: a hold thrown for work
+  outside a pipeline waits rather than expiring, because expiring on ``pipeline start`` would undo it before anything ran under it (BUG_052).
+- **``privacy.clean`` is held out unless named.** It is the one gate whose
+  failure cannot be undone after the fact; nothing un-writes an identifier out
+  of a published history. Folding it in costs ``--include privacy.clean``, a
+  separate sentence the operator wrote.
+- **It is loud on every turn.** ``build_context`` puts it above the lifecycle
+  lines, and each held rule reports ``stood down — <reason>`` rather than
+  vanishing — so a held gate reads as a ``[skip:BLOCK]`` on the default verdict
+  stream rather than as a pass.
+
+Host binding
+~~~~~~~~~~~~
+
+A host session and an invariant session are **1:1**. The binding is what makes
+attribution answerable at all: without it, several sessions running against one
+repository are indistinguishable from the shared checkout.
+
+It is made automatically. ``session start`` runs through a shell, and a shell
+tool call carries no hook payload, so the CLI cannot see the host identifier —
+the host adapter records it in ``PostToolUse``, which has the identifier and
+brackets the exact call that registered the session, reading the new session's
+id out of that command's own output rather than guessing.
+
+Two commands claim a session that way, and **exactly** two: ``session start`` and
+``session resume``. Both run through a shell, so the CLI can see the host
+identifier for neither; everything else that names a session is a query. The
+narrowness is load-bearing rather than tidy. The id is read as ``session <id> (``
+anywhere in the tool response, and ``session plan show`` prints a header spelled
+``plan for session ab12cd34 (add-widget) — 2/5 done``, so a pattern widened to
+"any ``invariant session`` command" would bind this host to whatever session a
+read-only query happened to name — quite possibly one the caller was only
+looking at. ``session status``, ``session list``, ``session sync`` and ``context`` all
+print the same sequence.
+
+**The claim binds; it does not re-resume.** By the time ``PostToolUse`` sees a
+resume's output, ``SessionDomain.resume`` has already incremented
+``resumed_count`` and written the standstill row, so the hook calls
+``adopt_host_session`` for both verbs rather than routing the resume back through
+the domain method of the same name. A second call there would count one pickup
+twice and leave two ``resumed`` rows describing one event. ``adopt_host_session``
+is sufficient, and it is sufficient because of the narrowing above: its refusal
+names a **live** binding only, so a spent one goes straight through to
+``_bind_host`` — which is where ``host_ended`` is cleared and the outgoing id is
+kept. What the hook owes is the half the CLI could not do, which is *which*
+host session claimed it, and nothing more.
+
+The verdict commands are the second place a command's output links a shell
+call to what it wrote (ADR-012 A4 increment 8, ruling c). ``invariant guidelines verdict`` and ``verdicts submit`` print the submission's token. The
+hook reads it from ``tool_response`` (``_response_text``, the one reading both
+use) and stamps the acting agent on the records carrying it. The command
+pattern is narrow for the reason the claim's is: ``verdicts show`` is a read
+and is not matched.
+
+The one other thing that call carries is the handoff claim. A host launched by
+``session handoff`` inherits ``INVARIANT_HANDOFF``, and the same PostToolUse that
+binds its first ``start`` or ``resume`` passes that token to
+``SessionDomain.claim_handoff`` (see "A note leaves the offer three ways"). It is
+here for the reason the binding is: this is the first moment a write is both
+allowed and bracketed by the act it records.
+
+Enforced in both directions. A host session that already owns a live session
+cannot start a second; a session bound to a **live** host is not rebound to
+another without ``--force``. Rebinding silently would hand a pipeline, its
+evidence and its declared file set to an owner that never did the work. A
+binding whose host has *ended* is spent rather than live, and replacing that one
+is a different operation — see "A session outlives its host" below.
+
+The binding is host-to-session and **never** host-to-worktree. Registering
+without isolating is legitimate — a device soak owns no code — so a session
+with no worktree is fully bound and fully valid.
+
+Three kinds of session stop competing for attribution, because none of them was
+ever a real answer:
+
++----------------------------------+----------------------------------+
+| Excluded                         | Why it was never the caller      |
++==================================+==================================+
+| **Stranded** — worktree          | Cannot be worked in. Left in, it |
+| recorded, gone from disk         | pads every ambiguity report      |
+|                                  | forever.                         |
++----------------------------------+----------------------------------+
+| **Host ended** — ``SessionEnd``  | Whoever is asking, it is not     |
+| fired                            | them.                            |
++----------------------------------+----------------------------------+
+| **Bound elsewhere**              | Under 1:1 that is a definite no, |
+|                                  | not an unknown.                  |
++----------------------------------+----------------------------------+
+
+A host session that owns nothing is therefore **not ambiguous** — it owns
+nothing. It is told to start a session, or to claim an unowned one, rather than
+asked to pick from a list in which none of the entries is it.
+
+``SessionEnd`` marks the binding spent; it does **not** abandon the session. The
+session may hold unmerged work in a live worktree, and destroying that because
+a terminal closed would be the library doing the one thing it exists to
+prevent. ``invariant session reap`` abandons a stranded session only once its
+branch is gone too — a worktree can be removed while its branch still holds
+recoverable commits, so the narrow condition is the safe one.
+
+A session outlives its host
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A plan that needs several agent-host sessions runs on **one** invariant session
+and merges once, at the end. Without that, the second Claude session starts a
+second invariant session under the same task name, the plan forks, and two
+branches hold half the work each. The binding is what has to give, and the
+distinction that lets it give safely is between a binding that is **spent** and
+one that is **live**.
+
++---------+---------------------+----------------+---------------------+
+| Binding | ``host_session_id`` | ``host_ended`` | May be replaced     |
++=========+=====================+================+=====================+
+| Live    | set                 | false          | only with           |
+|         |                     |                | ``--force`` — this  |
+|         |                     |                | is the hand-over    |
+|         |                     |                | ADR-001 D19 forbids |
++---------+---------------------+----------------+---------------------+
+| Spent   | set                 | true           | yes:                |
+|         |                     |                | ``session resume``, |
+|         |                     |                | or                  |
+|         |                     |                | ``session adopt``   |
++---------+---------------------+----------------+---------------------+
+| None    | unset               | —              | yes                 |
++---------+---------------------+----------------+---------------------+
+
+``SessionEnd`` marks a binding spent, and a spent binding has nobody on the other
+end to have a pipeline, an evidence trail or a declared file set taken away from
+them. That is the whole of the argument: the refusal in ``adopt_host_session``
+exists to stop work changing owner behind its owner's back, and there is no
+owner. So the refusal is narrowed by one clause rather than removed, it now says
+the binding is *live*, and it names ``session resume`` as the route for the other
+case.
+
+**The resumable set is the exact complement of the attributable one.**
+``attributable()`` answers "who could be calling right now", and excludes a
+session whose host has ended because whoever is asking, it is not them.
+``resumable()`` answers "what did somebody put down here", and admits only those.
+The two lists are disjoint by construction, which is why the predicate is
+written from ``live()`` rather than by widening ``attributable`` with a flag:
+widening it would make the hooks that decide whether an edit is allowed start
+seeing candidates that are provably not the caller, which is the ambiguity the
+1:1 binding exists to remove. Two further filters remove sessions that are not
+really on offer — a **stranded** one has no worktree to work in, and one
+registered elsewhere is somebody else's.
+
+**Resume replaces the binding; it never vacates it.** The tempting shortcut is
+to clear ``host_session_id`` and let the ordinary unbound path pick the session
+up. It is a defect, and the chain is worth writing down because every link is
+invisible from the line that would cause it: a vacated session rejoins
+``attributable()``; a *peer* host that owns nothing and had one origin candidate
+now has two; ``resolve`` answers ``ambiguous``; ``Context.rule_context`` renders that
+as ``session=None``; and ``pre-tool-use`` **denies** an unattributed edit. Resuming
+one session must not be able to refuse another session's tool call. For the same
+reason the write clears ``host_ended``: ``by_host_session`` filters on it, so a
+session picked up with the flag still set resolves to nobody for every
+subsequent hook in its new host.
+
+**A session can be put down at birth.** ``start(parked=True)`` registers a
+session for a later host rather than for the caller (ADR-016 ruling 9): it
+binds no host whatever the environment names, takes a fresh identifier
+rather than ``INVARIANT_SESSION_ID``, and is saved with ``host_ended`` set, so
+it is in ``resumable()`` from the start and ``session resume`` binds it like any
+other. ``invariant docs assess --plan`` records the all-at-once docs plan on
+one; the command that records a plan is not the host that will do it, and
+its output never prints the binding sequence ``session <id> (``.
+
+**Resumption is never automatic.** A host session that finds a resumable
+session has not thereby claimed it. Picking up unfinished work brings a pipeline
+state, a declared file set and a branch along with it, so it is a decision
+somebody makes and a command somebody runs. What *is* automatic is the refusal
+in the other direction: ``session start`` refuses a task name whose resumable
+session is sitting right there, names the address and its progress, and gives
+the command that picks it up. A warning printed above a successful ``start`` would
+be prose-as-control-flow — it does not stop the fork, and by the time anyone
+reads it there are two branches. ``--force`` starts a genuinely separate session.
+
+**The greeting names what it will not do automatically.** A session somebody
+parked here is invisible unless it is offered, and the greeting listed only
+sessions with **no** owner — so the one kind that can actually be picked up was
+the single thing it could not mention, and finding it required already knowing
+it was there. ``SessionStart`` now prints the resumable set **above** the unowned
+one: a definite offer, carrying a name, a state and a progress count, above a
+conditional hedged with "only if it is yours". The other order buries the
+answer under the caveat. It is capped at three against six for the unowned
+list, because each line carries a progress clause and runs about twice as wide
+and the block is injected on every ``SessionStart``; the overflow is named rather
+than dropped, behind ``invariant session list``. Nothing on that path writes —
+``resumable()`` is written from ``live()`` and sorts a list — and nothing may start
+to, because a hook that wrote on every ``SessionStart`` would stamp heartbeats
+and race every other host against one registry in order to say hello.
+
+One write sits beside that path and does not contradict it, because it touches
+neither this project's registry nor any session. The ``hook`` command registers
+the project in the oracle's USER-level index ("User-level state" below) after
+the greeting is computed: it reads first and takes that index's lock only for a
+project the index has never seen, so it writes once per project, ever, and not
+once per start. It is skipped for ``doctor``'s probe, and a failure there is
+swallowed whole — it can never change the greeting or mark the hook degraded.
+
+**The turn projection reports the plan, not the checklist.** A session that
+outlived a host says so once, with the count; then at most two lines from
+``core.plan.summary_lines`` — the next deliverable and the one after it — and
+everything else behind ``invariant session plan show``. It sits below the
+stand-down banner, which keeps its place as the only line reporting an absence
+of enforcement, and above ``session may go to:``, which is machinery: the plan is
+what the turn is *about*. Both halves are silent by default, so a session with
+no plan that was never resumed projects exactly as it did before this existed.
+An empty plan renders nothing at all rather than ``(no deliverables recorded)``,
+which is the opposite of what ``plan show`` does and deliberate: that answer is
+right for a direct question and wrong for a line every project sees on every
+turn, where a permanent report of an absent checklist is what teaches a reader
+to skip the whole block.
+
+Resume also refuses a **merged** or **pushed** session without ``--force``: the
+deliverable set already landed, and accumulating new commits onto a merged
+branch puts them behind a spent ``push_barrier``, which is finished work with no
+route out of the session holding it.
+
+**A name is an address.** ``session start`` appends the session id to the task
+slug, so the name a human types identifies exactly one session. Uniqueness is
+then structural rather than checked — ids are unique, therefore ``slug-id`` is —
+and the rejected alternative, keeping bare slugs and refusing a duplicate,
+refuses the case this feature exists for. Lookup is a ladder, first hit wins:
+exact id, exact name, bare slug, unique name prefix. Every rung but the first is
+scoped to live sessions; the first is not, so an id naming a torn-down session
+is told it is torn down rather than told it does not exist.
+
+**The resume is recorded in ``history`` as a standstill row** — same shape as a
+transition, with ``from`` equal to ``to``. It is not decoration. It is where the
+usage counter changes identity, so the seam sits on a row that says it is a
+seam; and it absorbs the dormant interval, because ``elapsed`` is wall time since
+the last heartbeat and without this row the days between two host sessions land
+on the next real transition and read as "this state took three days".
+
+Handing off: an event, not an edge
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``invariant session handoff --note "<line>"`` is how a session hands its work to
+the next host session: the note is privacy-scanned and recorded on
+``handoffs``, and a new Claude Code session is launched in the main checkout with
+the note as its first prompt (ADR-005). The machine above is unchanged by it,
+and that is the decision rather than an omission.
+
+A handoff changes nothing the machine governs — no worktree, branch or gate —
+so it is legal in **every** state, terminal ones included. That matters,
+because the documented place for it is after ``merged`` and ``torn_down``, where no
+edge exists to walk. It is recorded the way a resume is, as a standstill row in
+``history`` (``from`` equal to ``to``, carrying ``handoff: <name>``), and it passes and
+forces no gate. A finished session is saved and NOT re-registered: the registry
+indexes sessions in flight, and teardown removed this one from it.
+
+Which session a handoff belongs to, most reliable first:
+
+1. An explicit ``--id``, else ``INVARIANT_SESSION_ID``.
+2. A session the call PROVES — any attribution route except ``origin``.
+3. Otherwise the most recently moved session registered at or above the
+   working directory, in ANY state, preferring one bound to this host now or
+   earlier (``handoff_candidate``). This is a guess, so the command prints which
+   session it recorded on.
+
+Where nothing is bound, the greeting and ``invariant context`` show the newest
+**unconsumed** handoff recorded here (``latest_handoff``) while it is younger
+than ``session.plan_stale_days`` — derived on every read, like the stand-down's
+expiry, so nothing has to run for an old note to stop being offered.
+
+A note leaves the offer three ways
+''''''''''''''''''''''''''''''''''
+
+Freshness was the only exit at first (ADR-005 D5), so a note went on being
+offered — to every unbound greeting here, including the one in the very host
+session launched to act on it — for most of its life after the work was already
+in flight. Two exits were added beside it (IDEA_008, ADR-005 D6), and each
+consumes **one** note:
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> offered: session handoff --note (recorded)
+       offered --> claimed: first start / resume in the host its token names
+       offered --> dismissed: session handoff --dismiss
+       offered --> stale: older than session.plan_stale_days (derived, nothing writes)
+       claimed --> [*]
+       dismissed --> [*]
+       stale --> [*]
+
+- **Claimed — by the token the launcher set.** The launched line is
+  ``cd <main> && exec env -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>``,
+  and the launch file runs ``claude`` (BUG_075, IDEA_035), so the variable reaches that
+  one ``claude`` process and every hook it spawns. On the
+  PostToolUse that brackets the host's first ``session start`` or
+  ``session resume`` — the binding path under "Host binding" above —
+  ``claude_code`` reads it and calls ``SessionDomain.claim_handoff``, which marks
+  EXACTLY that note. Not at ``SessionStart``, which must not write. The first
+  claim wins; the host keeps the variable for its whole life, and every later
+  claim with it is a no-op.
+- **Dismissed — by hand.** ``session handoff --dismiss`` marks the note the
+  greeting is showing, recorded as ``dismissed`` rather than ``claimed``, so the
+  history says nobody acted on it.
+- **Stale — unchanged.** Still derived on every read.
+
+There is deliberately **no** "any start after ``at`` consumes" fallback. A note
+launched by hand carries no token, and a time window would silence a note on
+behalf of an unrelated session that merely started later in the same project
+— which is the duplicated-work failure this exists to remove, inverted. Such a
+note leaves by dismissal or staleness. Consumption is per note, so a handoff
+recorded after the one a session claimed is still offered.
+
+The marker lives on the entry — when, ``how`` (``claimed`` or ``dismissed``), the
+consuming invariant session and host session — and the entry stays on
+``handoffs``: the list is history, not a queue to pop. The write lands on the
+HANDING-OFF session's record, which is usually torn down by then, so it takes
+the handoff's own shape: a standstill row in ``history`` (carrying
+``handoff_consumed: <name>`` and ``how``), saved and never re-registered, passing
+and forcing no gate. A hook that cannot read the record, or a token that names
+nothing, changes nothing and fails nothing — the note simply goes on being
+offered.
+
+How a session lands: two modes, asked rather than remembered
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A session that outlives its host lands **once**, at the end of the plan, and
+every increment before that ends at a commit. Which of the two a given run is
+doing is a question with a recorded answer, and the reviewing agent asks the
+engine for it — ``invariant session plan show --json``, whose ``planned`` and
+``complete`` keys exist for exactly this consumer:
+
++-------------+--------------+-----------+-----------------------------+
+| ``planned`` | ``complete`` | Mode      | What the run does           |
++=============+==============+===========+=============================+
+| ``false``   | ``false``    | FINAL     | commit, merge, sync,        |
+|             |              |           | teardown — the behaviour    |
+|             |              |           | that predates the plan      |
++-------------+--------------+-----------+-----------------------------+
+| ``true``    | ``false``    | INCREMENT | commit and stop; the        |
+|             |              |           | session stays open          |
++-------------+--------------+-----------+-----------------------------+
+| ``true``    | ``true``     | FINAL     | the run that closed the     |
+|             |              |           | last deliverable is the run |
+|             |              |           | that finishes the session   |
++-------------+--------------+-----------+-----------------------------+
+
+Three properties are decisions rather than shape.
+
+**It is asked, not told.** Before this, the reviewing agent's Definition of Done
+was commit → merge → teardown unconditionally, and holding a session open across
+several increments meant pasting a paragraph into every invocation that said not
+to merge. That is prose-as-control-flow — remembered or not, with nothing
+recording which — in the library whose whole argument is that discipline
+belongs in state a script owns. Five increments of this repository's own session
+work rested on a human retyping it.
+
+**The unplanned session lands, and that is why the two keys are separate.** A
+session with no plan is *unplanned*, not *unfinished*, so it takes the
+pre-existing behaviour. Collapsed into one flag the two cases are
+indistinguishable, and every project that keeps no checklist would defer its
+merge forever — which is the same failure ``core.plan.progress`` computes
+``complete`` once to avoid, one layer up.
+
+**An engine that cannot answer falls back to FINAL.** Where the command fails or
+no plan record exists, the run merges and says so. The opposite default sounds
+safer and is not: it parks every run of every project silently, and unmerged
+work on branches looks exactly like the tool working.
+
+The state machine above is unchanged by this, and it is worth saying why the
+absence of an edit is the right outcome. An INCREMENT run never enters
+``reviewed``: it commits, rebases, marks its deliverables, and stops — which the
+diagram already draws as ``working --> working: commit (local, granular)``. The
+loop was there for granular commits within one host session; a plan makes the
+same loop span several. A mode that needed a new edge would be a mode the
+session machine had never modelled.
+
+What the two modes do change is which gates a run meets. An increment never
+reaches ``session.deliverables_complete`` — an entry gate on ``reviewed`` and on
+``merged`` — because it never attempts either transition, which is the gate
+working rather than being avoided: it refuses a landing, and no landing is being
+claimed. ``session.work_would_be_stranded`` is the one that stays live between
+increments, and it abstains on an open plan that moved recently, so an increment
+that marked a deliverable done has clocked the very touch that keeps the closeout
+quiet. The pair documented above as duals is what makes a parked session legal
+and a half-done merge illegal at the same time.
+
+Teardown will not remove the ground under the caller
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Teardown's other two preconditions are git questions — a clean tree, and a
+safe ``git branch -d``. Neither asks whether anything *outside* git is standing
+in the directory, and git will remove one that is occupied (BUG_009). When the
+occupant is an agent host the result is not an inconvenience: that host's own
+worktree isolation refuses every subsequent shell call and orders the caller
+back into the path just deleted, and the commands that would repair it sit
+behind the same refusal. The deadlock is self-sealing, so this is a **refusal**
+rather than a warning — there is no in-band recovery to scroll past it into.
+
+The precondition is a conjunction, and each half is what keeps the other
+honest:
+
++----------------------+----------------------+----------------------+
+| Half                 | Alone it would       | Why it is measurable |
++======================+======================+======================+
+| The binding is       | refuse every healthy | it is the model      |
+| **live** —           | teardown: a session  | above, read from the |
+| ``host_session_id``  | ending the           | record before        |
+| set, ``host_ended``  | documented way is    | anything is removed  |
+| false                | bound to the very    |                      |
+|                      | host session running |                      |
+|                      | the teardown, and    |                      |
+|                      | ``SessionEnd`` has   |                      |
+|                      | not fired because    |                      |
+|                      | that host is still   |                      |
+|                      | alive                |                      |
++----------------------+----------------------+----------------------+
+| The worktree is      | refuse a cleanup     | the caller's own     |
+| **occupied** — the   | that only costs one  | working directory,   |
+| caller is standing   | ``cd``, because with | which under a 1:1    |
+| inside it            | the binding already  | binding identifies   |
+|                      | spent there is       | that session's host  |
+|                      | nobody left to       |                      |
+|                      | strand               |                      |
++----------------------+----------------------+----------------------+
+
+Occupancy is measured from the **caller's** working directory because that is
+the only evidence there is. The binding is a scalar with no notion of where
+its host stands (BUG_010), so a *different* host wedged in this worktree stays
+invisible; closing that needs the binding to record a location, not a wider
+predicate here. ``--force`` remains for the deliberate case, in the same shape
+as every other override in this domain.
+
+The reads must happen **before** the removal, which is a real constraint
+rather than a stylistic one: teardown reads ``host_session_id`` afterwards
+anyway — twice for the transition's telemetry watermark, once when the record
+is serialised — and a check satisfied by those reads would be a precondition
+that ran after the thing it was guarding.
+
+Attribution
+~~~~~~~~~~~
+
+Which session a tool call belongs to, most reliable first:
+
+1. An explicit ``--id``, else ``INVARIANT_SESSION_ID``. The argument outranks the
+   variable, and the two naming different sessions is refused before
+   anything is recorded (IDEA_042).
+2. The host's session identifier, when the caller supplies one.
+3. The session whose worktree contains **the file the call names** — the
+   destination of a write, or the path a read was aimed at.
+4. The session whose worktree contains the working directory.
+5. The single session registered at or above the working directory.
+
+Steps 2 and 3 exist because step 4 cannot be relied on: a host runs hooks from
+the project root and may reset the working directory between tool calls, so
+with several sessions live, every one of them looks identical from the shared
+checkout — attribution fails precisely when the isolation rules need it.
+
+Step 3 is what keeps an edit attributable when step 2 is unavailable, which is
+the common case rather than a rare one: a session registered before the host
+identifier was recorded has none, and the documented fallback —
+``INVARIANT_SESSION_ID`` — is an environment variable that an edit tool call has
+no way to carry. A destination path depends on neither.
+
+The order matters. ``target`` sits *below* the host identifier so that who is
+writing beats where the bytes land: a session writing into a peer's worktree
+stays attributed to the writer, which is what makes that a detectable
+violation instead of a silent reattribution. And a target that belongs to no
+worktree is not an answer — resolution falls through, so an edit aimed at the
+shared checkout still reaches ``session.no_edit_in_main_checkout`` with a session
+to report against.
+
+When step 3 succeeds and the session has no host identifier recorded, the
+mapping is **learned**: the next call from that host session resolves by
+identifier alone, including calls that carry no path at all. Only step 3 may
+teach it. Learning from a weaker signal would bind the wrong pair permanently.
+Learning is reserved to a call that *wrote* — a read is evidence of where the
+reader was looking, not of who owns the worktree.
+
+**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D5).** A store has no worktree per
+session, so a store doc path names no session by itself. A read or edit of one
+is attributed by the ordinary order above (host binding, then the working
+directory) and then checked against the holder of the path's docs-lock unit;
+holding the lock never turns an ambiguous resolution into a proof (BUG_028).
+``docs_roots`` includes the store's main checkout, and a store path reaches its
+repo through the store's ``store.repos`` and the user config. Memory under a
+store is outside the lock (ruling 20). This extends ADR-011 to a session's
+legs. Increment 4 builds it.
+
+**A resolution is not automatically an identification.** Steps 1–4 name the
+session from something the call itself carried; step 5 names the only session
+left standing. Both return a session, and only the first four are evidence.
+Writing evidence on step 5 is how a *foreign* session's agent came to sit in a
+pipeline that never dispatched it: a curator run in the shared checkout, under
+a host bound to nothing, resolved to whichever session happened to be the sole
+attributable candidate — and the pipeline that received it would then clear a
+block-level ``agents.*_ran`` gate on work that never happened in it (BUG_028).
+
+So the evidence writers ask ``Resolution.proven``, not ``resolution.session is not None``. Enforcement and display still use step 5: telling somebody where they
+probably are is a fair use of a guess, and recording a fact against them is
+not.
+
+**What may not be recorded may still have to be said.** The ``proven`` rule
+decides what gets written; it does not decide what may be left unsaid. A
+session has two copies of every file — the shared checkout's and its
+worktree's — and only the worktree spelling identifies the reader, so a docs
+read aimed at the shared checkout while several sessions are live resolves at
+step 5 or lower and is discarded. Discarding it is correct. Its **silence** was
+not: ``docs.read_architecture`` is block-level, and a discarded read and an
+absent one produced the same verdict and the same remedy line, so the advice
+the gate gave back was the action that had just been thrown away (BUG_046). An
+unproven read of an architecture doc now reports the drop in the turn it
+happened, on the same reasoning as an unrecordable dispatch — and with the same
+restraint, since ``Read`` fires on everything an agent opens: only a read that
+would have been evidence speaks, and only when a governed session exists to
+hear it. An ungoverned turn stays silent.
+
+**A proof of identity is not a proof of place**, and an actor row needs both.
+Step 2 deliberately outranks step 3 — who is acting beats where the bytes land
+— so it answers identically for an architect writing inside its own worktree
+and for a curator filing a bug in the shared checkout, because a subagent
+shares its parent's host identifier. Both are ``host``, both are proven, and only
+one of them worked in the pipeline. A *dispatch* row can live with that: at
+dispatch time there is no better evidence, and the row only claims the request
+resolved here. An *actor* row claims the agent worked here, so for the host
+route — and only for it — the location is asked for explicitly rather than
+inferred. A session with no worktree passes on the binding alone, having no
+location to contradict.
+
+Where the location contradicts the binding, the location wins and the run is
+recorded against the session it landed in. That is step 2 inverted, for the
+same reason the dispatch route already inverts it when a brief names a
+worktree: the host is not acting there, it is delegating into it, and the run
+belongs to the delegate. One binding holds one session, so a parent driving two
+tracks cannot represent the second — and refusing outright would leave that
+track unable to record any agent that never names a path, which is the original
+wedge from the other end. The inversion is safe because it applies only when
+the host names an ACTOR, and a main-loop turn never does: a session reaching
+into a peer's worktree by hand stays attributed to the reacher, and stays a
+detectable crossing. When a *dispatch* cannot be recorded — the route was a guess, or the
+session has no pipeline — the hook says so in the turn where it happened,
+because the alternative is the caller discovering it at a blocking gate at the
+end of the phase, when nothing it can do will satisfy it.
+
+**One order, every recorded call.** Enforcement resolved through this order and
+recording did not: a docs read and an agent dispatch used steps 2 and 4 only,
+so a ``Read`` naming a file inside a session's worktree was not attributed to
+that session while several were live — the payload carried the answer and the
+recording pulled the same key out one line later purely to store it (BUG_010,
+narrow half). Both now resolve here. A call carrying no path, which is every
+agent dispatch, simply finds nothing at step 3 and continues; that is the
+order working, not an exception to it.
+
+**Which project, before which session (ADR-011).** The order above runs inside
+one registry, and the state root is per-repository (see "Storage layout"). So
+a session in another project cannot be found by searching the host's registry,
+however the call names it. A host rooted in project A that drove a session in
+project B therefore recorded nothing at all (BUG_040). Before f1396f9 it was
+worse: the call was recorded into A by A's host binding, which greened a gate
+in A on work done in B (BUG_010).
+
+Attribution is now within **the project the call's path names**. That is the
+host's project unless the path lies in another project's live session
+worktree. Before the order runs, the hook asks which project the call's paths
+belong to:
+
+- **Where a path's project comes from.** The project is the nearest manifest
+  above the path, loaded from its repository's main checkout. It is foreign
+  when its state root differs from the host's. Nothing else is consulted, the
+  oracle's index included: the index only knows projects a host has been
+  rooted in, and that is exactly what the failing case lacks.
+- **When the call is re-rooted.** A ``file_path`` is re-rooted when it lies in a
+  live session worktree of that foreign project. A brief is re-rooted when
+  every live-worktree match among the paths it names, the host project's
+  included, lands on one session, and that session is foreign. The call is
+  then handled whole, PreToolUse and PostToolUse alike, by a context rooted in
+  that project. That context stands in the session's worktree and carries no
+  host identifier. Inside it the order above runs unchanged, and resolves at
+  step 3 (or at ``prompt``, for a dispatch).
+- **No binding crosses roots.** ``SessionEnd`` fires in the host's own project,
+  so a binding learned in a foreign registry could never be marked spent.
+  Step 2 therefore does not operate across roots, and nothing is learned
+  there.
+- **An unplaced call is recorded nowhere.** This is a call that names a path
+  inside another invariant project and fails the test above: no live
+  worktree contains the path (the main checkout, or a torn-down or stranded
+  session's worktree), or its matches span more than one session. It is
+  recorded nowhere, the host's project included. A dispatch, or a read that
+  would have been docs evidence there, says so in its own turn, under the
+  BUG_046 restraint above. An edit stays silent, because nothing a gate waits
+  for was lost.
+- **Explicit identity disables the route.** An explicit ``INVARIANT_SESSION_ID``
+  names a session in the project that reads it, so it keeps the call at home.
+- **Ungoverned paths are ignored.** A path in no invariant project changes
+  nothing, as before.
+
+Domain: pipeline
+----------------
+
+.. comp:: The ``tdd`` pipeline machine
+   :id: COMP_MACHINE_TDD
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/tdd.yaml``: the default lane: designing, red, green,
+   refactor, reviewing and the landing. ``core/machines`` injects the
+   docs-first gates into it.
+
+.. comp:: The ``bugfix`` pipeline machine
+   :id: COMP_MACHINE_BUGFIX
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/bugfix.yaml``: a bug's lane, triaging and reproducing to a
+   proof (``reproduced`` is an outcome, ADR-006), then fixing, verifying and
+   the landing. ``core/machines`` injects the docs-first gates into it.
+
+.. comp:: The ``chore`` pipeline machine
+   :id: COMP_MACHINE_CHORE
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/chore.yaml``: mechanical work with no design content (a
+   rename, a formatter pass, a dependency bump): doing, reviewing and the
+   landing. ``core/machines`` injects the docs-first gates into it.
+
+.. comp:: The ``docs`` pipeline machine
+   :id: COMP_MACHINE_DOCS
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/docs.yaml``: a docs-only change: drafting, reviewing and the
+   landing. ``core/machines`` injects the docs-first gates into it.
+
+.. comp:: The ``spec-first`` pipeline machine
+   :id: COMP_MACHINE_SPEC_FIRST
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/spec-first.yaml``: design-heavy work whose specification is
+   the deliverable: designing, specified, implementing, reviewing and the
+   landing. ``core/machines`` injects the docs-first gates into it.
+
+.. comp:: The ``none`` pipeline machine
+   :id: COMP_MACHINE_NONE
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/none.yaml``: the escape hatch, one state and no gates, so a
+   project that disagrees with every shipped methodology still uses the session
+   and work-item domains. ``core/machines`` injects the docs-first gates into
+   it.
+
+
+One task's progress through the configured methodology. Scoped to a session;
+a session runs pipelines one at a time.
+
+The methodology is **pinned to the pipeline at ``start``**: the record carries
+the machine id, and every later operation — ``status``, ``gates``, ``advance``, and
+the rules that read the record (``pipeline.complete``,
+``session.work_would_be_stranded``) — resolves the machine from the record,
+falling back to the manifest only for records that predate the pin. This is
+what makes ``pipeline start --methodology <id>`` safe (the override used to
+live only in the memory of the ``start`` call, wedging every later invocation —
+AUD-02) and what makes the gate set un-swappable by a mid-pipeline edit to
+``methodology.pipeline``, which is an isolation-exempt manifest line (AUD-03).
+A pinned machine that can no longer be loaded fails the gates that need it
+rather than skipping; the one permitted escape is ``pipeline start``, which
+archives the unusable record rather than discarding it.
+
+The guidelines ruleset is **pinned the same way** (ADR-012 D3, A2 increment
+6). With ``guidelines.ruleset`` configured, ``start`` records ``ruleset`` on the
+pipeline: ``{"path", "digest", "error"}``, read through ``core.rules.ruleset_pin``,
+which is ``load_ruleset`` from the tree in hand, registries included. So the pin
+is exactly what ``guidelines.ruleset_valid`` reads.
+
+.. mermaid::
+
+   sequenceDiagram
+       participant C as CLI (pipeline start)
+       participant P as pipeline
+       participant R as rules
+       participant G as core/guidelines
+       C->>P: start(session, cwd)
+       P->>R: ruleset_pin(context: manifest, session worktree or cwd)
+       alt no guidelines.ruleset
+           R-->>P: None: nothing pinned, the manifest keeps deciding
+       else it loads
+           R->>G: load(path, registered, root)
+           G-->>R: Ruleset (digest of the ruleset's own bytes)
+           R-->>P: {path, digest, error: null}
+       else it does not load
+           R-->>P: {path, digest: null, error: why} (DN-D)
+       end
+       P->>P: save the record; the pipeline starts either way
+
+- **The digest is the ruleset's own**: the first twelve hex digits of the
+  SHA-256 of its bytes, the hash every verdict will record (A4). A registry
+  a ``cochange`` rule names is read with the ruleset, so a broken one makes the
+  ruleset unloadable at start, but its bytes are not in the digest: a registry
+  is read as it stands after the change.
+- **An unloadable ruleset is recorded, not refused** (ruling DN-D). The
+  pipeline starts, the record says why, and the landing refuses it through
+  ``guidelines.ruleset_valid``, which reads the ruleset the change lands. A
+  ruleset repaired inside the change therefore lands, which is how the
+  ruleset lane (ADR-012 D10) lands a repair; the pin keeps the record that
+  the pipeline started without one.
+- **What the pin holds on.** The ``guidelines.*`` landing gates ride a pipeline
+  that pinned a ruleset whatever the manifest says now, so clearing
+  ``guidelines.ruleset`` (an isolation-exempt manifest line, like
+  ``methodology.pipeline``) cannot drop them mid-pipeline. Their verdicts then
+  say what they can see. The comparison of the pinned digest with the
+  current one is A4's, for verdicts (DN-D): a submission is refused while
+  the tree's digest differs from the pin (A4 DN-6, below), and
+  ``guidelines.verdicts_complete`` reads every recorded verdict as stale while
+  it differs (A4 increment 3).
+- **Nothing pinned, nothing changes.** With no ruleset at start the field is
+  null and the manifest decides, as before. A record written before the field
+  existed loads with it null and is read the same way, so no record is
+  migrated.
+
+**Judgement verdicts are evidence too** (ADR-012 D5, A4 increment 1).
+``evidence["verdicts"]`` is an append-only list of the cited verdicts accepted
+by ``invariant guidelines verdict`` and ``invariant guidelines verdicts submit``.
+``domains/guidelines`` checks a submission through ``core.rules.plan_verdicts``
+and records what it accepted through ``PipelineDomain.record_verdicts``. A
+refused verdict never enters the list (ruling 6), and a bulk submission with
+one invalid entry enters nothing (DN-11). One entry:
+
+.. code:: json
+
+   {
+     "rule": "data.single-open",
+     "status": "pass",
+     "citations": [{"path": "app/store.py", "lines": [42, 58], "blob": "9c41e07ab2d3"}],
+     "tests": [],
+     "na_condition": null,
+     "note": "close() runs before the next open on every path",
+     "ruleset": "5be0c2d91f7a",
+     "state": "reviewing",
+     "surface": "cli",
+     "token": "<32 hex digits, one per submission>",
+     "agent": "compliance-reviewer",
+     "model": "<the host's own value>"
+   }
+
+- **``blob``** is ``digest_of`` the cited file's bytes in the tree at
+  submission. A later edit of the file makes the verdict stale, and
+  ``guidelines.verdicts_complete`` reads a stale verdict as a missing one (A4
+  increment 3).
+- **``ruleset``** is the pin, and a verdict is accepted only while the tree's
+  ruleset has the pinned digest (DN-6). With no pin, or a pin whose digest is
+  null, the tree's digest stands in for it. At the gate, a recorded
+  ``ruleset`` that is not the tree's digest, or a tree that is not the pin,
+  makes the verdict stale; nothing repins.
+- **``state``** is the state the verdict was checked in, always a review-role
+  state (DN-2). ``record_verdicts`` refuses, with nothing written, a record
+  whose state the pipeline has since left.
+- **No clock time.** The record is evidence about the change, ordered by
+  position. A later verdict on a rule is appended beside the earlier one.
+  The latest answers the rule at the gate; an earlier one is never brought
+  back over a latest one gone stale (A4 increment 3).
+- **Append-only, with one set-once exception.** No record is rewritten or
+  removed, except that the host may set ``agent`` once on a record that has
+  none (the user's A4.8 ruling a), and ``model`` once on a record of that agent
+  that has none (the A7 ruling 11). Nothing else on a record ever changes.
+- **``token``** is the submission's: 32 random hex digits, the same on every
+  record one accepted submission wrote, and printed by the command (A4
+  increment 8). The engine owns it, so a submission naming it is refused as
+  an unknown key (ruling b). A record written before A4.8 has none.
+- **``agent``** is the acting agent, stamped by the host after the command
+  returns (DN-12, A4 increment 8). The verdict command runs through a shell,
+  and a shell call carries no hook payload, so the CLI cannot see who
+  submitted it. The host's ``PostToolUse`` sees ``agent_type``. For a verdict
+  command, it reads the token out of the command's own output (ruling c,
+  the same link the host binding below uses) and calls
+  ``PipelineDomain.stamp_verdict_agent(session, token, agent)``. The session
+  is placed by the check an actor row clears. The stamp lands only on
+  records carrying that token with no agent yet, and never overwrites. A
+  main-loop turn, or a host that cannot name the agent, stamps nothing, and
+  the verdict stands as accepted.
+- **``model``** is what that agent's own transcript showed it running on, on the
+  same stamp in the same save (the A7 ruling 11, A7 increment 3). An opaque
+  string, read fresh for the stamp. When it cannot be read, the key is absent
+  and the agent is still stamped. A record whose agent is another agent's does
+  not take it. A submission naming it is refused as an unknown key.
+- **Audit only.** No gate, standing, staleness check or landing record reads
+  ``agent``, ``model`` or ``token`` (D1 item 2). The gate's re-check drops all three
+  with ``state`` and ``surface``. ``invariant pipeline status --json`` prints them.
+  None needs a migration: a record without them loads unchanged.
+
+.. mermaid::
+
+   sequenceDiagram
+       participant A as subagent (Bash)
+       participant C as invariant CLI
+       participant P as pipeline evidence
+       participant H as PostToolUse hook
+       A->>C: invariant guidelines verdict ...
+       C->>P: record_verdicts (each record carries the token)
+       C-->>A: recorded 1 verdict (..., token <hex>)
+       H->>H: agent_type on the payload, verdict command, token in the output
+       H->>H: _actor_session (the actor row's place check)
+       H->>H: subagent_model (that run's own transcript, bounded tail read)
+       H->>P: stamp_verdict_agent(session, token, agent, model), set once
+
+``invariant guidelines verdicts show`` reads the list and writes nothing (A4
+increment 4): it prints the standing the gate reads for each owed rule, and
+the records on rules the change no longer owes.
+
+The key is additive. A record older than it has no ``verdicts``, which reads as
+"no verdict submitted", and no record is migrated.
+
+**The audit record is evidence no rule can read** (ADR-012 D1 item 2, the A7
+rulings 9 to 11, A7 increment 3). ``evidence["audit"]`` says which subagents a
+host saw in this pipeline and what models they ran on:
+
+.. code:: json
+
+   {
+     "host": "claude_code",
+     "agents": {
+       "compliance-reviewer": {
+         "tier": "standard",
+         "asked": null,
+         "models": ["<the host's own value>"],
+         "runs": ["<the host's id for the run>"]
+       }
+     }
+   }
+
+- **``host``** is the adapter that observed. The first one stays.
+- **``tier``** is the agent's effective tier at the last read, or null. A local
+  agent has none.
+- **``asked``** is the model requested at dispatch, or else the ``model`` line of
+  the agent's installed copy, or null. A dispatch's request wins whichever
+  arrives first, because a foreground subagent acts before the hook sees the
+  dispatch that started it. It is per agent, so the last dispatch naming a model
+  answers: a later one naming none clears nothing.
+- **``models``** is what was observed, read from that run's own transcript, never
+  derived from ``asked``. Possibly empty.
+- **``runs``** is the run ids already read, so a run is read once.
+
+The host writes it through ``PipelineDomain.record_audit`` on ``PostToolUse``: the
+first time a subagent run acts in a pipeline (asked first through
+``audit_unread``, since this sits on every call), when a dispatch resolves here,
+and at a verdict stamp. Each write passes the same place check as the record
+beside it, an actor row's or a dispatch's. A main-loop turn names no agent and
+is not recorded. Any failure records nothing and leaves the hook's answer alone,
+and a missing fact stays null.
+
+- **No rule can see it.** ``RuleContext`` removes the key when it is built, on a
+  copy, so this holds whoever builds the context, the oracle's gate cache
+  included. An audit write still moves the record's write time, so the cache
+  evaluates once more and gets the same answer.
+- **The landing record copies none of it.** A test pins the gate's verdict, the
+  standings and the landing record equal with and without it.
+- **Who reads it.** ``invariant pipeline status``: ``--json`` and one text line.
+- **No migration.** A record older than the key has none and prints no line.
+
+**A landing keeps what the guidelines family decided** (ADR-012 DN-7, A4
+increment 6). An advance that succeeds into a state with the ``landing`` role,
+with at least one ``guidelines.*`` gate on the edge, appends one entry to
+``evidence["guidelines_landings"]``, in the same save that moves the state.
+``domains/pipeline.guidelines_landing`` copies it from the verdicts that
+advance evaluated, so it is what the gates decided there, not a later
+re-derivation. One entry:
+
+.. code:: json
+
+   {
+     "from": "reviewing",
+     "to": "committed",
+     "forced": false,
+     "gates": [
+       {"rule": "guidelines.ruleset_valid", "level": "block", "ok": true,
+        "skipped": false, "blocks": false, "message": "..."},
+       {"rule": "guidelines.mechanical_clean", "level": "warn", "ok": true,
+        "skipped": false, "blocks": false, "message": "...",
+        "ruleset": "5be0c2d91f7a", "findings": []},
+       {"rule": "guidelines.verdicts_complete", "level": "block", "ok": true,
+        "skipped": false, "blocks": false, "message": "...",
+        "ruleset": "5be0c2d91f7a",
+        "standings": [{"rule": "data.single-open", "severity": "blocker",
+                       "standing": "missing", "status": null, "reason": "",
+                       "problems": [], "set_aside": null, "blocks": false,
+                       "warns": false, "override": "reviewed by hand",
+                       "overridden": true}]}
+     ],
+     "grants": [{"guideline": "data.single-open",
+                 "gate": "guidelines.verdicts_complete",
+                 "reason": "reviewed by hand", "outcome": "spent",
+                 "passed": "data.single-open: no verdict", "why": ""}]
+   }
+
+- **``gates``** is every ``guidelines.*`` gate the edge evaluated, as it was
+  delivered: its level, ``ok``, ``skipped``, ``blocks`` and ``message``. ``ruleset``
+  (the digest the gate judged against), ``findings`` (``mechanical_clean``'s, in
+  D5's record shape) and ``standings`` (``verdicts_complete``'s, one per owed
+  rule) appear only where the gate computed them. An acknowledged warn gate
+  keeps its findings under the acknowledgement's text. ``detail`` and ``fixes``
+  are not kept.
+- **``grants``** is each grant either family gate read or relied on, spent or
+  held, with what it passed and why it is held: ``core.rules.grant_outcomes``,
+  the decision the CLI spends from. The CLI consumes a spent grant after the
+  save, into ``session.overrides``.
+- **``forced``** is the advance's, as on the history row. A forced landing
+  records the same shape, and the gate it went past shows ``blocks: true``;
+  its override row stays in ``overrides``.
+- **A refused advance records nothing**, and nor does a landing with no
+  guidelines gate on it (no ruleset configured or pinned).
+- **No clock time, no agent, no reader.** The entry is ordered by position,
+  carries no acting agent (DN-12), and no rule reads it: it is the audit
+  record of why a landing was allowed. ``invariant pipeline status --json``
+  prints it with the rest of the evidence.
+
+The key is additive under the round-trip contract (BUG_061): a record older
+than it has none, a build that does not know it writes it back intact, and
+no record is migrated.
+
+Shipped methodologies:
+
++----------------+--------------------------+------------------------------+
+| id             | For                      | Shape                        |
++================+==========================+==============================+
+| ``tdd``        | Default. Test-first      | designing → red → green →    |
+|                | development              | refactor → reviewing →       |
+|                |                          | committed                    |
++----------------+--------------------------+------------------------------+
+| ``spec-first`` | Design-heavy work where  | designing → specified →      |
+|                | the spec is the          | implementing → reviewing →   |
+|                | deliverable              | committed                    |
++----------------+--------------------------+------------------------------+
+| ``bugfix``     | Proving a reported       | triaging → reproducing →     |
+|                | defect is real before    | fixing → verifying →         |
+|                | fixing it                | committed, or reproducing →  |
+|                |                          | reproduced                   |
+|                |                          | (``red_phase: reproducing``) |
++----------------+--------------------------+------------------------------+
+| ``chore``      | Mechanical work with no  | doing → reviewing →          |
+|                | design content           | committed                    |
++----------------+--------------------------+------------------------------+
+| ``docs``       | Prose, records, backlog  | drafting → reviewing →       |
+|                | entries — nothing to     | committed                    |
+|                | test or diagram          |                              |
++----------------+--------------------------+------------------------------+
+| ``none``       | Escape hatch — a single  | working                      |
+|                | state, no gates          |                              |
++----------------+--------------------------+------------------------------+
+
+``docs-first`` is not in this list because it is not a methodology (D12). It is a
+pair of gates the engine injects into whichever methodology is configured:
+``docs.read_architecture`` leaving the design state, ``docs.updated`` entering the
+landing state (with ``docs.diagrams_current``, and ADR-018's
+``docs.builds_strict``, ``docs.needs_traceable``, ``docs.decisions_recorded``,
+``items.decisions_linked`` and ``docs.mandate_kept`` beside it). A methodology cannot opt out of it; a project can only retune
+the gates' level, and even that is discouraged.
+
+Details that are load-bearing rather than incidental:
+
+- **The read gate is an exit gate, not an entry gate.** A pipeline starts *in*
+  its design state, so an entry gate there would be evaluated before any work
+  had happened and could never fail — a gate that looks present and enforces
+  nothing. The check that means something is "you may not leave design until
+  you have read the docs."
+
+- **A fresh project has something to read.** The read gate blocks on an empty
+  ``paths.docs``, and ``init`` used to leave a new project exactly there: ``doctor``
+  red on the directory, the first ``advance`` blocked, nothing to read and
+  nothing saying what to write. ``init`` now writes a starter when the
+  directory is absent, since ADR-018 D11 a sphinx-needs docs project around
+  ``overview.rst``, and the gate stays at ``block``. The fix for a
+  gate nobody can satisfy is to make it satisfiable, not to lower it.
+
+- **Injection is by role, not by state name.** A methodology this library has
+  never seen still receives the gates, provided it labels its states. A
+  methodology that declares *no* design state — ``chore`` — is asserting there is
+  no design content, and is exempt from the read gate and from the
+  design-agent gate (BUG_064, below) but not from the update gate or the
+  review-agent gate. That exemption is deliberate: forcing an architecture read onto a
+  formatter pass makes ``chore`` useless and pushes people to ``none``, which drops
+  every gate. A narrower rule that gets used beats a broader one that gets
+  bypassed.
+
+- **A document has as many spellings as the repository has trees, and the read
+  gate accepts all of them.** An isolated session holds two copies of
+  ``docs/architecture/overview.md``, and the two steps a read must survive used
+  to prefer opposite ones: recording keeps only the spelling that identified
+  the reader, which is the worktree's, while matching resolved its docs root
+  from whichever tree the CLI was invoked in. Run from the shared checkout the
+  two accepted sets were disjoint — a ``block`` gate closed against every read
+  the track could perform (BUG_046). Matching now reduces to the docs
+  directory of *every* working tree of this repository, so the verdict no
+  longer depends on where the question was asked from. It stops there: another
+  checkout's ``docs/architecture`` is not this project's, however alike the paths
+  look.
+
+- **An exit gate is asked its question after the commit.** Anything evaluated
+  on leaving a state runs when that state's work is, by construction, already
+  committed, so a gate that asks "what changed" by reading the working tree
+  and the index alone sees nothing and returns *not applicable* — every time,
+  in exactly the state it was written for. Three sources answer between them:
+  the working tree and index (work in progress), the branch's own commits
+  (work already committed in this phase), and the session's declared file set
+  (the only one left when there is no base to diff against). All three, or the
+  gate is inert where it matters most. This is ``core/rules._changed_set``, read
+  by ``docs.updated``, ``docs.diagrams_current`` and ``coverage.meets_floor``; it is
+  one function rather than three because it was three, and two of them were
+  wrong for as long as they existed (BUG_012).
+
+- **An empty answer and an unanswerable question are different verdicts.**
+  When no source could speak — the commits unreadable, nothing declared — the
+  set is empty for a reason that is not "nothing changed". Those gates fail
+  and say so instead of skipping, because a skip on a ``block``-level gate reads
+  as a pass, and an unanswered question is not a negative answer.
+
+- **"What changed" has one answer; "is it structural" deliberately does not
+  share coverage's.** ``docs.updated`` used to call everything outside
+  ``paths.docs`` source, so a backlog record, a release plan or a ``LICENSE``
+  demanded an architecture-doc edit nobody could honestly write, and the chore
+  lane's first non-code change needed ``--force`` (BUG_064). It now holds out
+  prose (``.md``, ``.rst``, ``.txt``), extensionless repository metadata by whole
+  name (``LICENSE``, ``NOTICE``, ``CODEOWNERS``, …) and the project's ``non_source``
+  globs, naming every ``non_source`` match in its verdict. It does NOT borrow
+  the coverage gate's full unmeasured set: that set answers "could a run
+  measure this", and configuration, markup and stylesheets are unmeasurable
+  without being unstructural — a machine YAML in ``data/machines/``, an API
+  contract or an entry-point table changes a diagram with no code beside it,
+  and still reads as source here.
+  Test code is the one kind of CODE it holds out, and only where a declared
+  ecosystem's adapter claims the path through ``is_test_file`` — the same
+  convention the coverage gate keys on. A bugfix whose defect lived in a test
+  harness touched nothing but the suite and the backlog, and could leave
+  ``verifying`` only by ``--force`` (BUG_102). The architecture docs describe the
+  product's components, seams and flows; the suite that measures them is not
+  one of them, which is ADR-006 D2's reading of a repro-only commit applied to
+  a fix. Chosen over an acknowledgement route (that would make every test-only
+  fix carry a manual step for a question with one answer) and over a declared
+  "test-only" pipeline flag (a claim the diff already settles with positive
+  evidence, so declaring it adds a way to be wrong and nothing to check). The
+  open cost is a project that does document its harness: each held-out test
+  path is named in the verdict, so the reviewer still sees it, and any
+  non-test path beside it keeps the block. No adapter, no claim — a project
+  declaring no ecosystem holds out nothing.
+
+- **A gate on a sweep cadence stays where the machine puts it.** Scheduling
+  ``coverage.meets_floor`` or ``test.all_pass`` (``methodology.gates.schedule``,
+  ADR-010) changes what the gate demands per change, not which states carry
+  it: the floor turns advisory outside ``held_paths``, and the suite gate judges
+  the change's scoped run. Every recorded run says whether it was ``full`` or
+  ``scoped``, which is what lets a held path demand a full one.
+
+- **A recorded run keeps what its discovery found** (BUG_093). Every entry of
+  ``test_runs``, a ``pipeline test`` run or a coverage run, carries
+  ``discovered``: ``{key: value}``, each placeholder of its command that a
+  ``discover`` entry resolved (``Manifest.discovered_in``), and nothing ``vars`` or
+  the run itself supplied. A discovery may resolve only in the session's own
+  shell (its own exported simulator, say), so the oracle replays these values
+  to the project's discovery when the phone re-runs the session's tests
+  (oracle.md, "``oracle/recommend``"). The field is additive: a record older
+  than it loads without it, and the oracle reads such a run as one it cannot
+  replay where discovery is needed. It lives under the state root, which is
+  machine-local and never committed or rendered; the oracle shows a value the
+  project's privacy patterns flag only masked.
+
+- **``sweep.fresh`` rides beside a scheduled gate, by gate id.** With a cadence,
+  ``core/machines`` adds it to every entry or exit set naming a scheduled gate
+  (``Machine.inject_beside``), so the transition that once demanded whole-run
+  evidence reports how old the sweep holding it is. By id rather than by role,
+  because the concern belongs to the gate: a project machine that put
+  ``test.all_pass`` on an exit set gets it there. No cadence injects nothing, so
+  ``pipeline gates`` never lists a rule that cannot apply. It warns and never
+  blocks; the manifest refuses it at ``block`` or ``ask`` (ADR-010 D3 item 5, D6).
+
+- **The ``guidelines.*`` landing gates ride the landing entry when a ruleset
+  is configured.** ``core/machines`` adds ``guidelines.ruleset_valid`` to the
+  ``landing`` state's entry set
+  (``GUIDELINES_GATES``) only when ``guidelines.ruleset`` is set, for the reason
+  ``sweep.fresh`` is injected only under a cadence: with no ruleset the rule is
+  N/A, and a ``block``-level skip on every landing would be a change on every
+  project that has not opted in (ADR-012 D3, ruling 7). A pipeline that
+  pinned a ruleset at ``start`` keeps them whatever the manifest says later,
+  as it keeps its methodology; one that pinned nothing, and a record older
+  than the pin, follow the manifest as it stands (see the pin above).
+  ``guidelines.generated_current`` rides beside it in the same set (A2
+  increment 5): it compares every generated output with what ``guidelines render`` would write now and warns on drift in every profile, so it reports
+  and never refuses the landing. It reads the host's default instruction
+  files from the rule context, which ``PipelineDomain`` is handed by the CLI.
+  ``guidelines.mechanical_clean`` rides there too (A3 increments 3 and 4),
+  and so does ``guidelines.verdicts_complete`` (A4 increment 3): every
+  judgement guideline the change owes a verdict has one that still holds,
+  read from ``evidence["verdicts"]`` and checked again against the tree at
+  the landing. Both warn in ``loose`` and ``standard`` and block in ``strict``,
+  and a grant naming a guideline passes that guideline at its family gate
+  (see "The two override lists").
+  ``guidelines.baseline_only_shrinks`` (``BASELINE_GATES``, A3 increment 6)
+  joins the same entry set only when ``guidelines.baseline`` is configured as
+  well. With no baseline it is N/A, and it blocks in every profile. The
+  baseline key is read as the manifest stands, not pinned, because clearing
+  it shrinks what is honoured rather than widening it.
+
+- **``agents.rendered_current`` rides the landing entry where ``host.kind`` has
+  an adapter** (ADR-012 D8, the A6 ruling 10, A6 increment 4). It reports
+  each library agent whose installed copy is not what the host would render
+  now: absent, installed from an older version (naming which input moved),
+  edited locally (naming the overlay fix) or unreadable. A copy differing only
+  in its tier hint counts as current (the A7 ruling 6), because no gate reads a
+  hint. It warns in every profile and installs nothing. Its answer is the host's install plan, the
+  one ``agents install --dry-run`` prints, which the CLI hands ``PipelineDomain``
+  as a callable (``host_agent_plan``), because no domain imports a host.
+  ``core/machines`` injects ``AGENT_CURRENCY_GATES`` only when the domain holds
+  that plan (``load_pipeline_machine(..., host_agents=True)``), so a project
+  whose ``host.kind`` has no adapter, where the rule would be N/A, never lists
+  it. A pinned or overridden methodology keeps it.
+
+**Built (:need:`ADR-016 <DEC_ADR_016>` D3, increment 1).** ``docs.assessment`` reports the
+assessment's gaps (required sections, unnamed source areas, relative links
+to missing files) as ``doctor``'s ``docs assessment`` row. It fails on any gap,
+listing them by check in its detail with ``invariant docs assess`` as the fix,
+and is N/A when ``docs.assess.checks`` is empty. It warns in every profile and
+no machine names it, so ``core/machines`` never injects it into a pipeline:
+``doctor`` and ``invariant check docs.assessment`` are its only callers.
+``core/rules.DOCTOR_ROW_RULES`` names it as a rule reached through a doctor
+row whose level the rule's decides, the fourth route by which a graded rule
+counts as reachable beside an event, a machine gate and an injection.
+
+**Built (ADR-016 D6, increment 3).** ``docs.area_documented`` is the
+incremental onboarding path's landing obligation. ``core/machines`` adds it to
+the ``landing`` state's entry set, beside ``docs.updated``
+(``DOCS_ONBOARDING_GATES``), only when ``docs.onboarding`` is ``incremental``, for
+the reason ``sweep.fresh`` is injected only under a cadence: under any other
+mode the rule is N/A, and a project that chose nothing lands exactly as
+before. The mode is read from the manifest as it stands, never pinned at
+``start``. Asked directly (``invariant check docs.area_documented``) under
+another mode, the rule is N/A and names the mode.
+
+Armed, it reads ``core/rules._changed_set`` and keeps the files ``docs.updated``
+calls source: outside the docs, not prose, not ``non_source``, not test code an
+adapter claims. Each is mapped to the most specific source area holding it
+(``domains/docs.owning_area``, over the areas ``assess`` derives: ``areas.from``
+and ``exclude`` honoured), and the live assessment of the session's tree (its
+worktree, else the checkout in hand) says whether that area is named. Each
+unnamed, touched area is owed: the verdict names its path and the doc to
+write (``<docs location>/<area name>`` in the format's suffix) and offers
+naming it in an existing doc instead. An area already named is never asked,
+and a doc written in the same change settles it. No gap list is recorded:
+the deterministic assessment is the record.
+
+It is N/A in a ``docs``-lane pipeline (declared, as ``docs.diagrams_current``
+reads it), when no source changed, when nothing changed, and when
+``docs.assess.checks`` leaves out ``areas``. A file in no area is not asked. An
+unestablished changed set fails as it does for ``docs.updated``, and so do
+areas that cannot be derived when a touched file is left unplaced, because
+an unanswerable question is not a negative answer. With ``records.docs: store`` it reads the store's docs, as the assessment does; reading each leg
+from its own tree is ADR-014 increment 4. It warns in ``loose`` and
+``standard`` and blocks in ``strict`` (ruling 1); ``enforcement.rules`` sets it
+per project.
+
+.. mermaid::
+
+   graph LR
+       LAND["landing entry (docs.onboarding: incremental)"] --> RULE["docs.area_documented"]
+       RULE --> CS["_changed_set: source files"]
+       RULE --> ASSESS["domains/docs.assess on the session's tree"]
+       CS --> OWN["owning_area: file to source area"]
+       ASSESS --> OWN
+       OWN --> V{"area named?"}
+       V -- "yes" --> OK["not asked"]
+       V -- "no" --> OWED["owed: area and doc to write"]
+
+**Built (:need:`ADR-018 <DEC_ADR_018>` D5, D6, D10, increment 3).** Two rules
+join the landing state's entry set of every lane, after ``docs.updated`` and
+``docs.diagrams_current`` (``DOCS_FIRST_GATES``): ``docs.builds_strict`` and
+``docs.needs_traceable``. Neither runs a command. Both first decide whether
+they apply:
+
+- **N/A** while ``docs.needs.state`` is ``migrating`` and ``docs.format`` is not
+  ``sphinx``, saying so (D10): a project still on Markdown docs is not built
+  by a gate it has no environment for (invariant's own, until increment 7). N/A
+  when nothing changed, and when the change touches neither a file under the
+  docs project's source directory (in the session's tree) nor the ``docs.needs``
+  block of the repository's manifest (compared as parsed YAML against the
+  base; a base that cannot be read counts as a change). A migrating project
+  with no docs project is N/A; an enforced one fails, naming
+  ``docs.needs.srcdir``.
+- **Not established** (a failure, never N/A) when the changed set cannot be
+  read, as for ``docs.updated``, and for a docs project in a store
+  (``records.docs: store``), which only ADR-014 D9's store leg can see.
+
+Where they apply, both read the record ``invariant docs build`` wrote for the
+**digest of the source tree as it stands** (core/needs, ``tree_digest``). None,
+or only one for an older digest, fails, naming ``invariant docs build``.
+``docs.builds_strict`` passes on a green record and otherwise names each
+warning by file, line and type (``docs/backlog.rst:9 [docutils] ...``), twenty
+at most, then the count. ``docs.needs_traceable`` needs a green record and
+reads its ``needs.json``: every need's directive is declared in
+``docs.needs.types`` and its id carries its type's prefix, every decision's
+status is one of ``docs.needs.decision_statuses``, and every ``require_links``
+rule holds, each violation named by need, file and line; an external need is
+held to nothing, and a role with no needs is not a failure.
+
+Both are ``warn`` in every profile. An enforced project's load raises both to
+``block`` (manifest.md), so the same toy project warns while migrating on
+``sphinx`` and blocks when enforced, and since increment 5 no level lowers
+them again (ruling 19's floor, below).
+
+**Built (:need:`ADR-018 <DEC_ADR_018>` D8, D9, D10, increment 5).** Four more
+rules, none of which runs a command:
+
+- **``docs.design_home``**, a pre-tool-use rule on the edit tools. A write to a
+  refused home for design is refused, naming ``invariant docs decision new``
+  and the docs project's pages: a path under ``docs.needs.refused_paths`` (null:
+  ``docs/adr/**``, ``**/ADR-*.md``, ``**/adr-*.md``), or any Markdown file under
+  ``paths.docs`` or ``<srcdir>/decisions/``. A user guide elsewhere, a report
+  under ``paths.reports``, memory, and the generated files invariant declares
+  (the checklist, the instruction files) are written freely.
+- **``items.decisions_linked``**, at the hook on what an edit tool writes into
+  ``items.path`` or ``items.closed_path``, in ``domains/workitem`` on what an
+  ``invariant item`` write adds, and at the landing entry over the lines the
+  session added to those stores. Every need id it names with a ``decision``,
+  ``requirement``, ``ui`` or ``rule`` type's prefix must be held by the recorded
+  build of the tree, or else by the last build recorded; with none recorded,
+  it fails naming ``invariant docs build``.
+- **``docs.decisions_recorded``**, at the landing entry: each entry of ``session decisions`` that is still a draft fails, naming ``docs decision new`` and
+  ``session decisions resolve <n>``, and so does each declared id, or decision
+  id the plan's deliverables or the session's commit messages cite, that the
+  green record of the tree as it stands does not hold. N/A with no session
+  and with nothing declared or cited.
+- **``docs.mandate_kept``**, at the landing entry: a change moving
+  ``docs.needs.state`` in the repository's manifest from ``enforced`` at the
+  session's base to anything else (an absent key is ``migrating``) fails, and
+  passes only with ``pipeline advance --force --reason``. Any other change
+  passes, checked, rather than skipping: a block-level skip on every landing
+  of every migrating project would be news that is not news. N/A only with no
+  base or no manifest there to compare.
+
+The first three warn in every profile and an enforced load raises them to
+``block`` with the two build rules. ``docs.mandate_kept`` blocks in every
+profile. Ruling 19's floor holds the five in an enforced project, and
+``docs.mandate_kept`` in every project, at ``block``: a lower level is refused at
+load (manifest.md), so the reasoned routes are the only ones left:
+``invariant override`` at the hook, ``--force --reason`` at the landing, and
+``standdown``. The same toy project migrating warns on each of them.
+
+.. mermaid::
+
+   graph LR
+       EDIT["edit tool call"] --> HOME["docs.design_home: refused_paths, Markdown under paths.docs or decisions/"]
+       EDIT --> LINK["items.decisions_linked: ids in what it writes to an items store"]
+       ITEM["invariant item new, transition, residue"] --> LINK
+       LINK --> HELD["held: the tree's recorded build, else the last one"]
+       LAND2["landing entry, every lane"] --> LINK
+       LAND2 --> REC2["docs.decisions_recorded: session decisions, plan and commit ids"]
+       LAND2 --> KEPT["docs.mandate_kept: docs.needs.state at base vs tree"]
+       REC2 --> GREEN["the green record of the tree as it stands"]
+       REC2 -- "a draft" --> DRAFT["fail: docs decision new, session decisions resolve"]
+       KEPT -- "enforced to anything else" --> FORCE["fail: --force --reason only"]
+
+.. mermaid::
+
+   graph LR
+       LAND["landing entry, every lane"] --> STRICT["docs.builds_strict"]
+       LAND --> TRACE["docs.needs_traceable"]
+       STRICT --> APPLY{"sphinx or enforced, and srcdir or docs.needs touched?"}
+       TRACE --> APPLY
+       APPLY -- "no" --> NA["N/A, saying why"]
+       APPLY -- "yes" --> DIGEST["tree_digest of the session's srcdir"]
+       DIGEST --> REC["record for the digest (invariant docs build)"]
+       REC -- "none" --> OWED["fail: invariant docs build"]
+       REC -- "red" --> RED["builds_strict: each file, line, type"]
+       REC -- "green" --> JSON["needs_traceable: needs.json against types, links, statuses"]
+
+A note on ``docs``, because the reasoning generalises. A documentation-only
+change run through ``tdd`` blocks on three gates it cannot satisfy in principle —
+no implementation means no test could have failed first, no code means nothing
+to measure, and a change adding no component cannot honestly update a diagram —
+and none can be acknowledged, because they block. ``advance --force`` was the
+only route, and a tool that teaches ``--force`` as routine has spent the thing it
+exists for.
+
+Applicability is **declared, not inferred**. A caller choosing a methodology is
+making a claim that can be wrong and can be reviewed; a rule reading the diff's
+file extensions would be guessing, and would guess wrong on the change that adds
+a doc and a schema together. Privacy still blocks and the docs are still read
+and updated — only the diagram gate steps aside, and only for a pipeline that
+has declared there is no structure to draw.
+
+The record's lock
+~~~~~~~~~~~~~~~~~
+
+One session is many writers, so every read-modify-write of ``pipelines/<sid>.json``
+holds the store's lock across its load and its save (BUG_107). The writers:
+``start``, ``acknowledge``, ``advance``, ``record_docs_read``, ``record_agent_run``,
+``record_verdicts``, ``stamp_verdict_agent``, ``record_audit``, ``record_coverage``,
+``_record_test_run`` (``run_tests`` and ``run_coverage`` reach it) and ``run_coverage``'s
+own ``coverage_run`` write. A test lists them and scans the domain for a writer it
+does not list. Reads take no lock, because a write is atomic.
+
+- **Nothing slow runs under it.** A test run, a coverage run, a gate evaluation,
+  a usage reading and the ruleset pin all happen before the lock is taken. It is
+  held for one load, one mutation and one save, milliseconds on a normal record,
+  so a hook is never queued behind somebody's suite.
+- **A write that changes nothing takes no lock.** ``record_docs_read``,
+  ``record_agent_run``, ``stamp_verdict_agent`` and ``record_audit`` go through
+  ``_change``, which first asks a plain read. An agent already on the record is the
+  usual answer on every tool call a subagent makes, and it writes nothing, waits
+  for nothing and creates no lock file. Anything else is decided again from a
+  read under the lock.
+- **``record_verdicts`` checks the state under the lock**, so "the pipeline moved
+  after the verdicts were checked" and the append are one step.
+- **``advance`` evaluates outside the lock and commits only what it judged.**
+  Gates can run git and read the tree, so they cannot sit under a lock every hook
+  waits on. The price is that a verdict answers about the record as it stood.
+
+.. mermaid::
+
+   sequenceDiagram
+       participant A as advance
+       participant R as record
+       participant G as gates
+       loop at most ADVANCE_ATTEMPTS
+           A->>R: read, no lock (seen)
+           A->>G: edge and gates, no lock
+           G-->>A: verdicts (a block refuses here)
+           A->>R: take the lock, read again
+           alt the record equals seen, audit aside
+               A->>R: history row, state, save, release
+           else anything changed
+               A->>R: release, decide again from the top
+           end
+       end
+       A-->>A: still moving: refuse, nothing written
+
+Any change a gate could read sends it round, not only a change of state: a red
+run landing during the evaluation is what a stale green verdict must not pass
+over, and evidence landing during it survives, because the transition is applied
+to the re-read record. The audit record alone is left out of the comparison,
+since ``RuleContext`` removes it from what every gate reads, and it lands on a
+subagent's first call, so it would otherwise cost an evaluation for nothing. A
+gate is a read, and none runs a suite, so a second evaluation costs only the
+time. If the state moved, the edge is decided again from the new state, so a
+stale advance refuses rather than walking backwards. A record still changing
+after the last attempt is refused as a ``StateError`` naming the retry; nothing is
+recorded. Each pass takes as long as the gates do, several seconds here, so a
+parallel agent making a new write in each of the five can cause that refusal: a
+new file read is such a write, because ``docs_read`` keeps every path. Run it again
+once that agent has stopped.
+
+**When the lock cannot be had.** A command waits the store's 10 seconds, and a
+hook waits ``HOOK_LOCK_SECONDS`` (2 seconds), because one tool call can reach four
+writes and the host cancels a hook at ``HOOK_TIMEOUT_SECONDS`` (15 seconds). The
+wait belongs to ``PipelineDomain``, and ``invariant hook`` sets it through ``Context``,
+across a crossing into another project too. The registry's wait is unchanged.
+
++-------------------------+-----------------------+----------------------+
+| Writer                  | Who calls it          | On a timeout         |
++=========================+=======================+======================+
+| ``advance``, ``start``, | A command             | Exit 3 and the       |
+| ``acknowledge``,        |                       | store's message; the |
+| ``record_verdicts``     |                       | record is untouched; |
+|                         |                       | run it again         |
++-------------------------+-----------------------+----------------------+
+| ``_record_test_run``,   | ``pipeline test``,    | The same. The run    |
+| ``record_coverage``,    | ``pipeline coverage`` | happened and is not  |
+| ``coverage_run``        |                       | on the record, so    |
+|                         |                       | the gate reads what  |
+|                         |                       | it read before; run  |
+|                         |                       | it again             |
++-------------------------+-----------------------+----------------------+
+| ``record_docs_read``    | Hook                  | Absorbed. Fails      |
+|                         |                       | closed: the docs     |
+|                         |                       | gate blocks until    |
+|                         |                       | the doc is read      |
+|                         |                       | again                |
++-------------------------+-----------------------+----------------------+
+| ``record_agent_run``    | Hook                  | Absorbed. Fails      |
+|                         |                       | closed: the agent's  |
+|                         |                       | next call records    |
+|                         |                       | it, and a dispatch   |
+|                         |                       | re-records on the    |
+|                         |                       | next dispatch        |
++-------------------------+-----------------------+----------------------+
+| ``stamp_verdict_agent`` | Hook                  | Absorbed. The stamp  |
+|                         |                       | is lost for good,    |
+|                         |                       | and it is audit      |
+|                         |                       | only: no gate reads  |
+|                         |                       | it                   |
++-------------------------+-----------------------+----------------------+
+| ``record_audit``        | Hook                  | Absorbed. A first    |
+|                         |                       | act is asked again   |
+|                         |                       | on the run's next    |
+|                         |                       | call, because the    |
+|                         |                       | run is still unread; |
+|                         |                       | a dispatch's         |
+|                         |                       | requested model is   |
+|                         |                       | lost. No gate reads  |
+|                         |                       | it                   |
++-------------------------+-----------------------+----------------------+
+
+The hook's answer is the same in every case. A failure to open or take the lock
+is a ``StateError`` like the timeout, so the hook's existing ``except InvariantError``
+absorbs it. The doctor probe's ``InertStore`` takes no lock and creates no lock file.
+
+A malformed field reads as empty to a writer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A writer that adds to an evidence field reads it first, and the field may hold the
+wrong shape. So ``agents_run``, ``docs_read``, ``test_runs``, ``verdicts``,
+``guidelines_landings``, ``agents_run_how`` and ``acknowledged`` go through
+``_evidence_list`` or ``_evidence_mapping``: anything but the right shape reads as
+empty and is replaced (ADR-012 A7 increment 4). The fact the caller came to record
+is what counts. A raise would lose it with the save, and a hook would still exit
+0, so a gate would answer differently at the landing with nothing said in between.
+
+- **``stamp_verdict_agent``** finds nothing to stamp in a malformed ``verdicts`` and
+  leaves it as it is.
+- **``record_audit``** records nothing on a malformed audit and leaves it as it is,
+  since no gate waits for that record.
+- **``record_coverage`` and ``run_coverage``** replace their fields whole without
+  reading them.
+- **Readers are another matter.** A rule that raises on a malformed field fails
+  loudly through ``evaluate``. ``apply_acknowledgements`` has no such net, so it checks
+  the shape itself: an ``acknowledged`` that is not a mapping acknowledges nothing,
+  and the verdicts come back as they were.
+
+A proof is an outcome: ``bugfix``'s ``reproduced``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> triaging
+       triaging --> reproducing
+       reproducing --> fixing: test.new_test_fails
+       reproducing --> reproduced: test.new_test_fails, privacy.clean
+       reproducing --> not_reproducible
+       fixing --> verifying: test.all_pass
+       verifying --> committed: landing gates
+       verifying --> fixing
+       reproduced --> [*]
+       not_reproducible --> [*]
+       committed --> [*]
+
+(``abandoned`` is reachable from every non-terminal state and omitted.)
+
+``reproducing`` has stopping authority, and the ``bug-reproducer`` role uses it:
+it proves the bug, commits the red test wrapped in a strict expected-failure
+marker, and never fixes. Until BUG_066 the only terminals reachable from there
+without fixing were ``not_reproducible`` and ``abandoned`` — both false about a
+proof that fired — so ``pipeline.complete`` refused the session and its proof
+could not reach the base branch until its fix did. ``reproduced`` is that
+outcome: terminal, reached from ``reproducing`` only, priced at the recorded
+red run and a clean privacy scan. It deliberately does not carry the
+``landing`` role, whose docs and agent gates ask for a diagram a test-only
+commit cannot honestly change and for a design and review this outcome does
+not claim (ADR-006 D2). The fixer starts a fresh pipeline later and records
+red against the proof, which is then on the base branch (D3).
+
+The proof also has to read as red. A strict expected failure that fails exits
+clean, so on exit status alone the reproducer's run recorded as a pass. The
+recorder behind ``pipeline test`` now reads it as a counted failure — in the
+machine's ``red_phase`` only, for a run that named a ``--selector``, when the
+adapter confirms every expected-failure marker in the selected files is
+strict. The record keeps its real ``exit_code`` and says ``read_as_red: true``.
+Every other phase records the exit status, because in a green run a strict
+expected failure still failing is the tripwire holding, not a failure. Only
+the Python adapter can confirm strictness, from a literal ``strict=True`` in the
+source, since pytest's output prints strict and non-strict expected failures
+identically; the other adapters answer "cannot tell", and in those ecosystems
+the red run is recorded with the wrapper off (ADR-006 D4–D6).
+
+Agent-role gates
+~~~~~~~~~~~~~~~~
+
+A second pair rides the same injection, and **both hang on the landing
+state's entry** — ``agents.review_agent_ran`` and, despite its name,
+``agents.design_agent_ran``. Neither guards the state it is named after, and
+that is two decisions rather than one: where the design gate can be satisfied
+at all (ADR-003 D2), and which EDGES a gate ought to fire on (BUG_037). The
+second bullet below argues both, including the history — these were the review
+state's exit gates until BUG_037 moved them, and the sentence you are reading
+said so for longer than it was true. They read the subagent invocations the
+host recorded as pipeline evidence, keyed by ``agents.roles.<role>`` in the
+manifest.
+
+They exist because installing an agent and using one are different events, and
+only the second changes any outcome. A project can carry four correctly
+installed agents and never dispatch one.
+
+Six properties, each deliberate:
+
+- **The design gate applies only where a design state exists.** Both gates
+  hang on landing, but a machine receives ``agents.design_agent_ran`` only if it
+  declares a ``design``-role state; ``agents.review_agent_ran`` needs only the
+  landing state it rides. ``chore`` declares no design state, so it carries the
+  review-agent gate alone — the same boundary the read gate has always had.
+  When the design gate lived on the design state that boundary held by
+  construction; moving it to landing silently widened it to every machine, and
+  a ``LICENSE``-only chore needed ``--force`` to land (BUG_064, ADR-003 D2
+  amendment). The decision is made at injection, not by the rule answering
+  "not applicable", so ``invariant pipeline gates`` does not list the gate on a
+  machine that cannot owe it. Shipped result: ``tdd``, ``bugfix``, ``spec-first``
+  and ``docs`` carry both; ``chore`` carries the review-agent gate; ``none`` carries
+  neither.
+
+- **Two events, not one: the dispatch and the actor.** A dispatch is observed
+  from the *parent's* tool call. An agent that starts its own session and
+  pipeline has neither at that moment, so the dispatch has no destination and
+  no better lookup invents one — the agent that *created* a pipeline could not
+  be evidence for it (BUG_028). The actor can be observed instead: Claude Code
+  stamps the acting agent's type onto every hook payload, including the ones
+  the subagent's own tool calls raise, so a ``feature-architect`` that runs
+  ``pipeline start`` and then writes an ADR records itself in the pipeline it
+  made. Both land in ``agents_run``; ``agents_run_how`` keeps them apart, because
+  ``dispatch`` proves somebody asked for the agent and ``actor`` proves the agent
+  worked here, and only the second answers "did the design happen in this
+  pipeline". A host that cannot name the actor omits the key and loses that
+  route only.
+
+- **The design gate does not guard the design state.** It cannot: the host
+  records a dispatch when the subagent *returns*, so a design agent driving its
+  own pipeline can never have its own dispatch on record before it advances out
+  of designing. Placed there the gate was unsatisfiable for the one actor it
+  names, and ``--force`` was the only route past it. The landing edge is the
+  earliest boundary a *different* actor drives, which is what makes the
+  evidence available. The cost — the gate guards landing rather than leaving
+  design — is accepted in ADR-003 D2. Contrast ``docs.read_architecture``, which
+  stays on the design state's exit because a read is recorded the moment it
+  happens, while the agent is still running.
+
+  The actor route weakens this premise and is recorded as doing so, rather
+  than quietly acted on: an actor reading IS available while the agent is still
+  running, exactly like a docs read, so the reason the gate sits at the review
+  boundary no longer holds for a design agent that drives its own pipeline. It
+  still holds for one dispatched into a pipeline it does not act in. Moving the
+  gate is an ADR-003 D2 decision and has not been made here; what has changed
+  is that it is now a choice rather than a constraint.
+
+  Where these gates HANG has since changed, and it is not that decision. They
+  were the review state's exit gates and are now the landing state's entry
+  gates. On ``reviewing → committed`` — the edge ADR-003 D2 is about — the moment
+  and the obligation are identical; what stopped is their firing on
+  ``reviewing → red`` and ``reviewing → refactor``, which are not landing anything
+  (BUG_037). D2's own sentence is "the gate guards landing rather than leaving
+  design"; this is that sentence made true of the machine as well as of the
+  prose.
+
+- **Advisory in every shipped profile, including ``strict``.** The engine can
+  prove an agent *ran*; it cannot prove one was *needed*. A one-line fix made
+  inline is a legitimate exception, and a gate that legitimate work has to
+  override routinely is what teaches people to reach for ``--force`` on the gates
+  that do matter.
+
+- **An unconfigured role skips rather than passes.** A project with no review
+  agent should see the gate report "not applicable", not report green. Those
+  are different facts and ``Verdict.skipped`` keeps them apart.
+
+- **A wrong agent does not satisfy a role.** The failure names what did run, so
+  "I dispatched the curator" reads as the miss it is rather than as silence.
+
+Warned before the dispatch, not only after it
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A dispatch made while the session has no pipeline is recorded nowhere, because
+there is no pipeline for it to be evidence in. The PostToolUse notice ("was
+NOT recorded as evidence: session … has no pipeline running") says so, but
+only after the agent has done its work. For a gated role the cost is a full
+re-dispatch: a pipeline started later finds its ``agents.*_ran`` gate unmet.
+``agents.gated_dispatch_has_pipeline`` says it at PreToolUse instead, when
+starting the pipeline first is still cheap (IDEA_020).
+
+.. mermaid::
+
+   sequenceDiagram
+       participant H as Claude Code
+       participant R as rules
+       participant P as pipeline
+       H->>R: PreToolUse (Agent/Task, subagent_type)
+       R->>R: gated_roles_of(agent) over agents.roles
+       alt gated role, session bound, no pipeline
+           R-->>H: [warn] … will NOT count as evidence — try: pipeline start --methodology <m>
+       else otherwise
+           R-->>H: silent
+       end
+       Note over H: the dispatch runs either way
+       H->>P: PostToolUse: record_agent_run (unchanged)
+
+- **A rule, not a branch in the host.** Bound to ``pre-tool-use`` at ``warn`` in
+  every shipped profile, so ``_pre_tool_use`` delivers it through the same
+  ``v.warns`` path as any other advisory, and a project can retune it in its
+  manifest. A hard-coded host branch would have been one fewer contract key,
+  but nobody could turn it down, it could not be acknowledged or stood down,
+  and it would sit beside the gates it describes instead of in the same
+  registry. Never blocking is a decision, not a default: the dispatch is
+  legitimate, and the engine cannot tell that the agent will not start the
+  pipeline itself.
+- **One reading of the role mapping.** The rule asks ``gated_roles_of``, which
+  reads ``agents.roles.<role>`` through the helper the two gates read, and
+  ``GATED_ROLES`` names which role each gate reads. An agent in an ungated role
+  (the backlog curator) gets nothing. A role whose gate is ``off`` gets nothing
+  either, because that gate asks for no evidence.
+- **One answer to "which agent is this dispatch".** ``AGENT_TOOLS`` and
+  ``dispatched_agent`` live in ``core/rules``, and the PostToolUse recording uses
+  the same two. Reading ``tool_input.subagent_type`` from a rule widened the
+  normalised payload contract (see ``overview.md``, ``hosts/``).
+- **Same conditions as the PostToolUse notice.** No session bound to the call
+  means no warning: nobody is working under the gates. "No pipeline" is what
+  ``record_agent_run`` calls ``NO_PIPELINE``: no current pipeline record. A
+  dispatch whose brief names another live session's worktree is judged
+  against that session, because the rule context resolves through
+  ``resolution_for_payload``. A dispatch from a host rooted in another
+  repository is judged in the project its brief names, when the brief places
+  it there (ADR-011). The hook re-roots the whole call before this rule runs,
+  so the rule needed no change. An unplaced dispatch stays in the host's
+  project and resolves as it always did.
+- **Quiet under a stand-down, like any other rule.** The open question was
+  whether an advisory should still speak. It does not. A stand-down that holds
+  now also holds over the pipeline started next, so the gate the warning is
+  about would be stood down too.
+- **Session-recorded runs are not carried over.** Evidence is per-pipeline on
+  purpose. The warning makes the loss visible early; it does not change it.
+
+Domain: work item
+-----------------
+
+.. comp:: The idea machine
+   :id: COMP_MACHINE_IDEA
+   :part_of: COMP_DOMAINS_WORKITEM
+
+   ``data/machines/idea.yaml``: an idea's statuses and the transitions between
+   them.
+
+.. comp:: The bug machine
+   :id: COMP_MACHINE_BUG
+   :part_of: COMP_DOMAINS_WORKITEM
+
+   ``data/machines/bug.yaml``: a bug's statuses, ``filed`` to ``reproduced`` to
+   ``fixed`` and the ruled transitions, with ``filed → reproduced`` kept for
+   ``bug-reproducer``.
+
+
+Two item types with distinct lifecycles.
+
+.. mermaid::
+
+   stateDiagram-v2
+       direction LR
+       state "idea" as I {
+           [*] --> proposed
+           proposed --> accepted
+           proposed --> dropped
+           accepted --> in_progress
+           in_progress --> done
+       }
+       state "bug" as B {
+           [*] --> filed
+           filed --> reproduced: red test, or a ruling (red with the fix reverted)
+           filed --> not_reproducible
+           filed --> wont_fix
+           reproduced --> fixed: item.bug_reproduced_before_fix
+           reproduced --> not_reproducible
+           reproduced --> wont_fix
+           fixed --> verified
+           fixed --> reproduced
+           verified --> closed: item.residue_matches_status
+           verified --> reproduced
+           verified --> wont_fix
+       }
+
+The ``filed → reproduced`` edge is load-bearing: a bug may not enter ``fixed``
+without having passed through ``reproduced``, because a fix for an unreproduced
+defect proves nothing. The repro-proving agent owns that transition and is the
+only actor allowed to make it.
+
+An already-fixed bug closes through a ruling, not a new edge
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``bug-reproducer`` has a fourth verdict besides "red", "blind" and "device
+only": ALREADY-FIXED — the test passes on the base branch, goes red with a
+named commit reverted, and that commit is the fix. The only engine route from
+``filed`` used to be ``not_reproducible``, which records "we tried and it did not
+fire" about a defect that was real and is fixed, so a consuming project
+hand-edited the status instead and kept no record of the ruling at all
+(IDEA_019).
+
+``invariant item transition <id> fixed --ruling "<who, date>" --evidence <commit>`` records it, and **the bug machine is unchanged**. Two shapes were
+weighed:
+
++-------------------------------------+----------------------+--------------------------------+
+|                                     | A ``filed → fixed``  | One ruled command recording    |
+|                                     | edge, legal with a   | ``filed → reproduced → fixed`` |
+|                                     | ruling               |                                |
++=====================================+======================+================================+
+| The invariant above                 | Broken in its        | Kept: ``fixed`` is still       |
+|                                     | literal form; the    | reached only through           |
+|                                     | gate would have to   | ``reproduced``                 |
+|                                     | learn an exception   |                                |
++-------------------------------------+----------------------+--------------------------------+
+| ``item.bug_reproduced_before_fix``, | Both need a second   | Both read the history as they  |
+| ``item.history_matches_status``     | accepted shape       | always have                    |
++-------------------------------------+----------------------+--------------------------------+
+| What the reproduction row claims    | —                    | A reproduction on the pre-fix  |
+|                                     |                      | tree, which is exactly what a  |
+|                                     |                      | test red with the fix reverted |
+|                                     |                      | is                             |
++-------------------------------------+----------------------+--------------------------------+
+
+The second is chosen because the invariant's reason is satisfied rather than
+waived: the reason "a fix for an unreproduced defect proves nothing" is about
+evidence, and a test that goes red with the fix reverted IS that evidence. The
+row does not pretend it was walked: it carries ``intermediate: true`` and
+``item show`` prints "recorded on the ruling, not walked".
+
+What the command does, in order:
+
+1. ``--ruling`` and ``--evidence`` come together or not at all; either alone is
+   refused, naming the one that is missing. The evidence is resolved to a full
+   hash through ``core/git.resolve_commit``, and a name that is no commit here is
+   refused — a ruling resting on a string nothing can check is not provenance.
+2. Where the machine has no direct edge, the route is the **one** state both
+   edges reach (``_one_step_between``), read from the machine rather than named
+   in code. None, or two, and the edge is refused as before — ``filed → verified`` is two unwalked states, and a ruling vouches for one. Without a
+   ruling, the refusal names the ruled route instead of leaving ``--force`` as
+   the only visible way past it.
+3. Each step is gated as if it were walked — the exit gates of the state left
+   and the entry gates of the state entered, with the item as the previous
+   step left it — and **nothing is written unless every step passes**. Then
+   one save writes both rows.
+4. Every row the command writes carries ``ruling`` and ``evidence``; a ruling on
+   an edge that does exist (``reproduced → fixed``) annotates that one row.
+
+Who may rule is recorded, not enforced. The ruling text names the person and
+the date, and ``bug-reproducer`` still never runs the command itself: it reports
+ALREADY-FIXED with the commit and names this command, and the user runs it. A
+verdict without the revert-red check — the test passed, the commit was found
+by ``git log`` — is not a reproduction, and its route stays ``not_reproducible``.
+
+**Body text.** A transition writes status and history and never rewrites the
+body, on every backend — pinned by a round-trip test per backend on this
+path, including the ``sphinx_needs`` fixture BUG_065 was fixed against. On
+``sphinx_needs`` the rows, ruling and evidence included, are kept in the
+entry's ``.. invariant-history:`` comment block, which is not body (BUG_073;
+manifest.md, "The ``sphinx_needs`` round trip").
+
+**Retirement is deferred.** Moving a closed entry into a backend-declared
+closed store in the same transition is the other half of IDEA_019. Its
+manifest key now exists: ``items.closed_path``, unset by default so the markdown
+backend grows no archive, landed with BUG_074 (c), and today it is READ — id
+minting and ``item new``'s explicit-id check both count the ids retired there
+(manifest.md, "The ids a store has spent, and the closed store"). No
+transition writes it; ``item migrate --closed-path`` (ADR-018 D14) fills a new
+one, once, with the items in a terminal state, reading each item's machine
+for which states those are. Retiring on close stays deferred because none of what would make it
+safe exists yet: a move touches two files, so it is not one atomic outcome
+without a recovery story for a write that lands in one and not the other; the
+closed file has its own layout, and placing an entry there is the placement
+question BUG_074 (b) answered for the open store only.
+
+A separate field records *residue* — what remains owed after the status says
+done, such as a device soak that has not been run. Status and residue are
+distinct on purpose: a status of ``fixed`` with an unfulfilled residue is a
+normal, honest state, and collapsing the two produces documents that claim
+more than was proven. ``item.residue_matches_status`` guards the closing state
+on **entry** in both machines — ``bug.closed`` and ``idea.done``. Entry rather
+than exit because both are terminal: nothing ever leaves them, so an exit gate
+there is never evaluated and an entry could close owing three legs with the
+gate named to prevent exactly that staying silent.
+
+The store the gates cannot sit in front of
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Work items are data, and ``items.exempt`` holds them out of session isolation —
+deliberately: every session touches the backlog, and routing it through a
+branch produces conflicts with no review value. The cost is that the FSM's
+invariants bind only callers who go through the CLI. Writing the file directly
+never asks the machine, so it is never refused, and nothing records that
+anything was skipped. Seven bugs in this library's own backlog reached ``fixed``
+with an empty history exactly that way.
+
+``item.history_matches_status`` covers the gap from the other side. It is bound
+to the ``stop`` event rather than to any transition — there is no transition to
+attach it to — and at turn end it re-derives each item's status by walking its
+recorded history through that type's machine, reporting the ones that
+disagree: a status no history explains, a history that ends somewhere else, an
+edge the machine does not have. A ``forced`` entry is not drift; an override
+went through the machine, was refused, and recorded a written reason, so
+flagging it would report the audit trail working.
+
+This is the same shape as the memory domain's index check below — not "you may
+not do this", but "this store no longer says what it means".
+
+Domain: memory
+--------------
+
+Not an FSM. A store with invariants and repair operations.
+
++-----------------------+-----------------------+---------------------+
+| Invariant             | Check                 | Repair              |
++=======================+=======================+=====================+
+| Every file parses     | Valid frontmatter,    | report only         |
+|                       | known ``type``        |                     |
++-----------------------+-----------------------+---------------------+
+| The index matches the | Every file has an     | regenerate index    |
+| directory             | index line; every     |                     |
+|                       | line resolves         |                     |
++-----------------------+-----------------------+---------------------+
+| No dead links         | Every ``[[link]]``    | report only         |
+|                       | resolves, or is       |                     |
+|                       | flagged as            |                     |
+|                       | intentional-forward   |                     |
++-----------------------+-----------------------+---------------------+
+| No duplicates         | No two files cover    | report candidates   |
+|                       | the same fact         |                     |
++-----------------------+-----------------------+---------------------+
+| No personal data      | Privacy patterns find | report with offsets |
+|                       | nothing               |                     |
++-----------------------+-----------------------+---------------------+
+
+The index is a **generated artifact** (D-memory, per interview): regenerating
+it is a command, not an editing task. A hand-maintained index over hundreds of
+files drifts, and the drift is silent.
+
+The first four rows are the four ``memory.*`` rules, and all four are bound to
+the ``stop`` event and to nothing else. They are not pipeline gates on purpose:
+memory hygiene is a property of a knowledge store every session shares, not of
+the change under review, so holding a merge hostage to a stale index in a file
+the branch never touched would be a gate answering about someone else's work.
+Turn end is when the drift is worth naming and cheap to fix. They short-circuit
+to "not applicable" where ``memory.managed`` is false, so a project that does not
+use the domain hears nothing.
+
+Before they carried that binding they were reachable by no code path at all —
+graded by all three profiles, evaluated by none of them, which is an
+enforcement level reported for a control that never ran.
+
+Domain: stats
+-------------
+
+Not an FSM either. A store with invariants and repair operations, added by
+ADR-002.
+
++----------------------+----------------------+--------------------------+
+| Invariant            | Check                | Repair                   |
++======================+======================+==========================+
+| Every record parses  | Readable JSON with a | report only              |
+|                      | known shape          |                          |
++----------------------+----------------------+--------------------------+
+| Records match their  | Stored watermark     | ``stats refresh``        |
+| source               | equals the source's  |                          |
++----------------------+----------------------+--------------------------+
+| Nothing is silently  | A record whose       | ``stats archive``        |
+| lost                 | transcript is gone   |                          |
+|                      | is archived          |                          |
++----------------------+----------------------+--------------------------+
+| Every model is       | No model outside the | report only              |
+| priced               | price table          |                          |
++----------------------+----------------------+--------------------------+
+| The report matches   | Fingerprint in the   | ``stats report --write`` |
+| the store            | artifact equals the  |                          |
+|                      | store's              |                          |
++----------------------+----------------------+--------------------------+
+
+Selecting a record
+~~~~~~~~~~~~~~~~~~
+
+A record is addressed by an identifier — the host session's or the invariant
+session's — or by the invariant session's name, climbing the same ladder
+``SessionDomain.resolve_name`` climbs: full name, bare task slug, name prefix.
+It has to be the same ladder because it is the same question, and the
+precedence is written down once, in ``domains/session.name_rank``, which both
+callers read. The predicate beside it answers only *yes*, so a bare-slug match
+and a prefix match come back indistinguishable; a caller choosing between
+records needs the rung, not the answer.
+
+Two properties are decisions rather than shape.
+
+**A selector that matches several records refuses.** The rungs get narrower, so
+a tie inside one rung is a genuine tie, and the wider rung below it must not be
+allowed to break it. Taking the first hit would archive or render one session's
+telemetry under another's name — quietly, since every figure in the output
+would be internally consistent. The refusal lists the candidates by full name,
+which carries the id and so cannot be ambiguous.
+
+**The join is scanned, not indexed.** Records outlive the sessions that
+produced them, and a name is read off the record rather than off a live
+session, which is exactly why the ladder is available here at all.
+
+One ambiguity has no remedy and says so instead of offering one: several
+records carrying ONE name are one invariant session measured across several
+host sessions, and no selector this domain accepts separates them. It is
+unreachable today — ``_bindings`` joins the session's CURRENT binding only, so
+each session claims one record — and it becomes reachable the moment the
+earlier hosts recorded on ``Session.hosts`` are joined too. That join is filed
+as IDEA_007 rather than taken here: mapping every id in ``hosts`` to the session
+would hand ``_breakdown`` the same session id N times and report the session's
+whole spend against each of N records.
+
+What a transition records
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each recorded pipeline and session transition carries three fields beyond
+``{from, to, reason}``:
+
+- **``elapsed``** — seconds spent in the state just left.
+- **``usage``** — the cumulative token counts observed for that host session at
+  that moment: a **watermark**.
+- **``usage_host``** — the host session that watermark was counted against. The
+  machine's baseline carries the same pair (``usage_at_start``,
+  ``usage_at_start_host``).
+
+Per-state duration is ``elapsed`` directly. Per-state spend is the difference
+between consecutive watermarks, with the machine's own starting watermark
+(``usage_at_start``) as the earlier reading for the first state.
+
+A difference is only taken between two readings of the **same** counter. A
+forced rebind moves the binding mid-run, so the readings either side of it
+count two different transcripts; subtracting them is well-formed and measures
+nothing, and where the new transcript's total is the higher it comes out
+positive and looks exactly like a measurement. Recording which counter each
+reading came from is what makes that visible rather than plausible. Two
+*equal* readings are declined for the same reason in the other direction: they
+say nothing was written to the transcript in between, which is what a whole
+subagent run looks like from the parent's side, and never that the state was
+free.
+
+Neither is a clock time, so the privacy rule is satisfied by construction
+rather than by scrubbing. The anchor ``elapsed`` is measured against is
+*derived*, not stored — a pipeline's is ``started`` plus every ``elapsed`` since,
+and a session's is the heartbeat it already stamped — so no second timestamp
+was added to make this work.
+
+This is a better design than the timestamp it replaces and not only a
+compliant one. Attributing spend by comparing a response's timestamp against a
+transition's has a boundary problem: a response spanning a transition must be
+assigned to one side arbitrarily, and the arbitrariness is invisible in the
+output. A watermark has no boundary; a subtraction of two counts is exact.
+
+The cost is a **permanent asymmetry**. Every transition recorded before this
+existed has neither field and can never acquire one, because the information
+was not merely unstored — it was never observed. One entry missing ``elapsed``
+makes the whole machine's breakdown unavailable rather than partial, and the
+report says "no breakdown available" explicitly. Never a zero, and never a
+blank: a blank invites the reader to conclude the work was free.
+
+That sentence is reserved for that case. A machine that has not left a state
+yet, and a session that has never started a pipeline, also have no breakdown —
+and neither of them lost anything, so neither is told it predates the
+instrumentation. The report says which of the three it is, because a stated
+wrong cause is harder to catch than an absence: the reader has been given a
+reason and stops looking for one.
+
+Storing what was measured, not when
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A stats record holds durations and a bare date and no timestamp of any kind.
+The host's transcript timestamps are read at the boundary, turned into a wall
+duration, an active duration and a date, and discarded. The cache key is a
+content fingerprint rather than a modification time, for the same reason: an
+mtime is a stored clock time, and it answers the wrong question anyway — the
+cache asks whether the source changed, not when.
+
+Domain: sweep
+-------------
+
+Not an FSM either (IDEA_032 increment 3, ADR-010 D4, D7, D9). A sweep is one
+command, ``invariant sweep run``, that holds the gates a cadence moved off the
+per-change path: it runs the whole suite once and files what is new since the
+last sweep.
+
+.. mermaid::
+
+   sequenceDiagram
+       participant S as sweep run
+       participant G as git
+       participant P as pipeline seam
+       participant A as adapter
+       participant W as workitem
+       S->>G: main checkout? a branch? no tracked change?
+       S->>G: last committed record on this branch (ls-tree, show at HEAD)
+       S->>P: one run: commands.coverage, else commands.test
+       S->>A: failing_test_ids
+       S->>S: core/sweep diff: new, still broken, recovered, floor drops
+       loop each new red, at most 20
+           S->>P: commands.test_one alone: red again, or green (flaky)
+       end
+       S->>W: open items carrying sweep_key (non-terminal states)
+       S->>W: new bug per unclaimed key, with sweep_key and sweep_range
+       S->>S: write the record, privacy-scan it, the message and the items
+       S->>G: commit --only the record and the filed items
+
++----------------------------------+----------------------------------+
+| Invariant                        | How                              |
++==================================+==================================+
+| The commit range is true of a    | Refused outside the main         |
+| committed tree                   | checkout, on a detached HEAD, or |
+|                                  | with a tracked change; checked   |
+|                                  | before anything runs. The        |
+|                                  | sweep's own writes come after    |
+|                                  | the check, so they never count   |
+|                                  | against it                       |
++----------------------------------+----------------------------------+
+| A key is filed once              | Dedup against OPEN items (the    |
+|                                  | machine's non-terminal states,   |
+|                                  | so ``fixed`` and ``verified``    |
+|                                  | count); ``test:<id>`` and        |
+|                                  | ``flaky:<id>`` claim each other, |
+|                                  | so a hand-filed item is claimed  |
+|                                  | by adding ``sweep_key`` to its   |
+|                                  | frontmatter                      |
++----------------------------------+----------------------------------+
+| A flake is not a new red         | Each new red is re-run alone;    |
+|                                  | green alone is ``flaky:<id>``; a |
+|                                  | re-run that executed nothing is  |
+|                                  | not proof of green               |
++----------------------------------+----------------------------------+
+| A systemic red is one item       | More than 20 new reds files one  |
+|                                  | ``suite:red`` and no per-test    |
+|                                  | items                            |
++----------------------------------+----------------------------------+
+| The first sweep files nothing    | No record on the branch: the run |
+|                                  | is recorded as the baseline      |
++----------------------------------+----------------------------------+
+| A baseline is evidence           | Records are read from git at     |
+|                                  | ``HEAD``, never the working      |
+|                                  | tree; an uncommitted record is   |
+|                                  | never a baseline, and an         |
+|                                  | unreadable one is named and      |
+|                                  | skipped                          |
++----------------------------------+----------------------------------+
+| Two sweeps cannot double-file    | One lock under the state root,   |
+|                                  | taken without waiting; a second  |
+|                                  | sweep is refused                 |
++----------------------------------+----------------------------------+
+| Nothing measured, nothing        | A run that executed no tests, or |
+| recorded                         | a coverage run with no rows,     |
+|                                  | raises before any write          |
++----------------------------------+----------------------------------+
+
+A floor drop is a HELD file below the floor now that was not below it, or did
+not exist, at the last sweep. Both sides are judged by one policy,
+``core.rules.sweep_below_floor`` — the floor's own ``non_source``,
+``coverage_exclude`` and ``coverage_baseline`` ratchet — so a sweep and a change
+cannot disagree about which file is held. When the last sweep ran no coverage,
+files under the floor are reported and not filed: there is no previous figure
+to have dropped from. Recovered keys are reported and never closed; closing a
+bug goes through its own lifecycle.
+
+Freshness
+~~~~~~~~~
+
+``sweep.fresh`` (ADR-010 D6) reads the same committed records, at the session's
+BASE branch rather than ``HEAD`` — a session's own branch never carries a sweep,
+and a worktree cut before the latest sweep still sees it on its base — or at
+the checked-out branch when no session is bound. The last record is the
+highest ``seq`` on that branch; its age is today's UTC date minus its bare
+``ran_on``, in whole days. No record, a branch git cannot read, or a date that
+cannot be parsed warns; an age past ``cadence_days + grace_days`` warns naming
+the age and commit; otherwise the verdict is clean and still names the age.
+Nothing here is stored: the answer is recomputed from git on every
+evaluation, so a clone that has not pulled the base sees an older sweep and
+warns, which is the right answer for evidence it does not hold.
+
+The record
+~~~~~~~~~~
+
+One JSON file per sweep, ``<paths.sweeps>/<date>-<first 12 hex of head>.json``,
+committed by the sweep itself with the items it filed. Version 1 fields:
+``version``, ``seq`` (one more than the last on the branch), ``ran_on`` (bare UTC
+date), ``branch``, ``head`` and ``previous`` (the first 12 hex digits; ``previous`` null on
+a baseline), ``command`` (the manifest key, ``coverage`` or ``test``, never the
+resolved command, which names a bundle under the state root), ``executed``,
+``failed``, ``passed``, ``failing`` (test identities, null where the adapter cannot
+read them; flaky ones excluded), ``flaky``, ``files`` (``{project-relative path: pct}``; rows outside the project dropped), ``floor``, ``hazards`` (ids), ``filed``
+(``[{key, item}]``), ``still_broken`` (``[{key, item, status}]``) and ``recovered``
+(keys). ``passed`` is beside ``failed`` because an adapter that counts nothing
+reports ``None`` for a green run and a red one alike.
+
+No clock time, host, session, absolute path or full commit hash is in it, so
+it is privacy-clean by construction, and checked anyway: the engine scans the
+record, the commit message and the filed items with the project's own patterns
+before committing, because its commit is a subprocess no hook sees. A finding
+leaves all three uncommitted and exits 1, naming each by its project-relative
+path; the record is untracked, so it blocks nothing and is never read as a
+baseline.
+
+Every hash the sweep writes is short — ``head``, ``previous``, the file name, the
+commit message, and the ``sweep_range`` and commit-range line of each filed bug
+— because the opt-in ``device_ids`` pattern matches any forty hex digits, and a
+full hash there made the scan refuse every sweep on a project that enables it
+(BUG_090, ADR-010 D9's amendment). Records committed before that keep their
+full hashes and load unchanged under version 1. Nothing reads a recorded hash
+back through git and the last record is chosen by ``seq``, so the one place two
+spellings meet is a match on a head: ``core.sweep.same_commit`` compares by
+prefix in either direction, seven digits at least, a new sweep shortens the
+``previous`` it copies from an old record, and ``sweep show`` refuses a prefix
+that names more than one swept commit.
+
+Storage layout
+--------------
+
+::
+
+   <git-common-dir>/invariant/state/
+     registry.json           cross-session index
+     sessions/<sid>.json     one file per session
+     pipelines/<sid>.json    current + historical pipelines for a session
+     stats/<host-id>.json    one telemetry record per host session; derived and
+                             rebuildable, except where `stats archive` has
+                             promoted it to permanent
+     attention/<host-id>.json  one per host session: what it is waiting on, its
+                             pid, and how its last turn ended. Written by that
+                             host's hooks; read by the oracle (ADR-007 D5)
+     sweeps/<kind>.xcresult  the sweep's per-run result bundles, cleared before
+                             each use; never committed (ADR-010)
+     locks/registry.lock     advisory lock file
+     locks/<sid>.lock        one per pipeline record, held across its load and save
+     locks/sweep.lock        held for the whole of a `sweep run`, so two sweeps
+                             cannot file at once
+
+The sweep's records are the one exception to "runtime state is never
+committed", and they are not runtime state: they live in the declared store
+``paths.sweeps`` (default ``docs/sweeps``), are committed, and are read back from
+git rather than from disk (Domain: sweep, above).
+
+**Why the git common directory.** State has to be shared by every worktree of a
+repository. It cannot live under the project root, because each linked worktree
+*has* its own project root — a session created from the main checkout would
+then be invisible from the worktree it had just created, at exactly the moment
+it needs to be addressable. The git common directory is the one location every
+worktree resolves identically, and git already ignores it, so nothing has to be
+excluded by hand. ``paths.state`` overrides this for a project outside git or one
+that wants state somewhere specific.
+
+**Finding the current session.** An explicit ``--id`` wins, then
+``INVARIANT_SESSION_ID``; the two naming different sessions is refused
+(IDEA_042, cli.md "Conventions").
+Otherwise the session whose worktree contains the working directory does, with
+the deepest match winning so a nested worktree beats its parent. Failing that,
+a session is matched by where it was registered — without which a session that
+has not isolated yet, having no worktree, would be unreachable by the command
+that isolates it. Ambiguity there is reported with the candidates listed rather
+than guessed at.
+
+**Concurrency.** Every write is atomic: a temporary file in the same directory,
+then ``os.replace``, which is atomic on a single filesystem. So a reader never sees
+a half-written file and a plain read takes no lock. Atomicity does not protect a
+read-modify-write, and two kinds of file need more:
+
+- The **registry** is written by every session, so it is guarded by an advisory
+  lock (``flock``) held across its read-modify-write.
+- A **pipeline record** has one owner and many writers. Parallel hooks and the
+  session's own commands are separate processes, and while this paragraph said
+  an owner needed no lock they lost each other's evidence, and a stale save could
+  carry the state backwards (BUG_107). Every read-modify-write of the record now
+  holds ``locks/<sid>.lock`` across its load and its save, and nothing slower: no
+  gate, suite or transcript read runs under it. Domain: pipeline, "The record's
+  lock", says how.
+
+The **session record is still unlocked and still exposed.** It has the same
+shape of defect: ``SessionDomain._save`` writes back the whole record its caller
+loaded, from 18 call sites, many of them with a session loaded far up the stack
+and with gates evaluated in between. Taking a lock in those saves alone would not
+close it. So the fix is its own piece of work, and until it lands a parallel
+hook can lose a session's plan entry or declared file. The lock's name also has
+to change for it: a lock file is named for the document's stem, so
+``sessions/<sid>.json`` and ``pipelines/<sid>.json`` would share one, and ``flock``
+across two handles in one process waits out its timeout rather than nesting.
+
+Lock acquisition has a timeout, because a wedged lock must be visible; a holder
+that dies releases its lock with it. What the timeout costs depends on the
+caller. A command reports it as a real error, having written nothing. A hook
+waits less and absorbs it, losing that one write (Domain: pipeline).
+
+**The round trip, in both directions.** A record is a dataclass, and the two
+builds at either end of a document need not be the same one. Forward: unknown
+keys never reach the constructor and every field has a default, so a document
+written before a field existed loads with that field at its default. That is
+what makes a new field cost no migration, and it was designed and tested from
+the start. Backward: the keys a build does not declare are KEPT on the record
+and written back at the top level, so a build older than a field does not
+delete it. That half was not designed, and its absence was live — the editable
+install on ``PATH`` points at the main checkout, so while a feature branch adds
+fields every hook subprocess writes the record through a dataclass that lacks
+them, and a session's whole deliverable plan could be erased by a command that
+reported success (BUG_061).
+
+Both per-session documents carry the contract — ``sessions/<sid>.json`` and
+``pipelines/<sid>.json``, from one implementation in ``core/store``, because two
+copies of one rule is two chances for a build to honour half of it. The stats
+records deliberately do not: they are derived and rebuildable, so a key lost
+there is recovered by re-deriving it, and a session document has no such
+second source.
+
+Three properties of the preserved set, since a reader will ask:
+
+- **Preserved keys travel at the top level, not in a container.** They are
+  written back where the build that owns them will look, which is where they
+  were. Nesting them under a key of their own would be the same deletion one
+  indirection along, because no other build's loader reads that key. The
+  attribute they are held in — ``_extra`` — is reserved in the format and never
+  written: a leading underscore where every real field is public says
+  "structure, not data" to somebody reading the file by hand, and the loader
+  holds the name out of its own field match, so a document that carries a key
+  spelled that way round-trips as ordinary data rather than being expanded
+  into the record.
+- **A declared field always wins a collision.** The live attribute is what the
+  running code means; a preserved value is by definition one that build could
+  not interpret. The other polarity would discard the value the code had just
+  computed, which is this defect inverted and harder to see.
+- **It rescues nothing already on disk.** A build that predates the contract
+  has neither the fields nor the preservation, so this stops the NEXT
+  asymmetry rather than the one currently installed. The alternative — a
+  version stamp on the record and a refusal to write on downgrade — has the
+  same limitation and a worse failure: the older writer is usually a hook
+  subprocess, which cannot usefully refuse, since a hook that errors turns
+  every tool call in the repository into a failure and one that proceeds has
+  lost the data anyway.
+
+The registry is untouched by all of this, and deliberately so. Its per-session
+entry is a PROJECTION of four attributes — name, state, worktree, branch —
+rebuilt from the record on every write rather than round-tripped, so there is
+nothing there for an older build to drop.
+
+**Recovery.** Everything is JSON, hand-inspectable, and hand-fixable.
+``invariant state show`` prints it; ``invariant state repair`` reconciles the
+registry against the session files and against the actual worktrees on disk,
+which is what a stale registry entry from a crashed session needs.
+
+**Staleness.** A session file whose worktree no longer exists is stale. The
+registry records a heartbeat updated on each transition; ``repair`` treats an
+entry with no live worktree as abandoned rather than deleting it outright, so
+that evidence of what happened survives the cleanup.
+
+Attention and host liveness
+---------------------------
+
+The session record says where a session is in its lifecycle. It cannot say
+whether its host is sitting on a permission prompt right now, whether the last
+turn ended on a refusal, or whether the host is still alive. Those facts belong
+to a HOST session, which may have no invariant session at all. They change on
+every turn. The oracle reads them from a sidecar per host (IDEA_012, ADR-007
+D5):
+
+.. code:: json
+
+   {"host_session_id": "<id>", "pid": 4242,
+    "waiting": {"kind": "permission|question|idle", "message": "<raw>", "since": "<iso>"},
+    "blocked": {"rules": ["<rule id>"], "surface": "stop|cli", "since": "<iso>"},
+    "turn": "running|ended", "turn_since": "<iso>",
+    "ended": false,
+    "degraded": {"event": "<hook>", "error": "<type: message>", "since": "<iso>"},
+    "background": {"<task id>": {"kind": "agent|command", "since": "<iso>"}}}
+
+``background`` is the ledger of work the host's main turn started in the
+background and has not heard finish (BUG_094): a launch opens an entry
+under the id Claude Code gave the task, its task-notification closes it,
+and ``SessionEnd`` clears the lot. It holds at most 32 entries, oldest out.
+
+Every field may be ``null`` or absent. A record nobody has written means nothing
+is known about that host.
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **One writer, atomic replace, no | A file is written by its own     |
+| lock**                           | host's hooks, which run one at a |
+|                                  | time, so this is the             |
+|                                  | per-session-file argument above. |
+|                                  | The other writer is a refused    |
+|                                  | CLI command, which writes the    |
+|                                  | record of the host bound to the  |
+|                                  | refused session, and that host   |
+|                                  | is the caller.                   |
++----------------------------------+----------------------------------+
+| **Read-first where it fires      | ``PostToolUse`` runs after every |
+| constantly**                     | tool call. It reads, and writes  |
+|                                  | only when something was waiting, |
+|                                  | or when the call launched work   |
+|                                  | into the background.             |
+|                                  | ``SessionStart`` writes nothing, |
+|                                  | so the rule that a hook must not |
+|                                  | write on every start still       |
+|                                  | holds.                           |
++----------------------------------+----------------------------------+
+| **Clock times, machine-local**   | ``since`` and ``turn_since`` are |
+|                                  | UTC wall-clock times, to the     |
+|                                  | second. They are the exception   |
+|                                  | to "Storing what was measured,   |
+|                                  | not when", and they are scoped   |
+|                                  | by where they live: under the    |
+|                                  | state root, which is never       |
+|                                  | committed or rendered (ADR-007   |
+|                                  | D9).                             |
++----------------------------------+----------------------------------+
+| **Unknown keys survive; an       | The BUG_061 contract, as for the |
+| unreadable record is replaced**  | session records. The difference  |
+|                                  | is that this record is derived   |
+|                                  | from events, so a corrupt one is |
+|                                  | overwritten by the next event    |
+|                                  | instead of wedging every hook.   |
++----------------------------------+----------------------------------+
+| **A write never changes a        | One guarded helper in the CLI    |
+| verdict**                        | applies every write after the    |
+|                                  | response is computed and         |
+|                                  | swallows any failure.            |
+|                                  | ``doctor``'s probe writes        |
+|                                  | nothing (ADR-007 D10).           |
++----------------------------------+----------------------------------+
+
+**Host liveness.** ``pid`` is the first process id this library stores, and a
+pid is a claim that can go stale. The hook records ``CLAUDE_PID`` when Claude
+Code exports it to its hooks. Without it, a pid already on the record stands,
+and a host with none walks the parent chain to the first process named
+``claude``. ``SessionEnd`` clears the pid. The reader, which is the oracle's scan,
+treats a host as alive only if the pid exists and ``ps`` still names it
+``claude``. Existence is checked on every scan; the name is kept for 60 seconds
+and forgotten the moment the pid is seen dead. Both run at read time, because
+the pid can be reused after the host exits. A host that crashed without
+``SessionEnd`` therefore stops reading as "waiting" once its process is gone. A
+record with no pid has unknown liveness, which no signal reads as gone. The
+scan reads the record through an ``InertStore`` and never writes it (see
+:doc:`oracle.md </architecture/oracle>`).
+
+**A second source for the pid** (IDEA_024). Claude Code keeps its own
+per-process record, ``<claude home>/sessions/<pid>.json``, for every running
+process. It is Claude Code's state, not this library's: the oracle reads it,
+never writes it, stores nothing from it, and opens only the ``<digits>.json``
+files, never the ``.key`` files beside them. A host with no attention pid takes
+the record's, which is checked as above plus one more test, the record's
+process start against the live process's, against a reused pid. When the two
+sources name different pids the row says so and its liveness is unknown. A
+missing or unexpected record format leaves this section's rules exactly as
+they are, and the scan reports the source as not used (:doc:`oracle.md </architecture/oracle>`,
+"Host liveness").
+
+**Two surfaces of "blocked".** The Stop hook records the closeout's blocking
+rule ids, and a gated CLI command (``pipeline advance``, ``session transition``,
+``review``, ``merge``) records the rules that refused it. A clean Stop clears only
+a Stop block. The oracle reports a block once the turn has ended, so a CLI
+refusal must outlive the Stop of the turn it happened in. The next prompt clears
+both, and a CLI transition that succeeds clears a CLI block (ADR-007 D8).
+
+User-level state
+----------------
+
+Everything above is per repository. The Session Oracle (IDEA_012, ADR-007)
+needs one thing no repository can hold — the list of every invariant project on
+the machine — so it keeps a directory per USER:
+
+::
+
+   $INVARIANT_HOME, else ~/.invariant/
+     config.yaml           the user level of the config, when written (ADR-014
+                           D3): configuration, not state; manifest.md, "The user
+                           level"
+     linked-repos.txt      the linked identities, written by `store link` (D2)
+     stores/<name>/        stores `store init` created there: git repositories
+                           holding records, not state (D2)
+     projects.json         the project index
+     locks/projects.lock   advisory lock for its read-modify-write
+     locks/alerts.lock     advisory lock for the ledger's read-modify-write
+     oracle/               the watcher's derived state; safe to delete
+       snapshot.json       the last tick's assessed view of every project
+       alerts.json         the rising-edge de-dup ledger
+       watcher.log         the launchd agent's stdout and stderr
+       web.json            the web page loop's report: waiting or serving, where
+       web.log             the web page agent's stdout and stderr
+     web/                  the web page's records; NOT derived (0700)
+       devices.json        token hashes and pending pairing codes (0600)
+       actions.log         what the page ran: a start and an end line each (0600)
+       tls/                the page's certificate (0700)
+         oracle.pem        Tailscale's certificate chain, then its key (0600)
+     locks/devices.lock    advisory lock for its read-modify-write
+
+.. code:: json
+
+   {"version": 1,
+    "projects": [{"key": "<state root>", "root": "<main checkout>",
+                  "name": "<project.name>", "via": "init|session-start|manual"}]}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Keyed by                       | A project is the place its       |
+| ``Manifest.state_root``**        | sessions are recorded. Every     |
+|                                  | linked worktree resolves the     |
+|                                  | same git common directory, so    |
+|                                  | keying by it collapses a         |
+|                                  | repository's worktrees — and     |
+|                                  | several manifests sharing one    |
+|                                  | repository — to one entry. Keyed |
+|                                  | by root, each would list the     |
+|                                  | same sessions again. A project   |
+|                                  | that sets a relative             |
+|                                  | ``paths.state`` has a state root |
+|                                  | per checkout and is, honestly,   |
+|                                  | one entry per checkout.          |
++----------------------------------+----------------------------------+
+| **``root`` is the main           | A worktree is torn down; the     |
+| checkout's spelling**            | main checkout is where a person  |
+|                                  | would ``cd``. A registration     |
+|                                  | made from inside a worktree      |
+|                                  | records the same relative        |
+|                                  | position in the main checkout    |
+|                                  | when a manifest is there, else   |
+|                                  | the root as found.               |
++----------------------------------+----------------------------------+
+| **No clock times**               | An entry says what a project is  |
+|                                  | and how it arrived, never when — |
+|                                  | the same rule as "Storing what   |
+|                                  | was measured, not when".         |
++----------------------------------+----------------------------------+
+| **Locked writes, read-first      | Several hosts can start in       |
+| registration**                   | several projects at once, so a   |
+|                                  | write is a read-modify-write     |
+|                                  | under ``JsonStore.locked``. The  |
+|                                  | automatic route reads first and  |
+|                                  | locks only when the project is   |
+|                                  | missing; a race lost inside the  |
+|                                  | lock keeps the first             |
+|                                  | registration.                    |
++----------------------------------+----------------------------------+
+| **Unknown keys survive**         | Entries and the document are     |
+|                                  | mutated in place, never rebuilt, |
+|                                  | so a field a later build adds is |
+|                                  | written back by this one (the    |
+|                                  | BUG_061 lesson, applied to a     |
+|                                  | store that is not per-session).  |
++----------------------------------+----------------------------------+
+| **A newer ``version`` is         | Rewriting would drop whatever    |
+| refused, not rewritten**         | the new version means, in the    |
+|                                  | one file every project's         |
+|                                  | registration goes through.       |
++----------------------------------+----------------------------------+
+
+Three routes add an entry: ``init`` (``via: init``), the first ``SessionStart`` in a
+project (``via: session-start``), and ``invariant oracle projects add``
+(``via: manual``). An existing entry is never rewritten by a later route, so
+``via`` records how the project first arrived. ``remove`` and ``prune`` change only
+this index — nothing under any project is touched — and ``prune`` drops an entry
+only when its ``root`` no longer carries a manifest.
+
+``doctor``'s probe writes nothing here either: the registration is skipped
+wherever the hook's store is the inert one (BUG_059). The test suite points
+``INVARIANT_HOME`` at a temporary directory for every test, so no test can add to
+the index on the machine running it.
+
+The watcher's derived state
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``oracle watch`` (IDEA_012 increment 4) keeps two files under ``oracle/``. Neither
+is a record of anything: each is derived from the projects' own state on every
+tick.
+
+.. code:: json
+
+   {"version": 1, "generated": "<iso>", "watcher_pid": 4242, "interval": 5.0,
+    "home": "<oracle home>", "now": 1792640000.0,
+    "build": {"version": "0.1.0", "digest": "<16 hex>", "files": 75},
+    "oracle": {"skew": null, "unread": []},
+    "projects": ["<each project entry of oracle list --json>"]}
+
+``build`` and ``oracle`` were added by BUG_089, within version 1: ``build`` is the
+stamp of the installed tree the watcher started from, and ``oracle`` the read's
+own condition, a skew when the watcher is older than the install and the
+projects it left unread for it. A snapshot without ``build`` was written by a
+watcher older than stamps, which ``oracle status`` and ``doctor`` report as older.
+
+.. code:: json
+
+   {"version": 1,
+    "alerts": {"<project>|<subject>|<kind>|<discriminator>":
+                 {"since": "<iso>", "notified": true}}}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Derived, safe to delete**      | The snapshot is rewritten every  |
+|                                  | tick. Deleting the ledger costs  |
+|                                  | at most one repeat of each live  |
+|                                  | alert. A ledger that cannot be   |
+|                                  | read, or has another version or  |
+|                                  | shape, is replaced and not       |
+|                                  | refused, because nothing but the |
+|                                  | watcher writes it and nothing is |
+|                                  | lost by starting it again. The   |
+|                                  | index, which is a source of      |
+|                                  | truth, refuses instead.          |
++----------------------------------+----------------------------------+
+| **Atomic replace**               | A reader, such as the planned    |
+|                                  | TUI, never sees half a snapshot. |
++----------------------------------+----------------------------------+
+| **The ledger is locked**         | The daemon and a                 |
+|                                  | ``watch --once`` run at the same |
+|                                  | time must not both announce one  |
+|                                  | edge, so the read-modify-write   |
+|                                  | takes ``locks/alerts.lock``. The |
+|                                  | snapshot is not locked: the last |
+|                                  | writer wins, and either one is a |
+|                                  | whole tick.                      |
++----------------------------------+----------------------------------+
+| **Clock times, machine-local**   | ``generated`` and ``since`` are  |
+|                                  | UTC to the second, the attention |
+|                                  | sidecar's spelling, and ``now``  |
+|                                  | is the assessed epoch            |
+|                                  | ``oracle list --json`` already   |
+|                                  | prints. They are the second      |
+|                                  | exception to "Storing what was   |
+|                                  | measured, not when". They are    |
+|                                  | scoped by where they live:       |
+|                                  | outside every repository, never  |
+|                                  | committed or rendered, and       |
+|                                  | outside what ``privacy.clean``   |
+|                                  | screens (ADR-007 D14).           |
++----------------------------------+----------------------------------+
+| **The log is output, not state** | ``watcher.log`` is where launchd |
+|                                  | sends the agent's two streams    |
+|                                  | (``oracle install``, ADR-007     |
+|                                  | D17). Nothing reads it back; it  |
+|                                  | holds the ticks with news and    |
+|                                  | the failed ticks the loop        |
+|                                  | survived. It is appended to, not |
+|                                  | rotated, and safe to delete. The |
+|                                  | agent's plist lives outside the  |
+|                                  | home, in                         |
+|                                  | ``~/Library/LaunchAgents``,      |
+|                                  | because launchd reads it there.  |
++----------------------------------+----------------------------------+
+| **``notified: false`` is owed,   | An edge seen with no notifier,   |
+| not spent**                      | or whose delivery failed, is     |
+|                                  | delivered by the next tick that  |
+|                                  | can deliver it. A key that is no |
+|                                  | longer seen is dropped, so the   |
+|                                  | condition returning is a new     |
+|                                  | edge. A project that could not   |
+|                                  | be read keeps its keys.          |
++----------------------------------+----------------------------------+
+
+The web page loop's report
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``oracle web --wait``, the mode the web page's LaunchAgent runs (IDEA_023
+increment 3, ADR-008 D16, D17), writes ``<oracle home>/oracle/web.json`` each
+time its state changes:
+
+.. code:: json
+
+   {"version": 1, "pid": 4242, "state": "waiting|serving",
+    "addresses": ["<tailnet address>"], "port": 7341,
+    "urls": ["https://<host>.<tailnet>.ts.net:7341/"], "since": "<iso>", "error": null,
+    "scheme": "https|http",
+    "certificate": {"name": "<host>.<tailnet>.ts.net", "not_after": 1800000000.0,
+                    "expires": "<iso>", "error": null},
+    "build": {"version": "0.1.0", "digest": "<16 hex>", "files": 75}}
+
+``build``, the stamp of the installed tree the page started from, was added
+by BUG_089, within version 1; a running page whose report has none is older
+than stamps, and reported so.
+
+``scheme`` and ``certificate`` were added by IDEA_026 (ADR-008 D23), within
+version 1: a reader that does not know them reads the rest as before.
+``certificate`` is the one being served (``name``, ``not_after`` and ``expires`` are
+``null`` over plain HTTP) and ``error`` is why the last request to Tailscale
+failed, until one succeeds. Over plain HTTP ``urls`` lists each address with
+``http://``, as before.
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Derived, safe to delete**      | It says what one running process |
+|                                  | is doing, nothing more, so it    |
+|                                  | sits in ``oracle/`` beside the   |
+|                                  | snapshot. The loop removes it    |
+|                                  | when it stops;                   |
+|                                  | ``oracle uninstall`` removes it  |
+|                                  | after the ``bootout``, because   |
+|                                  | launchd's SIGTERM ends the       |
+|                                  | process first. A report left by  |
+|                                  | a process that died says so: its |
+|                                  | ``pid`` is checked alive on      |
+|                                  | every read.                      |
++----------------------------------+----------------------------------+
+| **Written on a change, not on a  | ``waiting`` to ``serving``, a    |
+| timer**                          | new address set, a new bind      |
+|                                  | error, a certificate renewed,    |
+|                                  | lost or failing. ``since`` is    |
+|                                  | when the state began, so a       |
+|                                  | steady loop writes nothing. Its  |
+|                                  | pid's liveness, not the file's   |
+|                                  | age, says whether anything is    |
+|                                  | behind it.                       |
++----------------------------------+----------------------------------+
+| **``error`` means waiting for a  | A bind that failed (a port in    |
+| reason**                         | use) leaves ``state: waiting``   |
+|                                  | with the error. ``doctor`` fails |
+|                                  | on it; waiting for Tailscale     |
+|                                  | with no error passes.            |
++----------------------------------+----------------------------------+
+| **Clock times, machine-local**   | ``since`` is UTC to the second:  |
+|                                  | the D14 exception again, under   |
+|                                  | the home and never committed.    |
++----------------------------------+----------------------------------+
+
+``web.log`` is the agent's output, like ``watcher.log``: appended to, never read
+back, safe to delete. It holds the state changes and never a request line.
+
+The page's certificate
+~~~~~~~~~~~~~~~~~~~~~~
+
+``<oracle home>/web/tls/oracle.pem`` is the HTTPS certificate the web page
+serves (IDEA_026, ADR-008 D19): the chain Tailscale issued for the Mac's
+MagicDNS name, followed by its private key, as PEM.
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **One file**                     | ``ssl`` loads the key from the   |
+|                                  | certificate's own file, so a     |
+|                                  | crash can never leave a          |
+|                                  | certificate beside another one's |
+|                                  | key.                             |
++----------------------------------+----------------------------------+
+| **Owner-only from creation**     | ``web/`` and ``web/tls/`` are    |
+|                                  | ``0700``; the file is written    |
+|                                  | through a temporary file created |
+|                                  | ``0600`` and exclusively, then   |
+|                                  | renamed over it                  |
+|                                  | (``home.write_private``). The    |
+|                                  | key is never readable by anyone  |
+|                                  | else, not even briefly.          |
++----------------------------------+----------------------------------+
+| **Replaced only by a pair that   | A new one is written to          |
+| loads**                          | ``web/tls/candidate.pem``,       |
+|                                  | loaded once, and renamed over    |
+|                                  | ``oracle.pem``; one whose key    |
+|                                  | does not match, which names      |
+|                                  | another host, or which has       |
+|                                  | expired is removed and the kept  |
+|                                  | one stays.                       |
++----------------------------------+----------------------------------+
+| **Neither a record nor a         | It is not derived from anything  |
+| report**                         | invariant holds, but deleting it |
+|                                  | costs only one request to        |
+|                                  | Tailscale, which keeps its own   |
+|                                  | copy. ``oracle uninstall``       |
+|                                  | leaves it, with the rest of      |
+|                                  | ``web/``.                        |
++----------------------------------+----------------------------------+
+| **No clock time stored**         | Its expiry is read from the      |
+|                                  | certificate itself whenever it   |
+|                                  | is needed.                       |
++----------------------------------+----------------------------------+
+
+The paired devices
+~~~~~~~~~~~~~~~~~~
+
+``invariant oracle web`` (IDEA_023, ADR-008) answers only a device that holds a
+token, and ``<oracle home>/web/devices.json`` is where those devices are
+recorded. It lives in ``web/`` rather than ``oracle/`` because it is not derived:
+deleting it unpairs every device, and only ``oracle web pair`` and a phone can
+make it again.
+
+.. code:: json
+
+   {"version": 1,
+    "devices":  [{"id": "<8 hex>", "name": "<--name>", "hash": "sha256:<hex>",
+                  "paired": "<iso>"}],
+    "pairings": [{"hash": "sha256:<hex>", "name": "<--name>", "expires": 1792640300.0}],
+    "failed": 0}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Hashes only**                  | A device's token (256 random     |
+|                                  | bits) and a pairing code are     |
+|                                  | stored as their SHA-256, so the  |
+|                                  | file is not a credential. The    |
+|                                  | token is shown to nobody; the    |
+|                                  | code only to the person who ran  |
+|                                  | ``pair``.                        |
++----------------------------------+----------------------------------+
+| **Single-use, short-lived        | A code is removed by the redeem  |
+| codes**                          | that spends it, and expired ones |
+|                                  | are dropped on every write.      |
+|                                  | ``failed`` counts wrong codes in |
+|                                  | a row; at ten every pending code |
+|                                  | is cancelled, and a good redeem  |
+|                                  | resets it.                       |
++----------------------------------+----------------------------------+
+| **Owner-only from creation**     | ``web/`` is created ``0700``     |
+|                                  | (and narrowed first if an older  |
+|                                  | build made it wider), and each   |
+|                                  | write's temporary file is        |
+|                                  | created ``0600``, exclusively,   |
+|                                  | before it is renamed over the    |
+|                                  | file. Nothing is created with    |
+|                                  | the process default and narrowed |
+|                                  | afterwards, so the file is never |
+|                                  | readable by anyone else, not     |
+|                                  | even briefly (ADR-008 D14).      |
++----------------------------------+----------------------------------+
+| **Locked writes, refused         | ``issue``, ``redeem`` and        |
+| shapes**                         | ``revoke`` take                  |
+|                                  | ``locks/devices.lock`` through   |
+|                                  | ``HomeStore``. Like the index, a |
+|                                  | newer ``version``, a non-object  |
+|                                  | or a malformed list is refused   |
+|                                  | rather than rewritten, and       |
+|                                  | unknown keys survive.            |
++----------------------------------+----------------------------------+
+| **Fails closed**                 | ``verify``, the one read on      |
+|                                  | every request, answers "nobody"  |
+|                                  | when the file cannot be read, so |
+|                                  | a broken store locks devices out |
+|                                  | rather than letting one in.      |
++----------------------------------+----------------------------------+
+| **Clock times, machine-local**   | ``paired`` (UTC ISO, to the      |
+|                                  | second) and ``expires`` (epoch   |
+|                                  | seconds) are the D14 exception   |
+|                                  | again: under the home, never     |
+|                                  | committed or rendered.           |
++----------------------------------+----------------------------------+
+
+The web actions' audit log
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Each action confirmed on the web page (IDEA_023 increment 2, ADR-008 D13)
+appends two lines to ``<oracle home>/web/actions.log``, one when it starts and
+one when it ends:
+
+.. code:: json
+
+   {"at": "<iso>", "event": "start", "job": "<id>", "device": "<8 hex>",
+    "device_name": "<--name>", "row": "<project key>|<subject>", "kind": "run",
+    "argv": ["invariant", "session", "merge", "--id", "<session>"], "cwd": "<dir>"}
+   {"at": "<iso>", "event": "done", "job": "<id>", "device": "<8 hex>", "...": "as above",
+    "exit": 0, "ok": true, "elapsed": 1.234, "tab": "closed_tab"}
+
+``tab`` is on the done line of a close host that ran (exit 0) and nowhere else.
+
++----------------------------------+-------------------------------------+
+| Property                         | Why                                 |
++==================================+=====================================+
+| **A record, not derived**        | Nothing else can say afterwards     |
+|                                  | what was run from the phone, so the |
+|                                  | log sits in ``web/`` beside the     |
+|                                  | paired devices, not in the          |
+|                                  | watcher's ``oracle/``. Only         |
+|                                  | ``oracle status`` and ``doctor``    |
+|                                  | read it back, and only its last 8   |
+|                                  | KiB, for the last action            |
+|                                  | (``AuditLog.last``, ADR-008 D17).   |
+|                                  | It is appended to and never         |
+|                                  | rewritten, rotated or locked: one   |
+|                                  | process writes it, and each line is |
+|                                  | a single ``O_APPEND`` write.        |
++----------------------------------+-------------------------------------+
+| **No record, no action**         | The start line is written before    |
+|                                  | the action runs. If it cannot be,   |
+|                                  | the action is refused and nothing   |
+|                                  | runs. A server killed mid-run       |
+|                                  | therefore still leaves the start    |
+|                                  | line. An end line that cannot be    |
+|                                  | written is reported on the page's   |
+|                                  | job.                                |
++----------------------------------+-------------------------------------+
+| **No secrets**                   | No token, nonce, environment or     |
+|                                  | output (so no masked value's real   |
+|                                  | value either, BUG_093; a close's    |
+|                                  | outcome is a fixed word, the next   |
+|                                  | row): the device by id and name,    |
+|                                  | the row by its key, and the command |
+|                                  | by its ``argv`` and ``cwd``.        |
+|                                  | ``exit`` is ``null`` for a terminal |
+|                                  | step, which has no exit status.     |
++----------------------------------+-------------------------------------+
+| **A close names its outcome by a | The one thing read from an action's |
+| word**                           | output: a close host's last line    |
+|                                  | becomes ``tab``, one of             |
+|                                  | ``close_host``'s fixed outcome      |
+|                                  | codes (``closed_tab``,              |
+|                                  | ``closed_window``, ``not_allowed``, |
+|                                  | ``no_tty``, ``not_terminal``,       |
+|                                  | ``unknown_app``, ``busy``,          |
+|                                  | ``no_tab``, ``tab_not_closable``,   |
+|                                  | ``failed``;                         |
+|                                  | ``closehost.outcome_word``,         |
+|                                  | BUG_098). The line itself, and the  |
+|                                  | processes, tty or error it may      |
+|                                  | name, are never written; a line     |
+|                                  | that is not one of the outcomes     |
+|                                  | writes no ``tab``. Everything else  |
+|                                  | stays "no output".                  |
++----------------------------------+-------------------------------------+
+| **A start is an action too**     | A session started from the page     |
+|                                  | (IDEA_030, ADR-009 D16) writes the  |
+|                                  | same two lines with ``kind``        |
+|                                  | ``start``, ``row``                  |
+|                                  | ``<project key>|start``, and the    |
+|                                  | ``argv`` and ``cwd`` of the         |
+|                                  | ``claude`` line it ran in the main  |
+|                                  | checkout, the first message         |
+|                                  | included: it is part of what ran.   |
+|                                  | ``exit`` is ``null``.               |
++----------------------------------+-------------------------------------+
+| **Owner-only from creation**     | Opened                              |
+|                                  | ``O_APPEND | O_CREAT | O_NOFOLLOW`` |
+|                                  | with mode ``0600`` in a ``0700``    |
+|                                  | ``web/``, so a symbolic link        |
+|                                  | planted in its place is refused     |
+|                                  | rather than followed.               |
++----------------------------------+-------------------------------------+
+| **Clock times, machine-local**   | ``at`` is UTC to the second:        |
+|                                  | ADR-007's D14 exception again,      |
+|                                  | under the home and never committed. |
++----------------------------------+-------------------------------------+

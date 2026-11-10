@@ -145,7 +145,7 @@ invariant oracle status       # is the agent loaded, and is its snapshot fresh
 
 Without the watcher the dashboard still works. It scans in-process and shows
 a "watcher not running" banner. It never answers a permission prompt for
-you. See [the oracle's architecture page](../architecture/oracle.md).
+you. See [the oracle's architecture page](../architecture/oracle.rst).
 
 **Starting a session.** The oracle can open a new Claude window on the Mac,
 with Remote Control on, in any registered project:
@@ -231,7 +231,7 @@ nobody answers, Claude still exits and the tab stays open for you to close by
 hand. You can change it later in System Settings > Privacy & Security >
 Automation. The same step is `invariant oracle close-host` on the command
 line; the decision is ADR-009 D15, and the checks it makes before signalling
-are in [the oracle's architecture page](../architecture/oracle.md).
+are in [the oracle's architecture page](../architecture/oracle.rst).
 
 ## Working on invariant itself
 
@@ -239,7 +239,7 @@ are in [the oracle's architecture page](../architecture/oracle.md).
 git clone https://github.com/Mindchallenges/invariant && cd invariant
 uv sync --group dev
 uv run pytest
-uv run --group docs sphinx-build -b html docs docs/_build/html
+invariant docs venv && invariant docs build   # the docs project, strictly
 ```
 
 With `uv tool install --editable .` the clone *is* the installed tool, so a

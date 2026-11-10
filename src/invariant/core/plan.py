@@ -8,13 +8,13 @@ next one gets, how far along it is, and how to print it.
 **Why `core/` and not the domain.** The mutations belong to
 ``domains/session`` — it owns the store, the locking and the refusals — but the
 questions do not. A later increment asks "is this session's plan still open?"
-from inside a *rule*, and ``docs/architecture/overview.md`` states the rule that
+from inside a *rule*, and ``docs/architecture/overview.rst`` states the rule that
 makes that possible: arrows point down, so ``core/`` may not import
 ``domains/``. The precedent is ``core/stats.breakdown``, which does the
 arithmetic that ``domains/stats`` renders. One home for the logic, two callers
 above it.
 
-**Why every reader tolerates rubbish.** ``docs/architecture/state_model.md``
+**Why every reader tolerates rubbish.** ``docs/architecture/state_model.rst``
 promises the state files are "JSON, hand-inspectable, and hand-fixable", which
 is the same sentence as "a hand can get one wrong". A reader that raises on a
 malformed entry turns a typo in a checklist into a session nobody can query —

@@ -32,7 +32,7 @@ browser:
 
 It imports nothing that runs anything: no ``actions``, no ``webactions``, no
 ``hosts/``. The table is the design of record's, in
-``docs/architecture/oracle-panel.md``, "Wording".
+``docs/architecture/oracle-panel.rst``, "Wording".
 """
 
 from __future__ import annotations

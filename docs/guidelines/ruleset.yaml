@@ -7,6 +7,8 @@ sections:
     title: Layering
   - id: conduct
     title: Agent conduct
+  - id: docs
+    title: Design records
 rules:
   - id: layers.only-the-cli-imports-the-oracle
     section: layers
@@ -30,11 +32,11 @@ rules:
     rationale: >
       To fix a finding, move the call up into the CLI, which may import the
       oracle, and hand what the lower layer needs down to it as a value or a
-      callable. docs/architecture/overview.md draws every arrow into oracle/
+      callable. docs/architecture/overview.rst draws every arrow into oracle/
       from the CLI, and ADR-007 D6 is why there is no hosts-to-oracle arrow.
     links:
-      - docs/architecture/overview.md
-      - docs/adr/ADR-007-a-machine-wide-read-only-oracle.md
+      - docs/architecture/overview.rst
+      - DEC_ADR_007_D6
   - id: layers.oracle-never-imports-hosts
     section: layers
     title: The oracle never imports a host
@@ -53,11 +55,11 @@ rules:
     rationale: >
       To fix a finding, define the shape the oracle reads (as HostProbe and
       HostSeams are), implement it in hosts, and have the CLI inject it.
-      docs/architecture/overview.md records that no oracle-to-hosts arrow
+      docs/architecture/overview.rst records that no oracle-to-hosts arrow
       exists, and ADR-007 D11 is the probe the CLI injects.
     links:
-      - docs/architecture/overview.md
-      - docs/adr/ADR-007-a-machine-wide-read-only-oracle.md
+      - docs/architecture/overview.rst
+      - DEC_ADR_007_D11
   - id: conduct.interview-when-input-is-needed
     section: conduct
     title: Interview the user when their input is needed
@@ -92,3 +94,42 @@ rules:
     links:
       - .claude/agents/backlog-curator.md
       - .claude/agents/feature-architect.md
+  - id: docs.items-carry-no-design
+    section: docs
+    title: Work items carry no design
+    statement: >
+      An item holds the problem, the evidence and the status; a ruling or
+      design in it is a decision need linked by id.
+    severity: warn
+    phases: [review]
+    applies_to:
+      - docs/backlog.rst
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+    rationale: >
+      To fix a finding, write the ruling or the design as a decision need
+      (invariant docs decision new) and leave only its id in the item.
+      items.decisions_linked checks mechanically that every id an item names
+      is a need the build holds; the prose around the ids is this rule's.
+  - id: docs.decisions-are-declared
+    section: docs
+    title: Every decision a session made is declared
+    statement: >
+      A decision a session makes is declared with `invariant session
+      decisions add`, as the id of its need or as a draft that becomes one,
+      before the session lands. A decision written only in an agent report,
+      a plan or a commit message is not recorded.
+    severity: warn
+    phases: [review]
+    applies_to: ["**"]
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+    rationale: >
+      To fix a finding, declare each undeclared decision (invariant session
+      decisions add) and write it as a need. docs.decisions_recorded holds
+      the declared ones at the landing; a decision nobody declared is
+      visible only to this review.

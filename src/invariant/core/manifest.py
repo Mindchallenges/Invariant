@@ -1,6 +1,6 @@
 """Manifest loading, layered resolution, and provenance.
 
-The manifest is the only project-aware artifact (``docs/architecture/manifest.md``).
+The manifest is the only project-aware artifact (``docs/architecture/manifest.rst``).
 Values are resolved in layers, later winning:
 
   1. library defaults

@@ -73,7 +73,7 @@ from .watcher import DEFAULT_INTERVAL, STALE_INTERVALS
 #: The longest wait between two refreshes after failures, in seconds.
 MAX_BACKOFF = 60.0
 
-#: The tokens of docs/architecture/oracle-panel.md, "Tokens", declared once.
+#: The tokens of docs/architecture/oracle-panel.rst, "Tokens", declared once.
 _TOKENS = """
 :root {
   color-scheme: dark;

@@ -6508,10 +6508,10 @@ class TestTheNormalisedPayloadContract:
             Path(__file__).resolve().parents[1]
             / "docs"
             / "architecture"
-            / "overview.md"
+            / "overview.rst"
         ).read_text(encoding="utf-8")
         assert "NORMALISED_PAYLOAD_KEYS" in overview
-        assert "Nothing above `hosts/` is aware of hook schemas." not in overview
+        assert "Nothing above ``hosts/`` is aware of hook schemas." not in overview
 
 
 class TestProofOfRedIsAProofAboutATest:

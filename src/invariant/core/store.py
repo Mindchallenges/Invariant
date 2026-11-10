@@ -1,6 +1,6 @@
 """Concurrency-safe JSON persistence for the state root.
 
-Two access patterns, deliberately different (``docs/architecture/state_model.md``):
+Two access patterns, deliberately different (``docs/architecture/state_model.rst``):
 
 * **Every write is atomic**, so a reader never sees a half-written file and a
   plain read takes no lock. ``os.replace`` over a same-directory temporary file
@@ -10,7 +10,7 @@ Two access patterns, deliberately different (``docs/architecture/state_model.md`
   machine. A pipeline record is written by one session and many processes: its
   parallel hooks and its commands, which lost each other's writes while this
   module said an owner was one writer (BUG_107). The session record still has
-  no lock and is still exposed to that race (``docs/architecture/state_model.md``).
+  no lock and is still exposed to that race (``docs/architecture/state_model.rst``).
 
 Everything is plain JSON on purpose. When a state file wedges, the recovery
 path is a human opening it, so the format has to survive being read by one.

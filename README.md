@@ -45,8 +45,8 @@ uv tool install git+https://github.com/Mindchallenges/invariant
 ```bash
 cd your-project
 invariant init             # manifest, hook shims, host wiring, four agents,
-                           # and a starter docs/architecture/overview.md if
-                           # the project has none
+                           # and a starter sphinx-needs docs project at docs/
+                           # if the project has none
 git add -A && git commit -m "adopt invariant"
 invariant doctor           # one line per check
 ```
@@ -249,20 +249,25 @@ back that quietly does nothing is worse than one never offered.
 - [Work items and memory](docs/guide/backlog-and-memory.md)
 - [Troubleshooting](docs/guide/troubleshooting.md) · [Extending it](docs/guide/extending.md) · [Uninstall](docs/guide/uninstall.md)
 
-**Reference** — `docs/architecture/`, the documents the docs-first gate reads:
+**Reference** — invariant's docs project at `docs/` (ADR-018), whose
+architecture pages under `docs/architecture/` are the documents the docs-first
+gate reads:
 
-- [`overview.md`](docs/architecture/overview.md) — layers and the dependency rule
-- [`state_model.md`](docs/architecture/state_model.md) — the machines and the storage layout
-- [`manifest.md`](docs/architecture/manifest.md) — full schema and the adapter interface
-- [`cli.md`](docs/architecture/cli.md) — the complete command surface
-- [`oracle.md`](docs/architecture/oracle.md) · [`oracle-panel.md`](docs/architecture/oracle-panel.md) — the Session Oracle: scan, signals, host liveness, closing a host, the phone panel
+- [`overview.rst`](docs/architecture/overview.rst) — layers, the dependency rule and every component as an element need
+- [`state_model.rst`](docs/architecture/state_model.rst) — the machines and the storage layout
+- [`manifest.rst`](docs/architecture/manifest.rst) — full schema and the adapter interface
+- [`cli.rst`](docs/architecture/cli.rst) — the complete command surface
+- [`oracle.rst`](docs/architecture/oracle.rst) · [`oracle-panel.rst`](docs/architecture/oracle-panel.rst) — the Session Oracle: scan, signals, host liveness, closing a host, the phone panel
 
-**Decisions** — `docs/adr/`; ADR-001 is why scripted state, with every design
-decision and the alternative that was rejected. ADR-007 to ADR-009 cover the
-oracle: read-only by default, Tailscale only, and the phone page as a
-confirm-first control panel.
+**Decisions** — `docs/decisions/`, one page per record, each decision a need
+linked to the elements it shapes; ADR-001 is why scripted state, with every
+design decision and the alternative that was rejected. ADR-007 to ADR-009
+cover the oracle: read-only by default, Tailscale only, and the phone page as a
+confirm-first control panel. The backlog is `docs/backlog.rst`, every item a
+need.
 
-Render it all as one site with `uv run --group docs sphinx-build -b html docs docs/_build/html`.
+Build it strictly in its pinned environment with `invariant docs venv` and
+`invariant docs build`.
 
 ## Development
 

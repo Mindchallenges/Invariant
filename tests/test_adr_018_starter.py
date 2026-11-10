@@ -520,7 +520,18 @@ class TestTheStarterBuildsStrictly:
         assert code == 0, text
         rules = (toy_python / "docs" / "rules.rst").read_text(encoding="utf-8")
         assert ":id: RULE_LAYERS_ONLY_THE_CLI_IMPORTS_THE_ORACLE" in rules
-        # The ruleset's own links name Markdown files; the build reads them as text.
+        # A path link renders as text; a need id as decided_by (D12), so the
+        # decisions it names must be needs of the project for the build to pass.
+        assert ":decided_by: DEC_ADR_007_D6" in rules
+        index = toy_python / "docs" / "decisions" / "index.rst"
+        index.write_text(
+            index.read_text(encoding="utf-8")
+            + "".join(
+                f"\n.. dec:: ADR-007 {d}\n   :id: DEC_ADR_007_{d}\n   :status: accepted\n"
+                for d in ("D6", "D11")
+            ),
+            encoding="utf-8",
+        )
         code, text = run(capsys, "--json", "docs", "build")
         record = json.loads(text)
         assert code == 0 and record["passed"], record

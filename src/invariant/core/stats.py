@@ -4,7 +4,7 @@ Host-agnostic by construction (ADR-002 D2). This module knows what a token
 costs and how to add a session up; it knows nothing about where the numbers
 came from. A host adapter implements :class:`SampleSource` against whatever
 that host writes to disk, and the CLI injects it — so ``core`` never imports
-``hosts`` and the arrows in ``docs/architecture/overview.md`` keep pointing one
+``hosts`` and the arrows in ``docs/architecture/overview.rst`` keep pointing one
 way.
 
 Two numbers with different standing live here, and keeping them apart is the

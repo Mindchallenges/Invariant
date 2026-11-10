@@ -1,6 +1,6 @@
 """Error types, each carrying the process exit code it maps to.
 
-The exit codes are part of the CLI contract (``docs/architecture/cli.md``): a
+The exit codes are part of the CLI contract (``docs/architecture/cli.rst``): a
 shim must be able to tell "a gate said no" apart from "the tool broke", so
 those never share a code.
 """

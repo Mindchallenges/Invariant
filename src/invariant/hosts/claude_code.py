@@ -7,7 +7,7 @@ addition rather than a rewrite.
 
 What travels upward is a payload dict spelled in
 ``core.rules.NORMALISED_PAYLOAD_KEYS``. That tuple is the contract, and it is
-stated in exactly one place so this module and ``docs/architecture/overview.md``
+stated in exactly one place so this module and ``docs/architecture/overview.rst``
 cannot drift apart about what a host owes the engine — they already had, which
 is what BUG_022 was filed about. A second host adapter's obligation is to fill
 those keys; nothing above reads anything else.

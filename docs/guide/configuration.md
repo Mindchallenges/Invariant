@@ -3,7 +3,7 @@
 One file, `.claude/invariant.yaml`. Every key has a default, so a working
 manifest is three lines; everything on this page is an *override*. The
 complete schema with every default is in the
-[manifest reference](../architecture/manifest.md).
+[manifest reference](../architecture/manifest.rst).
 
 ```bash
 invariant config show --provenance     # every resolved value and the layer it came from

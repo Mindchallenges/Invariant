@@ -17,7 +17,6 @@ import glob
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -852,39 +851,6 @@ class TestARealConversion:
         (venv / docs_domain.VENV_HASH).write_text(digest + "\n", encoding="utf-8")
         return root
 
-    def test_adr_016_converts_and_builds_strictly(self, starter, tmp_path, capsys):
-        copy = tmp_path / "copy" / "ADR-016.md"
-        copy.parent.mkdir()
-        source = next((REPO / "docs/adr").glob("ADR-016-*.md"))
-        shutil.copyfile(source, copy)
-        # The records it cites, ADR-014 and ADR-015, numbered past ADR-001 to 013.
-        for n in range(1, 16):
-            assert main(["docs", "decision", "new", f"Record {n}"]) == 0
-        capsys.readouterr()
-        # ADR-016 holds one construct that is not Markdown text: "<format>" in
-        # D1 is an HTML tag to a Markdown reader, and GitHub renders it as
-        # nothing. The converter leaves it, as it must ...
-        assert main(["--json", "docs", "migrate", "adr", str(copy), "--dry-run"]) == 0
-        (page,) = json.loads(capsys.readouterr().out)["pages"]
-        assert page["unconverted"] == ["raw html <format>"]
-        # ... and the session rewrites it, here in the copy's Markdown.
-        text = copy.read_text(encoding="utf-8")
-        copy.write_text(text.replace("<format>", "`<format>`"), encoding="utf-8")
-        assert main(["--json", "docs", "migrate", "adr", str(copy)]) == 0
-        (page,) = json.loads(capsys.readouterr().out)["pages"]
-        assert page["unconverted"] == []
-        assert page["needs"] == ["DEC_ADR_016", *(f"DEC_ADR_016_D{k}" for k in range(1, 10))]
-        code = main(["--json", "docs", "build"])
-        record = json.loads(capsys.readouterr().out)
-        assert code == 0 and record["passed"], record["diagnostics"]
-        held = json.loads(Path(record["needs_json"]).read_text(encoding="utf-8"))
-        (version,) = held["versions"].values()
-        needs = version["needs"]
-        for k in range(1, 10):
-            need = needs[f"DEC_ADR_016_D{k}"]
-            assert need["type"] == "dec" and need["part_of"] == ["DEC_ADR_016"]
-        assert needs["DEC_ADR_016"]["status"] == "accepted"
-
     def test_an_unconvertible_construct_fails_the_build(self, starter, tmp_path, capsys):
         copy = tmp_path / "copy" / "notes.md"
         copy.parent.mkdir()
@@ -921,3 +887,24 @@ class TestARealConversion:
         )
         assert main(["--json", "docs", "build"]) == 0, capsys.readouterr().out
 
+
+# -- the proof: this repository's records, migrated (increment 7) -----------------
+
+
+def test_this_repositorys_records_are_decision_pages():
+    """Increment 7 converted ADR-001 to ADR-019 with ``docs migrate adr``: each a
+    record page under docs/decisions/, its D-decisions needs ``part_of`` it, and
+    no Markdown record left behind."""
+    assert not (REPO / "docs/adr").exists()
+    pages = sorted((REPO / "docs/decisions").glob("ADR-*.rst"))
+    assert [p.name[:7] for p in pages] == [f"ADR-{n:03d}" for n in range(1, len(pages) + 1)]
+    assert len(pages) >= 19
+    (adr016,) = [p for p in pages if p.name.startswith("ADR-016-")]
+    text = adr016.read_text(encoding="utf-8")
+    assert "invariant-unconverted" not in text
+    assert "   :id: DEC_ADR_016\n   :status: accepted\n" in text
+    for k in range(1, 10):
+        assert f"   :id: DEC_ADR_016_D{k}\n   :status: accepted\n   :part_of: DEC_ADR_016\n" in text
+    index = (REPO / "docs/decisions/index.rst").read_text(encoding="utf-8")
+    for page in pages:
+        assert f"   {page.stem}\n" in index
