@@ -1643,6 +1643,27 @@ Details that are load-bearing rather than incidental:
   one function rather than three because it was three, and two of them were
   wrong for as long as they existed (BUG_012).
 
+- **A store project's changed set has two legs (ADR-014 D9, increment 4c-1;**
+  :need:`DEC_ADR_014_I4C1`\ **).** ``_changed_set(ctx, leg)`` reads the
+  repository leg by default, which is everything above, so coverage, tests
+  and guideline selection are unchanged. The store leg is the commits inside
+  the session's docs-lock spans, each kept to its unit, plus a held unit's
+  uncommitted paths. With ``records.docs: store``, ``docs.updated`` takes
+  "source changed" from the repository leg and counts a store doc only when
+  it was committed under a span of its unit that also holds a recorded read
+  in it, or is new in that span; ``docs.diagrams_current`` reads the store
+  leg; the privacy review boundary reads both. An unreadable span makes the
+  leg unanswerable, which fails, as above.
+
+- **In a store project the design state is left with the docs lock
+  released.** ``store.docs_lock_released`` is injected as an exit gate on
+  every state with the ``design`` role, beside ``docs.read_architecture``,
+  and only where the project has a store, so an in-repo project's machines
+  are unchanged. It blocks in every profile while the session's lease holds
+  a unit or waits for one. The read, the design and the doc update are one
+  cycle under the lock (ADR-014 D5): the doc update is committed in the
+  store at the end of design, and the code work runs after the release.
+
 - **An empty answer and an unanswerable question are different verdicts.**
   When no source could speak — the commits unreadable, nothing declared — the
   set is empty for a reason that is not "nothing changed". Those gates fail

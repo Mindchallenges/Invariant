@@ -1,5 +1,5 @@
 ---
-# invariant-managed: source=70c0fa3a932905cc overlay=none body=9ef02fe4aadb8544
+# invariant-managed: source=da141f2c130e7ec2 overlay=none body=5d4cffcfba207992
 name: feature-architect
 description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's guidelines: the engine's ruleset, or the compliance checklist where there is none), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase.
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -97,7 +97,7 @@ Produce a design plan with the following sections (this becomes section `DESIGN`
 2. **Affected components** — list each component the change touches, derived from the dependency diagrams (not file search). Mark each `[NEW]`, `[MODIFIED]`, or `[READ-ONLY-DEPENDENCY]`.
    - **Responsibility owner (single source of truth):** for every behavior the task needs, name the component that already *owns* that responsibility in the docs. If an owner exists → reuse / extend it, never fork a parallel implementation. If no owner exists → declare the new owner and document it (a behavior with no documented home is itself a finding). Judge by responsibility + invariants, not surface similarity — similar-looking code answering to a *different* caller stays separate.
 3. **Dependency arrows added / removed / changed** — what the updated diagram will look like.
-4. **Data flow** — if the change alters an end-to-end flow, sketch the new flow (textual sequence is fine; the diagram edit lands in Phase 7).
+4. **Data flow** — if the change alters an end-to-end flow, sketch the new flow (textual sequence is fine; the diagram edit lands in Phase 7, or at the end of design under a store docs lock — see Phase 7).
 5. **Schema / model deltas** — any persistent-schema change. If yes, you must use the project's documented safe-migration pattern (see Phase 4 and BAIL gate B4) — never a destructive in-place alteration.
 6. **Touched-file list (Boy-Scout scope)** — every source file you will edit. For each, mark:
    - `[EDIT]` — modifying existing code
@@ -149,6 +149,8 @@ Build a `REFACTOR-TODO` list from this review. Every entry becomes a change in P
 ## Phase 5 — Implement (TDD-first)
 
 Advance the pipeline as you go: `invariant pipeline advance red` when the failing test exists, `invariant pipeline advance green` when the minimum change makes it pass, `invariant pipeline advance refactor` for the cleanup passes. Failing test first, then the code, then verify green.
+
+**Under a store docs lock, Phase 7 comes first.** If the project keeps its docs in a store (`invariant config show` gives `records.docs: store`), do Phase 7 now, before the first advance out of design — see "Under a store docs lock" there.
 
 **Record every run through the pipeline, or the gates read nothing.**
 `advance` validates the transition and evaluates the gates — it does **not**
@@ -326,6 +328,14 @@ For every structural change identified in Phase 2 sections 3 / 4 / 5, update the
 If the project configures a docs build command, run it to confirm no errors. Warnings allowed; errors fail (bail back to fix). Beware a docs builder that skips unchanged files: "0 errors" from an incremental build has not re-validated your diagrams — force a clean rebuild when diagrams changed.
 
 If no structural change occurred (pure behavior tweak inside an existing component), skip this phase but say so explicitly in the report.
+
+**Under a store docs lock, this phase ends design.** When the project keeps its docs in a store (`invariant config show` gives `records.docs: store`), reading them took their units of the store's docs lock, and the read, the design and the doc update are one cycle under that lock, so no other session designs against docs you are about to change. The doc update therefore moves from after the code to the end of design, after Phase 4 and before Phase 5's first advance:
+
+1. Write the doc changes Phase 2 section 8 names, in the store's main checkout, under the units you hold. A doc you did not read needs `invariant docs lock <area or path>` and a read first.
+2. Commit them in the store (`git -C <store root> commit`): `docs.updated` counts a store doc only when it is committed under a span of its unit that also holds your read of it, or is new in that span.
+3. Release: `invariant docs unlock`. It refuses a unit with uncommitted changes. `store.docs_lock_released` holds the move out of design until every unit is released.
+
+If you bail at Phase 3, release the units with no change. If the code later shows the design was wrong, lock the unit again, read it again and update it under the new span. In a project whose docs are in its repository, none of this applies, and this phase stays after the code.
 
 ---
 

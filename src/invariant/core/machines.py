@@ -203,6 +203,20 @@ AGENT_CURRENCY_GATES: dict[str, dict[str, list[str]]] = {
 }
 
 
+#: Attached to the design state's EXIT, and only in a store project (ADR-014
+#: D5, increment 4c-1): the docs are read, designed against and written under
+#: one lock, and the units are released before implementation, so the
+#: session's code work runs in parallel with other sessions' doc cycles. An
+#: exit gate on design, as ``docs.read_architecture`` is, and by role, so
+#: every lane with a design state carries it. Conditional for the reason
+#: ``sweep.fresh`` is: an in-repo project has no docs lock, the rule is N/A
+#: there, and it blocks in every profile, so it would render as
+#: ``[skip:BLOCK]`` on every design state of invariant and Heap.
+STORE_LOCK_GATES: dict[str, dict[str, list[str]]] = {
+    "design": {"exit": ["store.docs_lock_released"]},
+}
+
+
 def shipped_ids() -> list[str]:
     return sorted(p.stem for p in MACHINE_DIR.glob("*.yaml"))
 
@@ -286,6 +300,8 @@ def load_pipeline_machine(
     machine = machine.inject_gates(DOCS_FIRST_GATES)
     if manifest is not None and manifest.get("docs.onboarding") == "incremental":
         machine = machine.inject_gates(DOCS_ONBOARDING_GATES)
+    if manifest is not None and getattr(manifest, "store", None) is not None:
+        machine = machine.inject_gates(STORE_LOCK_GATES)
     for required_role, by_role in AGENT_ROLE_GATES.items():
         if machine.states_with_role(required_role):
             machine = machine.inject_gates(by_role)

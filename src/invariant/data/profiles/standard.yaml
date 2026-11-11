@@ -30,6 +30,10 @@ rules:
   # isolation rules do: a design read from docs another session is about to
   # change is the stale design the ruling exists to prevent.
   store.docs_lock_held: block
+  # Released before the change leaves design (ADR-014 D5, increment 4c-1):
+  # the read-design-write cycle ends with the doc update committed and the
+  # units free, so code work never holds another session's design up.
+  store.docs_lock_released: block
 
   # Installing an agent is not using one. These advise rather than block: the
   # engine can prove an agent ran, never that one was needed.

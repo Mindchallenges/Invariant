@@ -31,7 +31,7 @@ Full schema
      docs: repo                   # repo (every default: today's layout exactly)
      backlog: repo                # or store, whose path keys are then read
      guidelines: repo             # against the store root. guidelines: store is
-     memory: repo                 # refused until increment 4 (D9). hooks and
+     memory: repo                 # refused until increment 4c-2 (D9). hooks and
      reports: repo                # agents take repo (committed) or local (this
      sweeps: repo                 # clone's .claude/, kept out of git; D11). See
      hooks: repo                  # "Records and their locations" below
@@ -485,8 +485,8 @@ Refused at load, each with its reason, rather than loaded to do nothing:
 - ``user`` for ``hooks`` or ``agents``, which is retired
   (:need:`DEC_ADR_020_D9`): nothing is installed at user level, and the
   refusal names ``local`` and ``repo`` as the two locations that remain;
-- ``store`` for ``guidelines``, until the gates read each record from its own
-  tree (D9, increment 4c); otherwise a baseline left behind would make
+- ``store`` for ``guidelines``, until the guidelines gates read each record from
+  its own tree (D9, increment 4c-2); otherwise a baseline left behind would make
   ``guidelines.baseline_only_shrinks`` admit every entry;
 - a ``store`` record when the project has no store;
 - ``items.exempt: false`` with ``records.backlog: store`` (D10): a backlog in a
@@ -560,6 +560,16 @@ beside ``docs/x*``) is refused, naming both areas, when a path both match is
 first resolved to a unit. ``lease_minutes`` is a whole number, at least 1. Any
 other ``docs_lock`` key is refused. With no areas declared every path is its
 own unit. The lock itself is ``core/doclock`` (overview).
+
+**Built (ADR-014 D9, increment 4c-1; :need:`DEC_ADR_014_I4C1`).** With
+``records.docs: store`` the docs gates read the store leg: ``docs.updated``
+counts a store doc only when it was committed under a docs-lock span of its
+unit that also holds a recorded read in it (or is new in that span), and
+``docs.diagrams_current`` reads the store's changed docs. The privacy review
+boundary scans the store leg too, with scope spelled store-relative: ``all``,
+and each scope keyword whose path resolves into the store. A store project's
+design states carry ``store.docs_lock_released`` (state model, the gates
+table). Nothing here changes for a project with no store.
 
 **Accepted, not yet built.** ``sync`` (D7) and ``privacy.store.scan`` (D8), each
 with its increment. Until then a ``store`` key other than ``repos`` and
@@ -2181,8 +2191,8 @@ policy lives in its store and is reviewed there. A pointer alone, with no
 store and no link, still makes a project, resolved from the user level and
 the library's defaults.
 
-**Refused in a store project until D9 is built (increment 4):
-``guidelines.baseline``.** The shrink gate reads the base branch's manifest at
+**Refused in a store project until D9's guidelines half is built (increment
+4c-2): ``guidelines.baseline``.** The shrink gate reads the base branch's manifest at
 ``.claude/invariant.yaml`` in the repo; a store project has none there, and the
 gate would read "no baseline configured" and admit every entry. The ADR's
 own D9 evidence is this case, with the guidelines records left in the repo,

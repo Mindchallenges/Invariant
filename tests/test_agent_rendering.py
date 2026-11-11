@@ -368,6 +368,57 @@ ADR_018_5 = {
     ),
 }
 
+#: ADR-014 increment 4c-1: under a store docs lock, the design agent's doc
+#: update moves from after the code to the end of design (D5), conditional on
+#: the docs being kept in a store, so an in-repo project's Phase 7 is as it was.
+ADR_014_4C1 = {
+    "feature-architect": (
+        (
+            "the diagram edit lands in Phase 7).",
+            (
+                "the diagram edit lands in Phase 7, or at the end of design under a "
+                "store docs lock — see Phase 7)."
+            ),
+        ),
+        (
+            "Failing test first, then the code, then verify green.\n",
+            (
+            "Failing test first, then the code, then verify green.\n\n"
+            "**Under a store docs lock, Phase 7 comes first.** If the project keeps its "
+            "docs in a store (`invariant config show` gives `records.docs: store`), do "
+            "Phase 7 now, before the first advance out of design — see \"Under a store "
+            "docs lock\" there.\n"
+            ),
+        ),
+        (
+            "skip this phase but say so explicitly in the report.\n",
+            (
+            "skip this phase but say so explicitly in the report.\n\n"
+            "**Under a store docs lock, this phase ends design.** When the project keeps "
+            "its docs in a store (`invariant config show` gives `records.docs: store`), "
+            "reading them took their units of the store's docs lock, and the read, the "
+            "design and the doc update are one cycle under that lock, so no other session "
+            "designs against docs you are about to change. The doc update therefore moves "
+            "from after the code to the end of design, after Phase 4 and before Phase 5's "
+            "first advance:\n\n"
+            "1. Write the doc changes Phase 2 section 8 names, in the store's main "
+            "checkout, under the units you hold. A doc you did not read needs `invariant "
+            "docs lock <area or path>` and a read first.\n"
+            "2. Commit them in the store (`git -C <store root> commit`): `docs.updated` "
+            "counts a store doc only when it is committed under a span of its unit that "
+            "also holds your read of it, or is new in that span.\n"
+            "3. Release: `invariant docs unlock`. It refuses a unit with uncommitted "
+            "changes. `store.docs_lock_released` holds the move out of design until every "
+            "unit is released.\n\n"
+            "If you bail at Phase 3, release the units with no change. If the code later "
+            "shows the design was wrong, lock the unit again, read it again and update it "
+            "under the new span. In a project whose docs are in its repository, none of "
+            "this applies, and this phase stays after the code.\n"
+            ),
+        ),
+    ),
+}
+
 #: The sections each shipped agent offers an overlay, in order. A rename here
 #: breaks every overlay that names the old id, so it is pinned.
 ANCHORS = {
@@ -468,6 +519,7 @@ def expected_render(name):
         *A6_5.get(name, ()),
         *A7_2.get(name, ()),
         *ADR_018_5.get(name, ()),
+        *ADR_014_4C1.get(name, ()),
     ):
         assert text.count(old) == 1, f"{name}: the rewrite no longer matches {old!r}"
         text = text.replace(old, new)

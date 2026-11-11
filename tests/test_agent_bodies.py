@@ -221,6 +221,16 @@ class TestTheBodiesAskTheEngine:
         assert "Phase 1c" in text
         assert "paths.docs" in text
 
+    def test_under_a_store_docs_lock_the_architects_doc_update_ends_design(self):
+        # ADR-014 D5, increment 4c-1: conditional on a store docs lock only.
+        text = section("feature-architect", "phase-7")
+        assert "records.docs: store" in text
+        named = commands_in(text)
+        assert "invariant docs unlock" in named
+        assert "store.docs_lock_released" in text
+        assert "stays after the code" in text
+        assert "Phase 7 comes first" in section("feature-architect", "phase-5")
+
     def test_the_reviewer_runs_the_four_commands_in_order(self):
         named = commands_in(section("compliance-reviewer", "phase-2"))
         positions = [named.index(command) for command in REVIEW_COMMANDS]

@@ -1058,13 +1058,12 @@ after increment 2.
 |           | alert), the oracle's list,      |                            |
 |           | panel and page.                 |                            |
 +-----------+---------------------------------+----------------------------+
-| 4c        | D9: ``_changed_set`` per leg,   | A ``conf.py`` change held  |
-|           | ``docs.updated`` pairing a span | by ``docs.updated`` until  |
-|           | with its read,                  | a doc is committed under a |
-|           | ``docs.diagrams_current`` and   | span that also holds the   |
-|           | privacy per leg, the manifest's | read. A grown store        |
-|           | location a property, the shrink | baseline refused.          |
-|           | gate reading the store's base,  |                            |
+| 4c        | Split on 2026-11-11             | The union of the two rows  |
+|           | (DEC_ADR_014_I4C1) into 4c-1    | below.                     |
+|           | and 4c-2, built in that order.  |                            |
+|           | Together: D9 (gates per leg,    |                            |
+|           | reads and writes under one      |                            |
+|           | span, store bases),             |                            |
 |           | ``store.docs_lock_released`` on |                            |
 |           | design states, both guidelines  |                            |
 |           | refusals lifted, the store      |                            |
@@ -1073,6 +1072,40 @@ after increment 2.
 |           | update moved to the end of      |                            |
 |           | design under a store docs lock, |                            |
 |           | invariant's copy re-rendered.   |                            |
++-----------+---------------------------------+----------------------------+
+| 4c-1      | Gates per leg and the lock      | A ``conf.py`` change held  |
+|           | released: ``_changed_set`` per  | by ``docs.updated`` until  |
+|           | leg, ``docs.updated`` pairing a | a doc is committed under a |
+|           | span with its read,             | span that also holds the   |
+|           | ``docs.diagrams_current``       | read. invariant and Heap   |
+|           | reading the doc leg, the        | unchanged.                 |
+|           | privacy review boundary reading |                            |
+|           | every leg,                      |                            |
+|           | ``store.docs_lock_released`` on |                            |
+|           | every design state of a store   |                            |
+|           | project, the library            |                            |
+|           | feature-architect's doc update  |                            |
+|           | moved to the end of design      |                            |
+|           | under a store docs lock,        |                            |
+|           | invariant's copy re-rendered.   |                            |
++-----------+---------------------------------+----------------------------+
+| 4c-2      | Guidelines in a store: the      | A grown store baseline     |
+|           | manifest's location a property, | refused. invariant's       |
+|           | the guidelines readers' policy  | ruleset pin unchanged.     |
+|           | tree split from the change's    |                            |
+|           | tree, the shrink gate reading   |                            |
+|           | the store's base, both          |                            |
+|           | guidelines refusals lifted, the |                            |
+|           | store starter writing a ruleset |                            |
+|           | at the docs project's           |                            |
+|           | guidelines folder (ADR-020      |                            |
+|           | D10). Decided with the split,   |                            |
+|           | built here: a session that held |                            |
+|           | no span compares against the    |                            |
+|           | store's current HEAD; CLI       |                            |
+|           | writes into store policy take   |                            |
+|           | 4b's on-access grant, or refuse |                            |
+|           | naming ``docs lock``.           |                            |
 +-----------+---------------------------------+----------------------------+
 | 5         | D6 and D7: release with fetch   | A forced repo-leg failure  |
 |           | and the same-file check, the    | finished by resume. A      |
@@ -1586,3 +1619,96 @@ SessionStart does not; a Read of another project's store from an in-repo
 project is recorded nowhere and said; the oracle's rows, list lines, signals,
 chip and technical lines; an in-repo project's rule N/A and its
 ``docs_roots`` unchanged.
+
+As built: increment 4c-1 (2026-11-11)
+-------------------------------------
+
+D9's gates per leg and D5's release before implementation, as the
+architecture docs describe them (``state_model.rst``, the gates table and
+"Domain: pipeline"; ``overview.rst``, ``core/rules`` and ``core/machines``;
+``manifest.rst``, "Records and their locations"). Where the build settles
+what the text left open:
+
+.. dec:: ADR-014 increment 4c is split; 4c-1 as built: the gates read each leg, and the lock is released before implementation
+   :id: DEC_ADR_014_I4C1
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :affects: COMP_CORE_RULES, COMP_CORE_DOCLOCK, COMP_DOMAINS_SESSION
+
+   - **The split.** Increment 4c was too large for one reviewable change,
+     so it is built as 4c-1 and 4c-2 (the increments table above). Decided
+     2026-11-11 by the parent session, on the basis of the 4a, 4b and 4c
+     split: 4c-1 the gates per leg and the lock released, 4c-2 the
+     guidelines in a store. Two choices 4c-2 makes were decided with the
+     split and are built there: a session that held no span compares the
+     baseline against the store's current HEAD, since the lock gates every
+     write it could have made; and a CLI write into store policy
+     (``guidelines render``, ``guidelines baseline --prune``, the starter)
+     takes 4b's on-access grant, or refuses naming ``docs lock``.
+   - **The store leg is read from the spans.** ``_changed_set(ctx, leg)``
+     takes the leg, the repository leg by default, so every reader that
+     names none (coverage, tests, guideline selection, the stale-entry
+     check) reads exactly what it read before. The store leg is, for each
+     span on the session's store leg, the store's diff from its
+     ``acquired_at_sha`` to its ``released_at_sha`` (to the store's HEAD
+     while it is open), kept to the span's unit, plus a held unit's
+     uncommitted paths. Its paths are absolute, in the store's main
+     checkout. A span git cannot read, or one naming no sha, makes the leg
+     unanswerable, never empty; a session with no span has an empty leg,
+     which is an answer.
+   - **A store doc counts when it is committed under a span with its
+     read.** Under ``records.docs: store``, ``docs.updated`` takes "source
+     changed" from the repository leg, as before, and counts a doc of the
+     store leg when it was committed under a span of its unit whose lease
+     and unit a ``docs_read`` row names, or when it was no file at the
+     span's ``acquired_at_sha``. An uncommitted doc never counts: the gate
+     blocks until the store carries the update. One counted doc clears it,
+     as one doc alongside does in-repo; a doc set aside is named in the
+     detail either way. A ``docs_read`` row carries no time, so a unit taken
+     again under the same live lease pairs with a read made under either
+     span: the lease and the unit are what the record holds.
+   - **The doc leg for diagrams.** ``docs.diagrams_current`` reads the store
+     leg when the docs are kept in a store, and the repository leg
+     otherwise.
+   - **Privacy reads every leg.** At the review boundary,
+     ``privacy.clean`` scans the store leg's content from the store's main
+     checkout, where it already is, beside the repository leg's. Scope is
+     spelled store-relative there: ``all``, and each keyword whose path
+     resolves into the store (``docs``, ``memory``, ``reports``). A literal
+     prefix is spelled against the repository and reaches no store path;
+     the store's own ``privacy`` block is D8's, increment 6.
+   - **``store.docs_lock_released``** is an exit gate on every state with
+     the ``design`` role, injected by ``core/machines`` only in a store
+     project (``STORE_LOCK_GATES``), as ``sweep.fresh`` is only where it can
+     apply, so an in-repo project's machines are unchanged. It blocks in
+     every profile. It fails while the session's lease holds a unit, is
+     queued for one or still wants one, and names ``invariant docs unlock``;
+     since ``docs unlock`` refuses a unit with uncommitted changes, passing
+     it means the doc update is on the store's main line.
+   - **The agent.** The library feature-architect's Phase 7 says that,
+     under a store docs lock, the doc update ends design (written, committed
+     in the store, released) before Phase 5's first advance, and Phase 5
+     points there. In a project whose docs are in its repository nothing
+     moves. invariant's installed copy was re-rendered by ``invariant agents
+     install``. Heap's copy is behind the library until Heap runs its own
+     ``agents install``; ``agents.rendered_current`` says so there, as a
+     warning.
+
+The proof is ``tests/test_adr_014_per_leg_gates.py``, on 4b's two toy
+repositories linked to one store, each session bound to its own host. A
+``conf.py`` change is held by ``docs.updated``; a doc read under the lock and
+written but not committed still holds it, named as uncommitted; committed in
+the store under the span holding the read, it clears, and stays clear after
+the release. A doc committed under a span with no read is set aside, naming
+it, until the read is made under the same span; one committed after the
+release counts for nothing; a file new in the span needs no read. Also: the
+store leg's paths, open and committed, and the repository leg untouched by
+them; an empty leg without a span; an unreadable span making the leg
+unanswerable and the gate fail; ``docs.diagrams_current`` failing a doc
+without a diagram and passing one with; the review boundary refusing a home
+path committed to a store doc, naming a clean one as scanned, and not
+scanning a store path outside scope; ``store.docs_lock_released`` failing a
+held unit and a queued session, naming ``docs unlock``, and passing with no
+lease; the gate on the design state of ``tdd``, ``bugfix``, ``spec-first`` and
+``docs`` in a store project and nowhere on ``chore``; and an in-repo
+project's machines without it, the rule N/A and the store leg empty.

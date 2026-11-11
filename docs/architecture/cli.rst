@@ -1250,7 +1250,10 @@ Setup
        The heartbeat is written by `docs lock` and `docs unlock`, at most once
        a minute. Landing, teardown and abandoning release every unit the
        session holds or waits for (`domains/session`). The gates that read the
-       spans are 4c.
+       spans (ADR-014 D9, increment 4c-1): `docs.updated` counts a store doc
+       committed under a span that also holds its read, and
+       `store.docs_lock_released` holds a store project's design state until
+       `docs unlock` has released every unit.
        Built (ADR-014 D5, increment 4b): the lock is enforced at the host. A
        Read, Edit or Write of a store policy path takes the path's unit in
        the same hook call when it is free, with an empty queue, and when the

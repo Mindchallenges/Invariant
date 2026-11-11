@@ -179,6 +179,7 @@ class TestRegistry:
             DOCS_ONBOARDING_GATES,
             FRESHNESS_GATE,
             GUIDELINES_GATES,
+            STORE_LOCK_GATES,
             load_machine,
             shipped_ids,
         )
@@ -192,6 +193,7 @@ class TestRegistry:
                 GUIDELINES_GATES,
                 BASELINE_GATES,
                 AGENT_CURRENCY_GATES,
+                STORE_LOCK_GATES,
             )
             for spec in injected.values()
             for gates in spec.values()

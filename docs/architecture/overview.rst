@@ -318,7 +318,7 @@ Layers
        RULES -. "docs_folder: the guidelines gates' fixes name the docs project's guidelines folder, imported at call time" .-> CNEEDS
        SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
        SESSION -- "docs_lock, docs_unlock, docs_take_over, release_docs_lock: DocsLock, resolve_unit; docs_access, docs_read_lease, docs_heartbeat, docs_notice: read_config, classify, then grant_free, touch (inc 4b)" --> CDOCLOCK
-       RULES -- "store.docs_lock_held: read_config, classify; DocsLock.standing on a governed path only (ADR-014 D5, inc 4b)" --> CDOCLOCK
+       RULES -- "store.docs_lock_held: read_config, classify; DocsLock.standing on a governed path only (ADR-014 D5, inc 4b); the store leg: read_config, in_unit; store.docs_lock_released: DocsLock.outcome (D9, inc 4c-1)" --> CDOCLOCK
        OSCAN -- "docs_lock_views: the lease record read for each session row (inc 4b)" --> CDOCLOCK
        CLI -- "for_payload: store_root_of, a path in another project's store (inc 4b)" --> CSTORES
        CLI -. "injects lease_host_alive, the oracle's reading of the attention sidecar" .-> SESSION
@@ -1689,7 +1689,17 @@ Component responsibilities
    session does not hold, and ``docs.read_architecture`` counting, for docs
    kept in a store, only the reads whose ``docs_read`` row names a lease one of
    the session's spans ran under; ``docs_roots`` naming the store's main
-   checkout for such docs
+   checkout for such docs; the changed set per leg (ADR-014 D9, increment
+   4c-1, :need:`DEC_ADR_014_I4C1`): ``_changed_set(ctx, leg)``, the
+   repository leg by default and the store leg (``_store_leg``) the commits
+   inside the session's docs-lock spans, each kept to its unit through
+   ``doclock.in_unit``, plus a held unit's uncommitted paths;
+   ``docs.updated`` counting a store doc only when committed under a span
+   whose lease and unit a ``docs_read`` row names, or new in that span;
+   ``docs.diagrams_current`` reading the doc leg; the privacy review boundary
+   scanning the store leg from the store's main checkout; and
+   ``store.docs_lock_released``, the design state's exit gate in a store
+   project, failing while the session's lease holds or waits for a unit
 
    **Never does:** Decide policy — levels come from the manifest; write a
    generated file (``domains/guidelines`` does); evaluate a guideline itself
@@ -1833,7 +1843,7 @@ Component responsibilities
 
    **Never does:** Write a session record (``domains/session`` does); read a
    host's attention sidecar (``alive`` is injected); fetch or push a store;
-   decide a tool call (``core/rules`` does) or gate a change (increment 4c)
+   decide a tool call or gate a change (``core/rules`` does both)
 
 .. comp:: ``core/identity``
    :id: COMP_CORE_IDENTITY
@@ -2131,8 +2141,11 @@ Component responsibilities
    **Owns:** locating and assembling the state machines: the shipped ones under
    ``data/machines`` and a project's own (``methodology.extra_machines``), a
    project machine shadowing a shipped one of the same id; the docs-first gates
-   injected on every pipeline machine (``DOCS_FIRST_GATES``, ADR-018 D5) and
-   ``sweep.fresh`` beside each gate a sweep cadence moves.
+   injected on every pipeline machine (``DOCS_FIRST_GATES``, ADR-018 D5),
+   ``sweep.fresh`` beside each gate a sweep cadence moves, and, in a store
+   project only, ``store.docs_lock_released`` on the exit of every state with
+   the ``design`` role (``STORE_LOCK_GATES``, ADR-014 D5, increment 4c-1), so
+   an in-repo project's machines are unchanged.
 
    **Never does:** import ``core/rules``: it names rule ids, and the registry
    resolves them.

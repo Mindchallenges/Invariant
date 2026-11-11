@@ -1439,6 +1439,59 @@ def _store_docs_lock_held(ctx: RuleContext) -> Verdict:
 
 
 @rule(
+    "store.docs_lock_released",
+    summary="A store's docs lock is released before the change leaves design.",
+    events=(),
+)
+def _store_docs_lock_released(ctx: RuleContext) -> Verdict:
+    """The exit gate on a design state in a store project (ADR-014 D5).
+
+    The docs are read, designed against and written in one cycle under one
+    lock, and the code work runs in parallel only after the units are
+    released, so a session may not leave design while it holds a unit or
+    waits for one. ``docs unlock`` refuses a unit with uncommitted changes,
+    so passing here also means the doc update is on the store's main line.
+    Injected only in a store project (``core/machines``); N/A in-repo.
+    """
+    if getattr(ctx.manifest, "store", None) is None:
+        return Verdict.na("this project keeps its records in its repository; no docs lock")
+    if ctx.session is None:
+        return Verdict.na("no session, so no lease to release")
+    sid = str(ctx.session.get("id"))
+    try:
+        out = doclock.DocsLock(ctx.manifest).outcome(sid)
+    except (StateError, ManifestError) as exc:
+        return Verdict.fail(
+            f"the store's docs lock cannot be read: {exc}",
+            fixes=("invariant store status",),
+        )
+    if not out.held and not out.waiting and not out.pending:
+        return Verdict.clean(f"session {sid} holds and waits for no unit of the store's docs lock")
+    parts = []
+    if out.held:
+        parts.append(f"holds {', '.join(out.held)}")
+    if out.waiting:
+        parts.append(
+            f"is queued for {out.waiting['unit']} at position {out.waiting['position']}"
+        )
+    elif out.pending:
+        parts.append(f"waits for {', '.join(out.pending)}")
+    return Verdict.fail(
+        f"session {sid} {' and '.join(parts)} of the store's docs lock",
+        detail="The doc update is written and committed at the end of design, and "
+        "the units released before implementation, so the next session reads the "
+        "latest docs while this one's code work runs (ADR-014 D5).",
+        fixes=(
+            f"invariant docs unlock --id {sid}",
+            (
+                "commit the doc update in the store first: docs unlock refuses a "
+                "unit with uncommitted changes"
+            ),
+        ),
+    )
+
+
+@rule(
     "pipeline.complete",
     summary="The methodology ran to its end before the work lands.",
     events=(),
@@ -1936,6 +1989,8 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
                 detail="; ".join([*declared_non_source, *held_as_tests]) or None,
             )
         return Verdict.clean("docs-only change")
+    if _docs_in_store(ctx.manifest):
+        return _docs_updated_in_store(ctx, docs_root)
     if docs_changed:
         return Verdict.clean(f"{len(docs_changed)} doc file(s) updated alongside")
     return Verdict.fail(
@@ -1945,6 +2000,67 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
         "and override.",
         fixes=(
             f"update the relevant doc under {_rel(docs_root, root)}",
+            "invariant pipeline advance <state> --force --reason 'no structural change'",
+        ),
+    )
+
+
+def _docs_updated_in_store(ctx: RuleContext, docs_root: Path) -> Verdict:
+    """``docs.updated``'s "docs changed" half, read from the store leg (D9).
+
+    The source changed on the repository leg. A store doc counts as its
+    update only when it was COMMITTED under a span of its unit which also
+    holds a recorded read in that unit (the read and the write under one
+    lease, D5), or when the file did not exist when the unit was taken. An
+    uncommitted doc, or one whose span holds no read, is named and does not
+    count, so the gate blocks until the store carries the update.
+    """
+    leg = _store_leg(ctx)
+    if not leg.answerable:
+        return Verdict.fail(
+            "the store leg's changes could not be read, so the doc update cannot be found",
+            detail=f"{leg.problem}. An unanswered question is not a negative answer, "
+            "and admitting the change on it would be.",
+            fixes=("invariant store status", "invariant session status"),
+        )
+    reads = {
+        (str(row.get("lease")), str(row.get("unit")))
+        for row in ctx.evidence("docs_read", []) or []
+        if isinstance(row, Mapping) and row.get("lease") and row.get("unit")
+    }
+    counted: set[str] = set()
+    set_aside: list[str] = []
+    for change in leg.changes:
+        if not _is_within(change.path, docs_root):
+            continue
+        if not change.committed:
+            set_aside.append(f"{change.rel}: uncommitted in the store")
+        elif (change.lease, change.unit) in reads:
+            counted.add(change.rel)
+        elif git.exists_at(leg.root, change.start, change.rel) is False:
+            counted.add(change.rel)  # new in the span: there was nothing to read
+        else:
+            set_aside.append(
+                f"{change.rel}: committed under {change.unit}, whose span holds no read of it"
+            )
+    aside = sorted(set(set_aside))
+    if counted:
+        return Verdict.clean(
+            f"{len(counted)} store doc file(s) committed under the docs lock with their read",
+            detail="; ".join(aside) or None,
+        )
+    sid = str((ctx.session or {}).get("id") or "<id>")
+    where = _rel(docs_root, _repo_root(ctx))
+    return Verdict.fail(
+        "source changed but no architecture doc in the store was committed under "
+        "the docs lock with its read",
+        detail=("; ".join(aside) + ". " if aside else "")
+        + "The store's docs are read, designed against and written under one "
+        "lease (ADR-014 D5): a doc counts when it is committed on the store's "
+        "main line under a span of its unit that also holds a read in it.",
+        fixes=(
+            f"invariant docs lock <area or path under {where}> --id {sid}",
+            "then read the doc, update it and commit it in the store under that lock",
             "invariant pipeline advance <state> --force --reason 'no structural change'",
         ),
     )
@@ -2097,6 +2213,9 @@ def _docs_diagrams_current(ctx: RuleContext) -> Verdict:
     # committed in this phase is invisible to the working tree by the time
     # this gate is asked about it.
     touched = _changed_set(ctx)
+    if _docs_in_store(ctx.manifest):
+        # The doc leg (ADR-014 D9): a store's docs change on the store leg.
+        touched = _changed_set(ctx, STORE_LEG)
     docs_changed = [p for p in touched.paths if _is_within(root / p, docs_root)]
     if not docs_changed:
         # "No doc changed" is a real answer; "nobody could tell what changed"
@@ -6790,7 +6909,130 @@ class _ChangedSet:
     base: str
 
 
-def _changed_set(ctx: RuleContext) -> _ChangedSet:
+#: The legs a session's changed set is read from (ADR-014 D5, D9). The
+#: repository leg is the record's own worktree, branch and base; the store
+#: leg is the commits inside the session's docs-lock spans.
+REPO_LEG = "repo"
+STORE_LEG = "store"
+
+
+def _changed_set(ctx: RuleContext, leg: str = REPO_LEG) -> _ChangedSet:
+    """Every path this change touched on one leg (ADR-014 D9).
+
+    The repository leg is the default and every gate's reading before
+    stores existed; the store leg is :func:`_store_leg`'s, its paths
+    absolute in the store's main checkout. Which gate reads which leg is D9:
+    the docs gates read the doc leg, privacy reads every leg, and coverage,
+    tests and guideline selection read the repository leg.
+    """
+    if leg == STORE_LEG:
+        store = _store_leg(ctx)
+        paths = {change.path for change in store.changes}
+        return _ChangedSet(
+            paths=tuple(sorted(paths, key=str)), answerable=store.answerable, base=""
+        )
+    if leg != REPO_LEG:
+        raise ValueError(f"no leg named {leg!r}; the legs are {REPO_LEG} and {STORE_LEG}")
+    return _repo_changed_set(ctx)
+
+
+@dataclass(frozen=True)
+class _StoreChange:
+    """One store path a span of the session's docs lock covers (ADR-014 D9).
+
+    ``committed`` is whether it changed in the store's commits across the
+    span; an uncommitted change is a held unit's dirty path. ``start`` is the
+    span's ``acquired_at_sha``, against which a file new in the span is told.
+    """
+
+    path: Path
+    rel: str
+    unit: str
+    lease: str
+    start: str
+    committed: bool
+
+
+@dataclass(frozen=True)
+class _StoreLeg:
+    """The session's store leg: what its docs-lock spans changed, or why that
+    cannot be said."""
+
+    root: Path | None
+    changes: tuple[_StoreChange, ...] = ()
+    answerable: bool = True
+    problem: str | None = None
+
+
+def _store_spans(session: Mapping | None) -> list[Mapping]:
+    """Every docs-lock span on the session's store leg, open or closed."""
+    spans: list[Mapping] = []
+    for leg in (session or {}).get("legs") or []:
+        if isinstance(leg, Mapping) and leg.get("kind") == STORE_LEG:
+            spans.extend(s for s in leg.get("lock_spans") or [] if isinstance(s, Mapping))
+    return spans
+
+
+def _store_leg(ctx: RuleContext) -> _StoreLeg:
+    """The commits inside the session's lock spans, and what a held unit carries.
+
+    D9: for each span, the store's diff from its ``acquired_at_sha`` to its
+    ``released_at_sha`` (the store's HEAD while it is still open), kept to the
+    span's unit; plus, for a unit still held, its uncommitted paths. Units
+    never overlap and only the holder writes one, so the commits a span
+    covers are the session's (DEC_ADR_014_I4A). An in-repo project,
+    and a session with no span, has an empty leg, which is an answer. A span
+    git cannot read makes the leg unanswerable, never empty.
+    """
+    store = getattr(ctx.manifest, "store", None)
+    if store is None:
+        return _StoreLeg(None)
+    root = Path(store.root)
+    spans = _store_spans(ctx.session)
+    if not spans:
+        return _StoreLeg(root)
+    try:
+        config = doclock.read_config(root)
+    except ManifestError as exc:
+        return _StoreLeg(root, answerable=False, problem=str(exc))
+    head = git.resolve_commit(root, "HEAD")
+    dirty: list[str] | None = None
+    changes: list[_StoreChange] = []
+    for span in spans:
+        unit, lease = str(span.get("unit") or ""), str(span.get("lease") or "")
+        start = str(span.get("acquired_at_sha") or "")
+        held = not span.get("released_at")
+        end = head if held else str(span.get("released_at_sha") or "")
+        if not start or not end:
+            return _StoreLeg(
+                root, answerable=False,
+                problem=f"the span of {unit} names no store commit to read from",
+            )
+        names = [] if start == end else git.diff_names(root, start, end)
+        if names is None:
+            return _StoreLeg(
+                root, answerable=False,
+                problem=f"the store's commits across the span of {unit} "
+                f"({start[:12]}..{end[:12]}) cannot be read",
+            )
+        for rel in names:
+            if doclock.in_unit(rel, unit, config):
+                changes.append(_StoreChange(root / rel, rel, unit, lease, start, True))
+        if held:
+            if dirty is None:
+                dirty = git.dirty_paths(root)
+                if dirty is None:
+                    return _StoreLeg(
+                        root, answerable=False,
+                        problem="the store's uncommitted changes cannot be read",
+                    )
+            for rel in dirty:
+                if doclock.in_unit(rel, unit, config):
+                    changes.append(_StoreChange(root / rel, rel, unit, lease, start, False))
+    return _StoreLeg(root, tuple(changes))
+
+
+def _repo_changed_set(ctx: RuleContext) -> _ChangedSet:
     """Every path this change touched, from the three sources that can know.
 
     Three, because each one alone goes empty in a state the others survive:
@@ -8617,7 +8859,72 @@ def _review_boundary_content_in_scope(
                     ),
                 ),
             )
+    if getattr(ctx.manifest, "store", None) is not None:
+        store_found, refusal = _store_leg_content_in_scope(ctx, scope)
+        if refusal is not None:
+            return [], refusal
+        found.extend(store_found)
     return found, None
+
+
+def _store_leg_content_in_scope(
+    ctx: RuleContext, scope: set[str]
+) -> tuple[list[tuple[str, str]], Verdict | None]:
+    """The store leg's part of the review boundary (ADR-014 D9: privacy reads
+    every leg).
+
+    The store's docs land on its main line at release, before the review, so
+    the content is read from the store's main checkout, where it already is.
+    Scope is spelled store-relative: ``all``, and each keyword whose path
+    resolves into the store. A literal prefix is spelled against the
+    repository and reaches no store path; the store's own ``privacy`` block
+    is D8's, increment 6.
+    """
+    leg = _store_leg(ctx)
+    if not leg.answerable:
+        return [], Verdict.fail(
+            "the store leg this session would land could not be scanned",
+            detail=f"{leg.problem}. An unanswered question is not a pass.",
+            fixes=("invariant store status", "invariant session status"),
+        )
+    found: list[tuple[str, str]] = []
+    for rel in sorted({change.rel for change in leg.changes}):
+        if not _in_store_privacy_scope(ctx, leg.root, rel, scope):
+            continue
+        path = leg.root / rel
+        try:
+            found.append((str(path), path.read_text("utf-8")))
+        except (FileNotFoundError, IsADirectoryError):
+            continue  # removed in the span: nothing of it is on the main line
+        except UnicodeDecodeError:
+            found.append((str(path), ""))
+        except OSError as exc:
+            return [], Verdict.fail(
+                "content this session landed in its store could not be scanned",
+                detail=f"{path} is inside privacy scope and could not be read "
+                f"({exc.strerror or exc}).",
+                fixes=("invariant privacy scan <path>",),
+            )
+    return found, None
+
+
+def _in_store_privacy_scope(ctx: RuleContext, root: Path, rel: str, scope: set[str]) -> bool:
+    """Is the store-relative ``rel`` inside privacy scope, spelled store-relative?"""
+    if "all" in scope:
+        return True
+    store = root.resolve()
+    for key in scope:
+        for manifest_key in _PRIVACY_SCOPE_PATHS.get(key, ()):
+            value = ctx.manifest.get(manifest_key)
+            if not isinstance(value, str) or not Path(value).is_absolute():
+                continue
+            try:
+                prefix = Path(value).resolve().relative_to(store).as_posix()
+            except ValueError:
+                continue
+            if rel == prefix or rel.startswith(prefix.rstrip("/") + "/"):
+                return True
+    return False
 
 
 def _privacy_screened_nothing(
