@@ -49,6 +49,7 @@ from ..core.rules import (
 from ..core.store import LOCK_TIMEOUT_SECONDS, InertStore, JsonStore
 from ..domains.pipeline import PipelineDomain, audit_line, describe_run, summarise
 from ..domains.session import (
+    Session,
     SessionDomain,
     name_ambiguity_message,
     name_matches,
@@ -344,7 +345,10 @@ class Context:
 
     @property
     def sessions(self) -> SessionDomain:
-        return SessionDomain(self.manifest, self.store, watermarks=self.watermarks)
+        return SessionDomain(
+            self.manifest, self.store, watermarks=self.watermarks,
+            host_alive=_lease_host_alive if self.manifest.store is not None else None,
+        )
 
     @property
     def pipelines(self) -> PipelineDomain:
@@ -1843,6 +1847,128 @@ def docs_assessment_row(
     return ("docs assessment", not fails, detail, gapped and not fails)
 
 
+def _lease_host_alive(lease: dict) -> bool | None:
+    """Is a docs-lease holder's host process running? (ADR-014 D5)
+
+    Read from the attention sidecar's ``pid`` in the holder's own state root,
+    which only the CLI may read: the oracle owns the sidecar, and the session
+    domain is handed this callable. ``None`` when it cannot be told.
+    """
+    from ..oracle.attention import AttentionStore
+    from ..oracle.scan import pid_exists
+
+    host, root = lease.get("host"), lease.get("state_root")
+    if not host or not root:
+        return None
+    try:
+        record = AttentionStore(JsonStore(Path(root))).read(host)
+    except Exception:  # noqa: BLE001 - an unreadable sidecar is no answer
+        return None
+    if record is None or not isinstance(record.pid, int):
+        return None
+    return pid_exists(record.pid)
+
+
+def _docs_lock_session(ctx: Context) -> Session:
+    session = ctx.current_session()
+    if session is None:
+        raise UsageError(
+            "the docs lock is a session's; no session is active here. Pass --id, "
+            "or start one with 'invariant session start <name>'."
+        )
+    return session
+
+
+def _lock_lines(out) -> list[str]:
+    lines = []
+    if out.granted:
+        lines.append(f"granted   {', '.join(out.granted)}")
+    for unit in [s["unit"] for s in out.closed if s.get("backed_off")]:
+        lines.append(f"backed off {unit} (ruling 21): it is queued again after the late unit")
+    for unit, who in sorted(out.handed.items()):
+        lines.append(f"passed    {unit} to session {who}")
+    for unit in [s["unit"] for s in out.closed if not s.get("backed_off")]:
+        lines.append(f"released  {unit}")
+    lines.append(f"held      {', '.join(out.held) or 'nothing'}")
+    if out.waiting:
+        w = out.waiting
+        lines.append(
+            f"queued    {w['unit']} at position {w['position']}, held by session "
+            f"{w['holder']}; 'invariant docs lock --wait' blocks until it passes to you"
+        )
+    if out.pending:
+        lines.append(f"then      {', '.join(out.pending)}")
+    return lines
+
+
+def cmd_docs_lock(args) -> int:
+    """Take docs-lock units in key order, or report the lease (ADR-014 D5)."""
+    ctx = Context(session_id=args.id)
+    session = _docs_lock_session(ctx)
+    domain = ctx.sessions
+    if args.take_over:
+        if args.units:
+            raise UsageError("--take-over names its one unit; drop the other arguments")
+        out = domain.docs_take_over(session.id, args.take_over, args.reason or "")
+    else:
+        out = domain.docs_lock(session.id, args.units)
+    if args.wait and out.waiting:
+        out = domain.docs_wait(session.id, args.timeout)
+        if out.waiting:
+            emit(
+                args,
+                {**out.to_dict(), "timed_out": True},
+                "\n".join(
+                    [
+                        *_lock_lines(out),
+                        (
+                            f"still queued for {out.waiting['unit']} after "
+                            f"{args.timeout:g}s; the queue keeps your place"
+                        ),
+                    ]
+                ),
+            )
+            return 1
+    return emit(args, out.to_dict(), "\n".join(_lock_lines(out)))
+
+
+def cmd_docs_unlock(args) -> int:
+    """Release docs-lock units, or all of them; never waits (ADR-014 D5)."""
+    ctx = Context(session_id=args.id)
+    session = _docs_lock_session(ctx)
+    out = ctx.sessions.docs_unlock(session.id, args.units)
+    return emit(args, out.to_dict(), "\n".join(_lock_lines(out)))
+
+
+def _docs_lock_table(ctx: Context) -> list[str]:
+    """Each held unit of the store: holder, how long, the queue (ADR-014 D5)."""
+    if ctx.manifest.store is None:
+        return []
+    try:
+        rows = ctx.sessions.docs_units()
+    except InvariantError:
+        return []
+    if not rows:
+        return [f"  docs lock  store {ctx.manifest.store.name}: no unit held"]
+    lines = [f"  docs lock  store {ctx.manifest.store.name}"]
+    for row in rows:
+        queue = ", ".join(q or "?" for q in row["queue"]) or "empty"
+        stale = f"  STALE: {row['stale']}" if row.get("stale") else ""
+        lines.append(
+            f"    {row['unit']}  held by {row['holder']} for "
+            f"{_held_for(row['held_seconds'])}; queue: {queue}{stale}"
+        )
+    return lines
+
+
+def _held_for(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
 def cmd_docs_assess(args) -> int:
     """The architecture docs assessment (ADR-016 D3). Read-only; exit 0
     whatever the gaps, 2 on a configuration that does not load.
@@ -3105,6 +3231,7 @@ def cmd_session_status(args) -> int:
             f"pipeline advance it lets through)"
         )
         text.append(f"  override   {grant['rule']} — {grant['reason']} {reach}")
+    text.extend(_docs_lock_table(ctx))
     return emit(
         args,
         {"session": session.to_dict(), "pipeline": pipeline.to_dict() if pipeline else None},
@@ -3265,9 +3392,12 @@ def cmd_session_list(args) -> int:
     # distinguishes two sessions on the same task. A session with no plan reads
     # `-` rather than `0/0`, because those are different facts.
     text = "\n".join(
-        f"  {s.id}  {s.state:<12} {s.name:<24} {_plan_fraction(s):<7} "
-        f"{s.worktree or ''}"
-        for s in sessions
+        [
+            f"  {s.id}  {s.state:<12} {s.name:<24} {_plan_fraction(s):<7} "
+            f"{s.worktree or ''}"
+            for s in sessions
+        ]
+        + _docs_lock_table(ctx)
     )
     return emit(args, {"sessions": [s.to_dict() for s in sessions]}, text)
 
@@ -6945,6 +7075,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="build again even when this tree is already recorded green",
     )
     q.set_defaults(func=cmd_docs_build)
+    q = p.add_parser(
+        "lock",
+        parents=[session_arg],
+        help="take the store's docs-lock units in key order, or show the lease (ADR-014 D5)",
+    )
+    q.add_argument(
+        "units", nargs="*",
+        help="an area's name, area:<name>, file:<path>, or a store path; none shows the lease",
+    )
+    q.add_argument("--wait", action="store_true", help="block until every unit is granted")
+    q.add_argument(
+        "--timeout", type=float, default=600.0,
+        help="seconds --wait blocks before giving up, keeping the place (default 600)",
+    )
+    q.add_argument("--take-over", metavar="UNIT", help="take one unit of a stale lease over")
+    q.add_argument("--reason", help="why, for --take-over: recorded in both sessions")
+    q.set_defaults(func=cmd_docs_lock)
+    q = p.add_parser(
+        "unlock",
+        parents=[session_arg],
+        help="release docs-lock units, or all of them; refused while one has uncommitted changes",
+    )
+    q.add_argument("units", nargs="*", help="the units to release; none releases every one")
+    q.set_defaults(func=cmd_docs_unlock)
     decision = p.add_parser(
         "decision", help="the docs project's decision records (ADR-018 D7)"
     ).add_subparsers(dest="decision_action", required=True)

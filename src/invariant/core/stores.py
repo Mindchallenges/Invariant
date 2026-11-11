@@ -26,6 +26,7 @@ from typing import Any
 import yaml
 
 from . import git
+from .doclock import parse_docs_lock
 from .errors import ManifestError, StateError
 from .home import (
     UserConfig,
@@ -48,9 +49,9 @@ STORES_DIR = "stores"
 #: The keys a pointer may hold. Policy lives in the store, reviewed there.
 POINTER_KEYS = ("version", "store", "records")
 
-#: The ``store`` keys this build reads. ``docs_lock`` arrives with D5
-#: (increment 4); ``publish`` was dropped at acceptance.
-STORE_KEYS = ("repos",)
+#: The ``store`` keys this build reads. ``docs_lock`` is D5 (increment 4a);
+#: ``publish`` was dropped at acceptance.
+STORE_KEYS = ("repos", "docs_lock")
 
 #: An scp-like remote, ``user@host:path``.
 _SCP_REMOTE = re.compile(r"^[\w.-]+@[\w.-]+:")
@@ -234,6 +235,9 @@ def read_store_manifest(root: Path) -> tuple[dict[str, Any], dict[str, dict[str,
                 f"the store config {path} sets store.{key}, which this build does "
                 f"not read; it reads {', '.join(STORE_KEYS)}"
             )
+    # Checked at load, so an overlapping area is refused before any session
+    # can take a unit of it (ADR-014 D5).
+    parse_docs_lock(block.get("docs_lock"), path)
     repos = block.get("repos") or {}
     if not isinstance(repos, Mapping):
         raise ManifestError(

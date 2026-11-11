@@ -19,9 +19,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..core import git
+from ..core import doclock, git
 from ..core import plan as plan_reader
-from ..core.errors import GateFailure, StateError, TransitionError, UsageError
+from ..core.errors import (
+    GateFailure,
+    ManifestError,
+    StateError,
+    TransitionError,
+    UsageError,
+)
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_session_machine
 from ..core.rules import (
@@ -47,6 +53,10 @@ _FINISHED = frozenset({"torn_down", "abandoned"})
 #: disagree about which edge it is.
 _FIRST_EDIT_FROM = "isolated"
 _FIRST_EDIT_TO = "working"
+
+#: The states that free every docs-lock unit a session holds: it landed, it
+#: was torn down, or it was abandoned (ADR-014 D5).
+_RELEASES_DOCS_LOCK = frozenset({"merged", "torn_down", "abandoned"})
 
 #: Context a gate needs to know which question it is being asked, derived from
 #: the state being ENTERED. ``session.ff_merge_target`` and
@@ -84,10 +94,10 @@ class Resolution:
     be worse than not learning one.
     """
 
-    session: "Session | None"
+    session: Session | None
     #: explicit | host | target | prompt | cwd | origin | ambiguous | none
     how: str
-    candidates: tuple["Session", ...] = ()
+    candidates: tuple[Session, ...] = ()
 
     @property
     def proven(self) -> bool:
@@ -226,6 +236,18 @@ class Session(PreservesUnknownKeys):
     #: that outlives the worktree is the only place it can live. ``at`` is the
     #: same epoch reading ``heartbeat`` holds, in the machine-local state root.
     handoffs: list[dict] = field(default_factory=list)
+    #: The session's legs beyond its repository (ADR-014 D5). The repository
+    #: leg is the record's own ``worktree``, ``branch`` and ``base``, so a
+    #: record written before legs existed is already a one-repo session and
+    #: loads unchanged. A store project adds one store leg,
+    #: ``{"kind": "store", "root", "lock_spans": [...]}``, whose spans say
+    #: when the session held each docs-lock unit: ``lease``, ``unit``,
+    #: ``acquired_at``, ``acquired_at_sha``, then at release ``released_at``,
+    #: ``released_at_sha`` and ``changed`` (the unit's paths that differ
+    #: across the span, empty when nothing was written). A span closed by a
+    #: back-off carries ``backed_off``; one taken from the session carries
+    #: ``taken_over``, ``taken_by`` and ``reason``.
+    legs: list[dict] = field(default_factory=list)
     #: Keys a document carried that this build does not declare, kept verbatim
     #: so that saving the record cannot delete them. Never written under this
     #: name — `to_dict` merges it back at the top level. See
@@ -283,9 +305,15 @@ class SessionDomain:
         store: JsonStore | None = None,
         watermarks: WatermarkSource | None = None,
         clock=time.time,
+        host_alive=None,
     ) -> None:
         self.manifest = manifest
         self.store = store or JsonStore(manifest.state_root)
+        #: Whether a docs-lease holder's host process runs (ADR-014 D5):
+        #: ``lease -> True | False | None``. Injected by the CLI, which may read
+        #: the oracle's attention sidecar; ``None`` here means nobody can tell,
+        #: so a lease goes stale on its heartbeat alone.
+        self.host_alive = host_alive
         self.machine: Machine = load_session_machine(manifest)
         #: Injected by the CLI (ADR-002 D2). ``None`` is normal: transitions
         #: then record ``usage: None``, which the report reads as "not
@@ -398,7 +426,7 @@ class SessionDomain:
         *,
         target: Path | str | None = None,
         host_session_id: str | None = None,
-    ) -> "Resolution":
+    ) -> Resolution:
         """:meth:`current`, plus *how* it decided.
 
         Callers that only need the answer use ``current``. The ``how`` matters
@@ -502,10 +530,10 @@ class SessionDomain:
                 worktree = Path(session.worktree).resolve()
             except OSError:
                 continue
-            if resolved == worktree or worktree in resolved.parents:
-                # Deepest match wins, so a nested worktree beats its parent.
-                if len(str(worktree)) > best_len:
-                    best, best_len = session, len(str(worktree))
+            # Deepest match wins, so a nested worktree beats its parent.
+            inside = resolved == worktree or worktree in resolved.parents
+            if inside and len(str(worktree)) > best_len:
+                best, best_len = session, len(str(worktree))
         return best
 
     def live(self) -> list[Session]:
@@ -861,6 +889,7 @@ class SessionDomain:
                 continue
             reaped.append(session)
             if not dry_run:
+                self.release_docs_lock(session)
                 session.state = "abandoned"
                 session.history.append(
                     {
@@ -1067,6 +1096,7 @@ class SessionDomain:
             cwd=str(self.manifest.root),
             capture_output=True,
             text=True,
+            check=False,
         )
         if proc.returncode != 0:
             raise StateError(f"worktree creation failed: {proc.stderr.strip()}")
@@ -1529,6 +1559,175 @@ class SessionDomain:
         self._save(session)
         return spent
 
+    # -- the store's docs lock (ADR-014 D5) -----------------------------
+
+    def _docs_lock(self) -> doclock.DocsLock:
+        return doclock.DocsLock(self.manifest, clock=self.clock, alive=self.host_alive)
+
+    def _holder(self, session: Session) -> doclock.Holder:
+        link = self.manifest.store
+        return doclock.Holder(
+            session=session.id,
+            identity=link.key if link is not None else None,
+            host=session.host_session_id,
+            state_root=str(self.manifest.state_root),
+        )
+
+    def docs_lock(self, session_id: str, units: Sequence[str] = ()) -> doclock.Outcome:
+        """Take the named units in key order, or report where the lease stands.
+
+        Grants or queues and returns at once; it never loops. An argument is
+        an area's name, a unit key, or a store path (:func:`doclock.resolve_unit`).
+        """
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        keys = [doclock.resolve_unit(self.manifest, lock.config, u) for u in units]
+        out = lock.acquire(self._holder(session), keys) if keys else lock.outcome(session.id)
+        lock.touch(session.id)
+        self._record_spans(session, lock, out)
+        self._save(session)
+        return out
+
+    def docs_unlock(self, session_id: str, units: Sequence[str] = ()) -> doclock.Outcome:
+        """Release the named units, or every one; refused while one is dirty."""
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        keys = [doclock.resolve_unit(self.manifest, lock.config, u) for u in units] or None
+        out = lock.release(session.id, keys)
+        self._record_spans(session, lock, out)
+        self._save(session)
+        return out
+
+    def docs_wait(self, session_id: str, timeout: float) -> doclock.Outcome:
+        """Block until the session's lease waits for nothing, or ``timeout``."""
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        out = lock.wait(session.id, timeout)
+        self._record_spans(session, lock, out)
+        self._save(session)
+        return out
+
+    def docs_take_over(self, session_id: str, unit: str, reason: str) -> doclock.Outcome:
+        """Take one unit of a stale lease over, recorded in both sessions' overrides."""
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        key = doclock.resolve_unit(self.manifest, lock.config, unit)
+        out, previous = lock.take_over(self._holder(session), key, reason)
+        now = self.clock()
+        session.overrides.append(
+            {
+                "rule": doclock.TAKEOVER_RULE,
+                "unit": key,
+                "reason": reason.strip(),
+                "taken_from": previous.get("session"),
+                "stale": previous.get("why"),
+                "at": now,
+            }
+        )
+        self._record_spans(session, lock, out)
+        self._save(session)
+        self._record_taken(previous, key, reason.strip(), session.id, now)
+        return out
+
+    def _record_taken(
+        self, previous: dict, unit: str, reason: str, by: str, now: float
+    ) -> None:
+        """Write the takeover into the previous holder's own record.
+
+        That session may live in another repository's state root, since a
+        store serves several. Its lease was stale, so it is not writing its
+        record at the same time; a record that cannot be found is skipped.
+        """
+        sid, root = previous.get("session"), previous.get("state_root")
+        if not sid or not root:
+            return
+        store = self.store if Path(root) == Path(self.manifest.state_root) else JsonStore(Path(root))
+        raw = store.read(self._path(sid))
+        if not raw:
+            return
+        victim = Session.from_dict(raw)
+        leg = self._store_leg(victim)
+        span = previous.get("span") or {}
+        for entry in leg["lock_spans"]:
+            if entry.get("unit") == unit and not entry.get("released_at"):
+                entry.update({k: v for k, v in span.items() if k not in ("lease", "unit")})
+                break
+        else:
+            leg["lock_spans"].append(dict(span))
+        victim.overrides.append(
+            {"rule": doclock.TAKEOVER_RULE, "unit": unit, "reason": reason, "taken_by": by, "at": now}
+        )
+        store.write(self._path(sid), victim.to_dict())
+
+    def release_docs_lock(self, session: Session) -> doclock.Outcome | None:
+        """Free every unit ``session`` holds or waits for: it landed, was torn
+        down or was abandoned. Never refused for uncommitted changes, which
+        the closed span names instead; a store that cannot be read leaves the
+        units to go stale, to be taken over with a reason."""
+        if self.manifest.store is None:
+            return None
+        try:
+            lock = self._docs_lock()
+            out = lock.release(session.id, None, check=False)
+        except (StateError, ManifestError, UsageError):
+            return None
+        self._record_spans(session, lock, out)
+        return out
+
+    def docs_units(self) -> list[dict]:
+        """Every held unit of the project's store, or none for an in-repo project."""
+        if self.manifest.store is None:
+            return []
+        return self._docs_lock().units()
+
+    def _store_leg(self, session: Session) -> dict:
+        for leg in session.legs:
+            if leg.get("kind") == "store":
+                leg.setdefault("lock_spans", [])
+                return leg
+        root = self.manifest.store.root if self.manifest.store is not None else None
+        leg = {"kind": "store", "root": str(root) if root else None, "lock_spans": []}
+        session.legs.append(leg)
+        return leg
+
+    def _record_spans(
+        self, session: Session, lock: doclock.DocsLock, out: doclock.Outcome
+    ) -> None:
+        """Bring the session's store leg in line with the lease record.
+
+        Spans the call opened or closed are written as they are; a unit the
+        lease gained by hand-over since the session last looked opens its span
+        from the record's own ``since`` and ``sha``.
+        """
+        if not out.opened and not out.closed and out.lease is None and not any(
+            leg.get("kind") == "store" for leg in session.legs
+        ):
+            return
+        leg = self._store_leg(session)
+        spans = leg["lock_spans"]
+        for opened in out.opened:
+            spans.append(dict(opened))
+        for closed in out.closed:
+            for entry in reversed(spans):
+                if entry.get("unit") == closed["unit"] and not entry.get("released_at"):
+                    entry.update({k: v for k, v in closed.items() if k != "unit"})
+                    break
+            else:
+                spans.append(dict(closed))
+        record = lock.read()
+        lid = out.lease or lock.lease_id(record, session.id)
+        open_units = {e.get("unit") for e in spans if not e.get("released_at")}
+        for key, unit in sorted(record["units"].items()):
+            if lid and unit.get("holder") == lid and key not in open_units:
+                spans.append(
+                    {
+                        "lease": lid,
+                        "unit": key,
+                        "acquired_at": unit.get("since"),
+                        "acquired_at_sha": unit.get("sha"),
+                    }
+                )
+
     # -- stand-down ----------------------------------------------------
 
     def stand_down(
@@ -1945,6 +2144,7 @@ class SessionDomain:
                 cwd=repo,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if proc.returncode != 0:
                 raise StateError(
@@ -1957,6 +2157,7 @@ class SessionDomain:
                 cwd=repo,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if proc.returncode != 0 and "not found" not in proc.stderr.lower():
                 raise StateError(
@@ -2028,6 +2229,7 @@ class SessionDomain:
                     f"(was {session.state})"
                 )
                 if not dry_run:
+                    self.release_docs_lock(session)
                     session.state = "abandoned"
                     session.history.append(
                         {"to": "abandoned", "reason": "worktree no longer exists", "repair": True}
@@ -2152,6 +2354,8 @@ class SessionDomain:
                     "gates": [v.rule_id for v in blocking],
                 }
             )
+        if target in _RELEASES_DOCS_LOCK:
+            self.release_docs_lock(session)
         self._note(session, reason, to=target)
         session.state = target
         self._save(session)
@@ -2472,6 +2676,7 @@ def _branch_names(root: Path) -> list[str]:
         cwd=str(root),
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         return []

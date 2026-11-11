@@ -1184,7 +1184,74 @@ Setup
        detected format `sphinx`, which has a reader (built in ADR-018 increment
        2), so `paths.docs` points at it and the assessment reads it. With
        `records.docs: store` an adopted source is store docs like any other, so
-       ADR-014 D5's docs lock covers it once that lock is built.
+       ADR-014 D5's docs lock covers it.
+       Built (ADR-014 D5, increment 4a; the session's docs lease, a store
+       project only):
+         docs lock [<unit>...] [--wait [--timeout <s>]] [--id <session>]
+                                take the store's docs-lock units in key order,
+                                or, with none named, report where the lease
+                                stands. A unit is an area's name, `area:<name>`,
+                                `file:<store path>`, or a store path, absolute
+                                or store-relative, which resolves to the area
+                                its patterns put it in, else to that file
+                                (`core/doclock`). Free units are granted at
+                                once; at the first busy one the session is
+                                queued, first in, first out, and the units
+                                after it wait in order ("then"). A unit that
+                                sorts before one the session holds is a late
+                                unit (ruling 21): granted if free; if busy, the
+                                session backs off, releasing every held unit
+                                that sorts after it (each passes to its queue's
+                                head) and queuing for the late unit and then
+                                those; refused, changing nothing, while one of
+                                them has uncommitted changes, naming the paths.
+                                It never loops. `--wait` blocks until every
+                                unit is granted, or for `--timeout` seconds
+                                (600 by default), on the lease's named pipe,
+                                which a hand-over writes to; timing out exits
+                                1 and keeps the place. The output names what
+                                was granted, backed off and passed on, what is
+                                held, the queue position and its holder, and
+                                what follows; `--json` carries `lease`,
+                                `granted`, `held`, `queued` (unit: `position`,
+                                `holder`), `pending`, `backed_off`, `released`
+                                and `handed`. Each grant opens a span on the
+                                session's store leg (state model, "What the
+                                record carries beyond the state"). Refused,
+                                exit 2: in an in-repo project, with no session,
+                                for an area the store does not declare, for a
+                                path outside the store, and for a path under a
+                                data record kept in the store, memory, the
+                                backlog, reports or sweeps, which are written
+                                outside the lock (ruling 20).
+         docs lock --take-over <unit> --reason <why> [--id <session>]
+                                take one unit of another session's stale lease
+                                over: its heartbeat older than
+                                `store.docs_lock.lease_minutes`, or its host
+                                process dead by the attention sidecar's `pid`.
+                                Recorded in both sessions' `overrides` (rule
+                                `store.docs_lock`, the unit, the reason, who
+                                took it from whom); the holder's span closes
+                                as `taken_over`. Refused with no reason, for a
+                                free unit, for one the caller holds, and while
+                                the holder's lease is live.
+         docs unlock [<unit>...] [--id <session>]
+                                release the named units, or every one, in any
+                                order; it never waits. Each passes to the head
+                                of its queue in the same write, which may then
+                                take what it waits for next. Refused, changing
+                                nothing, while a unit's paths carry uncommitted
+                                changes in the store's checkout: commit the
+                                update on the store's main line first. A
+                                release with nothing written is allowed, and
+                                its span's `changed` is empty. Naming a unit
+                                the session only queues for drops it; naming
+                                one it neither holds nor waits for is refused.
+       The heartbeat is written by `docs lock` and `docs unlock`, at most once
+       a minute. Landing, teardown and abandoning release every unit the
+       session holds or waits for (`domains/session`). The host's read grant
+       and refusal (`store.docs_lock_held`), the new holder's notice and the
+       oracle's views are increment 4b; the gates that read the spans are 4c.
 
 A managed file the operator has edited
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1338,6 +1405,10 @@ Session
        worktree of the clone, and the files go with the worktree. The output
        names what was rendered; `--json` carries `rendered`.
    invariant session status [--json]
+       Built (ADR-014 D5, increment 4a): in a store project, a `docs lock`
+       block lists each held unit of the store with its holder, how long it
+       has held it, its queue, and STALE with the reason when the holder's
+       lease is stale. An in-repo project prints nothing new.
    invariant session transition <state> [--reason <text>] [--force]
        The generic edge-walker. The machine's entry and exit gates for the edge
        are evaluated inside the domain, so this route is exactly as gated as
@@ -1747,7 +1818,10 @@ Session
                                          plan reads `-` rather than `0/0`, because
                                          those are different facts. `--json` is
                                          unchanged — the record already carries
-                                         the plan.
+                                         the plan. In a store project the
+                                         store's `docs lock` block follows, as
+                                         in `session status` (ADR-014 D5,
+                                         increment 4a).
 
 Pipeline
 --------

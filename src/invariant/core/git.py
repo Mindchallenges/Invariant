@@ -743,3 +743,41 @@ def init_repository(cwd: Path) -> tuple[bool, str]:
     """
     code, out, err = _run(["init", "-q"], cwd)
     return code == 0, (out if code == 0 else (err or out or f"git exited {code}"))
+
+
+def diff_names(cwd: Path, start: str, end: str) -> list[str] | None:
+    """The paths that differ between the commits ``start`` and ``end``.
+
+    Two endpoints, not a merge base: a docs-lock span (ADR-014 D5) is a stretch
+    of the store's own main line, so what changed across it is the plain diff.
+    ``None`` when git cannot answer.
+    """
+    if not start or not end or start.startswith("-") or end.startswith("-"):
+        return None
+    code, out = _run_bytes(["diff", "--name-only", "-z", start, end], cwd)
+    return None if code != 0 else _nul_separated(out)
+
+
+def dirty_paths(cwd: Path) -> list[str] | None:
+    """Every path ``git status`` reports changed or untracked, each file named.
+
+    Untracked directories are listed file by file, so a new file inside a
+    docs-lock unit is seen as that file. ``None`` when git cannot answer.
+    """
+    code, out = _run_bytes(["status", "--porcelain", "-z", "--untracked-files=all"], cwd)
+    if code != 0:
+        return None
+    entries = _nul_separated(out)
+    paths: list[str] = []
+    skip = False
+    for entry in entries:
+        if skip:
+            skip = False
+            continue
+        if len(entry) < 4:
+            continue
+        paths.append(entry[3:])
+        # A rename or copy carries its source as the next entry.
+        if entry[0] in "RC":
+            skip = True
+    return paths

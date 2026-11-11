@@ -72,6 +72,7 @@ Layers
            CHOME["home (ADR-014 D3)"]
            CIDENT["identity (ADR-014 D4)"]
            CSTORES["stores (ADR-014 D2)"]
+           CDOCLOCK["doclock (ADR-014 D5, inc 4a)"]
            CDOCFMT["docformat (ADR-016 D1): markdown, rst"]
            CNEEDS["needs (ADR-018 D2, D3, D5, D6)"]
            CMDCONV["mdconvert (ADR-018 D14)"]
@@ -316,6 +317,12 @@ Layers
        RULES -- "docs.design_home, items.decisions_linked, docs.decisions_recorded: prefixes_of, cited_ids, latest_record" --> CNEEDS
        RULES -. "docs_folder: the guidelines gates' fixes name the docs project's guidelines folder, imported at call time" .-> CNEEDS
        SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
+       SESSION -- "docs_lock, docs_unlock, docs_take_over, release_docs_lock: DocsLock, resolve_unit" --> CDOCLOCK
+       CDOCLOCK -- "JsonStore.locked: the lease record in the store's git dir" --> STORE
+       CDOCLOCK -- "common_dir, resolve_commit, diff_names, dirty_paths" --> GIT
+       CSTORES -- "parse_docs_lock: store.docs_lock refused at load" --> CDOCLOCK
+       CDOCLOCK -. "glob_matches, RECORD_PATH_KEYS, imported at call time" .-> MANIFEST
+       CLI -. "injects host_alive, read from the attention sidecar's pid" .-> SESSION
        WORKITEM -- "items.decisions_linked before an item write" --> RULES
        CGUIDE -- "id_stem, is_need_id: rule need ids and decided_by" --> CNEEDS
        DOCSD -- "docs.assess, docs.adopt, ADOPT_MODES, path_for, project_relative, glob_matches" --> MANIFEST
@@ -1775,8 +1782,35 @@ Component responsibilities
    the comment put back (ADR-017 ruling 9); a dotted key removed from a level
    (``without``, ruling 12)
 
+   ``store.docs_lock`` is checked here at load through
+   ``core/doclock.parse_docs_lock``, so an overlapping area is refused before
+   any session takes a unit (ADR-014 D5, increment 4a)
+
    **Never does:** Merge levels into a configuration (``manifest`` does);
-   clone, pull or push a store; know a host
+   clone, pull or push a store; know a host; hold the docs lock (``doclock``
+   does)
+
+.. comp:: ``core/doclock``
+   :id: COMP_CORE_DOCLOCK
+
+   **Owns:** A store's docs lock (ADR-014 D5, increment 4a): ``store.docs_lock``
+   checked (``parse_docs_lock``, areas that overlap refused naming both,
+   ``read_config``); the unit a store path belongs to (``unit_of``: its area,
+   else the file) and the one an argument names (``resolve_unit``, refusing a
+   path outside the store or under a data record kept there, ruling 20); the
+   lease record in the store's git directory and every change to it, each one
+   locked write (``DocsLock``): ``acquire`` in key order, granting the free
+   and queuing at the first busy unit, with ruling 21's back-off for a late
+   unit; ``release`` handing each unit to its queue's head and taking what that
+   lease waits for next; ``take_over`` of a stale lease with a reason;
+   ``touch``, the heartbeat at most once a minute; ``staleness``, by the lease
+   minutes or a dead host; ``wait``, blocking on a named pipe a hand-over
+   writes to; ``units``, the holder, age and queue of each unit. A span's
+   ``changed`` paths are read from the store's git, never from a trailer
+
+   **Never does:** Write a session record (``domains/session`` does); read a
+   host's attention sidecar (``alive`` is injected); fetch or push a store;
+   enforce a read or gate a change (ADR-014 increments 4b and 4c)
 
 .. comp:: ``core/identity``
    :id: COMP_CORE_IDENTITY
@@ -2146,7 +2180,15 @@ advance it. They are the only place where "what a session is" is encoded.
    the decisions a session declares (``decisions_add``, ``decisions_resolve``,
    ``decisions_remove``, ADR-018 D9, increment 5), an id checked against the
    decision types' prefixes through ``core/needs``; ``docs.decisions_recorded``
-   reads them at the landing.
+   reads them at the landing. It keeps a session's legs (ADR-014 D5,
+   increment 4a): the repository leg is the record's own ``worktree``,
+   ``branch`` and ``base``, and a store project adds a store leg whose
+   ``lock_spans`` it opens and closes as the session's docs-lock units are
+   granted and released (``docs_lock``, ``docs_unlock``, ``docs_wait``,
+   ``docs_take_over``, which also writes the takeover into the previous
+   holder's record, in whichever repository's state root it lives); landing,
+   teardown and abandoning release every unit (``release_docs_lock``).
+   Whether a holder's host is alive is the CLI's injected ``host_alive``.
 
 .. comp:: ``domains/pipeline``
    :id: COMP_DOMAINS_PIPELINE
@@ -3462,7 +3504,10 @@ per repository:
      config.yaml               the user level of the config, when written:
                                defaults, repos, store_naming (ADR-014 D3)
      stores/<name>/            a store, a git repository, when created by
-                               `store init` without a path (ADR-014 D2)
+                               `store init` without a path (ADR-014 D2); its
+                               docs lease, untracked, in
+                               .git/invariant/locks/docs.json (ADR-014 D5,
+                               increment 4a; state model, "Storage layout")
      projects.json             the oracle's project index; one entry per state root
      locks/projects.lock       advisory lock for the index's read-modify-write
      locks/alerts.lock         advisory lock for the alert ledger

@@ -563,7 +563,7 @@ RECORD_PATH_KEYS: dict[str, tuple[str, ...]] = {
 _STORE_NOT_YET: dict[str, str] = {
     "guidelines": (
         "the gates do not yet read a record from its own tree (ADR-014 D9, "
-        "increment 4): a ruleset or baseline in a store would leave "
+        "increment 4c): a ruleset or baseline in a store would leave "
         "guidelines.baseline_only_shrinks finding no baseline at the base and "
         "admitting every entry"
     ),
@@ -698,7 +698,7 @@ class Manifest:
             raise ManifestError(
                 "guidelines.baseline is refused in a project whose manifest is not "
                 "in its repository, until the gates read each record from its own "
-                "tree (ADR-014 D9, increment 4): guidelines.baseline_only_shrinks "
+                "tree (ADR-014 D9, increment 4c): guidelines.baseline_only_shrinks "
                 "would find no manifest at the base and admit every entry."
             )
         return manifest
@@ -1096,7 +1096,7 @@ class Manifest:
 
         A location this build cannot honour yet is refused with the increment
         that builds it rather than loading and doing nothing (BUG_050): the
-        guidelines records in a store (D9, increment 4). A retired location,
+        guidelines records in a store (D9, increment 4c). A retired location,
         `user` for hooks and agents (ADR-020 D9), is refused naming its fix.
         """
         records = self.data.get("records")

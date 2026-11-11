@@ -486,7 +486,7 @@ Refused at load, each with its reason, rather than loaded to do nothing:
   (:need:`DEC_ADR_020_D9`): nothing is installed at user level, and the
   refusal names ``local`` and ``repo`` as the two locations that remain;
 - ``store`` for ``guidelines``, until the gates read each record from its own
-  tree (D9, increment 4); otherwise a baseline left behind would make
+  tree (D9, increment 4c); otherwise a baseline left behind would make
   ``guidelines.baseline_only_shrinks`` admit every entry;
 - a ``store`` record when the project has no store;
 - ``items.exempt: false`` with ``records.backlog: store`` (D10): a backlog in a
@@ -537,10 +537,33 @@ found for the project ("Finding the project", below). An in-repo project
 does no store lookup (D2: "exactly as today"), so a ``store`` record in its
 ``.claude/invariant.yaml`` is refused as having no store.
 
-**Accepted, not yet built.** A store's ``invariant.yaml`` adds
-``store.docs_lock`` (D5), ``sync`` (D7) and ``privacy.store.scan`` (D8), each with
-its increment. Until then a ``store`` key other than ``repos`` is refused at load,
-naming it.
+**Built (ADR-014 D5, increment 4a; :need:`DEC_ADR_014_I4A`).** A store's
+``invariant.yaml`` may set ``store.docs_lock``:
+
+.. code:: yaml
+
+   store:
+     docs_lock:
+       areas:                     # name -> store-relative path patterns
+         architecture: [docs/architecture/**]
+         guidelines: [docs/guidelines/**, methodology/*.yaml]
+       lease_minutes: 30          # the ruled default
+
+A pattern uses the one glob matcher every declared glob uses (``glob_matches``)
+and is store-relative: absolute, or climbing with ``..``, is refused naming the
+area. An area name is letters, digits, ``.``, ``_`` and ``-``, since it is spelled
+``area:<name>`` in a unit key. Two areas whose patterns overlap are refused when
+the store's config loads, naming both, so every path has one unit: one
+pattern matching the other's text, read as a path (``docs/**`` beside
+``docs/architecture/**``). An overlap no pattern text shows (``docs/*.md``
+beside ``docs/x*``) is refused, naming both areas, when a path both match is
+first resolved to a unit. ``lease_minutes`` is a whole number, at least 1. Any
+other ``docs_lock`` key is refused. With no areas declared every path is its
+own unit. The lock itself is ``core/doclock`` (overview).
+
+**Accepted, not yet built.** ``sync`` (D7) and ``privacy.store.scan`` (D8), each
+with its increment. Until then a ``store`` key other than ``repos`` and
+``docs_lock`` is refused at load, naming it.
 
 **Built (:need:`ADR-016 <DEC_ADR_016>` D4, increment 2).** ``init``'s relocate offer
 writes another repo ``paths.docs`` into ``.claude/invariant.yaml``, or, for a

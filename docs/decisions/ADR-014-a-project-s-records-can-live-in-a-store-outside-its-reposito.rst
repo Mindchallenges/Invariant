@@ -1010,29 +1010,69 @@ after increment 2.
 |           |                                 | written. invariant and     |
 |           |                                 | Heap unchanged.            |
 +-----------+---------------------------------+----------------------------+
-| 4         | D5 (legs, areas and per-file    | Two sessions on one store: |
-|           | units, the global order, the    | reading the same area, the |
-|           | lease, per-unit queues,         | second queued and denied a |
-|           | takeover and rules, the         | doc read until the first   |
-|           | mid-design back-off of ruling   | releases, then granted;    |
-|           | 21, attribution) and D9 (gates  | reading different areas,   |
-|           | per leg, reads and writes under | both granted at once. Two  |
-|           | one span, store bases). Memory  | sessions asking for two    |
-|           | outside the lock (ruling 20).   | units in opposite orders,  |
-|           | The guidelines refusal lifted.  | both completing with no    |
-|           |                                 | deadlock. An overlapping   |
-|           |                                 | area declaration refused   |
-|           |                                 | at load. A ``conf.py``     |
-|           |                                 | change held by             |
-|           |                                 | ``docs.updated`` until a   |
-|           |                                 | doc is committed under a   |
-|           |                                 | span that also holds the   |
-|           |                                 | read. A stale lease taken  |
-|           |                                 | over only with a reason. A |
-|           |                                 | memory write by a session  |
-|           |                                 | holding no unit, accepted. |
-|           |                                 | A grown store baseline     |
-|           |                                 | refused.                   |
+| 4         | Split on 2026-11-11             | The union of the three     |
+|           | (DEC_ADR_014_I4A) into 4a, 4b   | rows below.                |
+|           | and 4c, built in that order.    |                            |
+|           | Together: D5 (legs, areas and   |                            |
+|           | per-file units, the global      |                            |
+|           | order, the lease, per-unit      |                            |
+|           | queues, takeover and rules, the |                            |
+|           | mid-design back-off of ruling   |                            |
+|           | 21, attribution) and D9 (gates  |                            |
+|           | per leg, reads and writes under |                            |
+|           | one span, store bases). Memory  |                            |
+|           | outside the lock (ruling 20).   |                            |
+|           | The guidelines refusal lifted.  |                            |
++-----------+---------------------------------+----------------------------+
+| 4a        | The lease and its CLI, no hooks | Two sessions on one store  |
+|           | and no gates:                   | reading the same area: the |
+|           | ``store.docs_lock`` read,       | second queued until the    |
+|           | overlapping areas refused at    | first releases, then       |
+|           | load, unit keys and the global  | granted. Reading different |
+|           | order, the lease record, grant, | areas, both granted at     |
+|           | queue and hand-over in one      | once. Opposite-order       |
+|           | locked write, heartbeat and     | requests both completing   |
+|           | staleness (time and a dead      | with no deadlock. An       |
+|           | host), ``--take-over            | overlapping area           |
+|           | --reason``, ``docs unlock``     | declaration refused at     |
+|           | refusing uncommitted changes,   | load. A stale lease taken  |
+|           | ruling 21's back-off,           | over only with a reason.   |
+|           | ``--wait``; the session's store |                            |
+|           | leg and its spans, units        |                            |
+|           | released at landing, teardown   |                            |
+|           | and abandon, units in ``session |                            |
+|           | status`` and ``list``.          |                            |
++-----------+---------------------------------+----------------------------+
+| 4b        | Enforcement and attribution:    | The second session denied  |
+|           | ``store.docs_lock_held`` with   | a doc read until the first |
+|           | the on-read grant, memory       | releases, then granted. A  |
+|           | outside the lock, ``docs_read`` | memory write by a session  |
+|           | rows carrying lease and unit,   | holding no unit, accepted. |
+|           | ``docs.read_architecture``      |                            |
+|           | taking reads under a lease,     |                            |
+|           | ``docs_roots`` and              |                            |
+|           | ``_foreign_project`` for store  |                            |
+|           | paths, the hook heartbeat, the  |                            |
+|           | new holder told (SessionStart,  |                            |
+|           | turn context, the oracle's      |                            |
+|           | alert), the oracle's list,      |                            |
+|           | panel and page.                 |                            |
++-----------+---------------------------------+----------------------------+
+| 4c        | D9: ``_changed_set`` per leg,   | A ``conf.py`` change held  |
+|           | ``docs.updated`` pairing a span | by ``docs.updated`` until  |
+|           | with its read,                  | a doc is committed under a |
+|           | ``docs.diagrams_current`` and   | span that also holds the   |
+|           | privacy per leg, the manifest's | read. A grown store        |
+|           | location a property, the shrink | baseline refused.          |
+|           | gate reading the store's base,  |                            |
+|           | ``store.docs_lock_released`` on |                            |
+|           | design states, both guidelines  |                            |
+|           | refusals lifted, the store      |                            |
+|           | starter writing a ruleset, the  |                            |
+|           | library feature-architect's doc |                            |
+|           | update moved to the end of      |                            |
+|           | design under a store docs lock, |                            |
+|           | invariant's copy re-rendered.   |                            |
 +-----------+---------------------------------+----------------------------+
 | 5         | D6 and D7: release with fetch   | A forced repo-leg failure  |
 |           | and the same-file check, the    | finished by resume. A      |
@@ -1317,3 +1357,112 @@ started outside the project sees nothing of invariant's. Until that runs,
 whether Claude Code also reads the main checkout's ``settings.local.json``
 from a worktree nested under it (``session.worktree_dir`` inside the
 repository) is reasoned, not run.
+
+As built: increment 4a (2026-11-11)
+-----------------------------------
+
+The lease and its CLI, as the architecture docs describe them
+(``manifest.rst``, "Records and their locations"; ``cli.rst``, ``docs lock``,
+``docs unlock``, ``session status`` and ``session list``; ``overview.rst``,
+``core/doclock`` and ``domains/session``; ``state_model.rst``, the session's
+``legs`` and "Storage layout"). Where the build settles what the text left
+open:
+
+.. dec:: ADR-014 increment 4 is split; 4a as built: the lease, its units and its CLI
+   :id: DEC_ADR_014_I4A
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :affects: COMP_CORE_DOCLOCK, COMP_CORE_STORES, COMP_DOMAINS_SESSION, COMP_CORE_GIT
+
+   - **The split.** Increment 4 was too large for one reviewable change, so
+     it is built as 4a, 4b and 4c, each proving its slice of the row (the
+     increments table above). Decided 2026-11-11 from the user's standing
+     rulings (generic and configurable, no surprises): 4a the lease and its
+     CLI, 4b enforcement and attribution, 4c D9's gates.
+   - **The feature-architect's doc update** moves to the end of design in the
+     library agent's text, conditional on a store docs lock, and invariant's
+     own rendered copy is re-rendered in 4c, with the
+     ``store.docs_lock_released`` gate that makes it binding. Nothing in 4a
+     changes an agent, so invariant's and Heap's copies stay current.
+   - **A store doc commit names no lease.** Who wrote it is derived from the
+     span's sha range and its unit's paths: units never overlap and only the
+     holder writes a unit, so the commits between a span's two shas touching
+     its paths are the holder's. No trailer is written or read, so a commit
+     made with plain ``git -C <store>`` attributes the same way. A span's
+     ``changed`` is that reading, taken at release.
+   - **The repository leg is the record's own fields.** ``legs`` holds the
+     store leg only; ``worktree``, ``branch`` and ``base`` stay where they are
+     and are the one repository leg, so no record is rewritten and every
+     reader of them is unchanged. A second repository leg (ruling 6) is the
+     later increment that moves them.
+   - **The lease record is the truth for open spans.** A grant made by the
+     session's own command opens its span at once; a unit passed to it by
+     another session's release opens its span from the record's ``since``
+     and ``sha`` the next time the session's own command reads the record,
+     because one session never writes another's record in ordinary use (the
+     state model's single-writer rule). The one exception is a takeover,
+     which writes the previous holder's record (its span closed as
+     ``taken_over``, an override naming the reason and who took it) in
+     whichever repository's state root it lives: that lease is stale by
+     definition, so its owner is not writing at the same time.
+   - **A lease ends when it holds and wants nothing**, and the session's next
+     ``docs lock`` opens a new one; each span names the lease it ran under.
+   - **The lifecycle never refuses.** Landing, teardown and abandoning free
+     every unit the session holds or waits for, uncommitted changes or not:
+     the holder is going, and a unit held by a finished session would only
+     wait to go stale. The closed span names the unit's dirty paths
+     (``uncommitted``), so the next holder's reviewer can see them.
+     ``docs unlock`` and the back-off do refuse, naming the paths.
+   - **``--wait`` blocks on a named pipe, not a file lock.** D5 said "an OS
+     file lock", but no process holds a lock for the length of a lease: the
+     lease is a record, written by short processes. So the waiter opens its
+     lease's pipe in the store's git directory, re-reads the record, and
+     blocks in ``select`` until a hand-over writes one byte, after the record
+     is written, or the timeout ends. It never polls, which is what the ruling
+     asks.
+   - **Overlap is refused twice.** At load, a pattern of one area that matches
+     another's pattern read as a path (``docs/**`` beside
+     ``docs/architecture/**``). Patterns that overlap with neither matching
+     the other's text (``docs/*.md`` beside ``docs/x*``) cannot be found
+     without listing paths at every load, so a path both match is refused,
+     naming both areas, when it is first resolved to a unit.
+   - **Data records take no unit.** A path under ``memory``, the backlog,
+     reports or sweeps kept in the store is refused by ``docs lock``, naming
+     ruling 20; those are written at any time. The read and write side of
+     ruling 20 (a memory write by a session holding no unit, accepted) is
+     4b's, where the host first enforces the lock.
+   - **The heartbeat in 4a** is written by ``docs lock`` and ``docs unlock``,
+     at most once a minute. The hooks' heartbeat is 4b's, with the rest of
+     the host side. A host's liveness is read from the attention sidecar's
+     ``pid`` in the holder's own state root, by the CLI, which hands
+     ``domains/session`` a callable: neither ``core`` nor ``domains`` imports
+     the oracle. An unknown answer never makes a lease stale.
+   - **No fetch yet.** ``docs lock`` does not pull the store first: sync is
+     D7, increment 5.
+   - **Exit codes.** A refusal is 2, as every usage refusal; ``--wait`` timing
+     out is 1 and keeps the place in the queue.
+
+The proof is ``tests/test_adr_014_docs_lock.py``. Two toy repositories, each
+with an origin, are linked to one store with two areas declared, and each
+runs a session. The same area: the second session is queued at position 1
+naming the holder, and is granted when the first releases, the hand-over
+recorded in the lease and as a span on its store leg. Different areas: both
+granted at once. Opposite orders: each holds one area and wants the other;
+the one whose late unit sorts first backs off, its unit passing to the other,
+which finishes and releases; the first then holds both, and the lease record
+ends empty. An overlapping declaration is refused at load, and by ``config
+show``. A live lease is not taken over; a stale one (a heartbeat 31 minutes
+old) is refused without ``--reason`` and taken with one, the reason in both
+sessions' overrides and the holder's span closed as ``taken_over``; a dead
+host makes a lease stale and an unknown one does not. Also: units taken in
+key order, stopping at the first busy one; a late free unit granted without
+waiting; a back-off and an unlock each refused over an uncommitted path, and
+the span's ``changed`` after a commit; ``--wait`` blocking until granted,
+and timing out still queued; the lifecycle releasing and handing on; memory
+refused as a unit; ``session status`` and ``session list`` showing holder,
+age and queue; an in-repo project unchanged, its ``docs lock`` refused and
+its record carrying no leg.
+
+**Owed.** The proof's "denied a doc read until the first releases" and "a
+memory write ... accepted" are 4b's, where the host enforces the lock; the
+``conf.py`` and grown-baseline proofs are 4c's.

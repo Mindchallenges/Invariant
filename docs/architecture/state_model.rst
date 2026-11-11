@@ -153,6 +153,16 @@ later (ruling 6). The existing ``worktree``, ``branch`` and ``base`` fields read
 first repo leg, so records written before this change still load. Increment 4
 builds the legs and the lock, increment 5 the landing record and resume.
 
+**Built (ADR-014 increment 4a, :need:`DEC_ADR_014_I4A`).** The store leg and
+its spans, and the lease. The repository leg is the record's own
+``worktree``, ``branch`` and ``base``, so ``legs`` holds the store leg alone
+("What the record carries beyond the state", below), and every record written
+before it loads as a one-repo session. ``merged``, ``torn_down`` and
+``abandoned`` each release every unit the session holds or waits for, on every
+route into them (``_advance``, ``reap_stranded`` and ``repair``), closing its
+spans. The lease record itself is the store's, not the session's ("Storage
+layout").
+
 .. mermaid::
 
    stateDiagram-v2
@@ -332,6 +342,21 @@ round-trip contract under Storage layout below).
 same no-migration contract. Its ``consumed`` key (IDEA_008) is under it too, one
 level down: an entry without the key is unconsumed, so every entry written
 before it existed reads exactly as it did.
+
+``legs`` is the seventh (ADR-014 D5, increment 4a), under the same contract.
+A store project's session carries one store leg, ``{"kind": "store", "root",
+"lock_spans"}``; an in-repo session's list stays empty. A span opens when a
+unit is granted (``lease``, ``unit``, ``acquired_at``, ``acquired_at_sha``, the
+store's ``HEAD``) and closes at release (``released_at``, ``released_at_sha``,
+and ``changed``: the unit's paths that differ across the span, empty when
+nothing was written). A unit the lease gained by hand-over is entered from the
+lease record the next time the session's own command reads it. A span closed
+by a back-off carries ``backed_off``; one taken from the session carries
+``taken_over``, ``taken_by`` and ``reason``; one freed by landing, teardown or
+abandoning carries ``uncommitted``, the unit's paths left dirty in the
+store's checkout. Who wrote a store commit is not recorded on the commit: a
+span's sha range and its unit's paths say it, since units never overlap and
+only the holder writes a unit (:need:`DEC_ADR_014_I4A`).
 
 ``decisions`` is the sixth (ADR-018 D9, increment 5), under the same contract:
 the decisions the session made, ``{"n", "id", "draft"}`` per ``session decisions`` entry, numbered as the plan is. An entry with no ``id`` is a draft.
@@ -1050,7 +1075,7 @@ teach it. Learning from a weaker signal would bind the wrong pair permanently.
 Learning is reserved to a call that *wrote* — a read is evidence of where the
 reader was looking, not of who owns the worktree.
 
-**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D5).** A store has no worktree per
+**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D5; increment 4b).** A store has no worktree per
 session, so a store doc path names no session by itself. A read or edit of one
 is attributed by the ordinary order above (host binding, then the working
 directory) and then checked against the holder of the path's docs-lock unit;
@@ -1058,7 +1083,8 @@ holding the lock never turns an ambiguous resolution into a proof (BUG_028).
 ``docs_roots`` includes the store's main checkout, and a store path reaches its
 repo through the store's ``store.repos`` and the user config. Memory under a
 store is outside the lock (ruling 20). This extends ADR-011 to a session's
-legs. Increment 4 builds it.
+legs. Increment 4b builds it; 4a's ``docs lock`` names its session explicitly
+(``--id``, then the ordinary order) and records nothing as evidence.
 
 **A resolution is not automatically an identification.** Steps 1–4 name the
 session from something the call itself carried; step 5 names the only session
@@ -2688,6 +2714,24 @@ Storage layout
      locks/<sid>.lock        one per pipeline record, held across its load and save
      locks/sweep.lock        held for the whole of a `sweep run`, so two sweeps
                              cannot file at once
+
+One record lives outside any repository's state root: a store's **docs
+lease** (ADR-014 D5, increment 4a), shared by the sessions of every
+repository the store serves, so it sits in the store's own git common
+directory, untracked::
+
+   <store>/.git/invariant/
+     locks/docs.json         the lease record: per lease its session, repo
+                             identity, host, state root, heartbeat and the
+                             units it still wants, in key order; per held unit
+                             its holder, when and at which store sha it was
+                             taken, and its first-in, first-out queue
+     locks/docs.lock         the advisory lock every change to it holds, so a
+                             release and the hand-over to the queue's head are
+                             one write
+     locks/wake/<lease>.fifo a named pipe while `docs lock --wait` blocks on
+                             it; a hand-over writes one byte after the record
+                             is written, and the waiter removes it
 
 The sweep's records are the one exception to "runtime state is never
 committed", and they are not runtime state: they live in the declared store
