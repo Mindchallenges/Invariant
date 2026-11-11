@@ -256,6 +256,36 @@ def read_store_manifest(root: Path) -> tuple[dict[str, Any], dict[str, dict[str,
     return top, checked
 
 
+def store_root_of(path: Path) -> Path | None:
+    """The store a path lies in: the nearest git top level above it, when its
+    ``invariant.yaml`` declares ``store.repos``; else ``None``.
+
+    What the hook asks of a path no project claims (ADR-014 D5, increment 4b):
+    a store path names no session, so a call into another project's store
+    is recorded nowhere rather than taken for ungoverned. Read without a
+    subprocess; a config that does not load answers ``None``, since this only
+    names where a path lies and the refusal belongs to the load.
+    """
+    try:
+        start = Path(path).resolve()
+    except OSError:  # pragma: no cover - a resolve that cannot answer
+        return None
+    for candidate in (start, *start.parents):
+        if not (candidate / ".git").exists():
+            continue
+        if not (candidate / STORE_MANIFEST).is_file():
+            return None
+        try:
+            raw = yaml.safe_load((candidate / STORE_MANIFEST).read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            return None
+        block = raw.get("store") if isinstance(raw, Mapping) else None
+        if isinstance(block, Mapping) and isinstance(block.get("repos"), Mapping):
+            return candidate
+        return None
+    return None
+
+
 def store_levels(link: StoreLink) -> StoreLevels:
     """The levels ``link``'s store contributes, refused unless it lists the repo."""
     top, repos = read_store_manifest(link.root)

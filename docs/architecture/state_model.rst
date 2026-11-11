@@ -223,6 +223,12 @@ Invariants this domain enforces:
 +--------------------------------------+-----------------------------+---------+
 | ``session.teardown_complete``        | Worktree removed after push | warn    |
 +--------------------------------------+-----------------------------+---------+
+| ``store.docs_lock_held``             | In a store project, a Read  | block   |
+|                                      | or edit of a store policy   |         |
+|                                      | path holds the path's       |         |
+|                                      | docs-lock unit (ADR-014 D5, |         |
+|                                      | increment 4b)               |         |
++--------------------------------------+-----------------------------+---------+
 
 The one edge a hook walks: the first edit
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1075,16 +1081,52 @@ teach it. Learning from a weaker signal would bind the wrong pair permanently.
 Learning is reserved to a call that *wrote* — a read is evidence of where the
 reader was looking, not of who owns the worktree.
 
-**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D5; increment 4b).** A store has no worktree per
-session, so a store doc path names no session by itself. A read or edit of one
-is attributed by the ordinary order above (host binding, then the working
-directory) and then checked against the holder of the path's docs-lock unit;
-holding the lock never turns an ambiguous resolution into a proof (BUG_028).
-``docs_roots`` includes the store's main checkout, and a store path reaches its
-repo through the store's ``store.repos`` and the user config. Memory under a
-store is outside the lock (ruling 20). This extends ADR-011 to a session's
-legs. Increment 4b builds it; 4a's ``docs lock`` names its session explicitly
-(``--id``, then the ordinary order) and records nothing as evidence.
+**Built (:need:`ADR-014 <DEC_ADR_014>` D5, increment 4b;
+:need:`DEC_ADR_014_I4B`).** A store has no worktree per session, so a store
+doc path names no session by itself. A Read or an edit of one is attributed by
+the ordinary order above (host binding, then the working directory) and then
+checked against the holder of the path's docs-lock unit; holding the lock
+never turns an ambiguous resolution into a proof (BUG_028). In order, at a
+pre-tool-use call naming a store path of the host's own project:
+
+1. **Which paths.** ``core/doclock.classify`` places the path: outside the
+   store, a data record kept there (memory, the backlog, reports, sweeps:
+   outside the lock, ruling 20), ungoverned (the store's ``invariant.yaml``,
+   its git directory, anything under no policy record and no area), or a
+   policy path with its unit (under ``records.docs`` or ``records.guidelines``
+   kept in the store, or matched by a declared area).
+2. **The grant.** For a session the call *proves* (explicit, host, target,
+   prompt, cwd), the session domain takes the unit when it is free: nobody
+   holds it, nobody queues for it, and the session's lease waits for no unit
+   sorting before it, so the grant can never leave the lease holding a unit
+   after one it waits for (``docs_access``). The same call refreshes the
+   heartbeat and opens any span a release handed to the session. A guessed
+   session (``origin``) is granted nothing.
+3. **The rule.** ``store.docs_lock_held`` then allows the call if the
+   resolved session, proven or guessed, holds the unit, and refuses it
+   otherwise, naming the unit, its holder, the session's queue position and
+   the command to run (``docs lock``, ``--wait``, or ``--take-over`` for a
+   stale holder). A call that resolves to no session is ungoverned, as at
+   every pre-tool-use rule.
+
+``docs_roots`` names the store's main checkout for docs kept in a store. A
+path in the host project's own store is home, not foreign. A path in another
+project's store (``core/stores.store_root_of``, when no project claims it) is
+**unplaced**, reason ``store``: no path in a store names a session, so it is
+recorded nowhere and a Read says so. D5 had that path reach its repository
+through ``store.repos`` and the user config; neither names a checkout, and the
+lease record's holder is the lock, which may not stand in for attribution, so
+the honest answer is the one ADR-011 gives any path no worktree contains. This
+extends ADR-011 to a session's legs. 4a's ``docs lock`` names its session
+explicitly (``--id``, then the ordinary order) and records nothing as
+evidence.
+
+**A read of a store doc carries its lease.** The ``docs_read`` row of a store
+policy path is ``{"path", "lease", "unit"}``, the lease ``None`` when the
+session did not hold the unit; every other row is the path, as before, so an
+in-repo project's evidence is unchanged. For docs kept in a store,
+``docs.read_architecture`` counts only rows whose lease one of the session's
+spans ran under (it holds or held it), and says how many reads it set aside.
 
 **A resolution is not automatically an identification.** Steps 1–4 name the
 session from something the call itself carried; step 5 names the only session
@@ -1998,7 +2040,9 @@ A malformed field reads as empty to a writer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A writer that adds to an evidence field reads it first, and the field may hold the
-wrong shape. So ``agents_run``, ``docs_read``, ``test_runs``, ``verdicts``,
+wrong shape. So ``agents_run``, ``docs_read`` (whose rows are paths, or
+``{"path", "lease", "unit"}`` for a store doc, ADR-014 increment 4b),
+``test_runs``, ``verdicts``,
 ``guidelines_landings``, ``agents_run_how`` and ``acknowledged`` go through
 ``_evidence_list`` or ``_evidence_mapping``: anything but the right shape reads as
 empty and is replaced (ADR-012 A7 increment 4). The fact the caller came to record

@@ -1466,3 +1466,123 @@ its record carrying no leg.
 **Owed.** The proof's "denied a doc read until the first releases" and "a
 memory write ... accepted" are 4b's, where the host enforces the lock; the
 ``conf.py`` and grown-baseline proofs are 4c's.
+
+As built: increment 4b (2026-11-11)
+-----------------------------------
+
+Enforcement and attribution at the host, as the architecture docs describe
+them (``state_model.rst``, "Attribution" and the session domain's rules;
+``cli.rst``, ``docs lock``, ``invariant hook``, ``invariant context`` and
+``oracle list``; ``overview.rst``, ``core/doclock``, ``core/rules``,
+``domains/session``, ``oracle/scan``, ``oracle/signals`` and
+``hosts/claude_code``; ``manifest.rst``, "Declared stores are writable
+stores"; ``oracle.rst`` and ``oracle-panel.rst``, the signals and their
+words). Where the build settles what the text left open:
+
+.. dec:: ADR-014 increment 4b as built: the lock enforced and attributed at the host
+   :id: DEC_ADR_014_I4B
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :affects: COMP_CORE_DOCLOCK, COMP_CORE_RULES, COMP_CORE_STORES, COMP_DOMAINS_SESSION, COMP_HOSTS_CLAUDE_CODE, COMP_CLI_MAIN, COMP_ORACLE_SCAN, COMP_ORACLE_SIGNALS, COMP_ORACLE_PANEL
+
+   - **What the lock governs.** A store policy path: one under a policy
+     record kept in the store (``docs``, which includes ``docs.needs.srcdir``,
+     and ``guidelines``, overlays included), or one a declared area matches,
+     so an area may reach files no record names. The data records kept there
+     (memory, the backlog, reports, sweeps) are outside it, which is ruling
+     20 at the host: ``store.docs_lock_held`` answers N/A for them, naming
+     the ruling. The store's own ``invariant.yaml`` and its git directory are
+     not governed: neither is something an agent designs against, and the
+     engine reads the configuration through its own code, not a tool call.
+     ``core/doclock.classify`` is that one reading, asked by the rule and by
+     the grant alike.
+   - **The on-access grant covers reads and edits.** D5 spoke of reads; a
+     write takes the same grant, which is what makes "a new file outside every
+     area is its own unit, taken when it is first written" hold. It is made
+     by the session domain before the pre-tool-use rules run, since a rule
+     only reads. A unit is granted when nobody holds it and nobody queues for
+     it, and when the session's lease waits for no unit sorting before it: a
+     grant never waits, but holding a unit that sorts after one the lease
+     waits for would break the order every wait relies on. The hook never
+     queues; a refusal names ``docs lock``, which queues or backs off as
+     ruling 21 says.
+   - **Granted only on proof.** The grant writes the lease on the session's
+     behalf, so it is made only for a session the call proves (explicit,
+     host, target, prompt, cwd). A session the call only guesses (``origin``)
+     is still checked by the rule against the holder, and is refused when it
+     does not hold the unit, which is D5's "holding the lock does not turn a
+     guess into a proof" read from the other side. A call that resolves to no
+     session is ungoverned, as at every pre-tool-use rule.
+   - **A read carries its lease.** A store policy path's ``docs_read`` row is
+     ``{"path", "lease", "unit"}``; every other row stays the path, so an
+     in-repo project's evidence, and every reader of it, is unchanged. For
+     docs kept in a store, ``docs.read_architecture`` counts a row only when
+     its lease is one of the session's spans' leases (held or held before),
+     and its failure counts the reads it set aside.
+   - **Another project's store is unplaced, not routed.** D5 had
+     ``_foreign_project`` reach a store path's repository through
+     ``store.repos`` and the user config. Neither names a checkout: both map
+     an identity to a store. The lease record names the unit's holder and
+     its state root, but taking the holder as the call's session would be the
+     lock standing in for attribution, which D5 forbids. So a path in the
+     host project's own store is home, and one in another project's store
+     (``core/stores.store_root_of``, asked when no project claims the path) is
+     unplaced with reason ``store``, recorded nowhere, and a Read of one says
+     so, which is ADR-011's answer for any path no live worktree contains.
+   - **The hooks' heartbeat** is written by ``invariant hook`` for every event
+     but SessionStart, through the session domain, at most once a minute, for
+     the session the host resolves to. SessionStart writes nothing, as it
+     never has.
+   - **The new holder is told, read only.** A unit the lease holds with no
+     open span on the store leg was passed on by a release since the session
+     last looked. The turn context (SessionStart and every prompt) says so
+     until the session's next store call or ``docs`` command opens the span;
+     the oracle raises ``docs_granted``, an alert in the "Needs you" group,
+     once per hand-over. Nothing on those paths writes the session record.
+   - **The oracle's views** read the lease record once per store project per
+     scan (``oracle/scan.docs_lock_views``): each session row carries its
+     held units (age, queue, staleness, unseen) and the unit it queues for;
+     ``oracle list`` prints a ``docs`` line for each, the TUI the signals,
+     and the panel and page a chip for each signal and the units under
+     "Technical details". ``lease_host_alive``, the holder's liveness from
+     its attention sidecar, moved from the CLI into ``oracle/scan``, which
+     owns the sidecar; the CLI still hands it to the session domain.
+   - **Attribution of a store commit** is 4a's: derived from a span's sha
+     range and its unit's paths, with no commit trailer written or read.
+     Nothing in 4b writes a commit.
+   - **A hook pays for the lock only where it governs.** Hooks fire on every
+     tool call, so the rule and the session domain classify the path against
+     the store's ``read_config`` first and build a ``DocsLock`` only for a
+     governed path; a memory, config or outside path opens no lease record.
+     The lock finds the store's git directory from disk
+     (``identity.common_dir_of``), asking git only when that cannot answer,
+     so the heartbeat every hook writes spawns no subprocess.
+   - **In-repo projects are unchanged.** The grant, the heartbeat and the
+     turn context's lines cost one attribute read; ``store.docs_lock_held``
+     answers N/A; ``docs_roots`` and the docs gate read as before. The rule
+     blocks in every profile, as the isolation rules do.
+
+The proof is ``tests/test_adr_014_docs_lock_host.py``, on 4a's two toy
+repositories linked to one store, with memory kept in the store and each
+session bound to its own host, driving ``invariant hook`` as Claude Code
+would. The first session's Read of an architecture doc takes
+``area:architecture`` in the hook call and opens its span; the second
+session's Read is refused naming the unit, the holder and the command, and
+takes nothing; queued, it is refused naming its position; when the first
+releases, the second's next prompt and SessionStart say the unit was passed
+to it, its Read is allowed and recorded with the lease and the unit, and
+``docs.read_architecture`` passes; once its span is open the notice turns
+to "holding". A Write to memory by a session holding no unit is accepted,
+and the rule names ruling 20. Also: an edit of a held unit passes and of a
+busy one is refused; a new file outside every area is taken when first
+written; the store's ``invariant.yaml`` and git directory are not governed;
+an unresolved call is ungoverned; a stale holder is named with the takeover;
+a grant never puts a unit after one the lease waits for, and grants one
+before it; a guessed session is refused and granted nothing; an overlap only
+a path shows is refused naming the areas; reads without a lease, or none,
+fail the docs gate, and a lease held before still counts after release; the
+lease row is written once; the hooks refresh a stale-looking heartbeat and
+SessionStart does not; a Read of another project's store from an in-repo
+project is recorded nowhere and said; the oracle's rows, list lines, signals,
+chip and technical lines; an in-repo project's rule N/A and its
+``docs_roots`` unchanged.

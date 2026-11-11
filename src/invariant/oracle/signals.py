@@ -8,8 +8,9 @@ ask it the same question and get the same answer.
 on the person, a gate that refused the turn, a turn gone silent, work finished
 and awaiting the next step, and an error. **Markers** are shown and never
 interrupt: parked, stranded, a leaked worktree, an orphan host, a host gone
-without ``SessionEnd``, an idle "your turn", a merge awaiting teardown, and a
-host started with variables inherited from its Terminal.app.
+without ``SessionEnd``, an idle "your turn", a merge awaiting teardown, a
+host started with variables inherited from its Terminal.app, and a place in a
+store's docs-lock queue. A docs-lock unit passed to a session alerts.
 
 **Every signal has a stable key**, ``project|subject|kind|discriminator``. The
 discriminator changes exactly when the condition is a new occurrence rather
@@ -49,6 +50,12 @@ ORPHAN_HOST = "orphan_host"
 HOST_GONE = "host_gone"
 YOUR_TURN = "your_turn"
 TEARDOWN_PENDING = "teardown_pending"
+#: A store's docs lock passed units to the session by another's release, and
+#: it has not looked since (ADR-014 D5, increment 4b): an alert, since a
+#: session that stopped while it waited can go on.
+DOCS_GRANTED = "docs_granted"
+#: The session queues for a unit of its store's docs lock: a marker.
+DOCS_QUEUED = "docs_queued"
 #: A live host started with variables it inherited from its Terminal.app
 #: (``HostView.inherited_env``, IDEA_035). A marker: it never alerts.
 INHERITED_ENV = "inherited_env"
@@ -385,10 +392,33 @@ def _session_signals(row: Row, add) -> None:
     elif row.stage == STAGE_LANDED:
         add(TEARDOWN_PENDING, INFO, False, f"{row.state}: teardown pending")
 
+    _docs_lock_signals(row, add)
+
     if row.stranded:
         add(STRANDED, INFO, False, f"its worktree {row.worktree} is gone")
     elif row.host_ended:
         add(PARKED, INFO, False, "its host ended; waiting to be resumed")
+
+
+def _docs_lock_signals(row: Row, add) -> None:
+    """The store's docs lock on a session row (ADR-014 D5, increment 4b).
+
+    A unit passed to the session since it last looked alerts once per
+    hand-over: the discriminator is each new unit with the time it was
+    passed. A queue position is a marker.
+    """
+    docs = row.docs_lock or {}
+    new = [h for h in docs.get("held") or [] if h.get("new")]
+    if new:
+        units = ", ".join(h["unit"] for h in new)
+        add(DOCS_GRANTED, LOW, True,
+            f"the docs lock passed {units} to it; it can read and design on them",
+            ",".join(f"{h['unit']}@{h.get('since')}" for h in new))
+    waiting = docs.get("waiting")
+    if waiting:
+        add(DOCS_QUEUED, INFO, False,
+            f"queued for {waiting.get('unit')} at position {waiting.get('position')} "
+            f"behind session {waiting.get('holder')}")
 
 
 def _age(since: Any, now: float) -> float | None:

@@ -72,7 +72,7 @@ Layers
            CHOME["home (ADR-014 D3)"]
            CIDENT["identity (ADR-014 D4)"]
            CSTORES["stores (ADR-014 D2)"]
-           CDOCLOCK["doclock (ADR-014 D5, inc 4a)"]
+           CDOCLOCK["doclock (ADR-014 D5, inc 4a, 4b)"]
            CDOCFMT["docformat (ADR-016 D1): markdown, rst"]
            CNEEDS["needs (ADR-018 D2, D3, D5, D6)"]
            CMDCONV["mdconvert (ADR-018 D14)"]
@@ -317,12 +317,16 @@ Layers
        RULES -- "docs.design_home, items.decisions_linked, docs.decisions_recorded: prefixes_of, cited_ids, latest_record" --> CNEEDS
        RULES -. "docs_folder: the guidelines gates' fixes name the docs project's guidelines folder, imported at call time" .-> CNEEDS
        SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
-       SESSION -- "docs_lock, docs_unlock, docs_take_over, release_docs_lock: DocsLock, resolve_unit" --> CDOCLOCK
+       SESSION -- "docs_lock, docs_unlock, docs_take_over, release_docs_lock: DocsLock, resolve_unit; docs_access, docs_read_lease, docs_heartbeat, docs_notice: read_config, classify, then grant_free, touch (inc 4b)" --> CDOCLOCK
+       RULES -- "store.docs_lock_held: read_config, classify; DocsLock.standing on a governed path only (ADR-014 D5, inc 4b)" --> CDOCLOCK
+       OSCAN -- "docs_lock_views: the lease record read for each session row (inc 4b)" --> CDOCLOCK
+       CLI -- "for_payload: store_root_of, a path in another project's store (inc 4b)" --> CSTORES
+       CLI -. "injects lease_host_alive, the oracle's reading of the attention sidecar" .-> SESSION
        CDOCLOCK -- "JsonStore.locked: the lease record in the store's git dir" --> STORE
-       CDOCLOCK -- "common_dir, resolve_commit, diff_names, dirty_paths" --> GIT
+       CDOCLOCK -- "common_dir (only when the disk read cannot answer), resolve_commit, diff_names, dirty_paths" --> GIT
+       CDOCLOCK -- "common_dir_of: the store's git dir read from disk, no subprocess (inc 4b)" --> CIDENT
        CSTORES -- "parse_docs_lock: store.docs_lock refused at load" --> CDOCLOCK
        CDOCLOCK -. "glob_matches, RECORD_PATH_KEYS, imported at call time" .-> MANIFEST
-       CLI -. "injects host_alive, read from the attention sidecar's pid" .-> SESSION
        WORKITEM -- "items.decisions_linked before an item write" --> RULES
        CGUIDE -- "id_stem, is_need_id: rule need ids and decided_by" --> CNEEDS
        DOCSD -- "docs.assess, docs.adopt, ADOPT_MODES, path_for, project_relative, glob_matches" --> MANIFEST
@@ -1679,11 +1683,18 @@ Component responsibilities
    ``_changed_set``; the library agents' currency (``agents_currency``,
    ``AgentCopy``, ADR-012 A6.4), the one judgement ``agents.rendered_current``
    and the host's ``library agents current`` row give, over a host install plan
-   handed in as a callable (``RuleContext.host_agent_plan``)
+   handed in as a callable (``RuleContext.host_agent_plan``); the store's docs
+   lock at a tool call (ADR-014 D5, increment 4b): ``store.docs_lock_held``,
+   which refuses a Read or an edit of a store policy path whose unit the
+   session does not hold, and ``docs.read_architecture`` counting, for docs
+   kept in a store, only the reads whose ``docs_read`` row names a lease one of
+   the session's spans ran under; ``docs_roots`` naming the store's main
+   checkout for such docs
 
    **Never does:** Decide policy — levels come from the manifest; write a
    generated file (``domains/guidelines`` does); evaluate a guideline itself
-   (``core/findings`` does)
+   (``core/findings`` does); take a docs-lock unit (``domains/session`` grants
+   one before the rule reads)
 
 .. comp:: ``core/items``
    :id: COMP_CORE_ITEMS
@@ -1780,7 +1791,9 @@ Component responsibilities
    result reads back as the merge; ``init``'s own comment (``INIT_COMMENT``,
    shared with ``init``'s body) counting as none, the file rewritten merged and
    the comment put back (ADR-017 ruling 9); a dotted key removed from a level
-   (``without``, ruling 12)
+   (``without``, ruling 12); the store a path lies in, read without a
+   subprocess (``store_root_of``, ADR-014 D5, increment 4b), which the hook
+   asks of a path no project claims
 
    ``store.docs_lock`` is checked here at load through
    ``core/doclock.parse_docs_lock``, so an overlapping area is refused before
@@ -1806,11 +1819,21 @@ Component responsibilities
    ``touch``, the heartbeat at most once a minute; ``staleness``, by the lease
    minutes or a dead host; ``wait``, blocking on a named pipe a hand-over
    writes to; ``units``, the holder, age and queue of each unit. A span's
-   ``changed`` paths are read from the store's git, never from a trailer
+   ``changed`` paths are read from the store's git, never from a trailer.
+   Increment 4b: where a path a tool call names stands (``classify``:
+   outside the store, a data record, ungoverned, or a policy path with its
+   unit; ``policy_paths``, the docs and guidelines records kept in the
+   store); one session's standing on one unit (``standing``); the on-access
+   grant of a free unit that never breaks the global order (``grant_free``).
+   Hooks reach the lock on every tool call, so it costs no subprocess: the
+   store's git directory is read from disk (``identity.common_dir_of``), and
+   the rule and the session domain classify a path against ``read_config``
+   before building a ``DocsLock``, which a path the lock does not govern
+   never pays for
 
    **Never does:** Write a session record (``domains/session`` does); read a
    host's attention sidecar (``alive`` is injected); fetch or push a store;
-   enforce a read or gate a change (ADR-014 increments 4b and 4c)
+   decide a tool call (``core/rules`` does) or gate a change (increment 4c)
 
 .. comp:: ``core/identity``
    :id: COMP_CORE_IDENTITY
@@ -2189,6 +2212,12 @@ advance it. They are the only place where "what a session is" is encoded.
    holder's record, in whichever repository's state root it lives); landing,
    teardown and abandoning release every unit (``release_docs_lock``).
    Whether a holder's host is alive is the CLI's injected ``host_alive``.
+   Increment 4b: the host's on-access grant, made for a session the call
+   proves, with the heartbeat and the store leg brought in line with the
+   lease record (``docs_access``); the lease and unit a read is recorded under
+   (``docs_read_lease``); the hooks' heartbeat (``docs_heartbeat``); and what
+   the turn context tells a session about its lease, read only
+   (``docs_notice``: units passed to it, held, queued for).
 
 .. comp:: ``domains/pipeline``
    :id: COMP_DOMAINS_PIPELINE
@@ -2378,7 +2407,12 @@ over Tailscale (IDEA_023) is shipping in increments; see
    **Owns:** One read-only snapshot per registered project: live sessions with their
    hosts nested, orphan hosts, leaked worktrees, and one error row per project
    or record that cannot be read; host liveness (pid exists, and is still the
-   host); the cache that keeps a repeat scan cheap
+   host); the cache that keeps a repeat scan cheap; in a store project, each
+   session's place in the store's docs lock, its held units with age, queue,
+   staleness and whether a release passed them to it unseen, and the unit it
+   queues for (``docs_lock_views``, ADR-014 D5, increment 4b); whether a lease
+   holder's host is alive, read from the attention sidecar
+   (``lease_host_alive``, which the CLI hands the session domain too)
 
    **Never does:** Write anything; name a state; import ``hosts/`` (host facts
    arrive through the injected ``HostProbe``)
@@ -2387,7 +2421,9 @@ over Tailscale (IDEA_023) is shipping in increments; see
    :id: COMP_ORACLE_SIGNALS
 
    **Owns:** ``classify(row, now, thresholds)``: alerts (waiting, gate blocked, stuck,
-   finished, error) and markers, each with a stable key; ``turn_state``,
+   finished, error, and ``docs_granted``: a docs-lock unit passed to the
+   session, once per hand-over) and markers (among them ``docs_queued``, a
+   place in a docs-lock queue), each with a stable key; ``turn_state``,
    whether a host is mid-turn (busy, waiting, or background: its turn over
    while work it started runs on, BUG_094), the one answer the class, the
    signals, the gate cache and the panel read (BUG_087); ``background_work``,
@@ -3155,10 +3191,14 @@ Elements
    ``core.rules.NORMALISED_PAYLOAD_KEYS``, the response shape, the settings
    wiring where ``records.hooks`` says, installing the agents, commands and
    skills with their overlays where ``records.agents`` says, and rendering a
-   ``local`` install into a session worktree (``render_into``).
+   ``local`` install into a session worktree (``render_into``). In a store
+   project (ADR-014 D5, increment 4b): asking the session domain for the
+   on-access grant before the pre-tool-use rules run, recording a store doc
+   read with its lease and unit, saying a read of another project's store
+   was recorded nowhere, and the turn context's docs-lock lines.
 
-   **Never does:** decide a rule; it asks the engine through the CLI and its
-   helpers.
+   **Never does:** decide a rule, or grant a unit; it asks the engine through
+   the CLI and its helpers.
 
 .. comp:: ``hosts/claude_code_telemetry``
    :id: COMP_HOSTS_CLAUDE_CODE_TELEMETRY

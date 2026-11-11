@@ -876,6 +876,20 @@ pid counts as the host. A probe without the two newer methods is a probe whose
 records are not used; one without ``process_cwd`` leaves an attention-only
 orphan ``unverified: cwd``, so it is never offered Close.
 
+**A store's docs lock on a session row** (ADR-014 D5, increment 4b). In a
+store project the scan reads the store's lease record once
+(``docs_lock_views``) and puts each live session's place on its row as
+``docs_lock``: every unit its lease holds, with ``since``, how long, the
+queue as session ids, ``stale`` and why, and ``new`` when the session's
+store leg has no open span for it, so a release passed it on unseen; and the
+unit it queues for with its position and holder. Staleness reads the
+holder's host from its attention sidecar (``lease_host_alive``, which the
+CLI hands the session domain as well). A store that cannot be read leaves
+every row without it. ``signals`` raises ``docs_granted`` and
+``docs_queued`` from it; ``oracle list`` prints a ``docs`` line per unit; the
+panel and page name it under "Technical details", with the chips in
+:doc:`oracle-panel`'s wording.
+
 **Cheap on the next pass.** ``ScanCache`` keeps the git-backed answers — each
 project's worktree list and its transcript source, whose construction asks git
 for the project's worktrees — and the process-name checks for 60 seconds. A
@@ -975,6 +989,19 @@ nothing else. Alerts come first in the list it returns.
 +----------------------+-------+--------------+------------------------+------------------------+
 | ``teardown_pending`` | no    | info         | the session is in its  | —                      |
 |                      |       |              | landed stage           |                        |
++----------------------+-------+--------------+------------------------+------------------------+
+| ``docs_granted``     | yes   | low          | in a store project,    | ``<unit>@<since>`` per |
+|                      |       |              | the session's lease    | new unit, joined       |
+|                      |       |              | holds a docs-lock unit |                        |
+|                      |       |              | with no open span on   |                        |
+|                      |       |              | its store leg: a       |                        |
+|                      |       |              | release passed it on   |                        |
+|                      |       |              | since the session last |                        |
+|                      |       |              | looked (ADR-014 D5,    |                        |
+|                      |       |              | increment 4b)          |                        |
++----------------------+-------+--------------+------------------------+------------------------+
+| ``docs_queued``      | no    | info         | the session queues for | —                      |
+|                      |       |              | a docs-lock unit       |                        |
 +----------------------+-------+--------------+------------------------+------------------------+
 | ``orphan_host``      | no    | info         | a ``host`` row; its    | —                      |
 |                      |       |              | ``cause`` is the       |                        |

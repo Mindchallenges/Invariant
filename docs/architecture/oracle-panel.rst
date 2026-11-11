@@ -629,7 +629,9 @@ Groups and tiles
 +===========+===========+============+=================================+
 | needs     | Needs you | Need you   | ``waiting`` (permission,        |
 |           |           |            | question, input); ``finished``  |
-|           |           |            | (reviewed, ready)               |
+|           |           |            | (reviewed, ready);              |
+|           |           |            | ``docs_granted`` (ADR-014 D5,   |
+|           |           |            | increment 4b)                   |
 +-----------+-----------+------------+---------------------------------+
 | problems  | Problems  | Problems   | the oracle itself when it is    |
 |           |           |            | older than the installed        |
@@ -696,6 +698,20 @@ States (chips and sentences)
 |                      |                   |         | It is ready for   |
 |                      |                   |         | the review        |
 |                      |                   |         | checks.           |
++----------------------+-------------------+---------+-------------------+
+| ``docs_granted``     | Its docs are      | needs   | The docs it was   |
+| (ADR-014 D5,         | free, go on       |         | waiting for are   |
+| increment 4b)        |                   |         | now its own. Tell |
+|                      |                   |         | Claude to go on:  |
+|                      |                   |         | it reads them     |
+|                      |                   |         | again before it   |
+|                      |                   |         | designs.          |
++----------------------+-------------------+---------+-------------------+
+| ``docs_queued``      | Waiting for the   | idle    | Another session   |
+| (a marker)           | docs              |         | is working on the |
+|                      |                   |         | docs it needs. It |
+|                      |                   |         | goes next when    |
+|                      |                   |         | they finish.      |
 +----------------------+-------------------+---------+-------------------+
 | ``error``, tests     | N tests failing   | problem | The last test run |
 |                      | (else Tests       |         | had N failures.   |
@@ -1122,7 +1138,13 @@ Fixed strings
 |                                  | ``<pid>`` / process id not        |
 |                                  | recorded / process ids disagree:  |
 |                                  | ``<source>`` ``<pid>`` (<alive,   |
-|                                  | gone or unknown>), …              |
+|                                  | gone or unknown>), …; in a store  |
+|                                  | project (ADR-014 D5, increment    |
+|                                  | 4b): Docs lock · holds ``<unit>`` |
+|                                  | · <age> · queue ``<ids>`` ·       |
+|                                  | stale: <why>; Docs lock · queued  |
+|                                  | for ``<unit>`` at position N      |
+|                                  | behind ``<id>``                   |
 +----------------------------------+-----------------------------------+
 | The oracle out of date (BUG_089) | Card: kicker Session Oracle · The |
 |                                  | oracle is out of date · Not read: |

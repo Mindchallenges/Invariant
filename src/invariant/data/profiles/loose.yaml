@@ -22,6 +22,12 @@ rules:
   pipeline.complete: warn
   pipeline.started_before_edit: warn
 
+  # The store's docs lock (ADR-014 D5, increment 4b): a read or edit of a
+  # store policy path needs its unit held. Blocks in every profile, as the
+  # isolation rules do: a design read from docs another session is about to
+  # change is the stale design the ruling exists to prevent.
+  store.docs_lock_held: block
+
   agents.design_agent_ran: warn
   agents.review_agent_ran: warn
   # Said before a design or review agent is dispatched with no pipeline to

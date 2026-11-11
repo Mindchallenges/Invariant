@@ -1249,9 +1249,20 @@ Setup
                                 one it neither holds nor waits for is refused.
        The heartbeat is written by `docs lock` and `docs unlock`, at most once
        a minute. Landing, teardown and abandoning release every unit the
-       session holds or waits for (`domains/session`). The host's read grant
-       and refusal (`store.docs_lock_held`), the new holder's notice and the
-       oracle's views are increment 4b; the gates that read the spans are 4c.
+       session holds or waits for (`domains/session`). The gates that read the
+       spans are 4c.
+       Built (ADR-014 D5, increment 4b): the lock is enforced at the host. A
+       Read, Edit or Write of a store policy path takes the path's unit in
+       the same hook call when it is free, with an empty queue, and when the
+       session's lease waits for no unit sorting before it, for a session the
+       call proves; otherwise `store.docs_lock_held` (pre-tool-use, block)
+       refuses it, naming the unit, its holder, the queue position, and the
+       `docs lock` command to run (`--wait` when queued, `--take-over` when
+       the holder is stale). Memory and the other data records kept in the
+       store are outside the lock (ruling 20), and so are the store's
+       `invariant.yaml` and git directory. The hook calls keep the lease's
+       heartbeat (`invariant hook`, below), and the turn context says which
+       units a release passed to the session (`invariant context`, below).
 
 A managed file the operator has edited
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2832,6 +2843,14 @@ they run from any directory.
        "to", "fix"}], "stale", "timed_out", "error"} | null, "turn_state":
        "busy" | "waiting" | "idle"}]}]}. turn_state is whether the row's current
        host is mid-turn (oracle.md, "Mid-turn").
+       Built (ADR-014 D5, increment 4b): in a store project a session row
+       carries `docs_lock`, {"held": [{"unit", "since", "held_seconds",
+       "queue", "stale", "new"}], "waiting": {"unit", "position", "holder"} |
+       null}, or null with no lease; the text adds a `docs` line per held unit
+       (its age, queue, "passed to it; not yet seen", STALE and why) and one
+       for the unit it queues for. A unit passed to a session it has not
+       seen raises the `docs_granted` alert; a queue place is the
+       `docs_queued` marker.
 
    invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify] [--json]
        Every --interval seconds: scan every registered project, write the
@@ -3195,6 +3214,17 @@ Host bridge
        changes the response: a known project costs one read, and a failure is
        swallowed.
 
+       Built (ADR-014 D5, increment 4b), in a store project: a path in the
+       project's own store is home, attributed by the ordinary order and
+       checked against the holder of its docs-lock unit; a path in another
+       project's store is unplaced (reason `store`), recorded nowhere, and a
+       Read of one says so. pre-tool-use first lets the session domain grant
+       a free unit for a proven session, then evaluates the rules, among them
+       `store.docs_lock_held`. post-tool-use records a store doc read as
+       `{"path", "lease", "unit"}`. Every event except session-start refreshes
+       the heartbeat of the lease the host's session holds, at most once a
+       minute; a failure there changes nothing.
+
        Every event except session-start also updates the host's attention
        sidecar, <state root>/attention/<host-id>.json (see oracle.md for the
        per-event table). `notification` exists for that alone: its response is
@@ -3229,6 +3259,13 @@ Host bridge
        is not the pipeline's pin adds one line saying a verdict is refused until
        they agree, and a failure inside the projection is one line. No
        statement and no verdict standing is carried.
+
+       In a store project, after the plan lines (ADR-014 D5, increment 4b): a
+       unit another session's release passed to this one, until the session's
+       next store call or `docs` command opens its span ("docs lock: <units>
+       passed to this session; read it again before designing on it"); the
+       units it holds; and its queue position with the holder and what
+       follows. Read only, and nothing at all with no lease.
 
        With no session bound it prints nothing — unless a fresh, unconsumed
        handoff is recorded here, in which case it prints that note, who left it

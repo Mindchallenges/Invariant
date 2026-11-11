@@ -9,6 +9,7 @@ locked file.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -1561,8 +1562,20 @@ class SessionDomain:
 
     # -- the store's docs lock (ADR-014 D5) -----------------------------
 
-    def _docs_lock(self) -> doclock.DocsLock:
-        return doclock.DocsLock(self.manifest, clock=self.clock, alive=self.host_alive)
+    def _docs_lock(self, config: doclock.DocsLockConfig | None = None) -> doclock.DocsLock:
+        return doclock.DocsLock(
+            self.manifest, clock=self.clock, alive=self.host_alive, config=config
+        )
+
+    def _docs_unit(self, path: str | Path) -> tuple[doclock.DocsLockConfig, str | None]:
+        """The lock's config and the unit ``path`` falls under, if governed.
+
+        Classified before any :class:`doclock.DocsLock` is built, so a tool
+        call on a path the lock does not govern costs no lock at all.
+        """
+        config = doclock.read_config(doclock.store_of(self.manifest))
+        _, unit = doclock.classify(self.manifest, config, path)
+        return config, unit
 
     def _holder(self, session: Session) -> doclock.Holder:
         link = self.manifest.store
@@ -1679,6 +1692,86 @@ class SessionDomain:
         if self.manifest.store is None:
             return []
         return self._docs_lock().units()
+
+    def docs_access(self, session_id: str, path: str | Path) -> doclock.Outcome | None:
+        """The host's on-access grant (D5, increment 4b), before the rule reads.
+
+        A tool call about to read or write a store policy path takes the
+        path's unit when it is free (:meth:`doclock.DocsLock.grant_free`),
+        refreshes the heartbeat, and brings the store leg in line with the
+        lease record, so a unit passed to this session by another's release
+        opens its span here. ``None`` for an in-repo project and for a path
+        the lock does not govern. The caller has already proven the session
+        (D5: holding the lock never turns a guess into a proof).
+        """
+        if self.manifest.store is None:
+            return None
+        config, unit = self._docs_unit(path)
+        if unit is None:
+            return None
+        lock = self._docs_lock(config)
+        session = self.require(session_id)
+        before = json.dumps(session.legs, sort_keys=True, default=str)
+        out = lock.grant_free(self._holder(session), unit)
+        lock.touch(session.id)
+        self._record_spans(session, lock, out)
+        if json.dumps(session.legs, sort_keys=True, default=str) != before:
+            self._save(session)
+        return out
+
+    def docs_read_lease(self, session_id: str, path: str | Path) -> dict | None:
+        """The lease and unit a read of ``path`` is made under (D5, increment 4b).
+
+        ``None`` when the lock does not govern the path, so the read is
+        recorded as it always was; else ``{"lease", "unit"}``, the lease
+        ``None`` when the session does not hold the unit.
+        """
+        if self.manifest.store is None:
+            return None
+        config, unit = self._docs_unit(path)
+        if unit is None:
+            return None
+        lock = self._docs_lock(config)
+        record = lock.read()
+        lid = lock.lease_id(record, session_id)
+        holder = (record["units"].get(unit) or {}).get("holder")
+        return {"lease": lid if lid is not None and holder == lid else None, "unit": unit}
+
+    def docs_heartbeat(self, session_id: str) -> bool:
+        """The hooks' heartbeat (D5, increment 4b): at most once a minute."""
+        if self.manifest.store is None:
+            return False
+        return self._docs_lock().touch(session_id)
+
+    def docs_notice(self, session_id: str) -> dict | None:
+        """What the turn context tells a session about its docs lock, read only.
+
+        ``new`` lists the units the lease holds with no open span on the
+        store leg: passed to it by another session's release since it last
+        looked, so it is told before it designs on them (D5). ``held`` is
+        every held unit, ``waiting`` the unit it queues for (``unit``,
+        ``position``, ``holder``) and ``pending`` what follows. ``None`` with
+        no lease, and for an in-repo project. Nothing is written: the span
+        opens at the session's next store call or ``docs`` command.
+        """
+        if self.manifest.store is None:
+            return None
+        session = self.require(session_id)
+        out = self._docs_lock().outcome(session.id)
+        if out.lease is None:
+            return None
+        open_units = {
+            span.get("unit")
+            for leg in session.legs if leg.get("kind") == "store"
+            for span in leg.get("lock_spans") or []
+            if not span.get("released_at")
+        }
+        return {
+            "held": list(out.held),
+            "new": [u for u in out.held if u not in open_units],
+            "waiting": out.waiting,
+            "pending": list(out.pending),
+        }
 
     def _store_leg(self, session: Session) -> dict:
         for leg in session.legs:

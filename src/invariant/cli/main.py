@@ -155,10 +155,12 @@ class Unplaced:
 
     ADR-011 D7. ``reason`` is ``unowned`` (no live session worktree there
     contains the path), ``ambiguous`` (the paths the call names land on more
-    than one session; ``sessions`` lists them as ``project:id``) or
+    than one session; ``sessions`` lists them as ``project:id``),
     ``unreadable`` (that project's manifest could not be loaded; ``detail``
-    says why). ``manifest`` is the foreign project's, when it loaded, so the
-    host adapter can ask whether a read would have been evidence there.
+    says why) or ``store`` (the path lies in another project's store, which
+    has no worktree per session, so no path there names one: ADR-014 D5).
+    ``manifest`` is the foreign project's, when it loaded, so the host adapter
+    can ask whether a read would have been evidence there.
     """
 
     path: Path
@@ -177,6 +179,8 @@ class _Foreign:
     manifest: Manifest | None
     sessions: SessionDomain | None
     error: str = ""
+    #: ``root`` is a store, not a project: no path in it names a session.
+    store: bool = False
 
 
 def _paths_named_by(payload) -> list[Path]:
@@ -516,7 +520,17 @@ class Context:
             return self
         paths = _paths_named_by(payload)
         root = self.manifest.root.resolve()
-        if all(_is_within(path, root) for path in paths):
+        # The project's own store is home (ADR-014 D5): its docs are read in
+        # the store's main checkout, attributed by the ordinary order and
+        # then checked against the holder of the path's unit.
+        own_store = self.manifest.store.root.resolve() if self.manifest.store else None
+
+        def at_home(path: Path) -> bool:
+            return _is_within(path, root) or (
+                own_store is not None and _is_within(path, own_store)
+            )
+
+        if all(at_home(path) for path in paths):
             return self
 
         owners: dict[tuple[str, str], tuple[_Foreign | None, object, Path]] = {}
@@ -527,7 +541,7 @@ class Context:
             if home is not None:
                 owners[("", home.id)] = (None, home, path)
                 continue
-            if _is_within(path, root):
+            if at_home(path):
                 continue
             foreign = self._foreign_project(path, projects)
             if foreign is None:
@@ -540,6 +554,12 @@ class Context:
                 owners[(str(foreign.root), owner.id)] = (foreign, owner, path)
 
         if not reached:
+            return self
+
+        stored = next(((p, f) for p, f in reached if f.store), None)
+        if stored is not None:
+            path, foreign = stored
+            self.unplaced = Unplaced(path=path, project=foreign.root, reason="store")
             return self
 
         unreadable = next(((p, f) for p, f in reached if f.sessions is None), None)
@@ -594,9 +614,12 @@ class Context:
         this context's state root — that registry is the one already being
         searched. Loaded from the repository's main checkout, so a linked
         worktree's copy of the manifest cannot move a relative ``paths.state``.
-        Looked up read-only: the question writes nothing (ADR-011 D2).
+        Looked up read-only: the question writes nothing (ADR-011 D2). A path
+        no project claims may lie in another project's store, which answers a
+        store :class:`_Foreign`: such a call is placed nowhere (ADR-014 D5).
         """
         from ..core import git
+        from ..core.stores import store_root_of
 
         try:
             found = Manifest.locate(path, required=False)
@@ -605,7 +628,13 @@ class Context:
         else:
             start = found.root if found.located else None
         if start is None:
-            return None
+            # No project claims it; another project's store may (ADR-014 D5).
+            store = store_root_of(path)
+            if store is None:
+                return None
+            if store not in seen:
+                seen[store] = _Foreign(store, None, None, store=True)
+            return seen[store]
         main = git.main_checkout(start)
         project = main if main and Manifest.is_project_root(main) else start
         if project in seen:
@@ -1850,23 +1879,13 @@ def docs_assessment_row(
 def _lease_host_alive(lease: dict) -> bool | None:
     """Is a docs-lease holder's host process running? (ADR-014 D5)
 
-    Read from the attention sidecar's ``pid`` in the holder's own state root,
-    which only the CLI may read: the oracle owns the sidecar, and the session
-    domain is handed this callable. ``None`` when it cannot be told.
+    The oracle's answer, read from the attention sidecar it owns, handed to
+    the session domain as a callable: neither ``core`` nor ``domains`` imports
+    the oracle.
     """
-    from ..oracle.attention import AttentionStore
-    from ..oracle.scan import pid_exists
+    from ..oracle.scan import lease_host_alive
 
-    host, root = lease.get("host"), lease.get("state_root")
-    if not host or not root:
-        return None
-    try:
-        record = AttentionStore(JsonStore(Path(root))).read(host)
-    except Exception:  # noqa: BLE001 - an unreadable sidecar is no answer
-        return None
-    if record is None or not isinstance(record.pid, int):
-        return None
-    return pid_exists(record.pid)
+    return lease_host_alive(lease)
 
 
 def _docs_lock_session(ctx: Context) -> Session:
@@ -5587,6 +5606,7 @@ def _oracle_row_lines(row: dict) -> list[str]:
     flag = status_flag(row).ljust(5)
     said = "; ".join(f"{s['kind']}: {s['detail']}" for s in signals) or "-"
     lines = [f"  {flag}  {row_label(row):<40} {said}"]
+    lines += _oracle_docs_lock_lines(row.get("docs_lock"))
     advice = row["recommendation"]
     if advice:
         command = " ".join(advice["argv"])
@@ -5594,6 +5614,30 @@ def _oracle_row_lines(row: dict) -> list[str]:
         lines.append(f"         next  {advice['label']}" + (f": {command}{where}" if command else ""))
         if advice.get("detail"):
             lines.append(f"               {advice['detail']}")
+    return lines
+
+
+def _oracle_docs_lock_lines(docs: dict | None) -> list[str]:
+    """A session row's docs-lock units and queue (ADR-014 D5, increment 4b)."""
+    if not docs:
+        return []
+    lines = []
+    for held in docs.get("held") or []:
+        queue = [q for q in held.get("queue") or [] if q]
+        line = f"         docs  holds {held['unit']} for {_held_for(held.get('held_seconds') or 0)}"
+        if queue:
+            line += f"; queue: {', '.join(queue)}"
+        if held.get("new"):
+            line += " (passed to it; not yet seen)"
+        if held.get("stale"):
+            line += f"; STALE: {held['stale']}"
+        lines.append(line)
+    waiting = docs.get("waiting")
+    if waiting:
+        lines.append(
+            f"         docs  queued for {waiting['unit']} at position {waiting['position']} "
+            f"behind {waiting['holder']}"
+        )
     return lines
 
 
@@ -6725,6 +6769,8 @@ def cmd_hook(args) -> int:
     if not probe:
         if args.event == "session-start":
             _register_on_session_start(ctx)
+        else:
+            _docs_heartbeat(work)
         signal = host.attention
         if signal is not None:
             _record_attention(
@@ -6734,6 +6780,25 @@ def cmd_hook(args) -> int:
             )
     print(json.dumps(response))
     return EXIT_OK
+
+
+def _docs_heartbeat(ctx: Context) -> None:
+    """The hooks' heartbeat on a store's docs lease (ADR-014 D5, increment 4b).
+
+    Every hook call of a session that holds a lease refreshes it, at most once
+    a minute, so a holder whose host is working is never stale. SessionStart
+    is left out, as every write is on that path. An in-repo project costs one
+    attribute read; nothing here can change a response, and a failure is
+    swallowed: a missed heartbeat is one the next call writes.
+    """
+    if ctx.manifest.store is None:
+        return
+    try:
+        session = ctx.current_session(strict=False)
+        if session is not None:
+            ctx.sessions.docs_heartbeat(session.id)
+    except Exception:  # noqa: BLE001, S110 - see the docstring
+        pass
 
 
 # -- the attention sidecar ---------------------------------------------

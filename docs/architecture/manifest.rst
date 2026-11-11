@@ -1038,9 +1038,13 @@ are written there. A path there lies under none of the project's checkouts,
 which ``_is_outside_project`` in ``core/rules`` already answers as outside the
 project, so the isolation rules do not hold it (read, not yet run end to end).
 
-**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D10).** Memory under a store is outside the
-docs lock (ruling 20), which increment 4 builds. Policy records are never
-exempt. A whole session in a store project, start to merge, is proved by
+**Built (:need:`ADR-014 <DEC_ADR_014>` D10, D5 increment 4b).** Memory under a
+store is outside the docs lock (ruling 20): ``store.docs_lock_held`` answers
+N/A for a path under memory, the backlog, reports or sweeps kept in the store,
+so a session holding no unit writes them, and ``docs lock`` refuses them as
+units (increment 4a). The policy records kept there, ``docs`` and
+``guidelines``, are what the lock governs, with any path a declared area
+matches. Policy records are never exempt. A whole session in a store project, start to merge, is proved by
 increment 2's repository proof, which the user runs on a named repository.
 
 A declared path means the same thing however it is spelled

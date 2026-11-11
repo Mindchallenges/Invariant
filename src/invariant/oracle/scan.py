@@ -68,13 +68,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..core import git
+from ..core import doclock, git
 from ..core.errors import InvariantError, ManifestError, StateError, UnknownRuleError
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE
 from ..core.manifest import Manifest
 from ..core.privacy import PrivacyScanner
-from ..core.store import InertStore
+from ..core.store import InertStore, JsonStore
 from ..domains.pipeline import PipelineDomain
 from ..domains.session import Session, SessionDomain
 from .attention import ATTENTION_DIR, AttentionStore
@@ -238,6 +238,73 @@ def pid_exists(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def lease_host_alive(lease: Mapping[str, Any]) -> bool | None:
+    """Is a docs-lease holder's host process running? (ADR-014 D5)
+
+    Read from the attention sidecar's ``pid`` in the holder's own state root,
+    which the oracle owns: the CLI hands this to the session domain, and the
+    scan asks it for the oracle's own view. ``None`` when it cannot be told,
+    which never makes a lease stale.
+    """
+    host, root = lease.get("host"), lease.get("state_root")
+    if not host or not root:
+        return None
+    try:
+        record = AttentionStore(JsonStore(Path(root))).read(host)
+    except Exception:  # noqa: BLE001 - an unreadable sidecar is no answer
+        return None
+    if record is None or not isinstance(record.pid, int):
+        return None
+    return pid_exists(record.pid)
+
+
+def docs_lock_views(
+    manifest: Manifest, sessions: Iterable[Session], now: float,
+    alive: Callable[[dict], bool | None] | None = lease_host_alive,
+) -> dict[str, dict[str, Any]]:
+    """Each session's place in its store's docs lock, for its row (ADR-014 D5).
+
+    ``{session id: {"held": [...], "waiting": ...}}`` for every session with
+    a lease: per held unit its key, ``since``, ``held_seconds``, its queue (as
+    session ids), ``stale`` and ``new`` (held with no open span on the store
+    leg, so passed to it by a release since it last looked); ``waiting`` the
+    unit it queues for, its ``position`` and ``holder``. Empty for an in-repo
+    project. Read only.
+    """
+    if getattr(manifest, "store", None) is None:
+        return {}
+    lock = doclock.DocsLock(manifest, clock=lambda: now, alive=alive)
+    record = lock.read()
+    leases = record["leases"]
+    views: dict[str, dict[str, Any]] = {}
+    for session in sessions:
+        lid = lock.lease_id(record, session.id)
+        if lid is None:
+            continue
+        open_units = {
+            span.get("unit")
+            for leg in session.legs if leg.get("kind") == "store"
+            for span in leg.get("lock_spans") or []
+            if not span.get("released_at")
+        }
+        out = lock.outcome(session.id)
+        stale = lock.staleness({"id": lid, **leases[lid]})
+        held = []
+        for unit in out.held:
+            entry = record["units"].get(unit) or {}
+            since = entry.get("since")
+            held.append({
+                "unit": unit,
+                "since": since,
+                "held_seconds": max(0, int(now - float(since))) if since else 0,
+                "queue": [leases.get(q, {}).get("session") for q in entry.get("queue", [])],
+                "stale": stale,
+                "new": unit not in open_units,
+            })
+        views[session.id] = {"held": held, "waiting": out.waiting}
+    return views
 
 
 class ScanCache:
@@ -543,6 +610,9 @@ class Row:
     #: could take its one adoptable session (:func:`mark_rivals`). Attach is
     #: offered only when there are none, so the match is unique both ways.
     adopt_rivals: int = 0
+    #: On a ``session`` row of a store project: its place in the store's docs
+    #: lock (:func:`docs_lock_views`), or ``None`` with no lease.
+    docs_lock: dict[str, Any] | None = None
 
     @property
     def current_host(self) -> HostView | None:
@@ -760,6 +830,7 @@ class _ProjectReader:
         self._transcripts: dict[str, float] = {}
         self._processes: dict[str, list[HostProcess]] = {}
         self._privacy: PrivacyScanner | None = None
+        self._docs: dict[str, dict[str, Any]] = {}
 
     def _row(self, kind: str, **fields: Any) -> Row:
         return Row(
@@ -775,6 +846,7 @@ class _ProjectReader:
         live = [s for s in records if self.stages.get(s.state, STAGE_EARLY) != STAGE_ENDED]
         self._transcripts = self.cache.transcript_activity(self.root)
         self._processes = self.cache.host_processes()
+        self._docs = self._docs_lock(live)
         session_rows = [self._session_row(s) for s in live]
         return session_rows + self._orphans(records, live) + self._leaked(live) + errors
 
@@ -791,6 +863,13 @@ class _ProjectReader:
             if session is not None:
                 records.append(session)
         return records, errors
+
+    def _docs_lock(self, live: list[Session]) -> dict[str, dict[str, Any]]:
+        """The live sessions' docs-lock views; none when the store cannot be read."""
+        try:
+            return docs_lock_views(self.manifest, live, self.now)
+        except (InvariantError, OSError, TypeError, ValueError):
+            return {}
 
     # -- sessions ----------------------------------------------------------
 
@@ -817,6 +896,7 @@ class _ProjectReader:
             plan_touched=session.plan_touched or None,
             pipeline=self._pipeline(session.id),
             hosts=hosts,
+            docs_lock=self._docs.get(session.id),
             last_activity=_latest(
                 [session.heartbeat, session.plan_touched]
                 + [h.attention_written for h in hosts]

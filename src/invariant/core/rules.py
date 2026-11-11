@@ -31,13 +31,13 @@ import yaml
 
 from ..adapters import Adapter, get_adapter
 from ..adapters.base import Reference
+from . import doclock, git
 from . import findings as findings_reader
-from . import git
 from . import guidelines as guidelines_reader
 from . import plan as plan_reader
 from . import sweep as sweep_reader
 from . import verdicts as verdicts_reader
-from .errors import InvariantError
+from .errors import InvariantError, ManifestError, StateError
 from .items import backend_for
 from .machines import load_item_machine, load_pipeline_machine, load_session_machine
 from .manifest import MANIFEST_RELPATH, Level, Manifest, glob_matches, project_relative
@@ -1355,6 +1355,89 @@ def _pipeline_started_before_edit(ctx: RuleContext) -> Verdict:
     )
 
 
+# -- the store's docs lock (ADR-014 D5, increment 4b) -------------------
+
+#: The tool calls the docs lock governs: a read and every edit.
+LOCKED_TOOLS = frozenset({"Read"}) | frozenset(EDIT_TOOLS)
+
+
+@rule(
+    "store.docs_lock_held",
+    summary="A store's policy docs are read and written only under the session's docs lock.",
+    events=("pre-tool-use",),
+)
+def _store_docs_lock_held(ctx: RuleContext) -> Verdict:
+    """A Read or an edit of a store policy path needs the path's unit held.
+
+    The host has already granted a free unit on the spot (the session
+    domain's ``docs_access``) before this runs, so a refusal here means the
+    unit is busy, or taking it would break the global order. Memory and the
+    other data records are outside the lock (ruling 20), and a call that
+    resolves to no session is ungoverned, as every pre-tool-use rule treats
+    one. A session resolved by a guess is still checked against the holder:
+    holding the lock never turns a guess into a proof, and a guess that does
+    not hold the unit is refused like any other (D5, "Attribution").
+    """
+    if ctx.tool_name not in LOCKED_TOOLS:
+        return Verdict.na("not a Read, Edit or Write")
+    target = ctx.target_path
+    if target is None:
+        return Verdict.na("no file path in this call")
+    if getattr(ctx.manifest, "store", None) is None:
+        return Verdict.na("this project keeps its records in its repository; no docs lock")
+    if not target.is_absolute():
+        target = ctx.cwd / target
+    # Classified before the lock is built: a hook runs this on every tool
+    # call, and only a governed path pays for opening the lease record.
+    try:
+        config = doclock.read_config(doclock.store_of(ctx.manifest))
+        kind, unit = doclock.classify(ctx.manifest, config, target)
+    except ManifestError as exc:
+        return Verdict.fail(str(exc), fixes=("narrow one of the store's docs_lock areas",))
+    if kind == doclock.DATA:
+        return Verdict.na("a data record kept in the store: outside the docs lock (ADR-014 ruling 20)")
+    if unit is None:
+        return Verdict.na("not a store policy path")
+    if ctx.session is None:
+        return Verdict.na("this call resolves to no session, so it is ungoverned (ADR-014 D5)")
+    sid = str(ctx.session.get("id"))
+    try:
+        standing = doclock.DocsLock(ctx.manifest, config=config).standing(sid, unit)
+    except StateError as exc:
+        return Verdict.fail(
+            f"the store's docs lock cannot be read: {exc}",
+            fixes=("invariant store status",),
+        )
+    if standing["held"]:
+        return Verdict.clean(f"session {sid} holds {unit}")
+    if standing["position"] is not None:
+        why = (
+            f"session {sid} is queued for {unit} at position {standing['position']}, "
+            f"behind session {standing['holder']}"
+        )
+        fixes = (f"invariant docs lock --wait --id {sid}",)
+    elif standing["holder"]:
+        why = f"{unit} is held by session {standing['holder']}"
+        fixes = (f"invariant docs lock {unit} --id {sid}",)
+        if standing["stale"]:
+            why += f", whose lease is stale ({standing['stale']})"
+            fixes += (f"invariant docs lock --take-over {unit} --reason '<why>' --id {sid}",)
+    else:
+        why = (
+            f"session {sid} does not hold {unit}, which was not taken for it here: "
+            "a read takes a free unit only for a session the call proves, and never "
+            "ahead of a unit the session waits for"
+        )
+        fixes = (f"invariant docs lock {unit} --id {sid}",)
+    return Verdict.fail(
+        why,
+        detail="A store's docs are read, designed against and written under one "
+        "exclusive lock per area, so no session designs on docs another is about "
+        "to change (ADR-014 rulings 13 and 16).",
+        fixes=fixes,
+    )
+
+
 @rule(
     "pipeline.complete",
     summary="The methodology ran to its end before the work lands.",
@@ -1732,7 +1815,10 @@ def _docs_read_architecture(ctx: RuleContext) -> Verdict:
             "architecture doc as a precondition rather than a nicety.",
             fixes=(f"create {_rel(docs_root, _repo_root(ctx))} and describe the layers",),
         )
-    read = [Path(p) for p in ctx.evidence("docs_read", []) or []]
+    rows = ctx.evidence("docs_read", []) or []
+    if _docs_in_store(ctx.manifest):
+        return _docs_read_under_lease(ctx, rows, docs_root)
+    read = [Path(p) for p in (_read_path(r) for r in rows) if p]
     # Every tree of this repository, not only the one the CLI is standing in.
     # A session has two copies of each document and the recording step can
     # only ever write the WORKTREE spelling while sessions are live — a
@@ -1751,6 +1837,48 @@ def _docs_read_architecture(ctx: RuleContext) -> Verdict:
         detail="The diagrams are the authoritative dependency map; reading "
         "them is what makes the plan trustworthy.",
         fixes=(f"read the relevant doc under {_rel(docs_root, _repo_root(ctx))}",),
+    )
+
+
+def _docs_read_under_lease(ctx: RuleContext, rows: list, docs_root: Path) -> Verdict:
+    """``docs.read_architecture`` for docs kept in a store (ADR-014 D5, 4b).
+
+    A read counts only when it was made under a lease the session holds or
+    held: its row names a lease one of the session's spans ran under. A read
+    of the store's docs without the lock is exactly the stale design ruling
+    13 forbids, so it is not evidence, and the failure says how many such
+    reads were set aside.
+    """
+    roots = docs_roots(ctx.manifest, ctx.cwd)
+    leases = _session_leases(ctx.session)
+    under, without = 0, 0
+    for row in rows:
+        path = _read_path(row)
+        if path is None or not any(_is_within(Path(path), root) for root in roots):
+            continue
+        lease = row.get("lease") if isinstance(row, Mapping) else None
+        if lease and str(lease) in leases:
+            under += 1
+        else:
+            without += 1
+    if under:
+        return Verdict.clean(f"{under} architecture doc(s) read under the docs lock")
+    where = _rel(docs_root, _repo_root(ctx))
+    if without:
+        return Verdict.fail(
+            f"{without} architecture doc read(s) in the store were made without "
+            "the docs lock, so none counts",
+            detail="A read of the store's docs counts only under a lease this "
+            "session holds or held (ADR-014 D5): the read, the design and the "
+            "doc update are one cycle under one lock.",
+            fixes=(f"invariant docs lock <area or path under {where}>, then read it again",),
+        )
+    return Verdict.fail(
+        "no architecture doc has been read in this pipeline",
+        detail="The diagrams are the authoritative dependency map; reading "
+        "them is what makes the plan trustworthy. The docs are in the store, "
+        "so the read is made under its docs lock.",
+        fixes=(f"read the relevant doc under {where}; the read takes its unit when it is free",),
     )
 
 
@@ -6807,6 +6935,10 @@ def docs_roots(manifest: Manifest, cwd: Path) -> list[Path]:
     disjointness this fixes.
     """
     configured = manifest.path_for("docs")
+    if _docs_in_store(manifest):
+        # The store's main checkout holds the one copy: a store has no
+        # worktree per session (ADR-014 D5), so a session reads it there.
+        return [configured]
     relative = _docs_relative(manifest, cwd)
     if relative is None:
         # An absolute path outside the project: there is one copy by
@@ -6826,6 +6958,33 @@ def docs_roots(manifest: Manifest, cwd: Path) -> list[Path]:
         if root not in roots:
             roots.append(root)
     return roots
+
+
+def _docs_in_store(manifest: Manifest) -> bool:
+    """Are the architecture docs kept in the project's store (ADR-014 D1)?"""
+    records = manifest.get("records") or {}
+    return getattr(manifest, "store", None) is not None and records.get("docs") == "store"
+
+
+def _read_path(row: Any) -> str | None:
+    """The path a ``docs_read`` row names: the row itself, or its ``path``."""
+    if isinstance(row, str):
+        return row
+    if isinstance(row, Mapping) and isinstance(row.get("path"), str):
+        return row["path"]
+    return None
+
+
+def _session_leases(session: Mapping | None) -> set[str]:
+    """Every docs-lock lease the session held a unit under: its spans' leases."""
+    leases: set[str] = set()
+    for leg in (session or {}).get("legs") or []:
+        if not isinstance(leg, Mapping) or leg.get("kind") != "store":
+            continue
+        for span in leg.get("lock_spans") or []:
+            if isinstance(span, Mapping) and span.get("lease"):
+                leases.add(str(span["lease"]))
+    return leases
 
 
 def is_architecture_doc(manifest: Manifest, cwd: Path, target: Path | str) -> bool:

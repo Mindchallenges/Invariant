@@ -63,6 +63,8 @@ from .recommend import (
 )
 from .scan import ROW_ERROR, ROW_HOST, ROW_SESSION, ROW_WORKTREE, row_key
 from .signals import (
+    DOCS_GRANTED,
+    DOCS_QUEUED,
     ERROR,
     FINISHED,
     GATE_BLOCKED,
@@ -116,7 +118,8 @@ class Group:
 
 
 GROUPS = (
-    Group(NEEDS, "Needs you", "Need you", False, frozenset({WAITING, FINISHED})),
+    Group(NEEDS, "Needs you", "Need you", False,
+          frozenset({WAITING, FINISHED, DOCS_GRANTED})),
     Group(PROBLEMS, "Problems", "Problems", False,
           frozenset({ERROR, GATE_BLOCKED, STUCK, HOST_GONE, STRANDED})),
     Group(WORKING, "Working", "Working", True),
@@ -248,6 +251,14 @@ _FACTS: dict[tuple[str, str], tuple[str, str, str, str]] = {
     (TEARDOWN_PENDING, ""): (
         "Merged, ready to clean up", TONE_IDLE,
         "It is merged. Its folder and branch can be removed.", ""),
+    (DOCS_GRANTED, ""): (
+        "Its docs are free, go on", TONE_NEEDS,
+        ("The docs it was waiting for are now its own. Tell Claude to go on: it reads "
+         "them again before it designs."), ""),
+    (DOCS_QUEUED, ""): (
+        "Waiting for the docs", TONE_IDLE,
+        "Another session is working on the docs it needs. It goes next when they finish.",
+        ""),
     (INHERITED_ENV, ""): (
         "Terminal.app needs a restart", TONE_IDLE,
         ("This Claude inherited settings from its Terminal.app that are meant for a "
@@ -286,6 +297,7 @@ _RULES = {
     "privacy.clean": "the privacy check must pass",
     "pipeline.complete": "the pipeline must be finished",
     "session.deliverables_complete": "the session's plan must be complete",
+    "store.docs_lock_held": "another session is working on the docs it needs",
 }
 
 #: Methodology: (lane, {phase: phrase}). A machine not here has neither.
@@ -550,6 +562,10 @@ _TECHNICAL = {
     "host_conflict": "Host {id} · process ids disagree: {pids}",
     "candidate": "{source} {pid} ({liveness})",
     "error": "Error: {error}",
+    "docs_held": "Docs lock · holds {unit} · {age}{queue}{stale}",
+    "docs_queue": " · queue {sessions}",
+    "docs_stale": " · stale: {why}",
+    "docs_waiting": "Docs lock · queued for {unit} at position {position} behind {holder}",
 }
 
 #: A disputed pid's liveness, as the TUI words it.
@@ -1006,10 +1022,31 @@ def _technical(row: dict[str, Any]) -> dict[str, Any]:
             continue
         template = _TECHNICAL["host"] if pid else _TECHNICAL["host_no_pid"]
         lines.append(template.format(id=host.get("host_session_id"), pid=pid))
+    lines += _docs_lock_lines(row)
     if row.get("error"):
         lines.append(_TECHNICAL["error"].format(error=row["error"]))
     path = row.get("worktree") or row.get("path") or row.get("root") or None
     return {"lines": lines, "path": path}
+
+
+def _docs_lock_lines(row: dict[str, Any]) -> list[str]:
+    """A session's docs-lock units and queue, under "Technical details" (ADR-014 D5)."""
+    docs = row.get("docs_lock") or {}
+    lines = []
+    for held in docs.get("held") or []:
+        queue = [q for q in held.get("queue") or [] if q]
+        lines.append(_TECHNICAL["docs_held"].format(
+            unit=held.get("unit"),
+            age=age_text(float(held.get("held_seconds") or 0)),
+            queue=_TECHNICAL["docs_queue"].format(sessions=", ".join(queue)) if queue else "",
+            stale=_TECHNICAL["docs_stale"].format(why=held["stale"]) if held.get("stale") else "",
+        ))
+    waiting = docs.get("waiting")
+    if waiting:
+        lines.append(_TECHNICAL["docs_waiting"].format(
+            unit=waiting.get("unit"), position=waiting.get("position"),
+            holder=waiting.get("holder")))
+    return lines
 
 
 def _detail(row: dict[str, Any], project: str, now: float, acting: bool,

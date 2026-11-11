@@ -22,6 +22,12 @@ rules:
   pipeline.complete: block
   pipeline.started_before_edit: block
 
+  # The store's docs lock (ADR-014 D5, increment 4b): a read or edit of a
+  # store policy path needs its unit held. Blocks in every profile, as the
+  # isolation rules do: a design read from docs another session is about to
+  # change is the stale design the ruling exists to prevent.
+  store.docs_lock_held: block
+
   # Advisory even here. "An agent was needed for this change" is a judgement,
   # and this profile's own rule is that heuristics advise.
   agents.design_agent_ran: warn

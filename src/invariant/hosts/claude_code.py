@@ -1802,6 +1802,34 @@ class ClaudeCodeHost:
             pass
         return {}
 
+    @staticmethod
+    def _docs_lock_access(payload: dict, ctx) -> None:
+        """Let the engine grant a free docs-lock unit before the rule reads it.
+
+        ADR-014 D5, increment 4b: a Read or an edit of a store policy path
+        takes the path's unit in the same hook call when it is free, so
+        ``store.docs_lock_held`` then finds it held. The grant is a write on
+        the session's behalf, so it is made only for a session the call
+        proves; a guessed one is still checked by the rule and refused if it
+        does not hold the unit. An in-repo project costs one attribute read.
+        A failure here grants nothing, and the rule then answers as it would.
+        """
+        tool = str(payload.get("tool_name", ""))
+        if tool != "Read" and tool not in EDIT_TOOLS:
+            return
+        if getattr(getattr(ctx, "manifest", None), "store", None) is None:
+            return
+        tool_input = payload.get("tool_input") or {}
+        target = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if not target:
+            return
+        try:
+            resolution = ctx.resolution_for_payload(payload)
+            if resolution.proven:
+                ctx.sessions.docs_access(resolution.session.id, str(target))
+        except InvariantError:
+            pass
+
     def _pre_tool_use(self, payload: dict, ctx) -> dict:
         """The surface where the operator meets the tool, and the only one with
         a human in the loop.
@@ -1819,6 +1847,7 @@ class ClaudeCodeHost:
         cannot soften a rule from inside the call it is refusing. A one-shot
         override granted beforehand is spent here, and spending it is recorded.
         """
+        self._docs_lock_access(payload, ctx)
         rule_ctx = ctx.rule_context(payload=payload)
         verdicts = evaluate_event("pre-tool-use", rule_ctx)
 
@@ -2009,6 +2038,10 @@ class ClaudeCodeHost:
         agent = dispatched_agent(payload) if tool in AGENT_TOOLS else None
         if agent:
             what = str(agent)
+        elif tool == "Read" and unplaced.reason == "store":
+            # Another project's store holds its docs; with no manifest to ask,
+            # a read there is the read that project's docs gate would want.
+            what = "this read"
         elif tool == "Read" and unplaced.manifest is not None:
             try:
                 if not is_architecture_doc(
@@ -2029,13 +2062,21 @@ class ClaudeCodeHost:
             )
         elif unplaced.reason == "unreadable":
             why = f"that project's manifest could not be read ({unplaced.detail})"
+        elif unplaced.reason == "store":
+            why = (
+                "it is a store, which has no worktree per session, so no path "
+                "in it names one (ADR-014 D5); its docs are read from a host "
+                "rooted in the project that holds their lock"
+            )
         else:
             why = (
                 "no live session's worktree there contains it (a torn-down or "
                 "stranded session's worktree does not count)"
             )
         return _context_response("PostToolUse", _UNPLACED_CALL.format(
-            what=what, path=unplaced.path, project=unplaced.project, why=why
+            what=what, path=unplaced.path, why=why,
+            place=(f"the store at {unplaced.project}" if unplaced.reason == "store"
+                   else f"the invariant project at {unplaced.project}"),
         ))
 
     def _record_docs_read(self, tool_input: dict, resolution, ctx) -> dict:
@@ -2070,7 +2111,18 @@ class ClaudeCodeHost:
 
         if resolution.proven:
             try:
-                ctx.pipelines.record_docs_read(resolution.session.id, str(target))
+                # A store policy path is recorded with the lease and unit it
+                # was read under (ADR-014 D5, increment 4b), so the docs gate
+                # can tell a read under the lock from one without it.
+                under = None
+                if getattr(getattr(ctx, "manifest", None), "store", None) is not None:
+                    under = ctx.sessions.docs_read_lease(resolution.session.id, str(target))
+                if under is None:
+                    ctx.pipelines.record_docs_read(resolution.session.id, str(target))
+                else:
+                    ctx.pipelines.record_docs_read(
+                        resolution.session.id, str(target), under=under
+                    )
             except InvariantError:
                 # Evidence is a side effect; see the dispatch branch above.
                 pass
@@ -2351,8 +2403,8 @@ _UNRECORDED_DOCS_READ = (
 #: placed there (ADR-011 D7). Nothing was recorded anywhere, the host's own
 #: project included, and the turn that made the call is the one told.
 _UNPLACED_CALL = (
-    "invariant — {what} was NOT recorded anywhere. It names {path}, inside the "
-    "invariant project at {project}, but {why}. A call is recorded in another "
+    "invariant — {what} was NOT recorded anywhere. It names {path}, inside "
+    "{place}, but {why}. A call is recorded in another "
     "project only when its path lies in exactly one live session worktree "
     "there (ADR-011); recording it in this host's project instead would credit "
     "a pipeline with work done elsewhere.\n"
@@ -2702,6 +2754,49 @@ def _offer_clause(session) -> str:
     return f"{got.fraction} deliverables, next: {got.remaining[0]['title']}"
 
 
+def _docs_lock_lines(ctx, session) -> list[str]:
+    """What the turn is told about the session's store docs lock (ADR-014 D5).
+
+    A unit another session's release passed to this one is said first, on
+    SessionStart and every turn until the session's next store call or
+    ``docs`` command opens its span: the session may have stopped while it
+    waited, and it should read the unit again before it designs on it. Then
+    a queue position, so a waiting session knows why its reads are refused.
+    Read only, and silent for an in-repo project or a session with no lease;
+    a store that cannot be read says nothing here.
+    """
+    if getattr(getattr(ctx, "manifest", None), "store", None) is None:
+        return []
+    try:
+        notice = ctx.sessions.docs_notice(session.id)
+    except InvariantError:
+        return []
+    if not notice:
+        return []
+    lines: list[str] = []
+    new, waiting = notice["new"], notice["waiting"]
+    if new:
+        lines.append(
+            f"  docs lock: {', '.join(new)} passed to this session; read "
+            f"{'them' if len(new) > 1 else 'it'} again before designing on "
+            f"{'them' if len(new) > 1 else 'it'}"
+        )
+    held = [u for u in notice["held"] if u not in new]
+    if held:
+        lines.append(
+            f"  docs lock: holding {', '.join(held)}; release with 'invariant docs "
+            f"unlock' once the doc update is committed in the store"
+        )
+    if waiting:
+        then = f", then {', '.join(notice['pending'])}" if notice["pending"] else ""
+        lines.append(
+            f"  docs lock: queued for {waiting['unit']} at position "
+            f"{waiting['position']} behind session {waiting['holder']}{then}; "
+            f"wait with 'invariant docs lock --wait'"
+        )
+    return lines
+
+
 def _spans_hosts_line(session) -> list[str]:
     """That this session outlived a host session, said once, on the turns it did.
 
@@ -2852,6 +2947,7 @@ def build_context(ctx, greeting: bool = False) -> str:
     # behind `invariant session plan show`.
     lines += _spans_hosts_line(session)
     lines += [f"  {line}" for line in plan_reader.summary_lines(session.plan)]
+    lines += _docs_lock_lines(ctx, session)
 
     machine = ctx.sessions.machine
     legal = machine.next_states(session.state)

@@ -48,6 +48,7 @@ import yaml
 
 from . import git
 from .errors import ManifestError, StateError, UsageError
+from .identity import common_dir_of
 from .store import JsonStore
 
 #: Where the lease record lives, under the store's git common directory.
@@ -67,6 +68,15 @@ DOCS_LOCK_KEYS = ("areas", "lease_minutes")
 #: Records that are data, not policy: outside the lock (ruling 20 for
 #: memory; D5's recommendation for the backlog, reports and sweeps).
 DATA_RECORDS = ("backlog", "memory", "reports", "sweeps")
+#: Records that are policy: what an agent designs against, so a read or a
+#: write of one is held to the lock (D5, "What the lock covers").
+POLICY_RECORDS = ("docs", "guidelines")
+
+#: How :func:`classify` places a path, beside the unit it names.
+OUTSIDE = "outside"      # not in the store
+DATA = "data"            # a data record kept in the store: no unit (ruling 20)
+UNGOVERNED = "ungoverned"  # in the store, under no policy record or area
+GOVERNED = "governed"    # a policy path: its unit must be held
 
 AREA = "area:"
 FILE = "file:"
@@ -273,24 +283,68 @@ def store_of(manifest) -> Path:
 
 def data_paths(manifest) -> list[tuple[str, str]]:
     """``(record, store-relative path)`` for each data record kept in the store."""
+    return _record_paths(manifest, DATA_RECORDS)
+
+
+def policy_paths(manifest) -> list[tuple[str, str]]:
+    """``(record, store-relative path)`` for each policy record kept in the store."""
+    return _record_paths(manifest, POLICY_RECORDS)
+
+
+def _record_paths(manifest, kinds: tuple[str, ...]) -> list[tuple[str, str]]:
     from .manifest import RECORD_PATH_KEYS  # local: see _matches
 
-    root = store_of(manifest)
+    root = store_of(manifest).resolve()
     records = manifest.get("records") or {}
     out: list[tuple[str, str]] = []
-    for record in DATA_RECORDS:
+    for record in kinds:
         if records.get(record) != "store":
             continue
         for key in RECORD_PATH_KEYS.get(record, ()):
             value = manifest.get(key)
-            if not isinstance(value, str) or not value:
-                continue
-            try:
-                rel = Path(value).resolve().relative_to(root.resolve())
-            except ValueError:
-                continue
-            out.append((record, rel.as_posix()))
+            # ``agents.overlays`` maps an agent to its overlay file.
+            values = value.values() if isinstance(value, Mapping) else [value]
+            for one in values:
+                if not isinstance(one, str) or not one:
+                    continue
+                try:
+                    rel = Path(one).resolve().relative_to(root)
+                except ValueError:
+                    continue
+                out.append((record, rel.as_posix()))
     return out
+
+
+def _under(rel: str, base: str) -> bool:
+    base = base.rstrip("/")
+    return base in ("", ".") or rel == base or rel.startswith(base + "/")
+
+
+def classify(manifest, config: DocsLockConfig, path: Path | str) -> tuple[str, str | None]:
+    """Where a path a tool call names stands with the lock, and its unit.
+
+    ``(OUTSIDE, None)`` outside the store; ``(DATA, None)`` under memory, the
+    backlog, reports or sweeps kept there, which are written at any time
+    (ruling 20); ``(UNGOVERNED, None)`` in the store under no policy record
+    and no declared area (the store's own ``invariant.yaml``, its git
+    directory); else ``(GOVERNED, unit)``. A policy path is one under a policy
+    record kept in the store (the docs, the guidelines) or matched by a
+    declared area, so an area may reach files no record names.
+    """
+    root = store_of(manifest).resolve()
+    try:
+        rel_path = Path(path).resolve().relative_to(root)
+    except (ValueError, OSError):
+        return OUTSIDE, None
+    rel = rel_path.as_posix()
+    if rel in ("", ".") or rel_path.parts[0] == ".git":
+        return UNGOVERNED, None
+    if any(_under(rel, base) for _, base in data_paths(manifest)):
+        return DATA, None
+    in_area = any(_matches(rel, p) for patterns in config.areas.values() for p in patterns)
+    if in_area or any(_under(rel, base) for _, base in policy_paths(manifest)):
+        return GOVERNED, unit_of(rel, config)
+    return UNGOVERNED, None
 
 
 def resolve_unit(manifest, config: DocsLockConfig, arg: str) -> str:
@@ -355,7 +409,11 @@ class DocsLock:
         self.config = config if config is not None else read_config(self.root)
         self.clock = clock
         self.alive = alive
-        common = git.common_dir(self.root)
+        # Read from disk first: a hook constructs this on every store call,
+        # and a subprocess per tool call is the cost to avoid. The store root
+        # is a git top level, so the disk read answers; git is asked only
+        # when it does not.
+        common = common_dir_of(self.root) or git.common_dir(self.root)
         if common is None:
             raise StateError(f"the store {self.root} is not a git repository")
         self.json = JsonStore(common / LOCK_DIR)
@@ -409,6 +467,27 @@ class DocsLock:
                 }
             )
         return rows
+
+    def standing(self, session: str, unit: str) -> dict[str, Any]:
+        """Where ``session`` stands on one unit, read only.
+
+        ``held`` whether its lease holds it; ``holder`` the session that does,
+        if another; ``position`` its place in the unit's queue, if queued;
+        ``stale`` why the holder's lease is stale, if it is.
+        """
+        record = self.read()
+        lid = self.lease_id(record, session)
+        entry = record["units"].get(unit) or {}
+        holder_id = entry.get("holder")
+        holder = record["leases"].get(holder_id or "", {})
+        queue = entry.get("queue", [])
+        return {
+            "unit": unit,
+            "held": lid is not None and holder_id == lid,
+            "holder": holder.get("session"),
+            "position": queue.index(lid) + 1 if lid is not None and lid in queue else None,
+            "stale": self.staleness({"id": holder_id, **holder}) if holder else None,
+        }
 
     def staleness(self, lease: dict | None) -> str | None:
         """Why the lease is stale, or ``None`` while it is live."""
@@ -470,6 +549,47 @@ class DocsLock:
                 return out
         finally:
             self._flush_wakes()
+
+    def grant_free(self, holder: Holder, unit: str) -> Outcome:
+        """The on-access grant (D5, increment 4b): take ``unit`` if it is free.
+
+        Free means nobody holds it and nobody queues for it. A grant never
+        waits, so it adds no edge to any wait-for cycle; it is still refused
+        when the lease waits for a unit that sorts before ``unit``, because
+        the lease would then hold a unit sorting after one it waits for,
+        which is the order every wait relies on. Anything not granted is
+        left exactly as it was: no lease is created and nobody is queued, and
+        a call that grants nothing on a plain read takes no lock and writes
+        nothing. ``granted`` says which.
+        """
+        out = Outcome()
+        if not self._grantable(self.read(), holder.session, unit, out):
+            return out
+        with self.json.locked(LOCK_REL, default={}) as raw:
+            record = _shape(raw)
+            raw.clear()
+            raw.update(record)
+            out = Outcome()
+            if self._grantable(record, holder.session, unit, out):
+                lid = self._lease_for(record, holder)
+                out.lease = lid
+                self._grant(record, lid, unit, out)
+                self._report(record, lid, out)
+            return out
+
+    def _grantable(self, record: dict, session: str, unit: str, out: Outcome) -> bool:
+        """Would :meth:`grant_free` grant ``unit``? Fills ``out`` when it would not."""
+        lid = self.lease_id(record, session)
+        out.lease = lid
+        entry = record["units"].get(unit)
+        held = entry is not None and lid is not None and entry.get("holder") == lid
+        busy = entry is not None and bool(entry.get("holder") or entry.get("queue"))
+        wants = record["leases"][lid]["wants"] if lid is not None else []
+        if held or busy or any(w < unit for w in wants):
+            if lid is not None:
+                self._report(record, lid, out)
+            return False
+        return True
 
     def release(
         self, session: str, units: list[str] | None, check: bool = True

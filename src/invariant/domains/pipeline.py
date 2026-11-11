@@ -914,12 +914,19 @@ class PipelineDomain:
 
     # -- evidence ------------------------------------------------------
 
-    def record_docs_read(self, session_id: str, path: str) -> None:
+    def record_docs_read(
+        self, session_id: str, path: str, under: dict | None = None
+    ) -> None:
+        """Note a docs read. ``under`` is ``{"lease", "unit"}`` for a read of a
+        store policy path (ADR-014 D5, increment 4b), and the row is then
+        ``{"path", "lease", "unit"}``; any other read is the path, as always."""
+        row: str | dict = path if under is None else {"path": path, **under}
+
         def apply(pipeline: Pipeline) -> bool:
             read = _evidence_list(pipeline, "docs_read")
-            if path in read:
+            if row in read:
                 return False
-            read.append(path)
+            read.append(row)
             return True
 
         # No pipeline: reading docs outside one is fine, just unrecorded.
