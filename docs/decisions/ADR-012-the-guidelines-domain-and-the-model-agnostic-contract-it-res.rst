@@ -23,6 +23,15 @@ ADR-012 — The guidelines domain, and the model-agnostic contract it rests on
      ask the engine for the guidelines. A7 closed with increment 4, built to the
      user's fourteen A7 rulings (under D9): tiers are hints no gate reads, the
      audit record is evidence no rule can see, and the D1 test holds both.
+   - **Amended 2026-11-11 by** :need:`ADR-020 <DEC_ADR_020>`, ruled by the
+     user (its ruling 9, D10). Ruling 1's ``docs/guidelines/ruleset.yaml``
+     holds for existing projects only: a new project's ruleset follows its
+     docs project, at ``<docs.needs.srcdir>/guidelines/ruleset.yaml``, so
+     ``invariant-docs/guidelines/ruleset.yaml``, which ``init`` names in
+     ``guidelines.ruleset`` explicitly. The privacy-scope reason ruling 1
+     gave is corrected: the ``docs`` scope keyword reaches ``paths.docs``
+     alone, so the ruleset file is screened only where ``privacy.scope``
+     names its folder. Ruling 1, D3 and D13 are amended in place.
    - **Date:** 2026-10-27
    - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
      from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -143,6 +152,18 @@ Rulings (2026-10-27)
 |    |                                | inside the ``docs/`` privacy      |
 |    |                                | scope, outside the default        |
 |    |                                | isolation exemptions (D3, D10).   |
+|    |                                | **Amended 2026-11-11 by ADR-020** |
+|    |                                | D10 (its ruling 9), for new       |
+|    |                                | projects only: a new project's    |
+|    |                                | ruleset follows its docs project, |
+|    |                                | ``<srcdir>/guidelines/``          |
+|    |                                | ``ruleset.yaml``, so              |
+|    |                                | ``invariant-docs/guidelines/``    |
+|    |                                | ``ruleset.yaml`` after ``init``.  |
+|    |                                | Existing projects keep the path   |
+|    |                                | above. The privacy reason holds   |
+|    |                                | only where ``privacy.scope``      |
+|    |                                | names the folder (D3, amended).   |
 +----+--------------------------------+-----------------------------------+
 | 2  | Ruleset format                 | YAML, like the manifest and the   |
 |    |                                | machines. No new dependency (D3). |
@@ -316,6 +337,19 @@ Decisions
    :status: accepted
    :part_of: DEC_ADR_012
    :affects: COMP_CORE_MACHINES, COMP_CORE_RULES, COMP_CORE_GUIDELINES, COMP_DOMAINS_GUIDELINES, COMP_HOSTS_CLAUDE_CODE
+
+   **Amended 2026-11-11 by** :need:`DEC_ADR_020_D10` **(ADR-020 ruling 9).**
+   The default place below holds for existing projects. A new project's
+   ruleset follows its docs project, ``<docs.needs.srcdir>/guidelines/
+   ruleset.yaml`` (``invariant-docs/guidelines/ruleset.yaml``), and ``init``
+   names it in ``guidelines.ruleset`` explicitly; every reader reads that key.
+   "Inside the ``docs/`` privacy scope" held only where ``privacy.scope``
+   names ``docs/`` literally, as invariant's does: the ``docs`` keyword reaches
+   ``paths.docs`` alone, in either place. The ruleset's text reaches every
+   rendered output, and render scans each whatever ``privacy.scope`` says
+   (below); a project that wants the file itself screened names its docs
+   project folder in ``privacy.scope``. The isolation reason holds in both
+   places. The text as given:
 
    **One file.** A project declares its guidelines in one YAML ruleset (ruling
    2), by default at ``docs/guidelines/ruleset.yaml`` with the generated checklist
@@ -4468,8 +4502,10 @@ Decisions
       guidelines:
         ruleset: null              # path of the ruleset; null = no guidelines, every
                                    # guidelines.* rule N/A. The documented location is
-                                   # docs/guidelines/ruleset.yaml (ruling 1). Never
-                                   # exempt from isolation (D10)
+                                   # docs/guidelines/ruleset.yaml (ruling 1); for a
+                                   # new project <srcdir>/guidelines/ruleset.yaml,
+                                   # written here by init (amended 2026-11-11,
+                                   # ADR-020 D10). Never exempt from isolation (D10)
         baseline: null             # path of the ratchet baseline (D6); a configured
                                    # file that does not exist is an error. Always a
                                    # pure ratchet: there is no Boy-Scout key (ruling 5)

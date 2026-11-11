@@ -590,7 +590,7 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
     element = needs_reader.type_of_role(types, "element")
     rule = needs_reader.type_of_role(types, "rule")
     backlog = f"{spelled}/{_BACKLOG}"
-    ruleset, parsed, note = _starter_ruleset(manifest, Path(base), backlog)
+    ruleset, parsed, note = _starter_ruleset(manifest, Path(base), spelled, backlog)
     source = None if ruleset is None else ruleset[0]
     areas, _gaps = _assessed_areas(manifest, manifest.get("docs.assess")["areas"])
     fill = {
@@ -649,21 +649,22 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
     )
 
 
-#: Where the starter writes the guidelines ruleset: ADR-012 D3's default path.
-STARTER_RULESET = "docs/guidelines/ruleset.yaml"
 #: The mandate's two judgement rules (ADR-018 D8, D9), as the starter writes them.
 MANDATE_GUIDELINES = ("docs.items-carry-no-design", "docs.decisions-are-declared")
 
 
 def _starter_ruleset(
-    manifest: Manifest, base: Path, backlog: str
+    manifest: Manifest, base: Path, srcdir: str, backlog: str
 ) -> tuple[tuple[str, str] | None, Any, str | None]:
     """The ruleset the starter writes, its parse, and a note where it writes none.
 
-    Written at ADR-012 D3's default path where the project configures no
-    ruleset and nothing is there. A configured ruleset is the project's and is
-    never rewritten: unless it holds both rules already, the note gives them
-    to add by hand. So does a store project, whose ruleset is its records'.
+    Written inside the docs project it starts, ``<srcdir>/guidelines/
+    ruleset.yaml`` (ADR-020 D10; ``docs/guidelines/ruleset.yaml``, ADR-012
+    D3's path, where the docs project is ``docs/``), where the project
+    configures no ruleset and nothing is there; the starter's settings name
+    it as ``guidelines.ruleset``, so every reader reads that key. A
+    configured ruleset is the project's and is never rewritten: unless it
+    holds both rules already, the note gives them to add by hand. So does a store project, whose ruleset is its records'.
     """
     from ..core.rules import all_rules  # local: core/rules imports this domain
 
@@ -684,13 +685,14 @@ def _starter_ruleset(
         return None, None, f"The guidelines ruleset {configured} is the project's own" + by_hand
     if Path(base).resolve() != manifest.root.resolve():
         return None, None, "No guidelines ruleset was written into the store" + by_hand
-    if (base / STARTER_RULESET).exists():
+    location = guidelines_reader.ruleset_location(srcdir)
+    if (base / location).exists():
         return None, None, (
-            f"{STARTER_RULESET} exists and guidelines.ruleset is not set, so no "
+            f"{location} exists and guidelines.ruleset is not set, so no "
             f"ruleset was written; set guidelines.ruleset to it" + by_hand
         )
     parsed = guidelines_reader.parse(text, registered=[r.id for r in all_rules()])
-    return (STARTER_RULESET, text), parsed, None
+    return (location, text), parsed, None
 
 
 def write_starter(starter: Starter) -> list[Path]:

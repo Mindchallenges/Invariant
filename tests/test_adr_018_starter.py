@@ -43,8 +43,8 @@ from invariant.domains import docs as docs_domain
 
 #: Every file the default starter writes, relative to the project root: the
 #: guidelines ruleset with the mandate's two judgement rules since increment 5,
-#: at ADR-012 D3's default path, and the docs project in invariant-docs/
-#: (ADR-020 D8).
+#: inside the docs project (ADR-020 D10), and the docs project in
+#: invariant-docs/ (ADR-020 D8).
 STARTER = sorted(
     [
         "invariant-docs/.gitignore",
@@ -53,7 +53,7 @@ STARTER = sorted(
         "invariant-docs/checklist.rst",
         "invariant-docs/conf.py",
         "invariant-docs/decisions/index.rst",
-        "docs/guidelines/ruleset.yaml",
+        "invariant-docs/guidelines/ruleset.yaml",
         "invariant-docs/index.rst",
         "invariant-docs/requirements.rst",
         "invariant-docs/requirements.txt",
@@ -517,11 +517,11 @@ class TestTheStarterBuildsStrictly:
         ruleset = Path(__file__).resolve().parent.parent / "docs" / "guidelines" / "ruleset.yaml"
         # The starter wrote one with the mandate's two rules; this
         # repository's replaces it, links to Markdown files included.
-        target = toy_python / "docs" / "guidelines" / "ruleset.yaml"
+        target = toy_python / SRC / "guidelines" / "ruleset.yaml"
         shutil.copy(ruleset, target)
         manifest = toy_python / ".claude" / "invariant.yaml"
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
-        data["guidelines"] = {"ruleset": "docs/guidelines/ruleset.yaml"}
+        assert data["guidelines"] == {"ruleset": f"{SRC}/guidelines/ruleset.yaml"}
         manifest.write_text(yaml.safe_dump(data), encoding="utf-8")
         code, text = run(capsys, "guidelines", "render")
         assert code == 0, text
@@ -566,7 +566,7 @@ class TestForceKeepsTheMandate:
         assert m.get("items.backend") == "sphinx_needs"
         assert m.get("items.path") == "invariant-docs/backlog.rst"
         assert m.get("paths.docs") == "invariant-docs/architecture"
-        assert m.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
+        assert m.get("guidelines.ruleset") == "invariant-docs/guidelines/ruleset.yaml"
         assert written(toy_python) == before
 
     def test_a_migrating_project_stays_as_it_was(self, toy_python, capsys):

@@ -762,9 +762,9 @@ class TestStarterRuleset:
     def test_init_writes_the_two_judgement_rules(self, toy_python, capsys):
         assert main(["init", "--ecosystem", "python"]) == 0
         manifest = Manifest.locate(toy_python)
-        assert manifest.get("guidelines.ruleset") == "docs/guidelines/ruleset.yaml"
+        assert manifest.get("guidelines.ruleset") == "invariant-docs/guidelines/ruleset.yaml"
         data = yaml.safe_load(
-            (toy_python / "docs/guidelines/ruleset.yaml").read_text(encoding="utf-8")
+            (toy_python / "invariant-docs/guidelines/ruleset.yaml").read_text(encoding="utf-8")
         )
         rules = {rule["id"]: rule for rule in data["rules"]}
         assert set(rules) == {"docs.items-carry-no-design", "docs.decisions-are-declared"}

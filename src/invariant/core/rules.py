@@ -2639,7 +2639,7 @@ def load_ruleset(
             fixes=(
                 (
                     "set guidelines.ruleset to a project-relative path, such as "
-                    "docs/guidelines/ruleset.yaml"
+                    + guidelines_example(ctx)
                 ),
             ),
         )
@@ -2715,6 +2715,16 @@ def _session_tree(ctx: RuleContext) -> Path:
     (``session merge``) the work lives in the session's worktree.
     """
     return _session_worktree(ctx) or _repo_root(ctx)
+
+
+def guidelines_example(ctx: RuleContext, name: str = guidelines_reader.RULESET_NAME) -> str:
+    """The path a fix offers for a guidelines file: inside the project's docs
+    project, where a new project's ruleset lives (ADR-020 D10), so the fix
+    names ``invariant-docs/guidelines/...`` there and ``docs/guidelines/...``
+    where the docs project is ``docs/``."""
+    from . import needs  # local: one reader of the docs project's folder
+
+    return guidelines_reader.ruleset_location(needs.docs_folder(ctx.manifest), name)
 
 
 def guidelines_relpath(ctx: RuleContext, configured: str) -> str | None:
@@ -4082,7 +4092,7 @@ def load_baseline(
             fixes=(
                 (
                     "set guidelines.baseline to a project-relative path, such as "
-                    "docs/guidelines/baseline.txt"
+                    + guidelines_example(ctx, "baseline.txt")
                 ),
             ),
         )
@@ -4289,7 +4299,8 @@ def _baseline_target(
             "guidelines.baseline is not set, so there is no baseline to record or "
             "prune; with it null every pattern or boundary finding is new (DN-1)",
             "set guidelines.baseline to a project-relative path, such as "
-            "docs/guidelines/baseline.txt, then: invariant guidelines baseline --record",
+            f"{guidelines_example(ctx, 'baseline.txt')}, then: invariant guidelines "
+            "baseline --record",
         )
     rel = guidelines_relpath(ctx, configured)
     if rel is None:

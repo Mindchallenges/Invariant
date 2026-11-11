@@ -272,7 +272,7 @@ Layers
        CONF -- get_rule --> RULES
        CONF -- PREDICATES and the standing names --> CVERD
        CONF --> CONFDATA
-       RULES -- load, the render plan, the ruleset and drift gates, parse_baseline, definition_of; phases_for, select, and the TurnIndex, EditAdvisory and EditGuidelines it answers --> CGUIDE
+       RULES -- load, the render plan, the ruleset and drift gates, parse_baseline, definition_of; phases_for, select, and the TurnIndex, EditAdvisory and EditGuidelines it answers; ruleset_location, for the paths its fixes offer --> CGUIDE
        CC -- render_turn_index, render_edit: the pure renderers it only wraps --> CGUIDE
        CGUIDE -- project_relative, glob_matches --> MANIFEST
        RULES -- evaluate, with the bytes, masks, references and the change's history as callables; ratchet, growth; na_answer, for the verdict plan --> CFIND
@@ -297,10 +297,10 @@ Layers
        PIPELINE -- "srcdir_of: the docs project a run's adapter skips" --> CNEEDS
        SWEEPD -- "srcdir_of: the docs project the sweep's adapter skips" --> CNEEDS
        MANIFEST -. "type_problems, link_rule_problems, resolve_srcdir: the docs.needs load check, imported at call time" .-> CNEEDS
-       CNEEDS -. "project_relative, imported at call time" .-> MANIFEST
+       CNEEDS -. "project_relative, DEFAULTS, imported at call time" .-> MANIFEST
        RULES -. "docs.assessment, docs.area_documented, imported at call time" .-> DOCSD
        DOCSD -- "headings, links: the reader for docs.format; detect_format; rst_directives, the element needs" --> CDOCFMT
-       DOCSD -- "render_rule_needs, render_checklist: the starter's two generated pages" --> CGUIDE
+       DOCSD -- "render_rule_needs, render_checklist: the starter's two generated pages; ruleset_location: where the starter's ruleset goes" --> CGUIDE
        CLI -- "init: plan_starter, write_starter, sync_venv" --> DOCSD
        CLI -- "docs decision new: new_decision" --> DOCSD
        CLI -- "docs migrate adr, prose: migrate_adr, migrate_prose" --> DOCSD
@@ -309,6 +309,7 @@ Layers
        WORKITEM -- "item migrate's bodies: item_body_converter, unconverted_in (ruling 20)" --> DOCSD
        DOCSD -. "all_rules: the starter ruleset's parse, imported at call time" .-> RULES
        RULES -- "docs.design_home, items.decisions_linked, docs.decisions_recorded: prefixes_of, cited_ids, latest_record" --> CNEEDS
+       RULES -. "docs_folder: the guidelines gates' fixes name the docs project's guidelines folder, imported at call time" .-> CNEEDS
        SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
        WORKITEM -- "items.decisions_linked before an item write" --> RULES
        CGUIDE -- "id_stem, is_need_id: rule need ids and decided_by" --> CNEEDS
@@ -789,8 +790,20 @@ away from the machine's configuration, so two replays in fresh trees must
 agree. The suite proves they do.
 
 ``CGUIDE`` is the guidelines ruleset (IDEA_031 A2, ADR-012 D3): a project's
-coding guidelines as one YAML file, by default ``docs/guidelines/ruleset.yaml``,
-named by the manifest's ``guidelines.ruleset``. ``core/guidelines`` holds the
+coding guidelines as one YAML file, named by the manifest's
+``guidelines.ruleset`` and read from that key alone by every reader (the
+gates, the pin, render, ``show``, ``doctor``, the instruction-file block).
+Its documented place is inside the docs project, ``ruleset_location``:
+``<docs project>/guidelines/ruleset.yaml``, so
+``invariant-docs/guidelines/ruleset.yaml`` for a new project, which ``init``
+writes into ``guidelines.ruleset`` explicitly (:need:`DEC_ADR_020_D10`), and
+``docs/guidelines/ruleset.yaml`` for invariant and any project whose docs
+project is ``docs/`` (ADR-012 ruling 1). The docs project's folder is
+``core/needs.docs_folder``: the resolved ``docs.needs.srcdir``, else the folder
+above ``paths.docs``. That place is never a load-time default: a null
+``guidelines.ruleset`` still means no guidelines. ``core/rules`` asks the same
+two functions for the path each guidelines gate's fix offers
+(``guidelines_example``), so a fix never names a ``docs/`` the project lacks. ``core/guidelines`` holds the
 schema (version 1), the model (``Ruleset``, ``Guideline``, ``Check``) and the
 validation, which collects every problem and refuses the ruleset whole, and
 the content hash a pipeline pins at ``start``. All five check kinds are validated:
@@ -2257,7 +2270,9 @@ advance it. They are the only place where "what a session is" is encoded.
    work-item domain writes. The starter (D11) also writes the
    guidelines ruleset with the mandate's two judgement rules where the
    project has none, parsing it against the rule registry through ``core/rules``,
-   imported at call time. A new project's docs project is ``STARTER_SRCDIR``,
+   imported at call time. It writes it inside the docs project it starts,
+   ``ruleset_location(<srcdir>)`` (ADR-020 D10), and names it in the
+   starter's settings as ``guidelines.ruleset``. A new project's docs project is ``STARTER_SRCDIR``,
    ``invariant-docs/``, with ``STARTER_DOCS`` its ``paths.docs`` (ADR-020 D8),
    and ``refused_srcdir`` names the content folder, one of the ``sphinx``
    adapter's ``HOMES``, a ``paths.docs`` would make its source directory.
@@ -3402,6 +3417,9 @@ Where things live at rest
        backlog.rst             items.path under sphinx_needs: every work item
                                an idea or bug need
        rules.rst, checklist.rst  generated by `guidelines render` (D12)
+       guidelines/ruleset.yaml guidelines.ruleset, named explicitly: the
+                               project's coding guidelines (ADR-012 D3), in
+                               the docs project (ADR-020 D10)
        agents/<name>.yaml      by convention, an agent overlay agents.overlays
                                names (ADR-012 D8); never read unless named, and
                                never exempt from isolation
@@ -3494,6 +3512,13 @@ a folder only invariant owns, at the repository root, or at the store root
 under the same relative name; ``init`` writes ``docs.needs.srcdir:
 invariant-docs`` and ``paths.docs: invariant-docs/architecture`` explicitly, so
 the load-time defaults do not move. invariant itself keeps ``docs/``.
+
+**Built (:need:`DEC_ADR_020_D10`).** A new project's guidelines ruleset follows
+its docs project: ``init`` writes it at
+``invariant-docs/guidelines/ruleset.yaml`` and names it in
+``guidelines.ruleset``, so a fresh ``init`` writes no ``docs/`` folder at all,
+and a documentation repository's own ``docs/`` is never written into.
+invariant keeps ``docs/guidelines/ruleset.yaml``.
 
 Configuration and knowledge are committed. Runtime state never is — it is
 machine-local, session-scoped, and would conflict constantly between

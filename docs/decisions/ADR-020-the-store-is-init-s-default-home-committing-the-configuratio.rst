@@ -6,13 +6,14 @@ ADR-020 — The store is init's default home; committing the configuration is op
 .. dec:: The store is init's default home; committing the configuration is opt-in
    :id: DEC_ADR_020
    :status: accepted
-   :amends: DEC_ADR_014, DEC_ADR_016, DEC_ADR_017, DEC_ADR_018
+   :amends: DEC_ADR_012, DEC_ADR_014, DEC_ADR_016, DEC_ADR_017, DEC_ADR_018
    :affects: COMP_CMD_SETUP, COMP_CORE_STORES, COMP_CORE_QUESTIONNAIRE, COMP_HOSTS_CLAUDE_CODE
 
    - **Status:** Accepted (2026-11-10) by the user's direction. Rulings 1 to
      4 were given by the user on 2026-11-10. Rulings 5 to 8 were given the
      same day, in the user's review of this record's first draft, by
-     interview. All are recorded below as decided. Each decision gives the
+     interview. Ruling 9 was given on 2026-11-11, after increment 1 was
+     built, and D10 carries it out. All are recorded below as decided. Each decision gives the
      design that carries out its rulings. Any choice beyond a ruling is
      marked *recommended*. No question is open.
    - **Date:** 2026-11-10
@@ -35,7 +36,11 @@ ADR-020 — The store is init's default home; committing the configuration is op
      (D3's "Default: in the repository", its ruling 17, and D3's and D11's
      starter source directory, ``docs/`` for a new project becoming
      ``invariant-docs/``; D13's in-repo folder takes the same name, and its
-     exclusion requirement is unchanged). Amends
+     exclusion requirement is unchanged) and
+     :need:`ADR-012 <DEC_ADR_012>`
+     (ruling 1's ``docs/guidelines/ruleset.yaml``, for new projects only,
+     and the privacy-scope reason given for it; D3 and D13 say so in place;
+     D10 here). Amends
      ``docs/architecture/overview.rst`` ("Where things live at rest"),
      ``docs/architecture/manifest.rst`` ("Records and their locations") and
      ``docs/architecture/cli.rst`` (``init``, ``doctor``, ``store``). Folds
@@ -140,6 +145,21 @@ Rulings at review (user, 2026-11-10, by interview):
    nothing outside the project is touched. A shared in-repo project keeps
    today's committed ``.claude/settings.json`` and ``.claude/agents/``. This
    replaces ADR-014 D11's user-level design for Claude Code.
+
+Ruling at build (user, 2026-11-11):
+
+.. _adr-020-ruling-9:
+
+9. **The guidelines ruleset follows the docs project.** Increment 1's build
+   found that the starter still wrote ``docs/guidelines/ruleset.yaml``, so
+   every new project gained a ``docs/`` folder, and in a documentation
+   repository the file landed inside the content's own ``docs/`` tree. A
+   new project's ruleset lives at
+   ``<docs.needs.srcdir>/guidelines/ruleset.yaml``, which is
+   ``invariant-docs/guidelines/ruleset.yaml`` for a fresh ``init``. This
+   amends ADR-012 ruling 1 for new projects only. Existing projects,
+   invariant among them, keep ``docs/guidelines/ruleset.yaml`` byte for
+   byte.
 
 What was read to write this
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -654,6 +674,91 @@ Decisions
    - **Moves.** ``store migrate`` converts between ``local`` and ``repo``
      wiring when the wiring is installed (D3).
 
+.. dec:: A new project's guidelines ruleset follows its docs project
+   :id: DEC_ADR_020_D10
+   :status: accepted
+   :part_of: DEC_ADR_020
+   :amends: DEC_ADR_012_D3, DEC_ADR_012_D13, DEC_ADR_020_I1
+   :affects: COMP_CMD_SETUP, COMP_DOMAINS_DOCS, COMP_CORE_GUIDELINES, COMP_CORE_NEEDS, COMP_CORE_RULES
+
+   Ruling :ref:`9 <adr-020-ruling-9>`. Built with this record's increment 1
+   follow-up (2026-11-11).
+
+   - **The place.** A ruleset's documented place is inside the docs
+     project, ``<docs project>/guidelines/ruleset.yaml``
+     (``core/guidelines.ruleset_location``). The docs project's folder is
+     ``core/needs.docs_folder``: the resolved ``docs.needs.srcdir``, else
+     the folder above ``paths.docs`` (ADR-018 D11's rule for the starter).
+     So a new project's is ``invariant-docs/guidelines/ruleset.yaml``, a
+     docs step that chose ``design/arch`` gives
+     ``design/guidelines/ruleset.yaml``, and a docs project at ``docs/``
+     gives ADR-012 ruling 1's path exactly, which is why no existing project
+     has anything to move.
+   - **One resolution for every reader: the key.** As D8 did for
+     ``docs.needs.srcdir`` and ``paths.docs``, ``init`` writes
+     ``guidelines.ruleset`` explicitly, in the starter's settings beside
+     them. Every reader (``guidelines.ruleset_valid`` and the other
+     ``guidelines.*`` gates, the pipeline's pin, ``guidelines render``,
+     ``show`` and ``select``, the managed block in ``CLAUDE.md``, the turn
+     index and ``doctor``) reads that key and nothing else, as it already
+     did. No reader derives a location: the key's load-time default stays
+     null, meaning no guidelines (ADR-012 D13), so no manifest changes
+     meaning (D2). It stays configurable the way it always was: a
+     configured ``guidelines.ruleset`` is the project's, is never rewritten,
+     and wins over the place.
+   - **The writer.** The starter (``domains/docs``) writes the ruleset at
+     ``ruleset_location(<srcdir>)``, the source directory it is writing,
+     and never over a file already there (the note names it and the two
+     rules to add by hand, as before). A store project still gets no
+     ruleset, because ``records.guidelines: store`` is refused until ADR-014
+     increment 4.
+   - **The fixes.** The guidelines gates that offer a path in a fix
+     (``guidelines.ruleset`` and ``guidelines.baseline`` outside the
+     project, a baseline not configured) name it through the same two
+     functions (``core/rules.guidelines_example``), so a new project is
+     never told to create ``docs/guidelines/``. A registry's example in the
+     ruleset parser, which has no manifest, names
+     ``<docs project>/guidelines/``.
+   - **Existing projects.** ``init --force`` keeps an existing manifest's
+     ``guidelines.ruleset`` (ADR-018 D10's kept keys). One that sets none
+     and whose docs project is ``docs/`` gets ``docs/guidelines/
+     ruleset.yaml``. invariant's own manifest names
+     ``docs/guidelines/ruleset.yaml`` and resolves it unchanged, with the
+     same pin (``02ed45e4db9d`` at this record).
+   - **Privacy scope.** ADR-012 ruling 1 gave "inside the ``docs/`` privacy
+     scope" as a reason for ``docs/guidelines/``. As built, the ``docs``
+     scope keyword reaches ``paths.docs`` alone (``docs/architecture``), so
+     the ruleset file was inside the privacy scope only where
+     ``privacy.scope`` names its folder literally, as invariant's names
+     ``docs/``. The move neither gains nor loses that: the default scope
+     reaches neither ``docs/guidelines/`` nor
+     ``invariant-docs/guidelines/``. What protects the ruleset's text is
+     that every output rendered from it (the checklist, the rules page and
+     the instruction-file block) is privacy-scanned at render whatever
+     ``privacy.scope`` says (ADR-012 D3). A project that wants the file
+     itself screened names its docs project folder in ``privacy.scope``.
+     ADR-012 D3 is amended in place to say so.
+   - **Isolation.** ``invariant-docs/guidelines/`` is outside
+     ``session.exempt_paths``' default ``.claude/*``, so ADR-012 D3's
+     reason, that a ruleset edit never lands on the base branch unreviewed,
+     holds unchanged.
+
+   This amends :need:`DEC_ADR_020_I1`'s "Unchanged here" bullet.
+
+   Proven by ``tests/test_adr_020_ruleset_location.py``: a fresh ``init``
+   on a toy repository writes no ``docs/`` folder and the ruleset at
+   ``invariant-docs/guidelines/ruleset.yaml``, named in the manifest, which
+   the gate, the pin, ``guidelines show``, the rules page and ``doctor`` all
+   read; a ``docs/conf.py`` content repository's ``docs/`` tree is byte for
+   byte as it was; a chosen docs folder carries the ruleset; an existing
+   file is never written over; ``init --force`` over a manifest with docs at
+   ``docs/`` writes ``docs/guidelines/ruleset.yaml``; the fixes name the
+   docs project's folder; and this repository resolves
+   ``docs/guidelines/ruleset.yaml`` with its pin ``02ed45e4db9d``
+   unchanged. The starter still builds strictly
+   (``tests/test_adr_018_starter.py``, behind
+   ``INVARIANT_TEST_SPHINX_BUILD``).
+
 Increments
 ----------
 
@@ -683,6 +788,13 @@ design. This record adds to increment 7, and adds the switch after it.
        strictly. A toy content tree at ``docs/conf.py`` is detected as
        ``sphinx`` (BUG_118's case b). This repository resolves and builds
        ``docs/`` exactly as before.
+   * - ADR-020 inc 1, follow-up (the ruleset)
+     - D10: the starter's ruleset at ``<srcdir>/guidelines/ruleset.yaml``,
+       ``guidelines.ruleset`` written explicitly, and the gates' fixes
+       naming the docs project's folder.
+     - A fresh ``init`` writes no ``docs/`` folder. A ``docs/conf.py``
+       content repository's ``docs/`` is untouched. This repository resolves
+       ``docs/guidelines/ruleset.yaml`` with the same pin.
    * - ADR-014 inc 3
      - ADR-014 D11 as amended by D9: ``records.hooks`` and
        ``records.agents`` ``local``, ``.claude/settings.local.json``,
@@ -883,7 +995,11 @@ at rest"). Where the build settles what the text left open:
    - **Unchanged here:** the guidelines ruleset the starter writes stays at
      ADR-012 D3's default path, ``docs/guidelines/ruleset.yaml`` (that
      record's ruling 1), so a new project still gains a ``docs/guidelines/``
-     folder beside ``invariant-docs/``. D8 does not move it.
+     folder beside ``invariant-docs/``. D8 does not move it. **Amended
+     2026-11-11 by** :need:`DEC_ADR_020_D10` **(ruling 9):** a new
+     project's ruleset follows its docs project, at
+     ``invariant-docs/guidelines/ruleset.yaml``, and a fresh ``init`` writes
+     no ``docs/`` folder.
 
 The proofs: ``init`` on a toy Python repository writes the starter in
 ``invariant-docs/``, with both keys in the manifest, and interactive

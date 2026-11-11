@@ -375,6 +375,19 @@ Setup
        existing manifest's `srcdir_of` otherwise), so a documentation
        repository whose content is at `docs/conf.py` is detected as `sphinx`.
 
+       Built (ADR-020 D10): the guidelines ruleset follows the docs project.
+       The starter writes it at `<docs.needs.srcdir>/guidelines/ruleset.yaml`
+       and names it in `guidelines.ruleset` explicitly, so a new project's is
+       `invariant-docs/guidelines/ruleset.yaml` and a fresh `init` writes no
+       `docs/` folder at all; in a documentation repository the content's
+       `docs/` is never written into. A docs step that chose another folder
+       carries the ruleset with it (`design/guidelines/ruleset.yaml` for
+       `design/arch`). `init --force` over an existing manifest keeps its
+       `guidelines.ruleset`; one that sets none, with its docs project at
+       `docs/`, gets `docs/guidelines/ruleset.yaml`, ADR-012's path. A file
+       already at the place is never written over: the note names it and the
+       two rules to add by hand.
+
        Built (ADR-018 D10, D11, increment 4): the docs starter. `init`,
        interactive or not, writes a sphinx-needs docs project wherever
        `paths.docs` / `records.docs` resolves (the Markdown `overview.md` is
@@ -397,11 +410,14 @@ Setup
        need id, the path where two names collide), `requirements.rst`,
        `decisions/index.rst`, `ui.rst`, the generated `rules.rst` and
        `checklist.rst` (rendered from no ruleset, with the managed marker, so
-       `guidelines render` takes them over), and `backlog.rst` (the items
-       store). The manifest gains `docs.format: sphinx`, `docs.needs.state:
+       `guidelines render` takes them over), `guidelines/ruleset.yaml` (the
+       mandate's two judgement rules, where the project configures no
+       ruleset; ADR-020 D10) and `backlog.rst` (the items store). The
+       manifest gains `docs.format: sphinx`, `docs.needs.state:
        enforced`, `docs.needs.srcdir` and `items.backend: sphinx_needs` with
        `items.path` the backlog page (a store project: in its block, with
-       `records.backlog: store`). The starter is not written, and the project
+       `records.backlog: store`), and `guidelines.ruleset` the ruleset it
+       wrote (none in a store project). The starter is not written, and the project
        is left migrating with a note naming why, where the source directory
        would be the root, already holds a `conf.py`, or holds a file the
        starter would write. Only an interactive `init` creates the docs

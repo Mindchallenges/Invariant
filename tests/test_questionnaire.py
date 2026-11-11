@@ -63,7 +63,7 @@ STARTER_MANIFEST = TODAYS_MANIFEST.replace(
     "\npaths:\n  docs: invariant-docs/architecture\n"
     "\ndocs:\n  format: sphinx\n  needs:\n    state: enforced\n    srcdir: invariant-docs\n"
     "\nitems:\n  backend: sphinx_needs\n  path: invariant-docs/backlog.rst\n"
-    "\nguidelines:\n  ruleset: docs/guidelines/ruleset.yaml\n"
+    "\nguidelines:\n  ruleset: invariant-docs/guidelines/ruleset.yaml\n"
     "\n# Everything else",
 )
 

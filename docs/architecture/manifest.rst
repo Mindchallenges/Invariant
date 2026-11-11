@@ -214,9 +214,15 @@ Full schema
    guidelines:                    # the project's coding guidelines (ADR-012 D3, D13)
      ruleset: null                # path of the one YAML ruleset; null = no
                                   # guidelines, every guidelines.* rule N/A. The
-                                  # documented location is
-                                  # docs/guidelines/ruleset.yaml. Rule content never
-                                  # goes in the manifest (D2)
+                                  # documented location is inside the docs
+                                  # project, <docs project>/guidelines/
+                                  # ruleset.yaml: invariant-docs/guidelines/
+                                  # ruleset.yaml for a new project, which init
+                                  # writes here explicitly (ADR-020 D10), and
+                                  # docs/guidelines/ruleset.yaml where the docs
+                                  # project is docs/ (ADR-012 ruling 1). Never
+                                  # derived at load. Rule content never goes in
+                                  # the manifest (D2)
      baseline: null               # the ratchet's record of pre-existing pattern and
                                   # boundary findings (D6); null = no baseline, every
                                   # such finding new (DN-1). A configured file that
@@ -507,6 +513,13 @@ store's block for the repository, so neither load-time default moves. A
 ``paths.docs`` whose source directory would be a content folder (``docs``,
 ``doc``, ``source``, ``docs/source``, ``doc/source``) is refused for a new
 project at ``init``'s location offer, never at load.
+
+**Built (:need:`DEC_ADR_020_D10`).** The guidelines ruleset follows the docs
+project: a new project's ``init`` writes ``guidelines.ruleset:
+invariant-docs/guidelines/ruleset.yaml`` explicitly, beside the two keys
+above, and ``guidelines.ruleset`` keeps its load-time default, null. In a store
+project the starter still writes no ruleset (``store`` for ``guidelines`` is
+refused above), and says so.
 
 The store a ``store`` record is read against is the one ``Manifest.locate``
 found for the project ("Finding the project", below). An in-repo project

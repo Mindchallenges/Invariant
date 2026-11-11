@@ -35,7 +35,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .errors import InvariantError
@@ -326,6 +326,29 @@ def srcdir_of(manifest: Any, tree: Path | None = None) -> Path | None:
         configured = str(configured) if relative is None else relative
     docs = project_relative(manifest.get("paths.docs"), [manifest.root])
     return resolve_srcdir(base, configured, docs)
+
+
+def docs_folder(manifest: Any) -> str:
+    """The docs project's folder, project-relative: where a new project's
+    guidelines live beside its docs (ADR-020 D10).
+
+    The resolved ``docs.needs.srcdir``; where none resolves inside the
+    project, the folder above ``paths.docs``, the starter's own rule (ADR-018
+    D11); where neither does (a store's docs, a ``paths.docs`` at the root),
+    the folder above the default ``paths.docs``. ``docs`` for invariant
+    itself, ``invariant-docs`` for a new project.
+    """
+    from .manifest import DEFAULTS, project_relative  # local: manifest calls back here
+
+    srcdir = srcdir_of(manifest)
+    if srcdir is not None:
+        roots = [manifest.root, Path(manifest.root).resolve()]
+        relative = project_relative(str(srcdir), roots)
+        if relative not in (None, "."):
+            return relative
+    docs = project_relative(manifest.get("paths.docs"), [manifest.root])
+    parent = PurePosixPath(docs).parent.as_posix() if docs else "."
+    return parent if parent != "." else PurePosixPath(DEFAULTS["paths"]["docs"]).parent.as_posix()
 
 
 # -- needs.json -------------------------------------------------------------------

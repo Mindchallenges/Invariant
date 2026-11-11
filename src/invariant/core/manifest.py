@@ -423,8 +423,12 @@ DEFAULTS: dict[str, Any] = {
     "host": {"kind": "claude_code", "tier_map": {}},
     # The project's coding guidelines (ADR-012 D3, D13). `ruleset` is the
     # path of the one YAML ruleset; null means no guidelines, and every
-    # `guidelines.*` rule is N/A. The documented location is
-    # docs/guidelines/ruleset.yaml (ruling 1). Rule CONTENT never goes here:
+    # `guidelines.*` rule is N/A. The documented location is inside the docs
+    # project, <docs project>/guidelines/ruleset.yaml (`core/guidelines.
+    # ruleset_location`): invariant-docs/guidelines/ruleset.yaml for a new
+    # project, which `init` writes here explicitly (ADR-020 D10), and
+    # docs/guidelines/ruleset.yaml where the docs project is docs/ (ADR-012
+    # ruling 1). Never derived at load. Rule CONTENT never goes here:
     # the manifest is the operator's enforcement configuration, the ruleset is
     # the project's content (D2). `checklist` is where `guidelines render`
     # writes the human checklist; null means checklist.<md|rst> beside the

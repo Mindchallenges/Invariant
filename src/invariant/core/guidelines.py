@@ -1,7 +1,11 @@
 """The guidelines ruleset: its model, its schema and its validation.
 
 A project declares its coding guidelines in one YAML ruleset (ADR-012 D3,
-rulings 1 and 2), by default at ``docs/guidelines/ruleset.yaml``. This module
+rulings 1 and 2), named by ``guidelines.ruleset``. Its documented place is
+:func:`ruleset_location`, ``<docs project>/guidelines/ruleset.yaml``:
+``invariant-docs/guidelines/ruleset.yaml`` for a new project (ADR-020 D10),
+``docs/guidelines/ruleset.yaml`` for invariant and every project whose docs
+project is ``docs/`` (ADR-012 ruling 1). This module
 reads one and refuses it whole, naming every problem, when it does not
 validate. ``core/rules`` asks it through ``guidelines.ruleset_valid``; later
 increments add what is rendered from it, what is checked against it and the
@@ -118,6 +122,23 @@ MECHANICAL_CONDITIONS = ("no_added_match", "no_executable_change")
 #: exception's optional line fingerprint (D6).
 DIGEST_LENGTH = 12
 _FINGERPRINT = re.compile(r"[0-9a-f]{12}")
+
+#: The folder the guidelines files sit in, inside the docs project
+#: (ADR-020 D10), and the ruleset's own name there.
+GUIDELINES_DIR = "guidelines"
+RULESET_NAME = "ruleset.yaml"
+
+
+def ruleset_location(docs_folder: str, name: str = RULESET_NAME) -> str:
+    """Where a guidelines file belongs: ``<docs_folder>/guidelines/<name>``.
+
+    ``docs_folder`` is the docs project's folder, project-relative
+    (``core/needs.docs_folder``). The ruleset by default; ``name`` places a
+    baseline or a registry beside it. A documented place, never a load-time
+    default: ``guidelines.ruleset`` null still means no guidelines (D13).
+    """
+    return posixpath.join(docs_folder, GUIDELINES_DIR, name)
+
 
 #: The generated checklist's suffix for each ``docs.format`` it can be written
 #: in (ruling DN-B). A null ``guidelines.checklist`` is ``checklist`` plus this
@@ -781,7 +802,8 @@ class _Reader:
         if rel in (None, "."):
             self.problem(
                 f"{where}: registry must be a project-relative path inside the "
-                f"project, such as docs/guidelines/duplication.yaml"
+                f"project, such as <docs project>/guidelines/duplication.yaml, "
+                f"beside the ruleset"
             )
             return None
         return rel

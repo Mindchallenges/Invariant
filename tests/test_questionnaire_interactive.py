@@ -68,7 +68,7 @@ ACCEPTED_MANIFEST = (
     "  path: invariant-docs/backlog.rst\n"
     "\n"
     "guidelines:\n"
-    "  ruleset: docs/guidelines/ruleset.yaml\n"
+    "  ruleset: invariant-docs/guidelines/ruleset.yaml\n"
     "\n" + INIT_COMMENT
 )
 
