@@ -2679,6 +2679,11 @@ Storage layout
                              host's hooks; read by the oracle (ADR-007 D5)
      sweeps/<kind>.xcresult  the sweep's per-run result bundles, cleared before
                              each use; never committed (ADR-010)
+     host/claude_code/installed.json
+                             the receipt of a `local` host install: each settings
+                             entry, exclude line and file (with its hash) it
+                             added, so uninstall is its exact inverse (ADR-014
+                             D11, increment 3)
      locks/registry.lock     advisory lock file
      locks/<sid>.lock        one per pipeline record, held across its load and save
      locks/sweep.lock        held for the whole of a `sweep run`, so two sweeps
@@ -2920,7 +2925,6 @@ the machine — so it keeps a directory per USER:
      config.yaml           the user level of the config, when written (ADR-014
                            D3): configuration, not state; manifest.md, "The user
                            level"
-     linked-repos.txt      the linked identities, written by `store link` (D2)
      stores/<name>/        stores `store init` created there: git repositories
                            holding records, not state (D2)
      projects.json         the project index

@@ -32,9 +32,9 @@ Full schema
      backlog: repo                # or store, whose path keys are then read
      guidelines: repo             # against the store root. guidelines: store is
      memory: repo                 # refused until increment 4 (D9). hooks and
-     reports: repo                # agents take repo or user; user is refused
-     sweeps: repo                 # until increment 3 (D11). See "Records and
-     hooks: repo                  # their locations" below
+     reports: repo                # agents take repo (committed) or local (this
+     sweeps: repo                 # clone's .claude/, kept out of git; D11). See
+     hooks: repo                  # "Records and their locations" below
      agents: repo
 
    paths:
@@ -481,13 +481,10 @@ Refused at load, each with its reason, rather than loaded to do nothing:
 - an unknown record type, and ``manifest``, which is no record: where the
   manifest lives is answered by the config levels (D3);
 - a value outside the record's locations (``repo`` or ``store``; ``repo`` or
-  ``user`` for ``hooks`` and ``agents``);
-- ``user`` for ``hooks`` or ``agents``, until D11 wires a host from outside the
-  repository (increment 3). **Accepted, not yet built
-  (:need:`DEC_ADR_020_D9`):** D11 is amended, ``user`` is retired and the
-  locations of ``hooks`` and ``agents`` become ``repo`` or ``local`` (the
-  project's own ``.claude/``, uncommitted, listed in ``.git/info/exclude``);
-  ``local`` is refused until increment 3 builds it;
+  ``local`` for ``hooks`` and ``agents``);
+- ``user`` for ``hooks`` or ``agents``, which is retired
+  (:need:`DEC_ADR_020_D9`): nothing is installed at user level, and the
+  refusal names ``local`` and ``repo`` as the two locations that remain;
 - ``store`` for ``guidelines``, until the gates read each record from its own
   tree (D9, increment 4); otherwise a baseline left behind would make
   ``guidelines.baseline_only_shrinks`` admit every entry;
@@ -495,6 +492,20 @@ Refused at load, each with its reason, rather than loaded to do nothing:
 - ``items.exempt: false`` with ``records.backlog: store`` (D10): a backlog in a
   store is written in the store's main checkout, which no session branch
   reviews.
+
+**Built (ADR-014 increment 3, D11 as amended by :need:`DEC_ADR_020_D9`;
+:need:`DEC_ADR_014_I3`).** ``hooks`` and ``agents`` are not path records:
+they say where the host adapter wires the project, and ``core/manifest``
+only checks the value. ``repo`` is the committed wiring (``.claude/settings.json``,
+``.claude/hooks/``, ``.claude/agents/``). ``local`` is the same ``.claude/``
+with nothing committed: the hook entries in ``.claude/settings.local.json``,
+each file listed in the clone's ``.git/info/exclude``, the store's main
+checkout in ``permissions.additionalDirectories``, and a receipt in the state
+root that makes uninstall exact. Each record is read on its own, so hooks
+and agents may differ. Under ``agents: local`` no managed guidelines block is
+written into an instruction file unless ``guidelines.instruction_files``
+names one. ``hosts/claude_code_wiring`` says what each location means for
+Claude Code (overview, ``hosts/``).
 
 **Accepted, not yet built (:need:`ADR-020 <DEC_ADR_020>`).** These load-time
 defaults do not move (:need:`DEC_ADR_020_D2`): an absent key still means

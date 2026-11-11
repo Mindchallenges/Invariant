@@ -800,8 +800,12 @@ design. This record adds to increment 7, and adds the switch after it.
        ``records.agents`` ``local``, ``.claude/settings.local.json``,
        shims and agents under ``.claude/``, the ``.git/info/exclude``
        lines, the receipt, isolate rendering into worktrees, the doctor
-       rows, ``user`` retired and ``linked-repos.txt`` removed.
-     - The amended row in ADR-014.
+       rows, ``user`` retired and ``linked-repos.txt`` removed. With it,
+       brought forward from the switch at the user's direction
+       (:need:`DEC_ADR_014_I3`): ``init``'s ``host:install`` question,
+       default no, and ``--host-install``.
+     - The amended row in ADR-014, and a non-interactive ``init`` that
+       installs nothing and names the commands.
    * - ADR-014 inc 4
      - ADR-014 D5 and D9: the docs lock, gates per leg, and the guidelines
        refusal lifted.
@@ -831,9 +835,10 @@ design. This record adds to increment 7, and adds the switch after it.
    * - ADR-020 inc 3 (the switch)
      - D1, D4, D5 and D9's question: the ``home`` section and
        ``home:location``, ``--home`` and ``--store``, the store default in
-       every mode, the level and docs defaults following the home,
-       ``host:install`` with ``--host-install``, the ``home`` report row and
-       field, and ``doctor``'s ``config home`` and ``docs folder`` rows.
+       every mode, the level and docs defaults following the home, the
+       ``home`` report row and field, and ``doctor``'s ``config home`` and
+       ``docs folder`` rows. (``host:install`` and ``--host-install`` landed
+       with ADR-014 increment 3.)
      - On a toy git repository with a scratch ``INVARIANT_HOME`` and a
        scratch ``HOME``:
 

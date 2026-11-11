@@ -1,9 +1,10 @@
 """ADR-014 D2 and D4: `invariant store init`, `store link` and `store status`.
 
 A store is created and linked from the home side: the repo itself gains no
-tracked file. Link writes the user level's `repos:` entry, the repo's
-`invariant.id` (even when it has a remote), and the plain-text index of linked
-identities a user-level hook shim reads (D11). Naming follows ruling 14. The
+tracked file. Link writes the user level's `repos:` entry and the repo's
+`invariant.id` (even when it has a remote); the linked-identity index the
+user-level shim of D11 was to read is gone with that shim (ADR-020 D9).
+Naming follows ruling 14. The
 home is the suite's temporary one; nothing reaches the real ~/.invariant.
 """
 
@@ -20,7 +21,6 @@ from invariant.cli.main import main
 from invariant.core.home import invariant_home, user_config_path
 from invariant.core.identity import repo_identity
 from invariant.core.manifest import Manifest
-from invariant.core.stores import LINKED_INDEX
 
 ORIGIN = "https://host.example/team/widgets.git"
 IDENTITY = "host.example/team/widgets"
@@ -58,8 +58,10 @@ def user_config() -> dict:
     return yaml.safe_load(user_config_path().read_text(encoding="utf-8")) or {}
 
 
-def index_lines() -> list[str]:
-    return (invariant_home() / LINKED_INDEX).read_text(encoding="utf-8").splitlines()
+def no_index() -> bool:
+    """The linked-identity index of ADR-014 D11's user-level shim is gone
+    (ADR-020 D9, increment 3): nothing reads it, so nothing writes it."""
+    return not (invariant_home() / "linked-repos.txt").exists()
 
 
 def stores() -> Path:
@@ -89,7 +91,7 @@ class TestStoreInit:
         found = repo_identity(repo)
         assert found.key == IDENTITY
         assert found.local_id.startswith("local:widgets-")
-        assert set(index_lines()) == {IDENTITY, found.local_id}
+        assert no_index()
         assert git(repo, "status", "--porcelain") == ""
         m = Manifest.locate(repo)
         assert m.store.root == store
@@ -190,7 +192,7 @@ class TestStoreLink:
         found = repo_identity(repo)
         assert found.origin == IDENTITY
         assert found.local_id is not None
-        assert IDENTITY in index_lines()
+        assert no_index()
         assert Manifest.locate(repo).store.root == store
 
     def test_linking_again_is_idempotent_and_keeps_the_id(self, repo, capsys, tmp_path):
@@ -200,7 +202,7 @@ class TestStoreLink:
         code, _ = run(capsys, "store", "link", str(store))
         assert code == 0
         assert repo_identity(repo).local_id == first
-        assert sorted(index_lines()) == sorted(set(index_lines()))
+        assert no_index()
 
     def test_other_user_level_keys_are_kept(self, repo, capsys, tmp_path):
         user_config_path().parent.mkdir(parents=True, exist_ok=True)

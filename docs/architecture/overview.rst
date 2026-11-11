@@ -18,6 +18,7 @@ Layers
            CC[claude_code]
            CCTEL[claude_code_telemetry]
            CCLAUNCH[claude_code_launch]
+           CCWIRE["claude_code_wiring: wiring_plan, receipt (ADR-014 D11)"]
            CCASSETS["assets: the managed-asset format and its one classifier"]
        end
 
@@ -112,6 +113,10 @@ Layers
        CC -. reads the claim token named by .-> CCLAUNCH
        CC -- "subagent_model: the audit's one bounded read" --> CCTEL
        CC -- "plan_assets: every install, doctor, uninstall" --> CCASSETS
+       CC -- "wiring_plan(repo or local), the receipt, the exclude lines, drift" --> CCWIRE
+       CCWIRE -- "common_dir: the clone's info/exclude" --> GIT
+       CC -- "main_checkout: the receipt's root" --> GIT
+       CLI -. "session isolate --execute renders local wiring into the worktree through" .-> CC
        CLI --> SESSION
        CLI --> PIPELINE
        CLI --> WORKITEM
@@ -350,8 +355,10 @@ identity, read from the git common directory's config without a subprocess;
 its one write, ``invariant.id``, goes through ``core/git``. ``MANIFEST --> CSTORES`` is ``Manifest.locate`` (D2): at a git top level with no in-repo
 manifest it asks ``core/stores`` for the repo's pointer and its store, and
 for the store's levels, refused unless the store lists the repo. ``CLI --> CSTORES`` is ``invariant store init``, ``link`` and ``status``; the write a link
-makes, the user level's ``repos:`` and the linked-identity index, lives in
-``core/stores`` beside the reads it must agree with. The oracle's existence
+makes, the user level's ``repos:``, lives in
+``core/stores`` beside the reads it must agree with (the linked-identity
+index it once wrote for a user-level shim is gone with that shim, ADR-020 D9).
+The oracle's existence
 checks ask ``Manifest.is_project_root`` (D10), over the arrows from ``OINDEX``,
 ``OSCAN`` and ``OGATES`` to ``MANIFEST`` that already exist.
 
@@ -3103,9 +3110,10 @@ Elements
    :id: COMP_HOSTS_CLAUDE_CODE
 
    **Owns:** the hook protocol of Claude Code: payload parsing into
-   ``core.rules.NORMALISED_PAYLOAD_KEYS``, the response shape,
-   ``settings.json`` wiring, and installing the agents, commands and skills
-   with their overlays.
+   ``core.rules.NORMALISED_PAYLOAD_KEYS``, the response shape, the settings
+   wiring where ``records.hooks`` says, installing the agents, commands and
+   skills with their overlays where ``records.agents`` says, and rendering a
+   ``local`` install into a session worktree (``render_into``).
 
    **Never does:** decide a rule; it asks the engine through the CLI and its
    helpers.
@@ -3118,6 +3126,21 @@ Elements
    the audit reads.
 
    **Never does:** drive the host or parse a hook payload.
+
+.. comp:: ``hosts/claude_code_wiring``
+   :id: COMP_HOSTS_CLAUDE_CODE_WIRING
+   :part_of: COMP_HOSTS_CLAUDE_CODE
+
+   **Owns:** where Claude Code is wired in one project (ADR-014 D11, ADR-020
+   D9): ``wiring_plan(root, location)`` for ``repo`` (``settings.json``,
+   committed) and ``local`` (``settings.local.json``, every path in the
+   clone's ``.git/info/exclude``, the store's main checkout in
+   ``permissions.additionalDirectories``); the install receipt,
+   ``<state root>/host/claude_code/installed.json``, that makes uninstall an
+   exact inverse; and the drift ``doctor``'s ``host wiring`` row reports.
+
+   **Never does:** write outside the project and its git directory, edit the
+   shared ``.gitignore``, or install anything at user level.
 
 .. comp:: ``hosts/claude_code_launch``
    :id: COMP_HOSTS_CLAUDE_CODE_LAUNCH
@@ -3438,10 +3461,6 @@ per repository:
    ~/.invariant/               $INVARIANT_HOME overrides it (ADR-007)
      config.yaml               the user level of the config, when written:
                                defaults, repos, store_naming (ADR-014 D3)
-     linked-repos.txt          every linked identity and local ID, one per
-                               line, written for ADR-014 D11's user-level hook
-                               shim, which ADR-020 D9 replaced; removed with
-                               ADR-014 increment 3
      stores/<name>/            a store, a git repository, when created by
                                `store init` without a path (ADR-014 D2)
      projects.json             the oracle's project index; one entry per state root
@@ -3477,21 +3496,23 @@ ID and the runtime state, neither tracked. The home holds ``config.yaml``, the
 user level of the configuration, when written: its ``defaults`` apply below
 every project's own settings, in-repo projects included, and are named by
 ``config show`` and ``doctor``; its ``repos`` map takes a repo's identity to its
-store. ``invariant store init`` and ``store link`` write it, with the index
-``linked-repos.txt`` beside it. The state root does not move: runtime state
+store. ``invariant store init`` and ``store link`` write it. The state root does not move: runtime state
 stays in the repo's git common directory. In-repo stays ``init``'s default
 until ADR-020's switch lands (below), and an in-repo project resolves as
 before. ``core/home`` resolves the home for the manifest and the oracle
 alike.
 
-**Accepted, not yet built (:need:`ADR-014 <DEC_ADR_014>` D11, amended by
-:need:`DEC_ADR_020_D9`).** Nothing of a host is ever installed in the home.
-Hooks and agents are installed only when the user says so, per project:
-committed under ``.claude/`` (``records.hooks``/``agents: repo``, the tree
-above), or, ``local``, in the same ``.claude/`` with the hook entries in
-``settings.local.json`` and every path listed in ``.git/info/exclude``, so
-nothing is committed and the shared ``.gitignore`` is untouched (increment
-3).
+**Built (:need:`ADR-014 <DEC_ADR_014>` D11, amended by
+:need:`DEC_ADR_020_D9`; increment 3, :need:`DEC_ADR_014_I3`).** Nothing of a
+host is ever installed in the home. Hooks and agents are installed only when
+the user says so, per project (``init``'s ``host:install``, default no, or
+``hooks install`` and ``agents install``): committed under ``.claude/``
+(``records.hooks``/``agents: repo``, the tree above), or, ``local``, in the
+same ``.claude/`` with the hook entries in ``settings.local.json``, every
+path listed in the clone's ``.git/info/exclude`` and a receipt at
+``<state root>/host/claude_code/installed.json``, so nothing is committed,
+the shared ``.gitignore`` is untouched and uninstall is exact. ``session
+isolate`` renders that wiring into each new worktree.
 
 **Accepted, not yet built (:need:`ADR-020 <DEC_ADR_020>`).** The store
 becomes ``init``'s default home for a project's configuration and records

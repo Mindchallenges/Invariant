@@ -251,7 +251,7 @@ def test_a_minted_record_page_builds_strictly(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(root)
     monkeypatch.setattr(cli_main, "_init_prompter", lambda args: Scripted("not_now"))
     monkeypatch.setattr(docs_domain, "_uv", lambda: shutil.which("uv"))
-    assert main(["init", "--ecosystem", "python"]) == 0
+    assert main(["init", "--host-install", "--ecosystem", "python"]) == 0
     assert main(["docs", "decision", "new", "The first record"]) == 0
     assert main(["docs", "decision", "new", "The second record"]) == 0
     capsys.readouterr()
@@ -707,7 +707,7 @@ class TestAtTheHook:
             sys.stdin = stdin
 
     def setup(self, project, capsys) -> tuple[str, Path]:
-        assert main(["init", "--ecosystem", "python"]) == 0
+        assert main(["init", "--host-install", "--ecosystem", "python"]) == 0
         assert Manifest.locate(project).get("docs.needs.state") == "enforced"
         commit(project, "invariant")
         capsys.readouterr()
@@ -760,7 +760,7 @@ class TestStarterRuleset:
         return root
 
     def test_init_writes_the_two_judgement_rules(self, toy_python, capsys):
-        assert main(["init", "--ecosystem", "python"]) == 0
+        assert main(["init", "--host-install", "--ecosystem", "python"]) == 0
         manifest = Manifest.locate(toy_python)
         assert manifest.get("guidelines.ruleset") == "invariant-docs/guidelines/ruleset.yaml"
         data = yaml.safe_load(

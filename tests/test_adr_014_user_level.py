@@ -239,7 +239,7 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
     monkeypatch.chdir(root)
-    assert main(["init", "--ecosystem", "python"]) == 0
+    assert main(["init", "--host-install", "--ecosystem", "python"]) == 0
     return root
 
 

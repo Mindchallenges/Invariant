@@ -293,7 +293,7 @@ class TestATransitionNeverRewritesTheBody:
 
 class TestTheRuledClosureFromTheCli:
     def setup(self):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("item", "new", "bug", "--title", "A defect")
 
     def test_one_command_records_the_ruling(self, project, capsys):  # noqa: F811

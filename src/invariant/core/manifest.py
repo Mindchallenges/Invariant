@@ -521,8 +521,20 @@ RECORD_LOCATIONS: dict[str, tuple[str, ...]] = {
     "memory": ("repo", "store"),
     "reports": ("repo", "store"),
     "sweeps": ("repo", "store"),
-    "hooks": ("repo", "user"),
-    "agents": ("repo", "user"),
+    "hooks": ("repo", "local"),
+    "agents": ("repo", "local"),
+}
+
+#: Locations a record no longer takes, each with the reason and the fix. The
+#: user-level host wiring of ADR-014 D11 was replaced before it was built:
+#: nothing is installed at user level (ADR-020 D9).
+_RETIRED_LOCATIONS: dict[str, str] = {
+    "user": (
+        "user is retired (ADR-020 D9): nothing is installed at user level, and "
+        "each project is wired on its own. Use local for this clone's own "
+        ".claude/, uncommitted and listed in .git/info/exclude, or repo for the "
+        "committed wiring"
+    ),
 }
 
 #: The path keys each record type owns. Under `store` they are read against
@@ -1083,9 +1095,9 @@ class Manifest:
         """Refuse a `records` block that would place a record nowhere (D1).
 
         A location this build cannot honour yet is refused with the increment
-        that builds it rather than loading and doing nothing (BUG_050): `user`
-        wiring for hooks and agents (D11, increment 3), and the guidelines
-        records in a store (D9, increment 4).
+        that builds it rather than loading and doing nothing (BUG_050): the
+        guidelines records in a store (D9, increment 4). A retired location,
+        `user` for hooks and agents (ADR-020 D9), is refused naming its fix.
         """
         records = self.data.get("records")
         if not isinstance(records, Mapping):
@@ -1106,16 +1118,12 @@ class Manifest:
                     f"use one of {', '.join(RECORD_LOCATIONS)}"
                 )
             allowed = RECORD_LOCATIONS[record]
+            retired = _RETIRED_LOCATIONS.get(location) if isinstance(location, str) else None
+            if retired is not None and record in ("hooks", "agents"):
+                raise ManifestError(f"records.{record}: {retired}.")
             if not isinstance(location, str) or location not in allowed:
                 raise ManifestError(
                     f"records.{record} is {location!r}; use one of {', '.join(allowed)}"
-                )
-            if location == "user":
-                raise ManifestError(
-                    f"records.{record}: user is not built yet. Wiring the host "
-                    f"from outside the repository is ADR-014 D11, increment 3; "
-                    f"until then it would wire nothing, so the project would "
-                    f"run with no {record}."
                 )
             if location == "store" and record in _STORE_NOT_YET:
                 raise ManifestError(

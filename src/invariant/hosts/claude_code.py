@@ -44,6 +44,7 @@ from ..core import agents as agent_sources
 from ..core import plan as plan_reader
 from ..core.agents import AgentSource, OverlayError, OverlayProblem
 from ..core.errors import InvariantError, UsageError
+from ..core.git import main_checkout as git_main_checkout
 from ..core.guidelines import render_edit, render_turn_index
 from ..core.manifest import Manifest, project_relative
 from ..core.privacy import PrivacyScanner
@@ -68,6 +69,7 @@ from ..core.rules import (
 from ..domains.pipeline import NO_PIPELINE, VIA_ACTOR
 from ..domains.session import ambiguity_message
 from . import assets
+from . import claude_code_wiring as wiring
 from .assets import ABSENT, CURRENT, LOCAL, OLDER, TIER_MOVED, digest_of
 from .claude_code_launch import HANDOFF_ENV
 from .claude_code_telemetry import subagent_model
@@ -113,6 +115,13 @@ echo '{{}}'
 CHECK_HOOKS = "hook shims installed"
 CHECK_HOOKS_RUN = "hook shims actually run"
 CHECK_WIRED = "hooks wired in settings"
+#: Where the project is wired, and whether the local wiring still matches its
+#: receipt (ADR-014 D11, ADR-020 D9).
+CHECK_HOST_WIRING = "host wiring"
+
+#: The commands that wire a project, which `init` and `doctor` name when
+#: nothing is installed (ADR-020 D9).
+INSTALL_COMMANDS = ("invariant hooks install", "invariant agents install")
 
 #: Set on a hook response when the engine failed and fell back to advisory
 #: silence. See ``_hook_degraded``.
@@ -472,14 +481,22 @@ class TierHint:
 class ClaudeCodeHost:
     INSTRUCTION_FILES = INSTRUCTION_FILES
 
-    def __init__(self, root: Path, manifest: Manifest | None = None) -> None:
+    def __init__(
+        self, root: Path, manifest: Manifest | None = None, *, record: bool = True
+    ) -> None:
         self.root = Path(root)
         self.claude_dir = self.root / ".claude"
         #: The project's manifest, for the `agents` keys an install reads
-        #: (`library`, `overlays`), the privacy scan and the isolation rule.
-        #: ``None`` is a project with none yet (`init`): every shipped agent,
-        #: and no overlay.
+        #: (`library`, `overlays`), the privacy scan, the isolation rule and
+        #: the `records.hooks` and `records.agents` locations. ``None`` is a
+        #: project with none yet: every shipped agent, no overlay, and the
+        #: committed `repo` wiring.
         self.manifest = manifest
+        #: Whether a `local` install writes the receipt and the exclude
+        #: lines. Off only for :meth:`render_into`'s copy in a session
+        #: worktree, which the main checkout's receipt and exclude lines
+        #: already cover.
+        self.record = record
         #: What the last :meth:`handle` call signalled about the host's
         #: attention; see there.
         self.attention: AttentionSignal | None = None
@@ -487,13 +504,88 @@ class ClaudeCodeHost:
         #: reported as warnings (agent drift), which `doctor` prints as `warn`.
         self.warned_rows: set[str] = set()
 
+    # -- where it is wired (ADR-014 D11, ADR-020 D9) ---------------------
+
+    def _location(self, record: str) -> str:
+        value = self.manifest.get(f"records.{record}") if self.manifest is not None else None
+        return value or wiring.REPO
+
+    @property
+    def hooks_location(self) -> str:
+        """``records.hooks``: ``repo`` (committed) or ``local``."""
+        return self._location("hooks")
+
+    @property
+    def agents_location(self) -> str:
+        """``records.agents``: ``repo`` (committed) or ``local``."""
+        return self._location("agents")
+
+    def wiring_plan(self, location: str) -> wiring.WiringPlan:
+        """What ``location`` means for this host in this project.
+
+        The host adapter's half of the neutral seam: `core/manifest` names the
+        location and knows nothing of hosts (ADR-014 ruling 12); this says
+        which files that is. A `local` plan grants the store's main checkout.
+        """
+        store_root = self.manifest.store_root if self.manifest is not None else None
+        return wiring.wiring_plan(self.root, location, store_root=store_root)
+
+    def receipt(self) -> wiring.Receipt | None:
+        """The `local` install's receipt, in the state root; ``None`` with no
+        manifest to name the state root."""
+        if self.manifest is None:
+            return None
+        main = git_main_checkout(self.root) or self.root
+        return wiring.Receipt.load(self.manifest.state_root / wiring.RECEIPT, main)
+
+    def _recording(self, plan: wiring.WiringPlan) -> wiring.Receipt | None:
+        """The receipt a write under ``plan`` records into, or ``None``: a
+        `repo` plan is tracked by git, and a rendered copy is not recorded."""
+        if plan.committed or not self.record:
+            return None
+        return self.receipt()
+
+    def local_installed(self) -> bool:
+        """Whether this clone has a `local` install on record, which is what
+        `session isolate` renders into a new worktree."""
+        receipt = self.receipt()
+        return receipt is not None and not receipt.empty
+
+    def render_into(self, worktree: Path) -> list[str]:
+        """Render the `local` wiring into a session worktree (ADR-020 D9).
+
+        A worktree holds only committed files, so the local wiring would be
+        missing there. It is rendered through the same install plan, not
+        copied, because it is generated from the configuration. Nothing is
+        recorded: the exclude lines are shared by every worktree of the
+        clone, and the worktree goes with its teardown. Returns what was
+        written, by kind.
+        """
+        target = ClaudeCodeHost(worktree, manifest=self.manifest, record=False)
+        done: list[str] = []
+        if self.hooks_location == wiring.LOCAL:
+            target.install_hooks()
+            done.append("hooks")
+        if self.agents_location == wiring.LOCAL:
+            target.install_assets(only="agent")
+            done.append("agents")
+        return done
+
     # -- installation --------------------------------------------------
 
     def plan_install(self) -> list[str]:
+        hooks = self.wiring_plan(self.hooks_location)
+        agents_plan = self.wiring_plan(self.agents_location)
+        settings = hooks.settings.relative_to(self.root).as_posix()
         actions = [f"install {len(EVENTS)} hook shims into .claude/hooks/"]
-        actions.append("wire the shims into .claude/settings.json")
+        actions.append(f"wire the shims into {settings}")
         agents = self._library(assets.BY_NAME["agent"])
         actions.append(f"install {len(agents)} library agents into .claude/agents/")
+        if not (hooks.committed and agents_plan.committed):
+            actions.append(
+                f"list each local path in {wiring.EXCLUDE_LABEL}, with a receipt in the "
+                f"state root"
+            )
         return actions
 
     def install_hooks(self) -> list[str]:
@@ -509,21 +601,35 @@ class ClaudeCodeHost:
         configuration for a hook, so the honest outcome was that the hook never
         got installed.
 
+        Wired where ``records.hooks`` says (ADR-014 D11): a `local` install
+        also lists every path it wrote in ``.git/info/exclude`` and records
+        all of it in the receipt.
+
         Returns what changed, so a caller can say so rather than claim work it
         did not do.
         """
-        hooks_dir = self.claude_dir / "hooks"
-        hooks_dir.mkdir(parents=True, exist_ok=True)
+        plan = self.wiring_plan(self.hooks_location)
+        receipt = self._recording(plan)
+        wiring.make_dirs(plan.hooks_dir, self.root, receipt)
         written = []
+        paths = []
         for event in EVENTS:
-            path = hooks_dir / f"invariant-{event}.sh"
+            path = plan.hooks_dir / f"invariant-{event}.sh"
             body = SHIM_TEMPLATE.format(event=event)
             existed = path.is_file() and path.read_text(encoding="utf-8") == body
             path.write_text(body, encoding="utf-8")
             path.chmod(0o755)
+            paths.append(path)
+            if receipt is not None:
+                receipt.record_file(path)
             if not existed:
                 written.append(f"invariant-{event}.sh")
-        self._wire_settings()
+        self._wire_settings(plan, receipt)
+        if receipt is not None:
+            wiring.add_exclude(
+                self.root, [plan.exclude_line(p) for p in (plan.settings, *paths)], receipt
+            )
+            receipt.save()
         return written
 
     def install(self) -> None:
@@ -533,27 +639,20 @@ class ClaudeCodeHost:
         self.install_hooks()
         self.install_assets(only="agent")
 
-    def _wire_settings(self) -> None:
-        settings = self._read_settings()
-
-        hooks = settings.setdefault("hooks", {})
+    def _wire_settings(
+        self, plan: wiring.WiringPlan | None = None, receipt: wiring.Receipt | None = None
+    ) -> None:
+        """Wire every event's shim into the settings file ``plan`` names, the
+        one ``records.hooks`` names by default."""
+        plan = plan if plan is not None else self.wiring_plan(self.hooks_location)
+        entries = {}
         for event, host_event in EVENTS.items():
             command = f"${{CLAUDE_PROJECT_DIR}}/.claude/hooks/invariant-{event}.sh"
-            entries = hooks.setdefault(host_event, [])
-            if any(
-                command in json.dumps(entry) for entry in entries
-            ):
-                continue
             entry = {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}
             if host_event in {"PreToolUse", "PostToolUse"}:
                 entry["matcher"] = "*"
-            entries.append(entry)
-
-        settings_path = self.claude_dir / "settings.json"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(
-            json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+            entries[host_event] = entry
+        wiring.wire(plan, entries, receipt)
 
     # -- removal -------------------------------------------------------
     #
@@ -565,6 +664,9 @@ class ClaudeCodeHost:
     # one and the shim still fires; it then finds no binary on PATH and exits
     # silently by design, so the leftover is invisible until it is not
     # (IDEA_004).
+    #
+    # A `local` install is taken back out by its receipt instead: exactly the
+    # entries, lines and files it added, and nothing else (ADR-014 D11).
 
     def plan_uninstall(
         self, remove_assets: bool = False, remove_manifest: bool = False
@@ -576,10 +678,13 @@ class ClaudeCodeHost:
         got back by running it again.
         """
         hooks_dir = self.claude_dir / "hooks"
+        receipt = self.receipt()
+        recorded = set(receipt.files) if receipt is not None else set()
         shims = sorted(
             hooks_dir / f"invariant-{event}.sh"
             for event in EVENTS
             if (hooks_dir / f"invariant-{event}.sh").is_file()
+            and f".claude/hooks/invariant-{event}.sh" not in recorded
         )
 
         settings, wired = self._read_settings(), []
@@ -594,11 +699,14 @@ class ClaudeCodeHost:
             for step in self.plan_assets(for_removal=True):
                 if step.state == ABSENT:
                     continue
+                if step.target.relative_to(self.root).as_posix() in recorded:
+                    continue
                 if step.write:
                     asset_files.append(step.target)
                 else:
                     protected.append(f"{step.kind}:{step.identity}")
 
+        local = self._plan_local_removal(receipt)
         manifest = self.root / ".claude" / "invariant.yaml"
         return {
             "shims": shims,
@@ -606,6 +714,27 @@ class ClaudeCodeHost:
             "assets": asset_files,
             "protected": protected,
             "manifest": manifest if remove_manifest and manifest.is_file() else None,
+            "local": local,
+        }
+
+    @staticmethod
+    def _plan_local_removal(receipt: wiring.Receipt | None) -> dict | None:
+        """What the receipt would take back out, with the edited files named."""
+        if receipt is None or receipt.empty:
+            return None
+        files, edited = [], []
+        for rel, sha in sorted(receipt.files.items()):
+            path = receipt.root / rel
+            if not path.is_file():
+                continue
+            (files if wiring.digest(path) == sha else edited).append(rel)
+        return {
+            "receipt": str(receipt.path),
+            "settings": receipt.settings.get("path"),
+            "wired": sorted(receipt.settings.get("hooks", {})),
+            "exclude": list(receipt.exclude.get("lines", [])),
+            "files": files,
+            "edited": edited,
         }
 
     def uninstall(
@@ -627,6 +756,11 @@ class ClaudeCodeHost:
           uninstalling is not a decision about the backlog. An asset the
           operator has EDITED survives even `--remove-assets`, by the same rule
           `install_assets` follows: their work is not this command's to discard.
+
+        A `local` install is reversed by its receipt: its settings entries,
+        exclude lines and files, so the settings file and the exclude file
+        come back byte for byte. An agent edited since is left and named, and
+        its exclude line stays, so `git status` keeps not showing it.
         """
         plan = self.plan_uninstall(
             remove_assets=remove_assets, remove_manifest=remove_manifest
@@ -645,29 +779,52 @@ class ClaudeCodeHost:
         if plan["manifest"] is not None:
             plan["manifest"].unlink()
 
+        receipt = self.receipt()
+        if receipt is not None and not receipt.empty:
+            self._remove_local(receipt)
+
         hooks_dir = self.claude_dir / "hooks"
         if hooks_dir.is_dir() and not any(hooks_dir.iterdir()):
             hooks_dir.rmdir()
         return plan
 
+    @staticmethod
+    def _remove_local(receipt: wiring.Receipt) -> None:
+        """Take a `local` install back out by its receipt.
+
+        What stays on record afterwards is exactly what was kept: each edited
+        file and its exclude line, so a later uninstall, once the user has
+        removed the file, takes the line too.
+        """
+        wiring.unwire(receipt)
+        _removed, edited = wiring.remove_files(receipt)
+        kept = {"/" + rel for rel in edited}
+        # A settings file invariant created that still holds the user's own
+        # keys stays, and so does the line that keeps it out of git status.
+        settings = receipt.settings.get("path")
+        created = settings and receipt.settings.get("before") is None
+        if created and (receipt.root / settings).is_file():
+            kept.add("/" + settings)
+        wiring.remove_exclude(receipt, keep=kept)
+        receipt.settings = {}
+        receipt.files = {rel: receipt.files[rel] for rel in edited}
+        if receipt.exclude:
+            receipt.exclude["lines"] = [
+                line for line in receipt.exclude.get("lines", []) if line in kept
+            ]
+        receipt.dirs = []
+        receipt.save()
+
     def _read_settings(self) -> dict:
-        settings_path = self.claude_dir / "settings.json"
-        if not settings_path.is_file():
-            return {}
-        try:
-            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            # Refuse, never overwrite. This file is the operator's, and this
-            # library is a guest in it: on the way IN a bad parse would cost
-            # them their hook wiring, and on the way OUT it would cost them the
-            # whole file as the last thing the tool ever did to their project.
-            raise UsageError(
-                f".claude/settings.json is not valid JSON ({exc}); fix it "
-                f"first, so nothing here overwrites your work"
-            ) from exc
-        return loaded if isinstance(loaded, dict) else {}
+        return wiring.read_settings(self.claude_dir / "settings.json", ".claude/settings.json")
 
     def _unwire_settings(self) -> None:
+        """Remove this library's entries from the committed settings file.
+
+        Written only when an entry was removed: a settings file holding none
+        of ours is the project's, and rewriting it would change a tracked file
+        for nothing.
+        """
         settings_path = self.claude_dir / "settings.json"
         if not settings_path.is_file():
             return
@@ -676,11 +833,15 @@ class ClaudeCodeHost:
         if not isinstance(hooks, dict):
             return
 
+        changed = False
         for host_event in list(hooks):
             entries = hooks.get(host_event)
             if not isinstance(entries, list):
                 continue
             kept = [entry for entry in entries if not _IS_OURS(entry)]
+            if len(kept) == len(entries):
+                continue
+            changed = True
             # An emptied list is removed rather than left as `[]`. A leftover
             # empty key is the visible residue of a tool that claimed to be
             # gone, which is the impression this command exists not to leave.
@@ -689,34 +850,121 @@ class ClaudeCodeHost:
             else:
                 del hooks[host_event]
 
-        settings_path.write_text(
-            json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        if changed:
+            wiring.write_settings(settings_path, settings)
 
     # -- verification --------------------------------------------------
 
+    def hooks_installed(self) -> bool:
+        """Whether any shim is present or any entry of ours is wired."""
+        plan = self.wiring_plan(self.hooks_location)
+        if any((plan.hooks_dir / f"invariant-{e}.sh").is_file() for e in EVENTS):
+            return True
+        try:
+            settings = wiring.read_settings(plan.settings, plan.settings.name)
+        except UsageError:
+            return True
+        return any(
+            _IS_OURS(entry)
+            for entries in (settings.get("hooks") or {}).values()
+            if isinstance(entries, list)
+            for entry in entries
+        )
+
+    def agents_installed(self) -> bool:
+        """Whether any library agent has a copy in the project."""
+        kind = assets.BY_NAME["agent"]
+        try:
+            shipped = self._library(kind)
+        except InvariantError:
+            return True
+        return any(self._target_for(kind, kind.identity(s)).is_file() for s in shipped)
+
+    def wiring_check(self) -> tuple[str, bool, str]:
+        """``doctor``'s ``host wiring`` row (ADR-020 D9).
+
+        Where hooks and agents are wired, or that they are not installed,
+        which passes: installing is the user's choice. It fails on a receipt
+        entry missing from its file, and on a `local` path missing from
+        ``.git/info/exclude``, which `git status` would then show.
+        """
+        installed = {"hooks": self.hooks_installed(), "agents": self.agents_installed()}
+        detail = ", ".join(
+            f"{record} {self._location(record)}" if present else f"{record} not installed"
+            for record, present in installed.items()
+        )
+        if not any(installed.values()):
+            return (
+                CHECK_HOST_WIRING,
+                True,
+                f"{detail} — your choice; to wire this project: "
+                + " and ".join(INSTALL_COMMANDS)
+                + " (records.hooks/agents: repo commits them, local keeps them out of git)",
+            )
+        problems: list[str] = []
+        receipt = self.receipt()
+        if receipt is not None and not receipt.empty:
+            problems += wiring.drift(receipt)
+        for record, paths in (
+            ("hooks", self._local_hook_paths),
+            ("agents", self._local_agent_paths),
+        ):
+            plan = self.wiring_plan(self._location(record))
+            if plan.committed:
+                continue
+            for line in wiring.unexcluded(plan, paths(plan)):
+                message = f"{line} is missing from {wiring.EXCLUDE_LABEL}"
+                if message not in problems:
+                    problems.append(message)
+        if problems:
+            return (
+                CHECK_HOST_WIRING,
+                False,
+                f"{detail}; " + "; ".join(problems)
+                + f" — repair with: {' and '.join(INSTALL_COMMANDS)}",
+            )
+        return CHECK_HOST_WIRING, True, detail
+
+    def _local_hook_paths(self, plan: wiring.WiringPlan) -> list[Path]:
+        paths = [plan.hooks_dir / f"invariant-{e}.sh" for e in EVENTS]
+        if self.hooks_installed():
+            paths.append(plan.settings)
+        return paths
+
+    def _local_agent_paths(self, plan: wiring.WiringPlan) -> list[Path]:
+        kind = assets.BY_NAME["agent"]
+        try:
+            shipped = self._library(kind)
+        except InvariantError:
+            return []
+        return [self._target_for(kind, kind.identity(s)) for s in shipped]
+
     def verify(self) -> list[tuple[str, bool, str]]:
-        checks: list[tuple[str, bool, str]] = []
-        hooks_dir = self.claude_dir / "hooks"
+        checks: list[tuple[str, bool, str]] = [self.wiring_check()]
+        plan = self.wiring_plan(self.hooks_location)
+        hooks_dir = plan.hooks_dir
+        if not self.hooks_installed():
+            # Nothing is half-gone: this is a project that uninstalled, or one
+            # that never installed, which is the user's choice (ADR-020 D9).
+            # Offering a repair here pushed back toward the state the operator
+            # was leaving (IDEA_004), and a failed row would make every
+            # project that chose not to wire itself read as broken.
+            detail = f"not installed — {INSTALL_COMMANDS[0]} wires them"
+            checks.append((CHECK_HOOKS, True, detail))
+            checks.extend(self.asset_checks())
+            return checks
         missing = [e for e in EVENTS if not (hooks_dir / f"invariant-{e}.sh").is_file()]
         # Name the repair. A failure whose only known fix is `init --force`
         # gets left alone, because that rewrites the manifest and nobody trades
         # a project's configuration for a hook.
         detail = f"{len(EVENTS) - len(missing)}/{len(EVENTS)}"
-        if len(missing) == len(EVENTS):
-            # Nothing is half-gone: this is a project that uninstalled, or one
-            # that never installed. Offering `hooks install` here pushed back
-            # toward the state the operator was leaving, which is not a repair
-            # (IDEA_004). Naming `init` states the way back without pretending
-            # a deliberate removal is damage.
-            detail = "not installed — run 'invariant init' to set this project up"
-        elif missing:
+        if missing:
             detail += (
                 f" — missing: {', '.join(missing)}. Repair with: invariant hooks install"
             )
         checks.append((CHECK_HOOKS, not missing, detail))
 
-        settings_path = self.claude_dir / "settings.json"
+        settings_path = plan.settings
         wired = False
         if settings_path.is_file():
             try:
@@ -842,9 +1090,13 @@ class ClaudeCodeHost:
             except InvariantError as exc:
                 refused, shipped, stale = exc, [], None
             present = {kind.identity(path) for path in installed}
-            for source in shipped:
-                if kind.identity(source) not in present:
-                    unloadable.append(f"{kind.identity(source)} (absent)")
+            # A project that installed no library agent at all chose not to
+            # wire them (ADR-020 D9): nothing is missing, so nothing fails.
+            # One that installed some and lacks others is half-wired.
+            if kind.name != "agent" or present & {kind.identity(s) for s in shipped}:
+                for source in shipped:
+                    if kind.identity(source) not in present:
+                        unloadable.append(f"{kind.identity(source)} (absent)")
 
             checks.append(
                 (
@@ -1257,6 +1509,9 @@ class ClaudeCodeHost:
         rather than a write.
         """
         result = InstallResult()
+        plan = self.wiring_plan(self.agents_location)
+        receipt = self._recording(plan)
+        recorded: list[Path] = []
         for step in self.plan_assets(only=only, overwrite_local=overwrite_local):
             label = f"{step.kind}:{step.identity}"
             if not step.write:
@@ -1276,11 +1531,20 @@ class ClaudeCodeHost:
                     f"ignored, so installing it would look like success and "
                     f"produce nothing."
                 ) from exc
-            step.target.parent.mkdir(parents=True, exist_ok=True)
+            wiring.make_dirs(step.target.parent, self.root, receipt)
             step.target.write_text(rendered, encoding="utf-8")
             result.installed.append(label)
             if step.why:
                 result.changed.append((label, step.why))
+            if receipt is not None and step.kind == "agent":
+                receipt.record_file(step.target)
+                recorded.append(step.target)
+        # Under `records.agents: local` the agents are this clone's alone:
+        # each is listed in .git/info/exclude and recorded with its hash, so
+        # uninstall can tell a copy it wrote from one the user has edited.
+        if receipt is not None and recorded:
+            wiring.add_exclude(self.root, [plan.exclude_line(p) for p in recorded], receipt)
+            receipt.save()
         return result
 
     # -- request handling ----------------------------------------------

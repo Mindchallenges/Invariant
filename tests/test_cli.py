@@ -71,14 +71,14 @@ def commit_all(root, message="wip"):
 
 class TestInit:
     def test_creates_everything(self, project, capsys):
-        assert run("init", "--ecosystem", "python") == 0
+        assert run("init", "--host-install", "--ecosystem", "python") == 0
         assert (project / ".claude" / "invariant.yaml").is_file()
         assert (project / ".claude" / "hooks" / "invariant-pre-tool-use.sh").is_file()
         assert (project / ".claude" / "settings.json").is_file()
         assert len(list((project / ".claude" / "agents").glob("*.md"))) == 4
 
     def test_hooks_are_executable_shims(self, project):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         shim = project / ".claude" / "hooks" / "invariant-pre-tool-use.sh"
         assert shim.stat().st_mode & 0o111
         body = shim.read_text(encoding="utf-8")
@@ -87,7 +87,7 @@ class TestInit:
 
     def test_shim_carries_no_absolute_home_path(self, project):
         """It is committed, so it must not bake in a username."""
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         for shim in (project / ".claude" / "hooks").glob("invariant-*.sh"):
             body = shim.read_text(encoding="utf-8")
             assert "/Users/" not in body and "/home/" not in body
@@ -99,7 +99,7 @@ class TestInit:
         uv and pipx install into a user bin directory that is not on PATH by
         default, so a PATH-only lookup finds nothing on a working install.
         """
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         fake_home = tmp_path / "home"
         (fake_home / ".local" / "bin").mkdir(parents=True)
         stub = fake_home / ".local" / "bin" / "invariant"
@@ -116,7 +116,7 @@ class TestInit:
         assert proc.stdout.strip() == "STUB hook pre-tool-use"
 
     def test_shim_is_silent_when_the_library_is_absent(self, project, tmp_path):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         shim = project / ".claude" / "hooks" / "invariant-pre-tool-use.sh"
         empty_home = tmp_path / "empty-home"
         empty_home.mkdir()
@@ -134,29 +134,29 @@ class TestInit:
         assert proc.stdout.strip() == "{}"
 
     def test_dry_run_writes_nothing(self, project, capsys):
-        assert run("init", "--dry-run") == 0
+        assert run("init", "--host-install", "--dry-run") == 0
         assert "would:" in out(capsys)
         assert not (project / ".claude" / "invariant.yaml").exists()
 
     def test_refuses_to_clobber(self, project, capsys):
-        run("init", "--ecosystem", "python")
-        assert run("init") == 2
-        assert run("init", "--force") == 0
+        run("init", "--host-install", "--ecosystem", "python")
+        assert run("init", "--host-install") == 2
+        assert run("init", "--host-install", "--force") == 0
 
     def test_state_root_is_gitignored_or_inside_git(self, project):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         assert ".claude/invariant/state/" in (project / ".gitignore").read_text()
 
     def test_detects_the_ecosystem(self, project, capsys):
         (project / "pyproject.toml").write_text("", encoding="utf-8")
-        run("--json", "init")
+        run("--json", "init", "--host-install")
         assert "python" in payload(capsys)["ecosystems"]
 
     def test_settings_json_is_preserved(self, project):
         settings = project / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(json.dumps({"model": "opus", "hooks": {}}), encoding="utf-8")
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         merged = json.loads(settings.read_text(encoding="utf-8"))
         assert merged["model"] == "opus"
         assert "PreToolUse" in merged["hooks"]
@@ -165,26 +165,26 @@ class TestInit:
         settings = project / ".claude" / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text("{not json", encoding="utf-8")
-        assert run("init", "--ecosystem", "python") != 0
+        assert run("init", "--host-install", "--ecosystem", "python") != 0
         assert settings.read_text(encoding="utf-8") == "{not json"
 
     def test_wiring_is_idempotent(self, project):
-        run("init", "--ecosystem", "python")
-        run("init", "--force", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
+        run("init", "--host-install", "--force", "--ecosystem", "python")
         settings = json.loads((project / ".claude" / "settings.json").read_text())
         assert len(settings["hooks"]["PreToolUse"]) == 1
 
 
 class TestDoctorAndConfig:
     def test_doctor_passes_on_a_fresh_install(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("doctor")
         text = out(capsys)
         assert "hook shims installed" in text
         assert "library agents current" in text
 
     def test_doctor_reports_agent_drift(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         agent = next((project / ".claude" / "agents").glob("*.md"))
         agent.write_text(
             agent.read_text(encoding="utf-8") + "\nlocally edited\n", encoding="utf-8"
@@ -203,7 +203,7 @@ class TestDoctorAndConfig:
         """A plan the install refuses is a defect, not drift: the row fails."""
         import yaml
 
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         path = project / ".claude" / "invariant.yaml"
         body = yaml.safe_load(path.read_text(encoding="utf-8"))
         body.setdefault("agents", {})["library"] = ["no-such-agent"]
@@ -219,7 +219,7 @@ class TestDoctorAndConfig:
     def test_doctor_flags_absent_architecture_docs(self, project, capsys):
         import shutil
 
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         shutil.rmtree(project / "invariant-docs")
         assert run("doctor") == 1
         # The row names the remedy. "docs-first is core policy" told a fresh
@@ -238,7 +238,7 @@ class TestDoctorAndConfig:
         without turning red, since the list is a deliberate phase state."""
         import yaml
 
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         path = project / ".claude" / "invariant.yaml"
         body = yaml.safe_load(path.read_text(encoding="utf-8"))
         body.setdefault("methodology", {}).setdefault("gates", {})[
@@ -254,7 +254,7 @@ class TestDoctorAndConfig:
         assert "web/**" in row
 
     def test_doctor_reports_no_advisory_exception_by_default(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         capsys.readouterr()
         run("doctor")
         row = next(
@@ -273,7 +273,7 @@ class TestDoctorAndConfig:
 
     def test_doctor_guidelines_row_without_a_ruleset(self, project, capsys):
         """ADR-012 D3: no ruleset, no change. The row passes and says so."""
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         capsys.readouterr()
         run("doctor")
         row = next(ln for ln in out(capsys).splitlines() if "guidelines ruleset" in ln)
@@ -282,7 +282,7 @@ class TestDoctorAndConfig:
     def test_doctor_rejects_a_malformed_ruleset(self, project, capsys):
         """IDEA_031's acceptance: `doctor` rejects a malformed ruleset, naming
         the problem, and exits 1."""
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         self._with_ruleset(project, "version: 1\nsections: []\nrules: [3]\n")
         capsys.readouterr()
         code = run("doctor")
@@ -293,7 +293,7 @@ class TestDoctorAndConfig:
         assert code == 1
 
     def test_doctor_accepts_a_valid_ruleset(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         self._with_ruleset(project, "version: 1\nsections: []\nrules: []\n")
         capsys.readouterr()
         run("doctor")
@@ -301,21 +301,21 @@ class TestDoctorAndConfig:
         assert "0 guideline(s)" in row
 
     def test_config_show_reports_provenance(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("config", "show", "--provenance")
         text = out(capsys)
         assert "[adapter:python]" in text
         assert "[profile:standard]" in text
 
     def test_global_flag_works_after_the_subcommand(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("config", "show", "--json")
         assert "config" in payload(capsys)
 
 
 class TestSessionCommands:
     def setup_project(self, project):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt invariant")
 
     def test_start_then_status(self, project, capsys):
@@ -360,7 +360,7 @@ class TestSessionCommands:
 
 class TestPipelineCommands:
     def setup_pipeline(self, project, monkeypatch):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt invariant")
         run("session", "start", "x")
         run("session", "isolate", "--execute")
@@ -423,7 +423,7 @@ class TestPipelineCommands:
 
 class TestItemCommands:
     def setup_project(self, project):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
 
     def test_new_list_show(self, project, capsys):
         self.setup_project(project)
@@ -460,7 +460,7 @@ class TestItemCommands:
 
 class TestMemoryCommands:
     def test_write_check_index(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("memory", "write", "a-fact", "--type", "project", "--description", "d",
             "--body", "The body.")
         assert run("memory", "check") == 0
@@ -468,7 +468,7 @@ class TestMemoryCommands:
         assert payload(capsys)["count"] == 1
 
     def test_check_fails_on_a_stale_index(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("memory", "write", "one", "--type", "project", "--description", "d", "--body", "b")
         memory_dir = project / ".claude" / "memory"
         (memory_dir / "two.md").write_text(
@@ -482,13 +482,13 @@ class TestMemoryCommands:
 
 class TestChecksAndPrivacy:
     def test_rules_list_shows_resolved_levels(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("rules", "list")
         text = out(capsys)
         assert "privacy.clean" in text and "block" in text
 
     def test_privacy_scan_finds_and_redacts(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         target = project / "invariant-docs" / "leak.md"
         target.write_text("mail a.person@example.com\n", encoding="utf-8")
         assert run("privacy", "scan", str(target)) == 1
@@ -497,18 +497,18 @@ class TestChecksAndPrivacy:
         assert "emails" in text
 
     def test_privacy_scan_clean(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         assert run("privacy", "scan", str(project / "app.py")) == 0
 
     def test_reveal_is_opt_in(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         target = project / "invariant-docs" / "leak.md"
         target.write_text("mail a.person@example.com\n", encoding="utf-8")
         run("privacy", "scan", str(target), "--reveal")
         assert "a.person@example.com" in out(capsys)
 
     def vendored(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         path = project / ".claude" / "invariant.yaml"
         body = yaml.safe_load(path.read_text(encoding="utf-8"))
         body.setdefault("privacy", {})["allow"] = [
@@ -540,7 +540,7 @@ class TestChecksAndPrivacy:
 
 class TestHookBridge:
     def test_pre_tool_use_denies_an_unattributed_edit(self, project, capsys, monkeypatch):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt")
         payload_in = json.dumps(
             {"tool_name": "Write",
@@ -582,7 +582,7 @@ class TestHookBridge:
         working directory it does not. Resolving from cwd alone meant a hook
         run anywhere else found no manifest and silently disabled every gate.
         """
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt")
         elsewhere = project.parent / "elsewhere"
         elsewhere.mkdir(exist_ok=True)
@@ -598,12 +598,12 @@ class TestHookBridge:
         assert decision["permissionDecision"] == "deny"
 
     def test_malformed_payload_does_not_crash(self, project, capsys, monkeypatch):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         monkeypatch.setattr("sys.stdin", _Stdin("not json at all"))
         assert run("hook", "pre-tool-use") == 0
 
     def test_context_is_empty_without_a_session(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         assert run("context") == 0
 
     def test_several_live_sessions_do_not_deadlock_the_hook(
@@ -618,7 +618,7 @@ class TestHookBridge:
         `session isolate` that would have resolved it. Nothing could reach the
         state that unblocks it. The hook must exit zero and must not deny.
         """
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt")
         run("session", "start", "first")
         run("session", "start", "second")
@@ -629,7 +629,7 @@ class TestHookBridge:
         assert decision.get("permissionDecision") != "deny"
 
     def test_ambiguity_names_the_sessions_and_the_way_out(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("session", "start", "first")
         run("session", "start", "second")
         assert run("context") == 0
@@ -639,7 +639,7 @@ class TestHookBridge:
         assert "isolate" in text and "--id" in text
 
     def test_context_accepts_the_id_its_own_error_recommends(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("session", "start", "first")
         run("session", "start", "second")
 
@@ -661,7 +661,7 @@ class TestHookBridge:
         the same as having judged 'no'. Losing a gate is recoverable; refusing
         every tool call is not.
         """
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
 
         def explode(*a, **k):
             raise RuntimeError("rule engine is wedged")
@@ -678,13 +678,13 @@ class TestHookBridge:
 
 class TestStateMaintenance:
     def test_state_show(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("session", "start", "x")
         run("state", "show", "--json")
         assert len(payload(capsys)["sessions"]) == 1
 
     def test_repair_dry_run(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         assert run("state", "repair", "--dry-run") == 0
         assert "would repair" in out(capsys)
 
@@ -718,7 +718,7 @@ class TestHookAttribution:
     def test_the_hook_attributes_the_edit_to_the_right_session(
         self, project, capsys, monkeypatch
     ):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt")
         run("session", "start", "alpha", "--host-session-id", "aa-1111-11110000aaaa")
         run("session", "start", "beta", "--host-session-id", "bb-2222-22220000bbbb")
@@ -743,7 +743,7 @@ class TestHookAttribution:
         ).get("permissionDecision") != "deny"
 
     def test_an_unattributable_edit_is_still_denied(self, project, capsys, monkeypatch):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt")
         run("session", "start", "alpha", "--host-session-id", "aa-1111-11110000aaaa")
         capsys.readouterr()
@@ -756,7 +756,7 @@ class TestHookAttribution:
         assert decision == "deny"
 
     def test_adopt_binds_a_host_id_to_an_existing_session(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         run("session", "start", "legacy", "--id", "deadbeef")
         capsys.readouterr()
         run("--json", "session", "adopt", "ff-0000-00009999", "--id", "deadbeef")
@@ -767,7 +767,7 @@ class TestAgentsCommand:
     """Repair must not cost the caller their enforcement configuration."""
 
     def test_install_makes_every_agent_loadable(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         agents = project / ".claude" / "agents"
         (agents / "feature-architect.md").write_text("broken\n", encoding="utf-8")
 
@@ -783,7 +783,7 @@ class TestAgentsCommand:
         profile and rule levels would silently lose all of it while repairing
         an unrelated file.
         """
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         manifest = project / ".claude" / "invariant.yaml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8")
@@ -796,7 +796,7 @@ class TestAgentsCommand:
         assert manifest.read_text(encoding="utf-8") == before
 
     def test_install_does_not_touch_settings_or_hooks(self, project):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         settings = project / ".claude" / "settings.json"
         settings.write_text('{"model": "opus"}', encoding="utf-8")
 
@@ -804,7 +804,7 @@ class TestAgentsCommand:
         assert settings.read_text(encoding="utf-8") == '{"model": "opus"}'
 
     def test_dry_run_writes_nothing(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         target = project / ".claude" / "agents" / "feature-architect.md"
         target.write_text("broken\n", encoding="utf-8")
 
@@ -813,7 +813,7 @@ class TestAgentsCommand:
         assert target.read_text(encoding="utf-8") == "broken\n"
 
     def test_list_reports_a_broken_agent_as_unloadable(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         (project / ".claude" / "agents" / "feature-architect.md").write_text(
             "<!-- marker -->\n---\nname: feature-architect\ndescription: d\n---\nb\n",
             encoding="utf-8",
@@ -824,7 +824,7 @@ class TestAgentsCommand:
         assert rows["compliance-reviewer"]["status"] == "loadable"
 
     def test_list_names_the_role_each_agent_answers_for(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         assert run("agents", "list", "--json") == 0
         rows = {r["agent"]: r for r in payload(capsys)["agents"]}
         assert rows["feature-architect"]["role"] == "design"
@@ -836,7 +836,7 @@ class TestAgentsCommand:
         The failure that shipped was "library agents current: ok" on a project
         whose agents all failed to load, so the two rows are asserted apart.
         """
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         run("doctor", "--json")  # exits 1 here: commands.build/test are unset
         rows = {c["check"]: c["ok"] for c in payload(capsys)["checks"]}
         assert rows["agents loadable by host"] is True
@@ -854,7 +854,7 @@ class EditHookHarness:
     """Shared setup for the hook-boundary suites. Not collected on its own."""
 
     def setup(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "invariant")
         worktrees = {}
         for name in ("alpha", "beta"):
@@ -1000,7 +1000,7 @@ class TestEditAttributionThroughTheHook(EditHookHarness):
 
 class TestPublishingIsOptInThroughTheCli:
     def project_with(self, project, push: bool):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         manifest = project / ".claude" / "invariant.yaml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8")
@@ -1075,7 +1075,7 @@ class TestTeardownWillNotRemoveTheGroundUnderTheCaller:
     """
 
     def merged_session(self, project, capsys, monkeypatch):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         # A live binding: a host session that has started and not ended, which
         # is what every session driven by an agent host carries.
@@ -1149,7 +1149,7 @@ class TestMergeIsGatedBeforeItRuns:
     """
 
     def isolated_session(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "adopt")
         run("session", "start", "x", "--json")
         sid = payload(capsys)["session"]["id"]
@@ -1188,7 +1188,7 @@ class TestIdIsAcceptedConsistently:
     then rejects it makes the advice a dead end."""
 
     def setup_session(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "adopt")
         run("session", "start", "x", "--json")
         return payload(capsys)["session"]["id"]
@@ -1210,7 +1210,7 @@ class TestSessionReviewExists:
     this library exists to make impossible."""
 
     def working_session(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "adopt")
         run("session", "start", "x", "--json")
         sid = payload(capsys)["session"]["id"]
@@ -1228,7 +1228,7 @@ class TestSessionReviewExists:
         assert payload(capsys)["session"]["state"] == "reviewed"
 
     def test_it_refuses_from_a_state_that_cannot_review(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "adopt")
         run("session", "start", "x", "--json")
         sid = payload(capsys)["session"]["id"]
@@ -1243,7 +1243,7 @@ class TestGenericTransitionEvaluatesGates:
     which every route passes through."""
 
     def strict_working_session(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         manifest = project / ".claude" / "invariant.yaml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8")
@@ -1284,7 +1284,7 @@ class TestItemVocabularyCheck:
     rather than a missing feature."""
 
     def project_with_item(self, project, status):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         backlog = project / "docs" / "backlog"
         backlog.mkdir(parents=True, exist_ok=True)
         (backlog / "BUG_001.md").write_text(
@@ -1329,7 +1329,7 @@ class TestTheMergeCommandEvaluatesItsGates:
     """
 
     def strict_project(self, project, capsys):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         manifest = project / ".claude" / "invariant.yaml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8")
@@ -1387,7 +1387,7 @@ class TestHooksAreInstallableWithoutRewritingTheManifest:
     """
 
     def adopted(self, project):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         manifest = project / ".claude" / "invariant.yaml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8")
@@ -1556,7 +1556,7 @@ class TestAssetsCommands:
     """
 
     def initialised(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         capsys.readouterr()
         return project
 
@@ -1625,7 +1625,7 @@ class TestAssetsCommands:
     def test_listing_an_uninitialised_project_says_none_rather_than_failing(
         self, project, capsys
     ):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         for kind in ("agents", "commands", "skills"):
             target = project / ".claude" / kind
             if target.is_dir():
@@ -1680,7 +1680,7 @@ class TestCheckReportsTheSameWayAdvanceDoes:
     """
 
     def test_check_runs_at_all(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         capsys.readouterr()
         assert run("check") in (0, 1)
 
@@ -1757,7 +1757,7 @@ class ParkedSessionHarness:
     """A session with a spent binding, which is what `resume` picks up."""
 
     def parked(self, project, capsys, monkeypatch, name="add-widget", plan=()):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-first-0000")
         run("session", "start", name, "--json")
@@ -1982,7 +1982,7 @@ class TestTheGreetingOffersParkedWork(ParkedSessionHarness, GreetingHarness):
         wide, and the whole block is injected on every SessionStart. The
         overflow is not dropped; it is named, behind the command that lists it.
         """
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         for n in range(4):
             host = f"host-{n}-0000"
@@ -2005,7 +2005,7 @@ class TestTheGreetingOffersParkedWork(ParkedSessionHarness, GreetingHarness):
         before — not a reworded one, not an extra blank line. Anything else is
         a change every consumer pays for and none of them asked for.
         """
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         self.unowned(project, capsys, monkeypatch, "spare-a", "spare-b")
 
@@ -2149,7 +2149,7 @@ class TestTheTurnProjectionShowsThePlan(ParkedSessionHarness):
         project that does not use this feature. Its turn projection must gain
         nothing at all.
         """
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         run("session", "start", "plain", "--json")
         session = payload(capsys)["session"]
@@ -2344,7 +2344,7 @@ class TestARefusedResumeBindsNothing(ParkedSessionHarness, HostClaimHarness):
         assert self.claim(captured.out + captured.err) == []
 
     def test_a_name_that_matches_several(self, project, capsys, monkeypatch):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         for host in ("host-a-0000", "host-b-1111"):
             monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host)
@@ -2431,7 +2431,7 @@ class TestSessionResume(ParkedSessionHarness):
     ):
         from invariant.hosts.claude_code import _STARTED_ID, _bind_claimed_session_id
 
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         for host in ("host-a-0000", "host-b-1111"):
             monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", host)
@@ -2485,7 +2485,7 @@ class TestSessionResume(ParkedSessionHarness):
 
 class TestSessionPlan(ParkedSessionHarness):
     def started(self, project, capsys, monkeypatch):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-plan-0000")
         run("session", "start", "plan-work", "--json")
@@ -2609,7 +2609,7 @@ class TestSessionPlan(ParkedSessionHarness):
 
 class TestSessionSync(ParkedSessionHarness):
     def isolated(self, project, capsys, monkeypatch):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", "host-sync-0000")
         run("session", "start", "sync-work", "--json")
@@ -2801,7 +2801,7 @@ class TestPlanIsVisibleWhereWorkIsPickedUp(ParkedSessionHarness):
         """And line one still binds: `TestAutomaticBinding` reads it."""
         from invariant.hosts.claude_code import _bind_claimed_session_id
 
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         run("session", "start", "later-work")
         text = out(capsys)
@@ -2830,7 +2830,7 @@ class TestDoctorReportsWhatWasLeftParked(ParkedSessionHarness):
         project that adopts the plan — the "gate that gets ignored, then
         switched off" failure this codebase names repeatedly.
         """
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         capsys.readouterr()
         before = run("doctor")
@@ -2848,7 +2848,7 @@ class TestDoctorReportsWhatWasLeftParked(ParkedSessionHarness):
         assert "FAIL" not in text.split("parked")[0].splitlines()[-1]
 
     def test_no_parked_session_says_so(self, project, capsys, monkeypatch):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "manifest")
         capsys.readouterr()
 
@@ -2912,7 +2912,7 @@ class TestTheHookProbeWritesNothing(EditHookHarness):
 
         self.key = PROBE_KEY
         monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", self.HOST_ID)
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         commit_all(project, "invariant")
         run("session", "start", "probed", "--json")
         session = payload(capsys)["session"]
@@ -3041,7 +3041,7 @@ class TestInitScaffoldsTheArchitectureDoc:
         import shutil
 
         shutil.rmtree(project / "invariant-docs")
-        assert run("init", "--ecosystem", "python", "--name", "widgets") == 0
+        assert run("init", "--host-install", "--ecosystem", "python", "--name", "widgets") == 0
         assert "invariant-docs/architecture/overview.rst" in out(capsys)
         body = self.scaffold(project).read_text(encoding="utf-8")
         assert "widgets" in body
@@ -3053,7 +3053,7 @@ class TestInitScaffoldsTheArchitectureDoc:
 
     def test_an_existing_docs_directory_is_left_alone(self, project, capsys):
         before = (project / "invariant-docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
-        assert run("init", "--ecosystem", "python") == 0
+        assert run("init", "--host-install", "--ecosystem", "python") == 0
         assert "overview.rst" not in out(capsys)
         after = (project / "invariant-docs" / "architecture" / "overview.md").read_text(encoding="utf-8")
         assert after == before
@@ -3064,7 +3064,7 @@ class TestInitScaffoldsTheArchitectureDoc:
 
         shutil.rmtree(project / "invariant-docs")
         (project / "invariant-docs" / "architecture").mkdir(parents=True)
-        assert run("init", "--ecosystem", "python") == 0
+        assert run("init", "--host-install", "--ecosystem", "python") == 0
         assert "overview.rst" not in out(capsys)
         assert list((project / "invariant-docs" / "architecture").iterdir()) == []
 
@@ -3072,7 +3072,7 @@ class TestInitScaffoldsTheArchitectureDoc:
         import shutil
 
         shutil.rmtree(project / "invariant-docs")
-        assert run("init", "--dry-run") == 0
+        assert run("init", "--host-install", "--dry-run") == 0
         assert "invariant-docs/architecture/overview.rst" in out(capsys)
         assert not (project / "invariant-docs").exists()
 
@@ -3080,9 +3080,9 @@ class TestInitScaffoldsTheArchitectureDoc:
         import shutil
 
         shutil.rmtree(project / "invariant-docs")
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         self.scaffold(project).write_text("Mine\n====\n", encoding="utf-8")
-        assert run("init", "--force", "--ecosystem", "python") == 0
+        assert run("init", "--host-install", "--force", "--ecosystem", "python") == 0
         assert self.scaffold(project).read_text(encoding="utf-8") == "Mine\n====\n"
 
     def test_the_scaffold_passes_the_privacy_scan(self, project, capsys):
@@ -3090,7 +3090,7 @@ class TestInitScaffoldsTheArchitectureDoc:
         import shutil
 
         shutil.rmtree(project / "invariant-docs")
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         assert self.scaffold(project).is_file()
         assert run("privacy", "scan", str(self.scaffold(project))) == 0
         assert "clean" in out(capsys)
@@ -3102,7 +3102,7 @@ class TestSessionStartDerivesItsBase:
 
     def adopt_on(self, project, branch):
         subprocess.run(["git", "branch", "-m", "master", branch], cwd=project, check=True)
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt invariant")
 
     def test_a_main_repository_isolates_with_no_flags(self, project, capsys):
@@ -3152,7 +3152,7 @@ class TestBUG_067_DashFWrittenByTheSameCommand:
 
     def privacy_refusal(self, project, capsys, monkeypatch, command: str) -> str:
         """The privacy.clean block of the hook's deny reason, for ``command``."""
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         commit_all(project, "adopt")
         payload_in = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
         monkeypatch.setattr("sys.stdin", _Stdin(payload_in))
@@ -3354,7 +3354,7 @@ class TestSweepFreshness:
         assert "sweep.fresh" in out(capsys)
 
     def test_doctor_row_without_a_cadence(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         capsys.readouterr()
         row = self.doctor_row(capsys)
         assert row["ok"] is True
@@ -3387,7 +3387,7 @@ def test_doctor_sweep_row_survives_an_unreadable_answer(project, capsys, monkeyp
     def boom(_ctx):
         raise InvariantError("git said no")
 
-    run("init", "--ecosystem", "python")
+    run("init", "--host-install", "--ecosystem", "python")
     monkeypatch.setattr(cli, "sweep_cadence_summary", boom)
     capsys.readouterr()
     run("doctor", "--json")

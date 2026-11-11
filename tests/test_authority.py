@@ -94,7 +94,7 @@ class HookHarness:
     """One session, bound to one host id, so attribution is never the variable."""
 
     def setup(self, project, capsys, *, isolate=False, rules=None, ruleset=None):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         if rules or ruleset:
             path = project / MANIFEST_RELPATH
             body = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -604,7 +604,7 @@ class TestDoctorSurvivesTheManifestItIsThereToDiagnose:
     def test_doctor_reports_an_unloadable_manifest_as_a_failed_check(
         self, project, capsys
     ):
-        assert run("init", "--name", "demo") == 0
+        assert run("init", "--host-install", "--name", "demo") == 0
         path = project / MANIFEST_RELPATH
         body = yaml.safe_load(path.read_text(encoding="utf-8"))
         body.setdefault("enforcement", {})["rules"] = {"privacy_clean": "off"}
@@ -638,7 +638,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         return target
 
     def test_a_local_edit_survives_a_reinstall(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = self.edit_installed(project)
         capsys.readouterr()
 
@@ -646,7 +646,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         assert "# project note" in target.read_text(encoding="utf-8")
 
     def test_the_skip_is_named_rather_than_silent(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         self.edit_installed(project)
         capsys.readouterr()
 
@@ -659,7 +659,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
     def test_overwrite_local_is_how_you_ask_for_the_shipped_version(
         self, project, capsys
     ):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = self.edit_installed(project)
         capsys.readouterr()
 
@@ -678,7 +678,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         """
         from invariant.hosts import assets
 
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = project / ".claude" / "agents" / "feature-architect.md"
         shipped = assets.reconstruct_source(target.read_text(encoding="utf-8"))
         older = shipped + "\nWording an earlier release shipped.\n"
@@ -711,7 +711,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         """It returned before any per-file work, so it could not name what it
         would flatten — the one thing a dry run of a destructive command is for.
         """
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         self.edit_installed(project)
         capsys.readouterr()
 
@@ -721,7 +721,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         assert "edited locally" in text
 
     def test_dry_run_writes_nothing(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = self.edit_installed(project)
         before = target.read_text(encoding="utf-8")
         capsys.readouterr()
@@ -731,7 +731,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
 
     def test_agents_install_protects_the_same_edit(self, project, capsys):
         """`agents install` is the command `doctor` actually points people at."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = self.edit_installed(project)
         capsys.readouterr()
 
@@ -739,7 +739,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         assert "# project note" in target.read_text(encoding="utf-8")
 
     def test_agents_install_dry_run_names_the_edited_one(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         self.edit_installed(project)
         capsys.readouterr()
 
@@ -752,7 +752,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         advice used to be the command that discarded the edit. It now leaves
         the edit alone, and the row says so and says how to reverse it.
         """
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         self.edit_installed(project)
         capsys.readouterr()
 
@@ -764,7 +764,7 @@ class TestInstallDoesNotDestroyTheEditsItCanAlreadySee:
         assert "--overwrite-local" in detail
 
     def test_a_missing_asset_is_installed_with_no_ceremony(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = project / ".claude" / "agents" / "bug-reproducer.md"
         target.unlink()
         capsys.readouterr()
@@ -815,7 +815,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     def test_BUG_106_an_edited_older_release_copy_survives_and_is_named(
         self, project, capsys, command
     ):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target, _ = self.older_release_copy(project, edited=True)
         capsys.readouterr()
 
@@ -836,7 +836,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     ):
         from invariant.hosts import assets
 
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target, shipped = self.older_release_copy(project, edited=False)
         capsys.readouterr()
 
@@ -853,7 +853,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     ):
         """The row `doctor` prints is read off the same plan, so it says the
         edit is kept rather than offering a repair that would discard it."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         self.older_release_copy(project, edited=True)
         capsys.readouterr()
 
@@ -867,7 +867,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     def test_a_dry_run_names_the_edited_older_release_copy_as_a_skip(
         self, project, capsys, command
     ):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target, _ = self.older_release_copy(project, edited=True)
         before = target.read_text(encoding="utf-8")
         capsys.readouterr()
@@ -884,7 +884,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     def test_overwrite_local_still_takes_the_shipped_version_back(
         self, project, capsys, command
     ):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target, shipped = self.older_release_copy(project, edited=True)
         capsys.readouterr()
 
@@ -894,7 +894,7 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
         assert assets.reconstruct_source(target.read_text(encoding="utf-8")) == shipped
 
     def test_uninstall_keeps_an_edited_older_release_copy(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target, _ = self.older_release_copy(project, edited=True)
         capsys.readouterr()
 
@@ -905,11 +905,11 @@ class TestAnEditSurvivesWhicheverReleaseInstalledTheCopy:
     def test_init_force_keeps_an_edited_older_release_copy(self, project, capsys):
         """`init` installs agents through the same plan, so a re-init does not
         flatten the edit either."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target, _ = self.older_release_copy(project, edited=True)
         capsys.readouterr()
 
-        assert run("init", "--name", "demo", "--force") == 0
+        assert run("init", "--host-install", "--name", "demo", "--force") == 0
         assert self.MARK in target.read_text(encoding="utf-8")
 
 
@@ -1108,13 +1108,13 @@ class TestUninstallRemovesWhatInitInstalled:
         )
 
     def test_the_shims_are_gone(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         assert run("uninstall") == 0
         assert not list((project / ".claude" / "hooks").glob("invariant-*.sh"))
 
     def test_the_wiring_is_gone(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall")
         assert "invariant-" not in json.dumps(self.settings(project))
@@ -1123,7 +1123,7 @@ class TestUninstallRemovesWhatInitInstalled:
         """`_wire_settings` merges into the operator's own file. Removal is the
         same match it uses to recognise its own entries, and anything else is
         left exactly as found."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         path = project / ".claude" / "settings.json"
         settings = json.loads(path.read_text(encoding="utf-8"))
         settings["hooks"].setdefault("PreToolUse", []).append(
@@ -1139,26 +1139,26 @@ class TestUninstallRemovesWhatInitInstalled:
         assert "./mine.sh" in json.dumps(after["hooks"])
 
     def test_an_emptied_event_list_does_not_linger(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall")
         assert self.settings(project).get("hooks", {}) == {}
 
     def test_the_manifest_survives_by_default(self, project, capsys):
         """Uninstalling is not a decision about the backlog."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall")
         assert (project / MANIFEST_RELPATH).is_file()
 
     def test_the_agents_survive_by_default(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall")
         assert list((project / ".claude" / "agents").glob("*.md"))
 
     def test_what_is_left_behind_is_named(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall")
         text = out(capsys)
@@ -1166,19 +1166,19 @@ class TestUninstallRemovesWhatInitInstalled:
         assert "invariant.yaml" in text
 
     def test_removing_the_manifest_is_asked_for_explicitly(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall", "--remove-manifest")
         assert not (project / MANIFEST_RELPATH).is_file()
 
     def test_removing_the_assets_is_asked_for_explicitly(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         run("uninstall", "--remove-assets")
         assert not list((project / ".claude" / "agents").glob("*.md"))
 
     def test_dry_run_enumerates_and_moves_nothing(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         capsys.readouterr()
         assert run("uninstall", "--dry-run") == 0
         text = out(capsys)
@@ -1191,7 +1191,7 @@ class TestUninstallRemovesWhatInitInstalled:
         """The same rule as `assets install`: the operator's own work is not
         this command's to discard, even when the operator asked for the assets
         to go."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         target = project / ".claude" / "agents" / "feature-architect.md"
         target.write_text(
             target.read_text(encoding="utf-8") + "\n# project note\n", encoding="utf-8"
@@ -1206,7 +1206,7 @@ class TestUninstallRemovesWhatInitInstalled:
         self, project, capsys
     ):
         """The same care `_wire_settings` takes, from the other direction."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         path = project / ".claude" / "settings.json"
         path.write_text("{not json", encoding="utf-8")
         capsys.readouterr()
@@ -1215,7 +1215,7 @@ class TestUninstallRemovesWhatInitInstalled:
         assert path.read_text(encoding="utf-8") == "{not json"
 
     def test_uninstalling_twice_is_not_an_error(self, project, capsys):
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         run("uninstall")
         capsys.readouterr()
         assert run("uninstall") == 0
@@ -1225,20 +1225,23 @@ class TestUninstallRemovesWhatInitInstalled:
     ):
         """A half-removal used to read as broken, with `hooks install` offered
         as the repair. A COMPLETE removal must not read as broken at all."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         run("uninstall")
         capsys.readouterr()
 
         run("doctor", "--json")
         rows = {c["check"]: c for c in payload(capsys)["checks"]}
+        assert rows["hook shims installed"]["ok"] is True
         assert "not installed" in rows["hook shims installed"]["detail"]
-        assert "invariant init" in rows["hook shims installed"]["detail"]
+        # Not installing is the user's choice (ADR-020 D9): the way back is
+        # named, and the row passes.
+        assert "invariant hooks install" in rows["hook shims installed"]["detail"]
 
     def test_a_half_removal_is_still_reported_as_broken(self, project, capsys):
         """Because it IS. One leftover shim still fires, and the shim exits
         silently when it finds no binary — which is the invisible failure the
         command exists to prevent."""
-        run("init", "--name", "demo")
+        run("init", "--host-install", "--name", "demo")
         (project / ".claude" / "hooks" / "invariant-stop.sh").unlink()
         capsys.readouterr()
 

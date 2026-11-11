@@ -3207,7 +3207,7 @@ def _generated_status(path: Path, rel: str, fmt: str, text: str, setting: str) -
     return "current" if existing == text else "stale"
 
 
-def _always_layer_gap(plan: RenderPlan) -> tuple[str, str] | None:
+def _always_layer_gap(plan: RenderPlan, manifest: Manifest) -> tuple[str, str] | None:
     """``(message, fix)`` when always rules exist and no block carries them.
 
     The A5 ruling D12. The managed block is where a host reads the always
@@ -3217,9 +3217,14 @@ def _always_layer_gap(plan: RenderPlan) -> tuple[str, str] | None:
     ``guidelines.instruction_files`` or the host default the context carries;
     nothing here names a host's file. A block that is present counts whatever
     its state: a stale or hand-edited one is drift, the gate's own finding.
-    ``None`` with no always rules or with a block present.
+    ``None`` with no always rules or with a block present, and with no file
+    to carry one under ``records.agents: local``: nothing of invariant's is
+    committed there, so no block is written, and the hook context carries the
+    always rules by design (ADR-014 D11).
     """
     if not plan.always or any(b.result.status != "absent" for b in plan.blocks):
+        return None
+    if not plan.blocks and manifest.get("records.agents") == "local":
         return None
     name = guidelines_reader.INDEX_BLOCK
     count = len(plan.always)
@@ -3258,7 +3263,7 @@ def always_layer_summary(ctx: RuleContext) -> str | None:
         plan = plan_render(ctx)
     except RenderRefused:
         return None
-    gap = None if plan is None else _always_layer_gap(plan)
+    gap = None if plan is None else _always_layer_gap(plan, ctx.manifest)
     if gap is None:
         return None
     message, fix = gap
@@ -3317,7 +3322,7 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
             edited_block = True
         elif result.status == "absent":
             absent.append(f"no {result.name} block in {result.relpath} (none inserted)")
-    gap = _always_layer_gap(plan)
+    gap = _always_layer_gap(plan, ctx.manifest)
     note = [f"{gap[0]}; try: {gap[1]}"] if gap else []
 
     if not findings:

@@ -63,14 +63,14 @@ def handbook(tmp_path, monkeypatch):
 
 class TestANewProjectsDocsFolder:
     def test_init_writes_the_starter_at_invariant_docs(self, toy, capsys):
-        code, text = run(capsys, "init", "--ecosystem", "python", "--name", "toy")
+        code, text = run(capsys, "init", "--host-install", "--ecosystem", "python", "--name", "toy")
         assert code == 0, text
         assert (toy / "invariant-docs" / "conf.py").is_file()
         assert (toy / "invariant-docs" / "architecture" / "overview.rst").is_file()
         assert not (toy / "docs" / "conf.py").exists()
 
     def test_the_two_keys_are_written_explicitly(self, toy, capsys):
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         written = manifest_text(toy)
         assert written["paths"]["docs"] == "invariant-docs/architecture"
         assert written["docs"]["needs"]["srcdir"] == "invariant-docs"
@@ -88,7 +88,7 @@ class TestANewProjectsDocsFolder:
         assert bare.get("docs.needs.srcdir") is None
 
     def test_dry_run_names_the_folder(self, toy, capsys):
-        code, text = run(capsys, "--json", "init", "--ecosystem", "python", "--dry-run")
+        code, text = run(capsys, "--json", "init", "--host-install", "--ecosystem", "python", "--dry-run")
         assert code == 0, text
         data = json.loads(text)
         assert data["docs_venv"]["srcdir"] == "invariant-docs"
@@ -96,7 +96,7 @@ class TestANewProjectsDocsFolder:
         assert not (toy / "invariant-docs").exists()
 
     def test_the_configuration_report_reads_the_written_location(self, toy, capsys):
-        code, text = run(capsys, "--json", "init", "--ecosystem", "python")
+        code, text = run(capsys, "--json", "init", "--host-install", "--ecosystem", "python")
         assert code == 0, text
         rows = {row["key"]: row for row in json.loads(text)["configuration"]}
         assert rows["paths.docs"]["value"] == "invariant-docs/architecture"
@@ -104,7 +104,7 @@ class TestANewProjectsDocsFolder:
 
     def test_an_existing_folder_is_reused_and_still_named(self, toy, capsys):
         (toy / "invariant-docs" / "architecture").mkdir(parents=True)
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert manifest_text(toy)["paths"]["docs"] == "invariant-docs/architecture"
         assert not (toy / "invariant-docs" / "conf.py").exists()
 
@@ -115,7 +115,7 @@ class TestANewProjectsDocsFolder:
         monkeypatch.setattr(
             cli_main, "_init_prompter", lambda args: Scripted("store", "", "", "not_now")
         )
-        code, text = run(capsys, "init", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert code == 0, text
         m = Manifest.locate(toy)
         assert m.store is not None
@@ -133,7 +133,7 @@ class TestAnExistingProjectIsUnchanged:
         manifest.write_text(
             "version: 1\nproject:\n  name: toy\n  ecosystems: [python]\n", encoding="utf-8"
         )
-        code, text = run(capsys, "init", "--force", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--force", "--ecosystem", "python")
         assert code == 0, text
         assert (toy / "docs" / "conf.py").is_file()
         assert not (toy / "invariant-docs").exists()
@@ -149,7 +149,7 @@ class TestAnExistingProjectIsUnchanged:
         )
         (toy / "docs" / "architecture").mkdir(parents=True)
         (toy / "docs" / "conf.py").write_text(STARTER_CONF, encoding="utf-8")
-        code, text = run(capsys, "--json", "init", "--force")
+        code, text = run(capsys, "--json", "init", "--host-install", "--force")
         assert code == 0, text
         assert json.loads(text)["ecosystems"] == ["python"]
 
@@ -160,7 +160,7 @@ class TestAnExistingProjectIsUnchanged:
         manifest = toy / MANIFEST_RELPATH
         manifest.parent.mkdir(parents=True)
         manifest.write_text("version: 1\nproject: [\n", encoding="utf-8")
-        code, text = run(capsys, "init", "--force", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--force", "--ecosystem", "python")
         assert code == 0, text
         assert (toy / "docs" / "conf.py").is_file()
         assert not (toy / "invariant-docs").exists()
@@ -235,7 +235,7 @@ class TestDetection:
         assert not SphinxAdapter(docs_srcdir=Path("docs")).detect(Path("."))
 
     def test_init_detects_it_and_writes_its_docs_project_beside_it(self, handbook, capsys):
-        code, text = run(capsys, "--json", "init", "--name", "handbook")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "handbook")
         assert code == 0, text
         assert json.loads(text)["ecosystems"] == ["sphinx"]
         m = Manifest.locate(handbook)

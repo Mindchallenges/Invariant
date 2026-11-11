@@ -1203,3 +1203,117 @@ two questions those rulings raised were ruled the same day (rulings 21 and
   and context. It does not block, because the change reached the store's main
   line through another session's gates. This matches ADR-015 ruling 2, under which
   a CI edit never silently changes a gate.
+
+As built: increment 3 (2026-11-11)
+----------------------------------
+
+D11 for Claude Code, as :need:`DEC_ADR_020_D9` amends it, as the architecture
+docs describe it (``manifest.rst``, "Records and their locations";
+``cli.rst``, ``init``, ``hooks install``, ``uninstall``, ``doctor``, ``store
+link`` and ``session isolate``; ``overview.rst``, ``hosts/claude_code_wiring``
+and "Where things live at rest"; ``state_model.rst``, "Storage layout"). Where
+the build settles what the text left open:
+
+.. dec:: ADR-014 increment 3 as built: local wiring, its receipt, and init's question
+   :id: DEC_ADR_014_I3
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :amends: DEC_ADR_020
+   :affects: COMP_HOSTS_CLAUDE_CODE, COMP_HOSTS_CLAUDE_CODE_WIRING, COMP_CORE_MANIFEST, COMP_CORE_STORES, COMP_CMD_SETUP, COMP_CMD_SESSION, COMP_CORE_RULES
+
+   - **One module says where.** ``hosts/claude_code_wiring`` holds
+     ``wiring_plan(root, location, store_root)``, the receipt, and the edits
+     to the settings file and to ``.git/info/exclude``.
+     ``ClaudeCodeHost.wiring_plan(location)`` is the adapter's half of the
+     neutral seam: it reads ``records.hooks`` and ``records.agents`` and hands
+     the store's main checkout in, so ``core/manifest`` still knows nothing of
+     hosts. The two records are read separately, so a project may wire its
+     hooks ``local`` and keep committed agents, or the reverse.
+   - **``user`` is refused naming its fix.** ``records.hooks: user`` and
+     ``records.agents: user`` fail at load with "user is retired (ADR-020 D9)"
+     and both locations that remain, ``local`` and ``repo``.
+   - **A receipt for ``local`` only.** ``repo`` wiring is tracked, and git is
+     its record, so a ``repo`` install writes no receipt and uninstall keeps
+     recognising its entries by the shim path, as before. invariant and Heap
+     are therefore unchanged.
+   - **Byte for byte, by comparison rather than by copy.** The receipt keeps
+     the settings file's and the exclude file's text from before invariant
+     first touched them. Uninstall removes exactly the receipt's entries,
+     lines and files; when what remains equals that earlier content, the
+     earlier bytes are written back, and when the file did not exist and
+     nothing else is left, it is removed. A key or line the user added since
+     survives, and the file is then written in its normal form. A second
+     install adds nothing already present and writes nothing.
+   - **What stays, stays hidden.** An agent edited since install is left,
+     named by uninstall, and keeps its exclude line, so ``git status`` does
+     not start showing it. A ``settings.local.json`` invariant created that
+     still holds the user's own keys stays, with its line. Both stay on the
+     receipt, so a later uninstall, once the user has removed the file, takes
+     the line too.
+   - **Exclude lines are anchored paths**, one per file (``/.claude/settings.local.json``,
+     ``/.claude/hooks/invariant-<event>.sh``, ``/.claude/agents/<name>.md``),
+     so a line covers the main checkout and every session worktree alike, and
+     never a file the user has of their own elsewhere under ``.claude/``.
+   - **Rendering into a worktree** is the CLI's step after ``session isolate
+     --execute`` creates the worktree, since only ``hosts/`` writes host files
+     and ``domains/session`` imports no host. It runs only when the main
+     checkout's receipt holds an install, writes through the same install
+     plan, and records nothing. The rendered files are excluded, so
+     ``git worktree remove`` (teardown) counts the worktree clean.
+   - **Not installed is not broken.** ``doctor``'s ``host wiring`` row passes,
+     naming ``invariant hooks install`` and ``invariant agents install``, when
+     neither hooks nor agents are installed; the shim rows then pass too, and
+     ``agents loadable by host`` does not list absent library agents. Once any
+     library agent is installed, an absent one is a half install and fails as
+     before. ``agents.rendered_current`` and the ``library agents current``
+     row are unchanged: with nothing installed they warn, naming each absent
+     agent and ``invariant agents install``, and never block, so a project
+     that chose not to wire is reminded at each landing and is never stopped.
+   - **No managed block under ``agents: local``.** The CLI's
+     ``host_instruction_files`` answers no default file, so ``guidelines
+     render`` writes no block into a tracked ``CLAUDE.md``, and ``doctor`` and
+     ``guidelines.generated_current`` raise no always-layer gap for it; the
+     turn index carries the always rules. A project that names files in
+     ``guidelines.instruction_files`` still gets them.
+   - **init's question lands here, brought forward from ADR-020's switch.**
+     The user's direction for this increment: "We should not install hooks
+     globally to take over everything in the system so user should tell us if
+     invariant should install the hooks and each project." So ``init`` asks
+     ``host:install`` last, default no, and a non-interactive ``init``
+     installs nothing and names the two commands; ``--host-install`` answers
+     yes. It is asked by ``init`` alone, not from the questionnaire's
+     catalogue, because it writes no configuration: ``hooks install`` and
+     ``agents install`` are its route afterwards. Yes installs where the
+     project as written says. This amends :need:`DEC_ADR_020`'s increments,
+     which listed the question with the switch; the switch keeps the rest of
+     D9's question as it stands (the home section and its order).
+   - **The index is gone.** ``store link`` and ``store link --update`` no longer
+     write ``~/.invariant/linked-repos.txt``, and nothing reads it. A copy an
+     earlier build wrote is inert and may be deleted.
+
+The proof is ``tests/test_adr_014_local_wiring.py``, on a toy repository with
+a scratch ``HOME`` seeded with a user-level Claude Code settings file and the
+suite's scratch ``INVARIANT_HOME``. In a store project with ``hooks`` and
+``agents`` ``local``: ``git status --untracked-files=all`` is empty after
+``hooks install`` and ``agents install``; ``settings.local.json`` holds one
+entry per event and the store's main checkout; a second install changes no
+byte; uninstall gives back a hand-formatted ``settings.local.json`` and the
+exclude file byte for byte, and removes what it created with its
+directories; an agent edited after install is left and named; a setting the
+user added after install survives; ``doctor`` passes local wiring, passes
+not-installed naming the commands, and fails a missing exclude line and a
+missing settings entry; ``session isolate --execute`` renders the wiring into
+the worktree with ``git status`` empty there, and the worktree stays
+removable; each shim answers in both checkouts as the host would call it;
+the scratch ``HOME`` is unchanged throughout; and ``init`` installs nothing
+without ``--host-install`` or a yes. An in-repo project's ``repo`` wiring is
+written as before, with no receipt and no exclude line.
+
+**Owed, live.** No test can start Claude Code. The leg that remains is a real
+host: in a store project wired ``local``, ``claude`` started in the main
+checkout and one started in a session worktree each fire every hook once,
+read the agents, and are granted the store's checkout, while a ``claude``
+started outside the project sees nothing of invariant's. Until that runs,
+whether Claude Code also reads the main checkout's ``settings.local.json``
+from a worktree nested under it (``session.worktree_dir`` inside the
+repository) is reasoned, not run.

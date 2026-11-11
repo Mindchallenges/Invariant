@@ -41,7 +41,7 @@ def wired(project, tmp_path, monkeypatch):
     home = tmp_path / "host"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
     monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", HOST_A)
-    run("init", "--ecosystem", "python")
+    run("init", "--host-install", "--ecosystem", "python")
     run("session", "start", "stats-domain")
     transcript(home, project, HOST_A, [assistant(), assistant(ts="2026-06-24T09:05:00Z")])
     return project

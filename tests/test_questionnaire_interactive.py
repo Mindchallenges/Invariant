@@ -165,7 +165,7 @@ def interactive(monkeypatch):
 
 
 def init(capsys, *extra: str) -> tuple[int, str]:
-    return run(capsys, "init", "--name", "toy", *extra)
+    return run(capsys, "init", "--host-install", "--name", "toy", *extra)
 
 
 def said(keyed: Keyed) -> str:
@@ -733,7 +733,7 @@ class TestInteractiveInit:
     def test_settings_by_hand_is_a_json_field(self, toy, capsys, interactive):
         write_user("# mine\nversion: 1\n")
         interactive(level=["user"], profile=["strict"])
-        code, text = run(capsys, "--json", "init", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
         assert code == 0, text
         (entry,) = json.loads(text)["settings_by_hand"]
         assert entry["path"] == str(user_config_path())
@@ -742,7 +742,7 @@ class TestInteractiveInit:
     def test_without_the_questionnaire_settings_by_hand_is_empty(self, toy, capsys, monkeypatch):
         monkeypatch.setattr(cli_main, "_init_prompter", lambda args: None)
         monkeypatch.setattr(cli_main, "_questionnaire_prompter", lambda args: None)
-        code, text = run(capsys, "--json", "init", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
         assert code == 0, text
         assert json.loads(text)["settings_by_hand"] == []
 

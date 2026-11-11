@@ -261,7 +261,7 @@ class TestTheCommands:
         return root
 
     def setup(self, project: Path, ruleset: str | None = RULESET) -> None:
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         if ruleset is not None:
             write_manifest(project, {
                 "version": 1,

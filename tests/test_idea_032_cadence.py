@@ -932,7 +932,7 @@ class TestTheChildEnvironment:
 
 
 def cli_project(project, capsys, level, schedule=None):
-    assert run("init", "--ecosystem", "python") == 0
+    assert run("init", "--host-install", "--ecosystem", "python") == 0
     suite = project / "fake-suite.sh"
     suite.write_text(FAKE_SUITE, encoding="utf-8")
     cov = project / "fake-cov.sh"

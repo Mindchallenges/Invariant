@@ -127,7 +127,7 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
     monkeypatch.chdir(root)
     monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
-    assert main(["init", "--name", "demo"]) == 0
+    assert main(["init", "--host-install", "--name", "demo"]) == 0
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "manifest"], cwd=root, check=True)
     return root
@@ -862,7 +862,7 @@ class TestTheCommand:
         root.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
         monkeypatch.chdir(root)
-        assert run("init", "--name", "bare") == 0
+        assert run("init", "--host-install", "--name", "bare") == 0
         capsys.readouterr()
         assert run("session", "handoff", "--note", "next: ship it") == 2
         assert "no session" in capsys.readouterr().err

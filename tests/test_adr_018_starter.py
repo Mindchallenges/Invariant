@@ -147,14 +147,14 @@ def conf_namespace(root: Path) -> dict:
 
 class TestNonInteractiveInit:
     def test_it_writes_the_starter_and_no_environment(self, toy_python, capsys):
-        code, text = run(capsys, "init", "--ecosystem", "python", "--name", "toy")
+        code, text = run(capsys, "init", "--host-install", "--ecosystem", "python", "--name", "toy")
         assert code == 0, text
         assert written(toy_python) == STARTER
         assert not (toy_python / SRC / ".venv").exists()
         assert "invariant docs venv" in text
 
     def test_the_manifest_is_enforced_on_the_starter(self, toy_python, capsys):
-        run(capsys, "init", "--ecosystem", "python", "--name", "toy")
+        run(capsys, "init", "--host-install", "--ecosystem", "python", "--name", "toy")
         m = Manifest.locate(toy_python)
         assert m.get("docs.needs.state") == "enforced"
         assert m.get("docs.format") == "sphinx"
@@ -163,7 +163,7 @@ class TestNonInteractiveInit:
         assert m.get("paths.docs") == "invariant-docs/architecture"
 
     def test_dry_run_names_the_same_files_and_writes_nothing(self, toy_python, capsys):
-        code, text = run(capsys, "--json", "init", "--ecosystem", "python", "--dry-run")
+        code, text = run(capsys, "--json", "init", "--host-install", "--ecosystem", "python", "--dry-run")
         assert code == 0, text
         actions = json.loads(text)["actions"]
         named = sorted(
@@ -172,18 +172,18 @@ class TestNonInteractiveInit:
         assert named == STARTER
         assert not (toy_python / SRC).exists() and not (toy_python / "docs").exists()
         assert any("invariant docs venv" in action for action in actions)
-        code, plain = run(capsys, "init", "--ecosystem", "python", "--dry-run")
+        code, plain = run(capsys, "init", "--host-install", "--ecosystem", "python", "--dry-run")
         assert "invariant docs venv" in plain
 
     def test_dry_run_and_no_terminal_name_what_is_written(self, toy_python, capsys):
-        _code, text = run(capsys, "--json", "init", "--ecosystem", "python", "--dry-run")
+        _code, text = run(capsys, "--json", "init", "--host-install", "--ecosystem", "python", "--dry-run")
         dry = json.loads(text)["actions"]
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         for path in written(toy_python):
             assert any(f"write {path}" in action for action in dry), path
 
     def test_json_output_names_the_environment_command(self, toy_python, capsys):
-        _code, text = run(capsys, "--json", "init", "--ecosystem", "python")
+        _code, text = run(capsys, "--json", "init", "--host-install", "--ecosystem", "python")
         data = json.loads(text)
         assert data["docs_venv"] == {
             "created": False,
@@ -192,13 +192,13 @@ class TestNonInteractiveInit:
         }
 
     def test_the_assessment_after_init_finds_no_gap(self, toy_python, capsys):
-        _code, text = run(capsys, "--json", "init", "--ecosystem", "python")
+        _code, text = run(capsys, "--json", "init", "--host-install", "--ecosystem", "python")
         assessment = json.loads(text)["docs_assessment"]
         assert assessment["format"] == "sphinx"
         assert all(not gaps for gaps in assessment["checks"].values()), assessment
 
     def test_an_item_lands_in_the_backlog_page(self, toy_python, capsys):
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         code, text = run(
             capsys, "item", "new", "bug", "--title", "It breaks", "--field", "severity=high"
         )
@@ -211,7 +211,7 @@ class TestNonInteractiveInit:
 class TestTheStartersFiles:
     @pytest.fixture
     def root(self, toy_python, capsys):
-        run(capsys, "init", "--ecosystem", "python", "--name", "toy")
+        run(capsys, "init", "--host-install", "--ecosystem", "python", "--name", "toy")
         return toy_python
 
     def test_conf_py_declares_the_baseline(self, root):
@@ -290,7 +290,7 @@ class TestTheStartersFiles:
 
 class TestFlutter:
     def test_a_flutter_tree_gets_an_element_per_area(self, toy_flutter, capsys):
-        code, text = run(capsys, "init", "--name", "app")
+        code, text = run(capsys, "init", "--host-install", "--name", "app")
         assert code == 0, text
         assert Manifest.locate(toy_flutter).get("project.ecosystems") == ["flutter"]
         assert written(toy_flutter) == STARTER
@@ -305,7 +305,7 @@ class TestWhereTheStarterIsNotWritten:
         overview = toy_python / SRC / "architecture" / "overview.md"
         overview.parent.mkdir(parents=True)
         overview.write_text("# Ours\n", encoding="utf-8")
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert written(toy_python) == [f"{SRC}/architecture/overview.md"]
         m = Manifest.locate(toy_python)
         assert m.get("docs.needs.state") == "migrating"
@@ -317,7 +317,7 @@ class TestWhereTheStarterIsNotWritten:
         conf = toy_python / SRC / "conf.py"
         conf.parent.mkdir()
         conf.write_text("project = 'theirs'\n", encoding="utf-8")
-        code, text = run(capsys, "init", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert code == 0, text
         assert conf.read_text(encoding="utf-8") == "project = 'theirs'\n"
         assert written(toy_python) == [f"{SRC}/conf.py"]
@@ -325,7 +325,7 @@ class TestWhereTheStarterIsNotWritten:
         assert Manifest.locate(toy_python).get("docs.needs.state") == "migrating"
 
     def test_the_markdown_starter_is_retired(self, toy_python, capsys):
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert not any((toy_python / SRC).rglob("*.md"))
         assert not (DATA_DIR / "scaffold" / "architecture-overview.md").exists()
 
@@ -354,7 +354,7 @@ class TestInteractiveInit:
         fake = FakeUv()
         monkeypatch.setattr(docs_domain, "_run", fake)
         monkeypatch.setattr(docs_domain, "_uv", lambda: "/bin/uv")
-        code, text = run(capsys, "init", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert code == 0, text
         venv = toy_python / SRC / ".venv"
         assert fake.calls[0] == ["/bin/uv", "venv", str(venv)]
@@ -367,7 +367,7 @@ class TestInteractiveInit:
     ):
         monkeypatch.setattr(cli_main, "_init_prompter", lambda args: Scripted("not_now"))
         monkeypatch.setattr(docs_domain, "_uv", lambda: None)
-        code, text = run(capsys, "init", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert code == 0, text
         assert written(toy_python) == STARTER
         assert "uv is not on PATH" in text and "invariant docs venv" in text
@@ -375,7 +375,7 @@ class TestInteractiveInit:
     def test_non_interactive_init_runs_no_uv(self, toy_python, capsys, monkeypatch):
         fake = FakeUv()
         monkeypatch.setattr(docs_domain, "_run", fake)
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         assert fake.calls == []
 
 
@@ -459,7 +459,7 @@ class TestMarkdownAdoption:
         docs = toy_python / SRC / "architecture"
         docs.mkdir(parents=True)
         (docs / "overview.md").write_text("# Ours\n", encoding="utf-8")
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         (toy_python / "handbook").mkdir()
         (toy_python / "handbook" / "guide.md").write_text("# Guide\n", encoding="utf-8")
         return toy_python
@@ -474,7 +474,7 @@ class TestMarkdownAdoption:
         assert code == 0, text
 
     def test_copy_into_an_enforced_project_is_refused(self, toy_python, capsys):
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         (toy_python / "handbook").mkdir()
         (toy_python / "handbook" / "guide.md").write_text("# Guide\n", encoding="utf-8")
         code, text = run(capsys, "docs", "adopt", "handbook", "--mode", "copy", "--dry-run")
@@ -496,7 +496,7 @@ class TestTheStarterBuildsStrictly:
     def init_and_build(self, root, capsys, monkeypatch, *argv):
         monkeypatch.setattr(cli_main, "_init_prompter", lambda args: Scripted("not_now"))
         monkeypatch.setattr(docs_domain, "_uv", lambda: shutil.which("uv"))
-        code, text = run(capsys, "init", *argv)
+        code, text = run(capsys, "init", "--host-install", *argv)
         assert code == 0, text
         assert "created the docs environment" in text, text
         assert docs_domain.venv_state(root / SRC).in_sync
@@ -557,9 +557,9 @@ def test_the_conf_py_template_parses():
 
 class TestForceKeepsTheMandate:
     def test_a_forced_reinit_keeps_the_project_enforced(self, toy_python, capsys):
-        run(capsys, "init", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
         before = written(toy_python)
-        code, text = run(capsys, "init", "--force", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--host-install", "--force", "--ecosystem", "python")
         assert code == 0, text
         m = Manifest.locate(toy_python)
         assert m.get("docs.needs.state") == "enforced"
@@ -571,8 +571,8 @@ class TestForceKeepsTheMandate:
 
     def test_a_migrating_project_stays_as_it_was(self, toy_python, capsys):
         (toy_python / SRC / "architecture").mkdir(parents=True)
-        run(capsys, "init", "--ecosystem", "python")
-        run(capsys, "init", "--force", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--ecosystem", "python")
+        run(capsys, "init", "--host-install", "--force", "--ecosystem", "python")
         assert Manifest.locate(toy_python).get("docs.needs.state") == "migrating"
 
 

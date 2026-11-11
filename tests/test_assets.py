@@ -696,7 +696,9 @@ class TestOnePlanEveryKind:
         assert "thing (edited locally)" in detail
 
     def test_the_rows_narrow_to_one_kind_and_name_the_given_repair(self, every_kind):
-        target_of(every_kind, "agent").unlink()
+        # Unloadable rather than absent: with no library agent installed at
+        # all, nothing is missing (ADR-020 D9), so the row would pass.
+        target_of(every_kind, "agent").write_text("no frontmatter\n", encoding="utf-8")
         rows = every_kind.asset_checks(only="agent", repair="invariant agents install")
         assert {name for name, _, _ in rows} == {
             "agents loadable by host",
@@ -727,7 +729,7 @@ def initialised(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     (root / "docs" / "architecture").mkdir(parents=True)
     monkeypatch.chdir(root)
-    assert main(["init", "--name", "demo"]) == 0
+    assert main(["init", "--host-install", "--name", "demo"]) == 0
     return root
 
 

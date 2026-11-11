@@ -155,7 +155,7 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
     monkeypatch.chdir(root)
     monkeypatch.delenv("INVARIANT_SESSION_ID", raising=False)
-    assert main(["init", "--ecosystem", "python"]) == 0
+    assert main(["init", "--host-install", "--ecosystem", "python"]) == 0
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "adopt"], cwd=root, check=True)
     return root

@@ -74,9 +74,9 @@ class TestValidation:
             resolve({"records": {"manifest": "store"}}, tmp_path)
 
     @pytest.mark.parametrize("key", ["hooks", "agents"])
-    def test_user_level_wiring_is_refused_until_it_is_built(self, tmp_path, key):
-        """D11 lands in increment 3; until then `user` would wire nothing."""
-        with pytest.raises(ManifestError, match="increment 3"):
+    def test_user_level_wiring_is_retired(self, tmp_path, key):
+        """ADR-020 D9 replaced D11's user-level wiring before it was built."""
+        with pytest.raises(ManifestError, match="retired"):
             resolve({"records": {key: "user"}}, tmp_path)
 
     def test_the_guidelines_records_are_refused_under_a_store(self, tmp_path):

@@ -300,7 +300,7 @@ class TestTheCommands:
         return next(ln for ln in out(capsys).splitlines() if "guidelines generated" in ln)
 
     def test_doctor_without_a_ruleset_passes_the_row(self, project, capsys):
-        run("init", "--ecosystem", "python")
+        run("init", "--host-install", "--ecosystem", "python")
         capsys.readouterr()
         run("doctor")
         assert "no guidelines ruleset configured" in self.doctor_row(capsys)

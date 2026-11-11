@@ -72,7 +72,7 @@ def test_BUG_059_doctor_does_not_spend_the_callers_host_binding(
     monkeypatch.chdir(root)
 
     # 1. init, commit, start a session with the host id exported.
-    main(["init", "--ecosystem", "python"])
+    main(["init", "--host-install", "--ecosystem", "python"])
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
     main(["session", "start", "x"])

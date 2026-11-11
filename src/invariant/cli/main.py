@@ -708,6 +708,53 @@ def _questionnaire_prompter(args):
     return prompts.TerminalPrompter() if prompts.interactive(args) else None
 
 
+def _host_install_prompter(args):
+    """Who answers `init`'s `host:install` question (ADR-020 D9): a terminal,
+    or nobody. The seam beside ``_init_prompter``; ``None`` installs nothing
+    unless ``--host-install`` said yes."""
+    from . import prompts
+
+    return prompts.TerminalPrompter() if prompts.interactive(args) else None
+
+
+#: The `host:install` question, asked last (ADR-020 D4, D9), and its answers.
+HOST_INSTALL_QUESTION = "Install invariant's hooks and agents in this project?"
+_HOST_INSTALL_NO = (
+    "install nothing now; 'invariant hooks install' and 'invariant agents "
+    "install' wire it later"
+)
+_HOST_INSTALL_YES = (
+    "wire this project's own .claude/, where records.hooks and records.agents "
+    "say (repo: committed; local: kept out of git)"
+)
+
+
+def _init_host_install(args) -> bool:
+    """Whether `init` installs the hooks and agents: ``--host-install``, else
+    the user's answer, default no in every mode. Nothing is installed without
+    the user saying so, and never at user level (ADR-020 ruling 8)."""
+    if getattr(args, "host_install", False):
+        return True
+    asker = _host_install_prompter(args)
+    if asker is None:
+        return False
+    answer = asker.choose(
+        HOST_INSTALL_QUESTION,
+        [("no", _HOST_INSTALL_NO), ("yes", _HOST_INSTALL_YES)],
+        "no",
+    )
+    return answer == "yes"
+
+
+def _not_installed_line() -> str:
+    from ..hosts.claude_code import INSTALL_COMMANDS
+
+    return (
+        "hooks and agents not installed (you were asked, default no); to wire "
+        "this project: " + " and ".join(INSTALL_COMMANDS)
+    )
+
+
 def _init_body(name: str, ecosystems: list[str], settings: Mapping[str, Any]) -> str:
     """The in-repo manifest `init` writes: the project block, then each
     top-level block of ``settings`` (ADR-017 D5), then init's own comment.
@@ -1143,8 +1190,12 @@ def cmd_init(args) -> int:
     if store is None and (starter is not None or mandate):
         settings = _over(settings, starter.settings if starter is not None else mandate)
         body = _init_body(name, ecosystems, settings)
+    install = _init_host_install(args)
     host = ClaudeCodeHost(root)
-    actions.extend(host.plan_install())
+    if install:
+        actions.extend(host.plan_install())
+    else:
+        actions.append(_not_installed_line())
     actions.append("add the state root to .gitignore")
     actions.append("register this project in the oracle index")
     venv = None
@@ -1172,6 +1223,7 @@ def cmd_init(args) -> int:
             "docs_assessment": report,
             "notes": eco_notes + notes_after,
             "docs_venv": venv,
+            "host_install": _host_install_payload(install),
         }
         text = (
             "would:\n"
@@ -1212,7 +1264,6 @@ def cmd_init(args) -> int:
     if store is None:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(body, encoding="utf-8")
-    host.install()
 
     gitignore = root / ".gitignore"
     marker = ".claude/invariant/state/"
@@ -1246,6 +1297,9 @@ def cmd_init(args) -> int:
                 )
 
     JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
+    resolved = _init_resolved(root, manifest_path, body, written=True)
+    if install:
+        _init_install(root, resolved)
     registration = _register_after_init(root)
     note = (
         f"\n\nNot registered in the oracle index: {registration['error']}\n"
@@ -1254,7 +1308,6 @@ def cmd_init(args) -> int:
         else ""
     )
 
-    resolved = _init_resolved(root, manifest_path, body, written=True)
     assessment, report = _init_assessment(resolved)
     if docs.mode is not None:
         after = _init_onboarding(docs.mode, root, assessment, report)
@@ -1282,6 +1335,7 @@ def cmd_init(args) -> int:
         "store_settings_by_hand": by_hand,
         "settings_by_hand": by_hand_settings,
         "docs_venv": venv,
+        "host_install": _host_install_payload(install),
     }
     # Each core question's resolved value and where it came from (ADR-017
     # D9), after everything else. Only where nothing was asked.
@@ -1305,6 +1359,29 @@ def cmd_init(args) -> int:
         + note
         + "".join(f"\n\n{text}" for text in after if text),
     )
+
+
+def _host_install_payload(installed: bool) -> dict:
+    from ..hosts.claude_code import INSTALL_COMMANDS
+
+    return {"installed": installed, "commands": [] if installed else list(INSTALL_COMMANDS)}
+
+
+def _init_install(root: Path, resolved) -> None:
+    """The hooks and agents, once the user said yes, wired where the project
+    as written says (`records.hooks` and `records.agents`), so a `local`
+    project's wiring is kept out of git with its receipt (ADR-014 D11).
+
+    ``resolved`` is the project as written, or the refusal that stopped it
+    resolving; then the committed wiring of every shipped agent is
+    installed, as `init` always did, since the project is initialised by
+    the time it asks and the refusal is reported with the rest."""
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    if isinstance(resolved, InvariantError):
+        ClaudeCodeHost(root).install()
+        return
+    ClaudeCodeHost(resolved.root, manifest=resolved).install()
 
 
 def _init_starter(root: Path, manifest_path: Path, body: str, name: str, docs: _InitDocs):
@@ -2301,13 +2378,21 @@ def cmd_hooks_install(args) -> int:
     from ..hosts.claude_code import ClaudeCodeHost
 
     ctx = Context()
-    host = ClaudeCodeHost(ctx.manifest.root)
+    host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
     written = host.install_hooks()
+    plan = host.wiring_plan(host.hooks_location)
+    settings = plan.settings.relative_to(plan.root).as_posix()
     return emit(
         args,
-        {"installed": written},
+        {"installed": written, "location": plan.location, "settings": settings},
         "hook shims: " + (", ".join(written) if written else "all already current")
-        + "\n  settings wiring refreshed"
+        + f"\n  wired in {settings} (records.hooks: {plan.location})"
+        + (
+            ""
+            if plan.committed
+            else "\n  each path listed in .git/info/exclude; 'invariant uninstall' "
+            "takes exactly this back out"
+        )
         + "\n  verify they actually RUN: invariant doctor",
     )
 
@@ -2324,7 +2409,7 @@ def cmd_uninstall(args) -> int:
     from ..hosts.claude_code import ClaudeCodeHost
 
     ctx = Context(required=False)
-    loaded = ctx.manifest.path.is_file()
+    loaded = ctx.manifest.path.is_file() or ctx.manifest.store is not None
     root = ctx.manifest.root if loaded else ctx.cwd
     host = ClaudeCodeHost(root, manifest=ctx.manifest if loaded else None)
 
@@ -2350,6 +2435,26 @@ def cmd_uninstall(args) -> int:
         lines.append(f"  kept    {label} (edited locally — your work, not ours)")
     if plan["manifest"] is not None:
         lines.append(f"{verb} {plan['manifest'].name}")
+    local = plan["local"]
+    if local is not None:
+        # The local wiring's receipt (ADR-014 D11): exactly what it added.
+        if local["settings"]:
+            lines.append(
+                f"{verb} invariant's entries from {local['settings']}"
+                + (f"  ({', '.join(local['wired'])})" if local["wired"] else "")
+                + "  — yours are untouched"
+            )
+        lines.append(f"{verb} {len(local['files'])} local file(s) invariant wrote")
+        lines += [f"    {rel}" for rel in local["files"]]
+        if local["exclude"]:
+            lines.append(
+                f"{verb} invariant's {len(local['exclude'])} line(s) from .git/info/exclude"
+            )
+        for rel in local["edited"]:
+            lines.append(
+                f"  kept    {rel} (edited since it was installed — your work; its "
+                f"exclude line stays)"
+            )
 
     # Named, always. What survives is the operator's data, and a removal that
     # does not say what it left behind invites the reader to assume it took
@@ -2358,7 +2463,15 @@ def cmd_uninstall(args) -> int:
     if plan["manifest"] is None:
         lines.append("    .claude/invariant.yaml            (--remove-manifest to drop it)")
     if not args.remove_assets:
-        lines.append("    .claude/agents/, commands/, skills/  (--remove-assets to drop them)")
+        local_agents = local is not None and any(
+            rel.startswith(".claude/agents/") for rel in local["files"]
+        )
+        lines.append(
+            "    .claude/commands/, skills/ and any committed agents  (--remove-assets "
+            "to drop them)"
+            if local_agents
+            else "    .claude/agents/, commands/, skills/  (--remove-assets to drop them)"
+        )
     lines.append("    the state directory, with its session records")
     lines.append("    work items, memories and architecture docs")
     if not args.dry_run:
@@ -2373,6 +2486,7 @@ def cmd_uninstall(args) -> int:
             "assets": [str(p) for p in plan["assets"]],
             "kept": plan["protected"],
             "manifest": str(plan["manifest"]) if plan["manifest"] else None,
+            "local": plan["local"],
         },
         "\n".join(lines),
     )
@@ -2710,14 +2824,12 @@ def _store_repo(start: Path | None = None) -> Path:
 
 def _linked_lines(linked) -> list[str]:
     from ..core.home import display_path, user_config_path
-    from ..core.stores import linked_index_path
 
     identity = linked.identity
     return [
         f"linked {linked.key} ({identity.source}) -> {linked.store}",
         f"  invariant.id {identity.local_id} in the repository's local git config",
         f"  repos entry in {display_path(user_config_path())}",
-        f"  identity index {display_path(linked_index_path())}",
     ]
 
 
@@ -2909,8 +3021,34 @@ def cmd_session_isolate(args) -> int:
     session = ctx.require_session()
     plan = ctx.sessions.isolate(session.id, execute=args.execute)
     if args.execute:
-        return emit(args, plan, f"isolated into {plan['worktree']} on {plan['branch']}")
+        rendered = _render_local_wiring(ctx, Path(plan["worktree"]))
+        plan["rendered"] = rendered
+        text = f"isolated into {plan['worktree']} on {plan['branch']}"
+        if rendered:
+            text += (
+                f"\n  rendered this clone's local {' and '.join(rendered)} into it "
+                f"(records.hooks/agents: local)"
+            )
+        return emit(args, plan, text)
     return emit(args, plan, plan.get("command", ""))
+
+
+def _render_local_wiring(ctx: Context, worktree: Path) -> list[str]:
+    """Render the main checkout's `local` wiring into a new worktree.
+
+    A worktree holds only committed files, so a project wired `local` would
+    have no hooks and no agents there (ADR-020 D9). Only `hosts/` writes host
+    files, so the domain creates the worktree and the CLI asks the host to
+    render into it. Nothing when the clone has no local install on record.
+    """
+    if ctx.manifest.get("host.kind") != "claude_code":
+        return []
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
+    if not host.local_installed():
+        return []
+    return host.render_into(worktree)
 
 
 def cmd_session_status(args) -> int:
@@ -4803,6 +4941,12 @@ def host_instruction_files(manifest) -> tuple[str, ...]:
     """
     from ..hosts.claude_code import ClaudeCodeHost
 
+    # Under `records.agents: local` nothing of invariant's is committed, so no
+    # managed block goes into a tracked instruction file; the always rules
+    # reach the agent through the hook context (ADR-014 D11). A project that
+    # names its files in `guidelines.instruction_files` still gets them.
+    if manifest.get("records.agents") == "local":
+        return ()
     if manifest.get("host.kind") == "claude_code":
         return ClaudeCodeHost.INSTRUCTION_FILES
     return ()
@@ -6682,13 +6826,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # init / doctor / config
-    p = sub.add_parser("init", help="write a manifest and install host shims")
+    p = sub.add_parser(
+        "init", help="write a manifest; install host hooks and agents only when asked"
+    )
     p.add_argument("--root")
     p.add_argument("--name")
     p.add_argument("--ecosystem")
     p.add_argument("--profile")
     p.add_argument("--force", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--host-install",
+        action="store_true",
+        help="install invariant's hooks and agents in this project (asked, default no)",
+    )
     p.set_defaults(func=cmd_init)
 
     sub.add_parser(

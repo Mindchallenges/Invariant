@@ -196,7 +196,7 @@ def interactive(monkeypatch):
 
 
 def init(capsys, *extra: str) -> tuple[int, str]:
-    return run(capsys, "init", "--ecosystem", "generic", "--name", "toy", *extra)
+    return run(capsys, "init", "--host-install", "--ecosystem", "generic", "--name", "toy", *extra)
 
 
 def area_gaps(assessment: dict) -> list[str]:
@@ -570,7 +570,7 @@ class TestNonInteractiveInit:
         if shape == "unrelated":
             (toy / SRC / "architecture").mkdir(parents=True)
         code, text = run(
-            capsys, "--json", "init", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
         assert code == 0, text
         payload = json.loads(text)
@@ -593,7 +593,7 @@ class TestNonInteractiveInit:
         assert tree(toy) == before
         assert "docs assessment:" in text
         code, text = run(
-            capsys, "--json", "init", "--ecosystem", "generic", "--name", "toy", "--dry-run"
+            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy", "--dry-run"
         )
         payload = json.loads(text)
         assert "beta" in area_gaps(payload["docs_assessment"])
@@ -607,7 +607,7 @@ class TestNonInteractiveInit:
 
         monkeypatch.setattr("invariant.domains.docs.assess", broken)
         code, text = run(
-            capsys, "--json", "init", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
         assert code == 0, text
         assert "cannot be read" in json.loads(text)["docs_assessment"]["error"]
@@ -793,7 +793,7 @@ class TestLocationOffer:
         store = self.commented_store(unrelated, tmp_path)
         interactive("store", str(store), "", "not_now")
         code, text = run(
-            capsys, "--json", "init", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
         assert code == 0, text
         by_hand = json.loads(text)["store_settings_by_hand"]
@@ -812,7 +812,7 @@ class TestLocationOffer:
     ):
         interactive("store", "", "", "not_now")
         code, text = run(
-            capsys, "--json", "init", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
         assert code == 0, text
         assert json.loads(text)["store_settings_by_hand"] is None

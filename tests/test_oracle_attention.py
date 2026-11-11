@@ -759,7 +759,7 @@ class TestCliRefusal:
             ["config", "user.name", "T"],
         ):
             subprocess.run(["git", *argv], cwd=project, check=True, capture_output=True)
-        assert main(["init", "--name", "demo"]) == 0
+        assert main(["init", "--host-install", "--name", "demo"]) == 0
         subprocess.run(["git", "add", "-A"], cwd=project, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-qm", "i"], cwd=project, check=True, capture_output=True

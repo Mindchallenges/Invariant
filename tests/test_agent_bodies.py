@@ -260,7 +260,7 @@ def project(tmp_path, monkeypatch):
     root = tmp_path / "proj"
     (root / "invariant-docs" / "architecture").mkdir(parents=True)
     monkeypatch.chdir(root)
-    assert main(["init", "--name", "demo"]) == 0
+    assert main(["init", "--host-install", "--name", "demo"]) == 0
     return root
 
 

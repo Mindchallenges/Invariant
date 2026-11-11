@@ -676,7 +676,7 @@ class TestNonInteractiveInit:
     def test_writes_todays_manifest_and_adds_the_core_list_after_the_report(
         self, toy, capsys
     ):
-        code, text = run(capsys, "init", "--name", "toy")
+        code, text = run(capsys, "init", "--host-install", "--name", "toy")
         assert code == 0, text
         assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST
         assessment = text.index("docs assessment:")
@@ -692,9 +692,9 @@ class TestNonInteractiveInit:
         """Text, --json, and a report that could not resolve: one tree, today's."""
         trees = []
         for name, argv in (
-            ("text", ["init", "--name", "toy"]),
-            ("json", ["--json", "init", "--name", "toy"]),
-            ("broken", ["init", "--name", "toy"]),
+            ("text", ["init", "--host-install", "--name", "toy"]),
+            ("json", ["--json", "init", "--host-install", "--name", "toy"]),
+            ("broken", ["init", "--host-install", "--name", "toy"]),
         ):
             root = make_repo(tmp_path / name, origin=None)
             monkeypatch.chdir(root)
@@ -714,7 +714,7 @@ class TestNonInteractiveInit:
         assert trees[0] == trees[1] == trees[2]
 
     def test_json_carries_the_configuration_field(self, toy, capsys):
-        code, text = run(capsys, "--json", "init", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
         assert code == 0, text
         payload = json.loads(text)
         assert [row["key"] for row in payload["configuration"]] == CORE_KEYS
@@ -728,7 +728,7 @@ class TestNonInteractiveInit:
 
     def test_the_field_matches_config_show_for_every_listed_key(self, toy, capsys):
         write_user({"version": 1, "defaults": {"methodology": {"gates": {"coverage_min": 80}}}})
-        code, text = run(capsys, "--json", "init", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
         assert code == 0, text
         listed = configuration(json.loads(text))
         code, text = run(capsys, "--json", "config", "show")
@@ -746,7 +746,7 @@ class TestNonInteractiveInit:
 
     def test_a_user_level_floor_is_shown_with_its_user_label_in_text(self, toy, capsys):
         write_user({"version": 1, "defaults": {"methodology": {"gates": {"coverage_min": 85}}}})
-        code, text = run(capsys, "init", "--name", "toy")
+        code, text = run(capsys, "init", "--host-install", "--name", "toy")
         assert code == 0, text
         row = next(
             line for line in text.splitlines() if line.strip().startswith("methodology.gates.coverage_min")
@@ -758,12 +758,12 @@ class TestNonInteractiveInit:
         self, toy, capsys
     ):
         before = tree(toy)
-        code, text = run(capsys, "init", "--name", "toy", "--profile", "strict", "--dry-run")
+        code, text = run(capsys, "init", "--host-install", "--name", "toy", "--profile", "strict", "--dry-run")
         assert code == 0, text
         assert tree(toy) == before
         row = next(line for line in text.splitlines() if line.strip().startswith("enforcement.profile"))
         assert row.split()[1:] == ["strict", "repo:.claude/invariant.yaml"]
-        code, text = run(capsys, "--json", "init", "--name", "toy", "--dry-run")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy", "--dry-run")
         assert code == 0, text
         assert [row["key"] for row in json.loads(text)["configuration"]] == CORE_KEYS
         assert tree(toy) == before
@@ -775,10 +775,10 @@ class TestNonInteractiveInit:
             raise ManifestError("the catalogue cannot be read")
 
         monkeypatch.setattr("invariant.core.questionnaire.load_catalogue", broken)
-        code, text = run(capsys, "init", "--name", "toy", "--dry-run")
+        code, text = run(capsys, "init", "--host-install", "--name", "toy", "--dry-run")
         assert code == 0, text
         assert "configuration not resolved: the catalogue cannot be read" in text
-        code, text = run(capsys, "--json", "init", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
         assert code == 0, text
         assert "cannot be read" in json.loads(text)["configuration"]["error"]
 
@@ -787,7 +787,7 @@ class TestNonInteractiveInit:
             raise ManifestError("the manifest cannot be read")
 
         monkeypatch.setattr("invariant.core.manifest.Manifest.locate", broken)
-        code, text = run(capsys, "--json", "init", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
         assert code == 0, text
         payload = json.loads(text)
         assert "cannot be read" in payload["configuration"]["error"]
@@ -807,7 +807,7 @@ class TestInteractiveInitIsUnchanged:
                 return default
 
         monkeypatch.setattr("invariant.cli.main._init_prompter", lambda args: Accepting())
-        code, text = run(capsys, "init", "--name", "toy")
+        code, text = run(capsys, "init", "--host-install", "--name", "toy")
         assert code == 0, text
         assert "configuration (core questions):" not in text
         assert (toy / MANIFEST_RELPATH).read_text(encoding="utf-8") == STARTER_MANIFEST

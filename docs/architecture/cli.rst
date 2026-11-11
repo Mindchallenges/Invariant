@@ -96,11 +96,15 @@ Conventions
 
   **A fourth class: host assets.** The host adapter installs files where
   its host reads them: for Claude Code, the hook shims under
-  ``.claude/hooks/``, this library's entries in ``.claude/settings.json``, and
-  the managed agents, commands and skills under ``.claude/``. Only ``init``,
-  ``hooks install``, ``agents install`` and ``assets install`` write them, and
-  ``uninstall`` removes them. In the settings file the class is only the
-  entries the library wired; every other key is the project's. A managed
+  ``.claude/hooks/``, this library's entries in ``.claude/settings.json``
+  (``records.hooks: repo``) or ``.claude/settings.local.json`` (``local``),
+  and the managed agents, commands and skills under ``.claude/``. Only
+  ``init`` (when the user says yes), ``hooks install``, ``agents install`` and
+  ``assets install`` write them, and ``uninstall`` removes them. Under
+  ``local`` each file is listed in the clone's ``.git/info/exclude`` and
+  recorded in a receipt in the state root (ADR-014 D11). In the settings file
+  the class is only the entries the library wired; every other key is the
+  project's. A managed
   asset an operator has edited is the operator's and is never rewritten
   unasked ("A managed file the operator has edited", below). Unlike a
   generated file, a host asset is a host's own wiring rather than a
@@ -132,10 +136,27 @@ Setup
 ::
 
    invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
-       Write a manifest, install shims, wire host settings, create the state root,
-       and add the state root to .gitignore. Refuses to clobber an existing
-       manifest without --force; prints a diff of what it would change with
-       --dry-run.
+                  [--host-install]
+       Write a manifest, create the state root, and add the state root to
+       .gitignore; install the hook shims, the host settings wiring and the
+       library agents only when the user says so (below). Refuses to clobber an
+       existing manifest without --force; prints a diff of what it would change
+       with --dry-run.
+
+       Built (ADR-020 D9, with ADR-014 increment 3; DEC_ADR_014_I3): the
+       `host:install` question. Last, init asks "Install invariant's hooks and
+       agents in this project?", default no in every mode; nothing is ever
+       installed at user level. It is asked through its own seam,
+       `_host_install_prompter`, only where a run may ask
+       (`prompts.interactive`), and it is not a catalogue question: it writes
+       no configuration. A non-interactive init installs nothing, and its
+       report names `invariant hooks install` and `invariant agents install`;
+       `--host-install` answers yes, from a script or with `--dry-run`, whose
+       actions then list the install. Yes installs after every other write,
+       where the project as written says (`records.hooks` and
+       `records.agents`: committed under `repo`, kept out of git with a
+       receipt under `local`). `--json` carries `host_install`:
+       {"installed", "commands"}, the commands empty once installed.
 
        Where the docs directory (`paths.docs`: `invariant-docs/architecture`
        for a new project, ADR-020 D8; an existing manifest's own, or
@@ -343,18 +364,13 @@ Setup
        is said on the report's `home` row. The default holds in every mode:
        a non-interactive init with no flags writes the store project, and
        `--home repo` (or `--set home:location=repo`) the in-repo layout;
-       `--store <path>` answers the store step. Last, `host:install` asks whether to install invariant's hooks and
-       agents in this project, default no in every mode (ADR-020 D9);
-       `--host-install` answers yes. Yes wires `repo` (committed, as above)
-       or `local`: `.claude/settings.local.json`, `.claude/hooks/` and
-       `.claude/agents/`, each listed in `.git/info/exclude`, with a receipt
-       in the state root. Nothing is ever installed at user level. The
-       configuration report opens with a `home` row, names the other route
-       (`init --home repo`, later `store migrate --to repo`) and, with no
-       install, `invariant hooks install` and `invariant agents install`;
-       `--json` carries `home`: {"location", "store", "reason"}. Until the
-       switch, the in-repo layout stays init's default and init installs
-       as before.
+       `--store <path>` answers the store step. The `host:install`
+       question, last, is already built (above); under the switch a store
+       project's yes wires `local`. The configuration report opens with a
+       `home` row and names the other route (`init --home repo`, later
+       `store migrate --to repo`); `--json` carries `home`: {"location",
+       "store", "reason"}. Until the switch, the in-repo layout stays init's
+       default.
 
        Built (ADR-020 D8, its increment 1): a new project's docs folder. With
        no `.claude/invariant.yaml` yet, `paths.docs` is
@@ -439,6 +455,21 @@ Setup
        Remove the hook shims, unwire the entries this library added to the host
        settings file, and SAY WHAT IS LEFT BEHIND.
 
+       Built (ADR-014 D11, increment 3): a `local` install is taken back out
+       by its receipt, `<state root>/host/claude_code/installed.json`, which
+       lists each settings entry it added verbatim, each `.git/info/exclude`
+       line it added, each file with its hash, and the directories it
+       created. Uninstall removes exactly those, agents included, and nothing
+       else; when what remains of `settings.local.json` or the exclude file is
+       what it held before the first install, its earlier bytes are written
+       back, and a file the install created is removed once nothing else is
+       in it. A file whose hash no longer matches, an agent the user edited,
+       is left in place and named, and keeps its exclude line; so does a
+       `settings.local.json` invariant created that still holds the user's
+       own keys. `--dry-run` names the receipt's settings entries, exclude
+       lines and files; `--json` carries them as `local`. The committed
+       settings file is rewritten only when it held an entry of ours.
+
        The inverse of `init`, and it exists for the reason `init` does not need
        one stated: adoption was one command and withdrawal was hand surgery —
        delete each shim, then hand-edit the JSON `_wire_settings` merged its
@@ -479,8 +510,9 @@ Setup
        A COMPLETE removal stops reading as broken. `doctor`'s shim check used to
        offer `hooks install` for any absence, pushing back toward the state the
        operator was leaving; where every shim is gone it now says "not installed"
-       and names `invariant init` as the way back. A HALF removal is still
-       reported as broken, because it is.
+       and passes, naming `invariant hooks install` as the way back, since
+       not installing is the user's choice (ADR-020 D9). A HALF removal is
+       still reported as broken, because it is.
 
    invariant doctor
        Check the installation: manifest valid, shims present and executable, host
@@ -498,13 +530,19 @@ Setup
        repository was linked by its local ID and has since gained an origin,
        offering `invariant store link --update`.
 
+       Built (ADR-014 D11 as amended by ADR-020 D9, increment 3). The `host
+       wiring` row names where hooks and agents are wired (`repo`, `local`)
+       or that they are not installed, which passes, naming `invariant hooks
+       install` and `invariant agents install`: not installing is the
+       user's choice. It fails on a receipt entry missing from its file (a
+       settings entry, a granted directory, an exclude line or a file) and on
+       a `local` path missing from .git/info/exclude, which `git status`
+       would then show. With nothing installed the shim rows pass saying
+       so, and `agents loadable by host` lists no absent library agent; once
+       any is installed, an absent one fails as a half install. The hook
+       rows read the settings file `records.hooks` names.
        Accepted, not yet built. ADR-014 D8 names an active
-       `privacy.store.scan` exception; D11, as amended by ADR-020 D9, adds a
-       `host wiring` row: where the project is wired (`repo`, `local` or
-       not installed, which passes, naming `hooks install` and `agents
-       install`), failing on a receipt entry missing from the files or a
-       `local` path missing from .git/info/exclude. Increment 3 builds the
-       D11 row and increment 6 the D8 row.
+       `privacy.store.scan` exception (increment 6).
        ADR-020 D5 adds `config home`, which informs and never fails: the
        in-repo manifest, committed and shared; or the store, its path, that
        a fresh clone or CI is unconfigured until it links the store, "this
@@ -799,7 +837,10 @@ Setup
        classifier loop, a writer and a check of its own.
 
        It installs what agents.library lists, and never touches an agent in
-       agents.local. Each agent is rendered with its overlay, if
+       agents.local. Under `records.agents: local` each agent it writes is
+       listed in `.git/info/exclude` and recorded with its hash in the
+       install receipt (ADR-014 D11), which is how `uninstall` later tells a
+       copy it wrote from one the user has edited. Each agent is rendered with its overlay, if
        agents.overlays names one (ADR-012 D8, A6 increment 3; manifest.md,
        "Agents: the library, the project's own, and overlays"). Each rewritten
        stale copy is named with the input that moved, `updated <name> — the
@@ -871,12 +912,13 @@ Setup
 
    invariant store link [PATH] [--update]
        Link the repository to the store at PATH from the user level: the
-       repos: entry in ~/.invariant/config.yaml, the repository's invariant.id
-       in its local git config (written even when it has a remote, D4), and
-       the linked-identity index ~/.invariant/linked-repos.txt, written for
-       D11's user-level hook shim (ADR-020 D9 replaces that shim, and
-       increment 3 removes the index). Nothing is written to the repository's
-       tracked files, and the other keys of the user config are kept. Refused,
+       repos: entry in ~/.invariant/config.yaml and the repository's
+       invariant.id in its local git config (written even when it has a
+       remote, D4). The linked-identity index, ~/.invariant/linked-repos.txt,
+       written for D11's user-level hook shim, is gone with that shim (ADR-020
+       D9, increment 3); a copy an earlier build wrote is unread. Nothing is
+       written to the repository's tracked files, and the other keys of the
+       user config are kept. Refused,
        writing nothing to the user level, when the store does not list the
        repository under store.repos (the refusal names the line to add) or the
        repository is already linked to another store. Linking again is a no-op.
@@ -1286,6 +1328,15 @@ Session
        `session resume`).
    invariant session isolate            Print the worktree and branch to create,
                                         or create them with --execute.
+       Built (ADR-014 D11, ADR-020 D9, increment 3): when the main checkout
+       has a `local` install on record (its receipt), --execute then renders
+       that wiring into the new worktree, through the same install plan:
+       `.claude/settings.local.json`, the shims and the agents, as
+       `records.hooks` and `records.agents` say. A worktree holds only
+       committed files, so without it a host started there would have no
+       hooks. Nothing is recorded: the exclude lines are shared by every
+       worktree of the clone, and the files go with the worktree. The output
+       names what was rendered; `--json` carries `rendered`.
    invariant session status [--json]
    invariant session transition <state> [--reason <text>] [--force]
        The generic edge-walker. The machine's entry and exit gates for the edge
@@ -3010,7 +3061,12 @@ Host bridge
        Read the host's payload on stdin, evaluate the rules bound to <event>, and
        write the host's expected response on stdout. Events for Claude Code:
        session-start, user-prompt-submit, pre-tool-use, post-tool-use, stop,
-       session-end, notification. `hooks install` wires all seven.
+       session-end, notification. `hooks install` wires all seven, in
+       `.claude/settings.json` under `records.hooks: repo` or
+       `.claude/settings.local.json` under `local`, where it also lists each
+       path in `.git/info/exclude`, grants the store's main checkout in
+       `permissions.additionalDirectories` and records it all in the receipt
+       (ADR-014 D11). A second run adds nothing already wired.
 
        The governing manifest is resolved from CLAUDE_PROJECT_DIR when the host
        supplies it, falling back to the working directory. The host guarantees

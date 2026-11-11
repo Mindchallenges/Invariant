@@ -279,7 +279,7 @@ def project(tmp_path, monkeypatch):
         subprocess.run(argv, cwd=root, check=True)
     monkeypatch.chdir(root)
     monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
-    assert main(["init", "--name", "demo"]) == 0
+    assert main(["init", "--host-install", "--name", "demo"]) == 0
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "manifest"], cwd=root, check=True)
     elsewhere = tmp_path / "elsewhere"

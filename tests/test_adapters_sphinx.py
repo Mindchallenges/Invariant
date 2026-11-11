@@ -508,7 +508,7 @@ class TestInit:
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
         monkeypatch.setenv("INVARIANT_HOME", str(tmp_path / "home"))
         monkeypatch.chdir(root)
-        assert main(["init", "--root", str(root)]) == 0
+        assert main(["init", "--host-install", "--root", str(root)]) == 0
         body = yaml.safe_load((root / ".claude" / "invariant.yaml").read_text())
         assert body["project"]["ecosystems"] == ["sphinx"]
         assert body["vars"] == {"srcdir": "source"}
@@ -529,7 +529,7 @@ class TestInit:
         root = tree(tmp_path / "proj", {"doc/conf.py": "", "source/conf.py": ""})
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
         monkeypatch.setenv("INVARIANT_HOME", str(tmp_path / "home"))
-        assert main(["init", "--root", str(root), "--dry-run"]) == 0
+        assert main(["init", "--host-install", "--root", str(root), "--dry-run"]) == 0
         assert "set vars.srcdir" in capsys.readouterr().out
 
 

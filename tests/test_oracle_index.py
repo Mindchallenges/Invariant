@@ -463,7 +463,7 @@ class TestInitRegisters:
     def test_init_registers_the_project(self, repo, monkeypatch, capsys, home):
         (repo / MANIFEST_RELPATH).unlink()
         monkeypatch.chdir(repo)
-        assert run("init", "--ecosystem", "python", "--json") == 0
+        assert run("init", "--host-install", "--ecosystem", "python", "--json") == 0
         result = last_json(capsys)
         (row,) = stored(home)["projects"]
         assert row["via"] == "init"
@@ -475,7 +475,7 @@ class TestInitRegisters:
     ):
         (repo / MANIFEST_RELPATH).unlink()
         monkeypatch.chdir(repo)
-        assert run("init", "--dry-run") == 0
+        assert run("init", "--host-install", "--dry-run") == 0
         assert "oracle index" in capsys.readouterr().out
         assert not home.exists()
 
@@ -486,7 +486,7 @@ class TestInitRegisters:
         home.parent.mkdir(parents=True, exist_ok=True)
         home.write_text("a file where a directory belongs", encoding="utf-8")
         monkeypatch.chdir(repo)
-        assert run("init", "--ecosystem", "python") == 0
+        assert run("init", "--host-install", "--ecosystem", "python") == 0
         out = capsys.readouterr().out
         assert "initialised" in out
         assert "Not registered in the oracle index" in out
@@ -499,7 +499,7 @@ class TestInitRegisters:
         home.parent.mkdir(parents=True, exist_ok=True)
         home.write_text("x", encoding="utf-8")
         monkeypatch.chdir(repo)
-        assert run("init", "--ecosystem", "python", "--json") == 0
+        assert run("init", "--host-install", "--ecosystem", "python", "--json") == 0
         assert "error" in last_json(capsys)["oracle"]
 
 
@@ -509,7 +509,7 @@ class TestSessionStartRegisters:
     @pytest.fixture
     def initialised(self, repo, monkeypatch, capsys, home):
         monkeypatch.chdir(repo)
-        assert run("init", "--ecosystem", "python", "--force") == 0
+        assert run("init", "--host-install", "--ecosystem", "python", "--force") == 0
         (home / INDEX_FILE).unlink()
         capsys.readouterr()
         return repo

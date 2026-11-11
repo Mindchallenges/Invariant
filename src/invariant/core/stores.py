@@ -42,11 +42,6 @@ STORE_MANIFEST = "invariant.yaml"
 #: The repo pointer, at the repo's root (D3, 5c).
 POINTER = ".invariant.yaml"
 
-#: The plain-text index of linked identities, beside the user config. A
-#: user-level hook shim (D11) reads it to tell a linked repo from any other
-#: without starting Python.
-LINKED_INDEX = "linked-repos.txt"
-
 #: Where stores are created by default, inside the home.
 STORES_DIR = "stores"
 
@@ -376,20 +371,6 @@ def _write_user(raw: Mapping[str, Any], env: Mapping[str, str] | None) -> None:
     load_user_config(env)
 
 
-def linked_index_path(env: Mapping[str, str] | None = None) -> Path:
-    return invariant_home(env) / LINKED_INDEX
-
-
-def _add_to_index(names: list[str], env: Mapping[str, str] | None) -> None:
-    path = linked_index_path(env)
-    known: set[str] = set()
-    if path.is_file():
-        known = {line.strip() for line in path.read_text(encoding="utf-8").splitlines()}
-    known |= {name for name in names if name}
-    known.discard("")
-    _write_atomic(path, "".join(f"{name}\n" for name in sorted(known)))
-
-
 @dataclass(frozen=True)
 class Linked:
     identity: Identity
@@ -401,8 +382,8 @@ class Linked:
 def link_repo(top: Path, store: Path, env: Mapping[str, str] | None = None) -> Linked:
     """Link the repo at ``top`` to the store at ``store`` from the user level.
 
-    Writes ``invariant.id`` if missing, the user level's ``repos`` entry and
-    the linked-identity index. Refused, writing nothing to the user level,
+    Writes ``invariant.id`` if missing and the user level's ``repos`` entry.
+    Refused, writing nothing to the user level,
     when the store does not list the repo or the repo is linked elsewhere.
     """
     root = Path(store).expanduser().resolve()
@@ -426,7 +407,6 @@ def link_repo(top: Path, store: Path, env: Mapping[str, str] | None = None) -> L
     repos[identity.key] = {"store": display_path(root)}
     raw["repos"] = repos
     _write_user(raw, env)
-    _add_to_index([identity.key, identity.local_id or ""], env)
     return Linked(identity=identity, store=root, key=identity.key, added=current is None)
 
 
@@ -458,7 +438,6 @@ def update_link(top: Path, env: Mapping[str, str] | None = None) -> Linked:
     repos[identity.origin] = repos.pop(identity.local_id)
     raw["repos"] = repos
     _write_user(raw, env)
-    _add_to_index([identity.origin], env)
     return Linked(identity=identity, store=root, key=identity.origin, added=False)
 
 

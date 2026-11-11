@@ -841,13 +841,13 @@ class TestARealConversion:
             },
         )
         monkeypatch.chdir(root)
-        assert main(["init", "--ecosystem", "python"]) == 0
+        assert main(["init", "--host-install", "--ecosystem", "python"]) == 0
         env = _real_env()
-        venv = root / "docs" / ".venv"
+        venv = root / "invariant-docs" / ".venv"
         (venv / "bin").mkdir(parents=True, exist_ok=True)
         (venv / "bin" / "sphinx-build").symlink_to(os.environ["INVARIANT_TEST_SPHINX_BUILD"])
         (venv / "lib").symlink_to(env / "lib")
-        digest = hashlib.sha256((root / "docs/requirements.txt").read_bytes()).hexdigest()
+        digest = hashlib.sha256((root / "invariant-docs/requirements.txt").read_bytes()).hexdigest()
         (venv / docs_domain.VENV_HASH).write_text(digest + "\n", encoding="utf-8")
         return root
 
@@ -858,7 +858,7 @@ class TestARealConversion:
             "# Notes\n\nConvertible prose.\n\nA <kbd>raw</kbd> construct.\n", encoding="utf-8"
         )
         assert main(
-            ["docs", "migrate", "prose", str(copy), "--into", str(starter / "docs/architecture")]
+            ["docs", "migrate", "prose", str(copy), "--into", str(starter / "invariant-docs/architecture")]
         ) == 0
         out = capsys.readouterr().out
         assert "1 construct(s) left as .. invariant-unconverted::" in out
@@ -866,14 +866,14 @@ class TestARealConversion:
         record = json.loads(capsys.readouterr().out)
         assert not record["passed"]
         assert any(
-            "docs/architecture/notes.rst" in line and "invariant-unconverted" in line
+            "invariant-docs/architecture/notes.rst" in line and "invariant-unconverted" in line
             for line in record["diagnostics"]
         ), record["diagnostics"]
 
     def test_a_migrated_residue_with_a_semicolon_builds_strictly(self, starter, capsys):
         from invariant.core.items import Item, SphinxNeedsBackend
 
-        SphinxNeedsBackend(starter / "docs/backlog.rst").add(
+        SphinxNeedsBackend(starter / "invariant-docs/backlog.rst").add(
             Item(
                 id="BUG_001",
                 type="bug",
