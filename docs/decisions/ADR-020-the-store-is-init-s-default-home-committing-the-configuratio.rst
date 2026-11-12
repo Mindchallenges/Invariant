@@ -13,7 +13,9 @@ ADR-020 — The store is init's default home; committing the configuration is op
      4 were given by the user on 2026-11-10. Rulings 5 to 8 were given the
      same day, in the user's review of this record's first draft, by
      interview. Ruling 9 was given on 2026-11-11, after increment 1 was
-     built, and D10 carries it out. All are recorded below as decided. Each decision gives the
+     built, and D10 carries it out. Ruling 10 was given on 2026-11-12 as
+     the user's unblock ruling, and D11 carries it out, amending D6 and D5
+     in place. All are recorded below as decided. Each decision gives the
      design that carries out its rulings. Any choice beyond a ruling is
      marked *recommended*. No question is open.
    - **Date:** 2026-11-10
@@ -160,6 +162,19 @@ Ruling at build (user, 2026-11-11):
    amends ADR-012 ruling 1 for new projects only. Existing projects,
    invariant among them, keep ``docs/guidelines/ruleset.yaml`` byte for
    byte.
+
+Ruling at unblock (user, 2026-11-12):
+
+.. _adr-020-ruling-10:
+
+10. **Unblock first: a local manifest.** In the user's words: "invariant
+    does not allow not committing the YAML file in .claude ... some user may
+    want to keep it local", and "Keep the fixes small. So you unblock me
+    first for now, and then later on we proceed with what we planned." An
+    in-repo ``.claude/invariant.yaml`` hidden through ``.git/info/exclude``,
+    like the local hooks, is supported, and ``session isolate`` copies it
+    into each worktree. This amends D6 for the manifest. The store default
+    and its increments continue unchanged.
 
 What was read to write this
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -472,6 +487,12 @@ Decisions
      untracked or git-ignored. No session worktree will hold it, so
      sessions find no project. The row names ``invariant store migrate --to
      store`` as the way to keep the configuration out of git (D6).
+     **Amended 2026-11-12 by** :need:`DEC_ADR_020_D11` **(ruling 10):** a
+     manifest git ignores is the supported local home, and the row passes,
+     saying ``session isolate`` copies it. The row warns only on a manifest
+     git neither tracks nor ignores, naming ``git add`` and the exclude
+     line. The in-repo rows are built; the store and two-homes rows are
+     not.
    - **Warns, two homes:** an in-repo manifest beside a user-level link, or
      beside a store listing this repository's identity. The row names both,
      and the one ``Manifest.locate`` uses (the in-repo manifest, ADR-014
@@ -508,6 +529,12 @@ Decisions
    Only host wiring is ever local (D9). Wiring is rendered from the
    configuration, so a copy of it cannot drift the way a copied manifest
    would.
+
+   **Amended 2026-11-12 by** :need:`DEC_ADR_020_D11` **(ruling 10, the
+   user's unblock ruling):** for the manifest, a git-ignored in-repo
+   ``.claude/invariant.yaml`` is now a supported mode, hidden through
+   ``.git/info/exclude`` and copied into each worktree by ``session
+   isolate``. The rest of ``.claude/`` is unchanged: wiring stays D9's.
 
 .. dec:: The switch lands only after ADR-014's increments 3 to 7
    :id: DEC_ADR_020_D7
@@ -759,6 +786,55 @@ Decisions
    (``tests/test_adr_018_starter.py``, behind
    ``INVARIANT_TEST_SPHINX_BUILD``).
 
+.. dec:: A manifest kept out of git through .git/info/exclude is copied into each worktree
+   :id: DEC_ADR_020_D11
+   :status: accepted
+   :part_of: DEC_ADR_020
+   :amends: DEC_ADR_020_D6, DEC_ADR_020_D5
+   :affects: COMP_CORE_MANIFEST, COMP_CORE_GIT, COMP_DOMAINS_SESSION, COMP_CMD_SESSION, COMP_CMD_SETUP, COMP_CLI_ONBOARDING
+
+   Ruling :ref:`10 <adr-020-ruling-10>`, the user's unblock ruling
+   (2026-11-12). Built with it.
+
+   - **How the user chooses it.** One documented line, no new flag:
+     ``git rm --cached .claude/invariant.yaml`` where it was committed, and
+     ``.claude/invariant.yaml`` added to ``.git/info/exclude``. ``doctor``
+     recognises it. An ``init`` option was not chosen: it would add a flag
+     and a question that ADR-020 increment 3 is about to reshape with
+     ``--home``, and it would not reach an existing project, which is the
+     case that asked.
+   - **What it is.** ``core/manifest.manifest_tracking`` says how git holds
+     the in-repo manifest: ``committed`` at HEAD, ``local`` when untracked
+     and ignored by any ignore source (``core/git.is_ignored``), else
+     ``uncommitted``. Nothing in ``Manifest.locate`` or the schema changes.
+   - **Worktrees.** ``session isolate --execute`` copies a ``local``
+     manifest into the new worktree before the wiring is rendered (D9).
+     ``.git/info/exclude`` is shared by every worktree of the clone, so the
+     copy is ignored there too and can never be committed. A manifest the
+     base carries is never overwritten, and an ``uncommitted`` one is not
+     copied. The copy is taken once; an edit to the main checkout's manifest
+     reaches sessions isolated after it.
+   - **doctor.** D5's ``config home`` row is built for an in-repo manifest:
+     committed (shared), local (passes, naming the copy), or untracked and
+     not ignored (warns, naming ``git add`` and the exclude line).
+   - **Onboarding.** ``docs assess --plan`` and ``init``'s all-at-once plan
+     accept a ``local`` manifest, since a session can now see it.
+   - **Costs, accepted.** A local manifest is not reviewed in a pull request
+     and is not versioned per commit (ruling 4's costs). The checks that
+     read the base branch's manifest find none there: ``docs.mandate_kept``
+     reads not applicable, and ``guidelines.baseline_only_shrinks`` finds no
+     base baseline. A fresh clone or CI is unconfigured.
+   - **Unchanged.** A committed manifest, invariant's and Heap's, resolves,
+     isolates and lands exactly as before. The store default (D1, D7) and
+     its increments continue as planned.
+
+   Proven by ``tests/test_adr_020_local_manifest.py``: a project with an
+   excluded manifest runs ``session start``, ``isolate``, ``pipeline start``
+   and ``pipeline gates`` in the worktree, and ``session merge``, with
+   ``git status`` clean of the manifest throughout; a committed manifest is
+   not copied over and stays tracked; ``doctor``'s three cases; and the
+   onboarding check.
+
 Increments
 ----------
 
@@ -897,7 +973,8 @@ Alternatives rejected
        repository and a store with their history. A second command would
        fork that owner (D3).
    * - A git-ignored ``.claude/`` for the configuration (IDEA_048)
-     - Ruling 3: the store covers it (D6).
+     - Ruling 3: the store covers it (D6). Amended by ruling 10: the
+       manifest alone may be kept local (D11).
    * - Keeping in-repo as the non-interactive default
      - Ruling 7.
    * - User-level hooks, shim and agents (ADR-014 D11 as accepted)

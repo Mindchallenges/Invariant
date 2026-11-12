@@ -383,6 +383,19 @@ def exists_at(cwd: Path, rev: str, path: str) -> bool | None:
     return False
 
 
+def is_ignored(cwd: Path, path: str) -> bool | None:
+    """Whether git ignores the untracked ``path``: ``True``, ``False``, or ``None``.
+
+    Any ignore source counts: ``.gitignore``, ``.git/info/exclude`` or the
+    global excludes file. A tracked path is never ignored. ``None`` is git
+    unable to answer, outside a repository for one.
+    """
+    code, _, _ = _run(["check-ignore", "-q", "--", path], cwd)
+    if code in (0, 1):
+        return code == 0
+    return None
+
+
 def blob_at(cwd: Path, rev: str, path: str) -> bytes | None:
     """The exact bytes of ``path`` at ``rev``, unstripped, or ``None``.
 

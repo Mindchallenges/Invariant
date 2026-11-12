@@ -33,6 +33,7 @@ from typing import Any
 
 import yaml
 
+from . import git
 from .agents import TIERS
 from .errors import ManifestError, UnknownRuleError
 from .home import UserConfig, load_user_config
@@ -48,6 +49,24 @@ from .stores import (
 )
 
 MANIFEST_RELPATH = Path(".claude") / "invariant.yaml"
+
+def manifest_tracking(root: Path) -> str | None:
+    """How git holds the in-repo manifest under ``root`` (ADR-020 D11).
+
+    ``committed`` when HEAD carries it, ``local`` when it is untracked and
+    git ignores it (the ``.git/info/exclude`` line), ``uncommitted`` otherwise.
+    ``None`` where there is no in-repo manifest or git cannot say.
+    """
+    if not (root / MANIFEST_RELPATH).is_file():
+        return None
+    rel = MANIFEST_RELPATH.as_posix()
+    if git.exists_at(root, "HEAD", rel) is True:
+        return "committed"
+    ignored = git.is_ignored(root, rel)
+    if ignored is None:
+        return None
+    return "local" if ignored else "uncommitted"
+
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 

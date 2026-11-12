@@ -247,6 +247,7 @@ Layers
        RULES --> adapters
        RULES --> GIT
        SESSION --> GIT
+       SESSION -- "manifest_tracking: isolate copies a local manifest (ADR-020 D11)" --> MANIFEST
        WORKITEM --> GIT
        MANIFEST --> GIT
        MANIFEST -- "load_user_config: the user level, 5a" --> CHOME

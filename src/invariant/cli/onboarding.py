@@ -23,9 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..core import git
 from ..core import plan as plan_reader
-from ..core.manifest import MANIFEST_RELPATH, Manifest, project_relative
+from ..core.manifest import Manifest, manifest_tracking, project_relative
 from ..core.stores import (
     STORE_MANIFEST,
     StoreWrite,
@@ -276,10 +275,11 @@ def carries_manifest(manifest: Manifest) -> bool:
     """Does the base carry the manifest (ruling 9)? A store project's lives in
     its store; an in-repo project's must be committed, because a session works
     in a worktree cut from a commit and an uncommitted manifest is invisible
-    from inside one."""
+    from inside one. One kept local through ``.git/info/exclude`` counts:
+    ``session isolate`` copies it into the worktree (ADR-020 D11)."""
     if manifest.store is not None:
         return True
-    return git.exists_at(manifest.root, "HEAD", MANIFEST_RELPATH.as_posix()) is True
+    return manifest_tracking(manifest.root) in ("committed", "local")
 
 
 def record_plan(ctx, assessment: Assessment) -> Session | None:

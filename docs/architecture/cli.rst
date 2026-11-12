@@ -552,6 +552,12 @@ Setup
        store` keeps the configuration out of git, ADR-020 D6) and on two
        homes, an in-repo manifest beside a user-level link or a store
        listing the repository, naming the one `Manifest.locate` uses.
+       Built for an in-repo manifest (ADR-020 D11, amending D5 and D6):
+       `config home` reads `committed` (shared through the repository) or
+       `local` (kept out of git through .git/info/exclude; `session isolate`
+       copies it into each worktree), which pass, and warns only on a
+       manifest git neither tracks nor ignores, naming `git add` and the
+       exclude line. The store and two-homes cases are not built.
        ADR-020 D5 also adds `docs folder`, present only in a documentation
        repository whose own conf.py would read invariant-docs/: it passes
        when that conf.py excludes the folder, and otherwise warns, naming
@@ -1418,6 +1424,12 @@ Session
        hooks. Nothing is recorded: the exclude lines are shared by every
        worktree of the clone, and the files go with the worktree. The output
        names what was rendered; `--json` carries `rendered`.
+       Built (ADR-020 D11): before that, a main-checkout
+       `.claude/invariant.yaml` that is untracked and git-ignored (kept
+       local through .git/info/exclude) is copied into the new worktree,
+       where the shared exclude keeps it out of `git status`. A manifest the
+       base carries is never overwritten. The output says so; `--json`
+       carries `manifest_copied`.
    invariant session status [--json]
        Built (ADR-014 D5, increment 4a): in a store project, a `docs lock`
        block lists each held unit of the store with its holder, how long it

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -31,6 +32,7 @@ from ..core.errors import (
 )
 from ..core.fsm import Machine
 from ..core.machines import ABANDON_ROLE, load_session_machine
+from ..core.manifest import MANIFEST_RELPATH, manifest_tracking
 from ..core.rules import (
     Evaluated,
     RuleContext,
@@ -1102,10 +1104,27 @@ class SessionDomain:
         if proc.returncode != 0:
             raise StateError(f"worktree creation failed: {proc.stderr.strip()}")
 
+        plan["manifest_copied"] = self._copy_local_manifest(Path(plan["worktree"]))
         session.worktree = plan["worktree"]
         session.branch = plan["branch"]
         self._advance(session, "isolated", reason="worktree created")
         return plan
+
+    def _copy_local_manifest(self, worktree: Path) -> bool:
+        """Copy a manifest kept out of git into a new worktree (ADR-020 D11).
+
+        A worktree holds only committed files, so a manifest hidden through
+        ``.git/info/exclude`` would leave the worktree with no project. The
+        exclude file is shared by every worktree of the clone, so the copy is
+        ignored there too and can never be committed. A manifest the base
+        carries is never overwritten.
+        """
+        target = worktree / MANIFEST_RELPATH
+        if manifest_tracking(self.manifest.root) != "local" or target.exists():
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.manifest.root / MANIFEST_RELPATH, target)
+        return True
 
     def transition(
         self,

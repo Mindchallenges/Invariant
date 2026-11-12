@@ -532,6 +532,20 @@ above, and ``guidelines.ruleset`` keeps its load-time default, null. In a store
 project the starter still writes no ruleset (``store`` for ``guidelines`` is
 refused above), and says so.
 
+**Built (:need:`DEC_ADR_020_D11`, the user's unblock ruling, amending
+:need:`DEC_ADR_020_D6`).** The in-repo manifest may be kept out of git: untracked,
+and hidden through ``.git/info/exclude`` (any ignore source counts). Nothing it
+means changes, and ``Manifest.locate`` finds it as before.
+``core/manifest.manifest_tracking`` names how git holds it (``committed``,
+``local`` or ``uncommitted``); ``session isolate`` copies a ``local`` one into
+each new worktree, where the shared exclude keeps the copy out of ``git
+status``, and ``doctor``'s ``config home`` row recognises it. The checks that
+read the base branch's manifest (``docs.mandate_kept``, the guidelines
+baseline's base copy) find none there. To choose it::
+
+   git rm --cached .claude/invariant.yaml   # only if it was committed
+   echo .claude/invariant.yaml >> .git/info/exclude
+
 The store a ``store`` record is read against is the one ``Manifest.locate``
 found for the project ("Finding the project", below). An in-repo project
 does no store lookup (D2: "exactly as today"), so a ``store`` record in its

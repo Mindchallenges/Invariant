@@ -29,6 +29,7 @@ from ..core.manifest import (
     MANIFEST_RELPATH,
     Level,
     Manifest,
+    manifest_tracking,
     project_relative,
 )
 from ..core.rules import (
@@ -1587,6 +1588,12 @@ def cmd_doctor(args) -> int:
         # this machine, so it is named here rather than discovered. A row
         # that informs and never fails: a default is the operator's choice.
         checks.append(("user defaults", True, user_defaults_summary(ctx.manifest)))
+        home_row = _config_home_row(ctx.manifest)
+        if home_row is not None:
+            label, detail, warns = home_row
+            checks.append((label, True, detail))
+            if warns:
+                warned.add(label)
         identity_row = store_identity_row(ctx.manifest)
         if identity_row is not None:
             label, ok, detail, warns = identity_row
@@ -2483,6 +2490,33 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
     return rows
 
 
+def _config_home_row(manifest) -> tuple[str, str, bool] | None:
+    """``config home`` for an in-repo manifest (ADR-020 D5 as D11 amends it).
+
+    Informs, and warns only on a manifest git neither tracks nor ignores: no
+    worktree would hold it, and ``git status`` shows it. A store project's
+    cases are D5's, not built yet.
+    """
+    tracking = manifest_tracking(manifest.root)
+    if tracking is None or manifest.store is not None:
+        return None
+    rel = MANIFEST_RELPATH.as_posix()
+    if tracking == "committed":
+        return "config home", f"repo: {rel}, committed (shared through the repository)", False
+    if tracking == "local":
+        local = (
+            f"repo: {rel}, local (kept out of git through .git/info/exclude; "
+            f"session isolate copies it into each worktree)"
+        )
+        return "config home", local, False
+    loose = (
+        f"repo: {rel} is untracked and not ignored, so no session worktree holds "
+        f"it; share it: git add {rel} and commit, or keep it on this machine: "
+        f"echo {rel} >> .git/info/exclude"
+    )
+    return "config home", loose, True
+
+
 def _report_checks(
     args, checks: list[tuple[str, bool, str]], warned: Collection[str] = ()
 ) -> int:
@@ -3169,6 +3203,11 @@ def cmd_session_isolate(args) -> int:
         rendered = _render_local_wiring(ctx, Path(plan["worktree"]))
         plan["rendered"] = rendered
         text = f"isolated into {plan['worktree']} on {plan['branch']}"
+        if plan.get("manifest_copied"):
+            text += (
+                f"\n  copied this clone's local {MANIFEST_RELPATH.as_posix()} into it "
+                f"(kept out of git through .git/info/exclude)"
+            )
         if rendered:
             text += (
                 f"\n  rendered this clone's local {' and '.join(rendered)} into it "
